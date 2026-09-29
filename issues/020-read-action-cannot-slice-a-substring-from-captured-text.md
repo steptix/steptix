@@ -27,7 +27,7 @@ below (fail-hard policy). What landed:
 One refinement from the plan below: the no-match failure is **not** a special
 "terminal" path — it fails on the *same* throw path as a `read` whose selector
 matches nothing (bounded retry, then a hard step failure). See the revised
-no-match bullet under Design decisions. No `runner-core`/TestBench change → no
+no-match bullet under Design decisions. No `runner-core`/Steptix change → no
 extension version bump.
 
 ## Symptom (user report)
@@ -186,7 +186,7 @@ captured text and stores group 1 (or the whole match when the pattern has no gro
    attach spurious patterns.
 
 All in the **main package** — `read` execution is not in `runner-core`, so **no
-TestBench extension version bump** is triggered (per CLAUDE.md the bump is only for
+Steptix extension version bump** is triggered (per CLAUDE.md the bump is only for
 code bundled into a VSIX).
 
 ## Tests (shipped)

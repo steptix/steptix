@@ -17,7 +17,7 @@ describe('loadDataFile', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
-    tmpRoot = mkdtempSync(path.join(tmpdir(), 'aiui-data-'));
+    tmpRoot = mkdtempSync(path.join(tmpdir(), 'steptix-data-'));
     mkdirSync(path.join(tmpRoot, 'fixtures', 'data'), { recursive: true });
   });
   afterEach(() => {

@@ -12,12 +12,12 @@ import { bundleToolModule } from '../src/tools/reload.js';
  * (the self-resolve plugin in `src/tools/reload.ts`).
  *
  * Caught live: `C:\\Projects\\AITests` — a tests-only project driven from
- * TestBench, no `node_modules` — had a freshly compiled, correct `.steps.ts`,
- * and every run fell back to AI with "Cannot find package 'ai-ui-automation'".
+ * Steptix, no `node_modules` — had a freshly compiled, correct `.steps.ts`,
+ * and every run fell back to AI with "Cannot find package 'steptix'".
  * The server loading the file IS the framework; it resolves its own module.
  *
  * The project here lives in the OS temp dir, deliberately outside this repo,
- * so nothing above it resolves `ai-ui-automation` — the repo's own
+ * so nothing above it resolves `steptix` — the repo's own
  * `package.json` self-reference is exactly what would mask the bug.
  */
 
@@ -25,14 +25,14 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 let dir: string;
 
 beforeEach(async () => {
-  dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-selfres-'));
+  dir = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-selfres-'));
 });
 
 afterAll(async () => {
   // Each test's dir is removed as it goes; nothing to do here.
 });
 
-const STEPS_TS = `import { defineSteps } from 'ai-ui-automation/codebehind';
+const STEPS_TS = `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   {
     source: 'Enter the booking code',
@@ -84,7 +84,7 @@ describe('code-behind in a project without node_modules', () => {
       const expected = path.resolve(repoRoot, 'dist', 'codebehind', 'index.js').replace(/\\/g, '/');
       expect(contents).toContain(`from "file:///`);
       expect(contents).toContain(expected);
-      expect(contents).not.toContain(`from "ai-ui-automation/codebehind"`);
+      expect(contents).not.toContain(`from "steptix/codebehind"`);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
@@ -100,7 +100,7 @@ describe('code-behind in a project without node_modules', () => {
     try {
       const { contents: bytes } = await bundleToolModule(file, resolveCodeBehindCacheDir(file));
       const contents = Buffer.from(bytes).toString("utf8");
-      expect(contents).toContain(`from "ai-ui-automation/codebehind"`);
+      expect(contents).toContain(`from "steptix/codebehind"`);
       expect(contents).not.toContain('file:///');
     } finally {
       await fs.rm(inRepo, { recursive: true, force: true });

@@ -1,7 +1,7 @@
 # Code-behind debugging — breakpoints in `.steps.ts`, F11 into a step's code
 
 **Status: built + verified 2026-08-26** (branch
-`claude/codebehind-debugging-breakpoints-8a9128`, TestBench 0.5.98, rebased
+`claude/codebehind-debugging-breakpoints-8a9128`, Steptix 0.5.98, rebased
 onto main at 95aa7e9). Root vitest 3044/3044, runner-core 472/472, extension
 unit 399/399 + integration 259/259, `tsc --noEmit` clean on both roots. Live
 proof:
@@ -25,7 +25,7 @@ handle, and step-over/step-into.
 This story makes exactly that work, two ways:
 
 **Breakpoints just bind.** Press F9 inside a `run()` in `securebank.steps.ts`,
-run the test from TestBench. When the run reaches that step, VS Code pauses on
+run the test from Steptix. When the run reaches that step, VS Code pauses on
 your line — in your file, not in a bundle — with the entry's `ctx`, `page` and
 locals inspectable in the standard debug UI. Continue, and the run carries on.
 
@@ -39,8 +39,8 @@ already ships; code-behind entries get the same treatment.
 
 **You set** a breakpoint on the `await ctx.page.getByRole(...)` line in
 `tests/securebank.steps.ts` and press Run on `tests/securebank.md`.
-**You get:** the run starts, a debug session named "TestBench: server"
-attaches automatically (status bar: `TestBench: attached debugger for
+**You get:** the run starts, a debug session named "Steptix: server"
+attaches automatically (status bar: `Steptix: attached debugger for
 .steps.ts breakpoints`), the first two steps replay green, and on step 3 VS
 Code pauses on your line. The Variables pane shows `ctx`, the Debug Console
 evaluates `await ctx.page.title()` against the live browser. F5 resumes; the
@@ -49,9 +49,9 @@ step passes; the run finishes.
 **You are paused** at a breakpoint on step 5 of the test, whose gutter shows
 the `</>` mark, and you press F11.
 **You get:** the debugger attaches (or is reused), the status bar says
-`TestBench: stepping into code-behind for step 5 — use the Debug toolbar`,
+`Steptix: stepping into code-behind for step 5 — use the Debug toolbar`,
 and execution stops at a `debugger;` pause one Step Over away from the entry's
-`run()` body. Step through it; when `run()` returns, the TestBench arrow moves
+`run()` body. Step through it; when `run()` returns, the Steptix arrow moves
 on as usual.
 
 **You press F11** on a paused step with no code-behind entry.
@@ -60,7 +60,7 @@ pauses again. No error, no debugger; the flag simply had nothing to trigger on.
 
 **You run** with a `.steps.ts` breakpoint set but the server has no inspector
 (started without `--inspect`).
-**You get:** the run proceeds normally, plus one status-bar line: `TestBench:
+**You get:** the run proceeds normally, plus one status-bar line: `Steptix:
 server has no inspector — .steps.ts breakpoints won't bind (restart it with
 --inspect)`. Nothing hangs, nothing fails.
 
@@ -84,7 +84,7 @@ Attachment itself also ships already, for tools: the server publishes its
 inspector ws URL on `/health` (unauthenticated by design; the URL's UUID is
 the secret), the extension records it per-run and has hardened attach logic
 (`resolveInspectorTarget`, `shouldReuseDebugSession` in
-[inspector-target.ts](../testbench-native/src/extension/inspector-target.ts)),
+[inspector-target.ts](../steptix-vscode/src/extension/inspector-target.ts)),
 and the serverAutoStart command already carries `--inspect=0`.
 
 What's missing is only the two triggers:
@@ -127,7 +127,7 @@ Decisions and consequences:
   do not get the hook, consistent with batch runs ignoring `.md` breakpoints;
   if a debugger is already attached from an editor run, batch runs still pause
   on hit breakpoints, which is normal VS Code behaviour.
-- Setting: `testbench-native.autoAttachStepsBreakpoints` (boolean, default
+- Setting: `steptix.autoAttachStepsBreakpoints` (boolean, default
   `true`) to turn the whole flow off.
 
 ### Flow 2 — F11 into a code-behind step
@@ -216,18 +216,18 @@ flag, so it can only ever see the event by a future bug; listing it keeps the
   [src/tools/executor.ts](../src/tools/executor.ts). No-op without an
   inspector by construction, but it is only ever armed after an ack.
 
-The CLI runner is untouched: `aiui run` under a debugger (`node --inspect-brk
+The CLI runner is untouched: `steptix run` under a debugger (`node --inspect-brk
 dist/index.js run …`) already pauses on `.steps.ts` breakpoints via the same
 sourcemapped loader; nothing to add.
 
-### Extension (testbench-native/)
+### Extension (steptix-vscode/)
 
 - `extension.ts`: the attach block of `handleToolAwaitingDebugger` is factored
   into a shared `attachServerDebugger(controller)` (local-server check →
   `resolveInspectorTarget` → reuse-or-`startDebugging`); the tool handler, the
   new `codebehind:awaiting-debugger` handler (attach → ack, ack-and-exit on
   any failure), and the auto-attach hook all call it. The debug session name
-  becomes the shared "TestBench: server".
+  becomes the shared "Steptix: server".
 - `commands/index.ts`: both F11 branches classify the paused line — tool ⇒
   `pauseAtNextTool` (unchanged), skill ⇒ neither flag, anything else ⇒
   `pauseAtNextCodeBehind`.
@@ -305,7 +305,7 @@ sourcemapped loader; nothing to add.
 - Debugging AI-driven steps (nothing to step through), or the compile
   pipeline's internals.
 - Conditional/hit-count breakpoints — VS Code owns breakpoints wholesale
-  here, so whatever js-debug supports works; nothing TestBench-specific.
+  here, so whatever js-debug supports works; nothing Steptix-specific.
 - Edit-and-continue of `.steps.ts` mid-run. Edits apply on the next batch
   (bundle-per-load) as they do today.
 - Remote-server debugging.

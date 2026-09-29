@@ -224,8 +224,8 @@ beforeEach(() => {
   runInteractiveReplMock.mockReset();
   runInteractiveReplMock.mockResolvedValue({ kind: 'continue' });
 
-  lockDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-cli-'));
-  lockPath = path.join(lockDir, 'aiui-computer.lock');
+  lockDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-computer-cli-'));
+  lockPath = path.join(lockDir, 'steptix-computer.lock');
   adapter = new FakeDesktopAdapter({ width: 200, height: 150 });
 
   launchBrowserMock.mockResolvedValue(makeSession());
@@ -338,7 +338,7 @@ describe('the CLI gives the lock back at the end of every runTest (§5.9)', () =
   });
 
   it('data rows: each row releases at its end and takes the lock again at its own [use computer]', async () => {
-    const outputDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-cli-rows-'));
+    const outputDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-computer-cli-rows-'));
     try {
       const config = makeConfig();
       config.reports = {
@@ -578,7 +578,7 @@ describe('a CLI pause for a person gives the lock back (§5.9)', () => {
   });
 
   it('data rows: a pause inside each row releases, the row takes the lock back, and every row still gives it back at its end', async () => {
-    const outputDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-cli-rows-pause-'));
+    const outputDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-computer-cli-rows-pause-'));
     try {
       const config = makeConfig();
       config.reports = {
@@ -672,7 +672,7 @@ describe('§5.1 item 1b — the vision route on the CLI path (§15.4)', () => {
   }
 
   const REFUSAL =
-    'Computer mode needs the model to see the screen, but the TestBench Copilot bridge ' +
+    'Computer mode needs the model to see the screen, but the Steptix Copilot bridge ' +
     'reports that gateway/copilot/gpt-5.6-luna does not accept images.';
 
   it('runs after the opt-in and before the adapter loads, and checks config.ai', async () => {
@@ -960,7 +960,7 @@ describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surf
 
   let toolsDir: string;
   beforeEach(() => {
-    toolsDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-cli-tools-'));
+    toolsDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-computer-cli-tools-'));
     writeFileSync(
       path.join(toolsDir, 'echo.ts'),
       "export default { name: 'echo', description: 'echo', parameters: {}, run() {} };\n",

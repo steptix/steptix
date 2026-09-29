@@ -20,7 +20,7 @@ import {
  * that make the match side interesting.
  *
  * Fixtures live under the repo (not `os.tmpdir()`) so a `.steps.ts` can
- * resolve `ai-ui-automation/codebehind` by package self-reference, as a real
+ * resolve `steptix/codebehind` by package self-reference, as a real
  * user's file resolves it from under their own project. Requires a built
  * `dist/`, same as the tool suites.
  */
@@ -50,7 +50,7 @@ async function write(rel: string, contents: string): Promise<string> {
 
 /** A `.steps.ts` whose entries just record that they ran. */
 function stepsFile(entries: string[]): string {
-  return `import { defineSteps } from 'ai-ui-automation/codebehind';
+  return `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
 ${entries.join(',\n')},
 ]);

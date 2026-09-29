@@ -109,7 +109,7 @@ const originalCwd = process.cwd();
 let root: string;
 
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(path.join(tmpdir(), 'aiui-ui-flow-')));
+  root = realpathSync(mkdtempSync(path.join(tmpdir(), 'steptix-ui-flow-')));
   process.chdir(root);
   executeStepMock.mockReset();
   launchBrowserMock.mockReset();

@@ -1,7 +1,7 @@
 # Compiling like a run
 
 Builds on [codebehind-compile.md](codebehind-compile.md), which shipped the
-compile pipeline, the server endpoint and the TestBench commands. This story
+compile pipeline, the server endpoint and the Steptix commands. This story
 changes *how a compile behaves while it runs and what it leaves behind*.
 Nothing about the file format, binding or the generation prompts changes; the
 review pass gains one rule, which the build found it needed (see "What was
@@ -33,7 +33,7 @@ After this story, a compile looks and behaves like a run:
   replay round dies at step 7 after three repairs, you get 1–6 proven, 7 as
   `ai: true` with the error, and 8–9 as code that the next run will prove.
 
-Example. The author has `tests/checkout.md`, runs it from TestBench, and it
+Example. The author has `tests/checkout.md`, runs it from Steptix, and it
 fails at step 5 under AI — a wrong button label. They press **Compile**
 anyway. The Runner panel shows:
 
@@ -109,8 +109,8 @@ Three things, all of them choices in codebehind-compile.md rather than bugs:
 3. **All or nothing.** A Record that fails at step *k* generates nothing
    (`Record failed … nothing to compile until the test passes under AI`), and
    a Replay that never goes green returns an empty `files` map, so the entries
-   that did replay go to `.aiui-codebehind-cache/<name>.steps.ts.candidate`
-   and TestBench never shows them. The rule was chosen so only proven code
+   that did replay go to `.steptix-codebehind-cache/<name>.steps.ts.candidate`
+   and Steptix never shows them. The rule was chosen so only proven code
    lands. But the runtime already has the safety net the rule was standing in
    for: an entry that throws heals under AI and is flagged ⚠ for the next
    compile. The worst case of writing an unproven entry is one heal. The
@@ -140,7 +140,7 @@ step result too. What it does not keep is the post-step DOM — one extra
 
 So `captureStepContext` becomes something a client can ask for. It moves from
 `InternalRunOptions.codeBehind.captureContext` onto the wire as
-`StepRequest.captureStepContext?: boolean`, and TestBench sends it on every
+`StepRequest.captureStepContext?: boolean`, and Steptix sends it on every
 run. Of the four knobs codebehind-compile.md kept off the wire on purpose,
 this is the one that only *retains* more; `candidateFiles`, `disabled` and
 `strict` change what executes, and they stay internal.
@@ -204,7 +204,7 @@ is an ordinary run and writes it; a Record with code-behind off is excluded
 as today, for the reason codebehind-compile.md gives — it would stamp "all
 AI" over the findings the compile is acting on. Replays stay excluded.
 
-The CLI is unchanged here: `aiui compile` has no session to reuse and
+The CLI is unchanged here: `steptix compile` has no session to reuse and
 records in-process, as it does today.
 
 ### Every run is on the stream
@@ -215,7 +215,7 @@ Each inner run's events ride the compile stream as they happen:
 { type: 'compile:run'; phase: 'record' | 'replay'; round?: number; event: RunEvent }
 ```
 
-Every event, `done` included, unchanged inside the wrapper. TestBench folds
+Every event, `done` included, unchanged inside the wrapper. Steptix folds
 `event` through the same path as a run's — ▶ on the running step, ✓ ⚡ `</>` ✗ as
 they land, captures into the Variables panel, the step lines into the panel.
 `</>` comes for free: a strict replay's `step:pass` already carries
@@ -226,12 +226,12 @@ round.
 
 `compile:step` — the Generate and Repair events — gains `line` (and the
 origin `frame` for a step inside a skill body, from the expansion the server
-already holds), and TestBench paints ▶ on that line while the model works on
+already holds), and Steptix paints ▶ on that line while the model works on
 the step. The gutter walks the test during Generate too, which is most of a
 compile's wall-clock.
 
 The CLI prints the step lines under each phase in the same shape as
-`aiui run`.
+`steptix run`.
 
 ### Replay keeps its own sessions
 
@@ -326,7 +326,7 @@ and has no diff — and exits **2**, so a script can tell "everything compiled"
 sessionId?, select?, maxRounds?, dryRun? }`. `sessionId` replaces
 `fromSessionId` and means more: the session to compile *from* when it can be
 and to record *in* when it must. The `api-server` allow-list names it;
-`fromSessionId` is dropped rather than aliased, because TestBench is the only
+`fromSessionId` is dropped rather than aliased, because Steptix is the only
 client and the two shipped together.
 
 The step route gains `captureStepContext` on the wire. Its allow-list must
@@ -368,7 +368,7 @@ per-file compile lock is unchanged.
   and Replay events carry theirs unchanged inside `compile:run`, and
   `compile:step` carries one too. The paragraph on "Compile from this run"
   being a fast path no plain Run leaves lying around is withdrawn: a plain
-  TestBench run now leaves exactly that. `fromSessionId` → `sessionId`;
+  Steptix run now leaves exactly that. `fromSessionId` → `sessionId`;
   `CompileStatus` gains `partial`; the four internal knobs become three.
 - **How many prompts** — the Record row reads "none, when the last run has
   context; one AI run otherwise".
@@ -397,10 +397,10 @@ Everything above, in one pass, with three things the build added:
 
 And one the first real use found, the day it shipped. `tests/github with
 sections.md` declares `- username: $GITHUB_USERNAME`, runs green from
-TestBench, and compiled with the literal `$GITHUB_USERNAME` typed into the
-username field. A Run resolves `$VAR` parameters before it starts — TestBench
+Steptix, and compiled with the literal `$GITHUB_USERNAME` typed into the
+username field. A Run resolves `$VAR` parameters before it starts — Steptix
 on the client, against the nearest `.env` above the test file with
-`.env.<name>` overlaid; `aiui run` from `process.env` — and the compile built
+`.env.<name>` overlaid; `steptix run` from `process.env` — and the compile built
 its runs from the parsed test, whose parser keeps `$VAR` as written. Nothing
 on the server resolves it: the one resolver lives in the CLI's file runner and
 reads `process.env`, which the server deliberately does not share with the
@@ -412,7 +412,7 @@ run uses — data row, `$VAR` from an env map the caller supplies, the inline
 value — and every Record and Replay starts from that map
 (`CompileRunRequest.parameters`); the review's leak guard checks the resolved
 values too, since a guard looking for `$GITHUB_PASSWORD` would wave the real
-one through. The server composes the env the way TestBench does — process
+one through. The server composes the env the way Steptix does — process
 baseline, the nearest `.env` walking up from the test file, `.env.<name>` from
 the project root on top — and passes the first data row; the CLI passes
 `process.env` with the project layers merged, and the first row. A `$VAR`
@@ -423,10 +423,10 @@ prefix compile stopped at step 3 with `got "$LIVE_WHO"`.
 
 One deviation from the text above: a prefix compile reports `partial` even
 when its replay is green, because "green" means the whole test replays as
-code and a prefix only proved the prefix — the CLI exits 2 and TestBench's
+code and a prefix only proved the prefix — the CLI exits 2 and Steptix's
 notification says what is left, which is the point of the status.
 
-Verified by running: root 2710+ (vitest), runner-core 432, testbench-native
+Verified by running: root 2710+ (vitest), runner-core 432, steptix-vscode
 unit 223 and integration 186; live through the extension against
 `fixtures/test-app` — Compile with no prior run records in the editor's
 session and the next run serves every step as code, and Run-then-Compile
@@ -459,7 +459,7 @@ unmeasured.
   summary; exit code 2.
 - `runner-core` — `CompileRunEvent` and the narrower; `partial`; the summary
   fields; `sessionId`; `captureStepContext` on the step request type.
-- `testbench-native` — send `captureStepContext: true` on every run; fold
+- `steptix-vscode` — send `captureStepContext: true` on every run; fold
   `compile:run` events through the run path, resetting marks between rounds;
   ▶ on `compile:step.line`; the partial notification and diff; the panel's
   single Compile button. Patch bump per CLAUDE.md (runner-core changed too).

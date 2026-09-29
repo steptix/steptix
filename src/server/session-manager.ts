@@ -250,7 +250,7 @@ export interface StepRequest {
   /**
    * Active environment name. When supplied, the server loads `.env.<name>` and
    * `<dataDir>/<name>.json` (where `dataDir` is `tests.dataDir` from the
-   * project's `aiui.config.json`, default `data`) from the **test file's
+   * project's `steptix.config.json`, default `data`) from the **test file's
    * project root** — resolved via `resolveProjectRoot(testFilePath)`, NOT the
    * server's cwd. It then interpolates `${env.X}` / `${data.X.Y}` placeholders
    * in each step before the regular `{{...}}` substitution. Resolution is
@@ -286,7 +286,7 @@ export interface StepRequest {
    * The test's own frontmatter `dataSources` (name → path), forwarded by the
    * client from the editor buffer. Each path is resolved relative to
    * `testFilePath`'s directory and loaded into a `${<name>.X}` namespace, so
-   * test-level named data sources resolve on the server (TestBench) path — not
+   * test-level named data sources resolve on the server (Steptix) path — not
    * just the CLI parse path. Paths are static (no `${envName}` interpolation).
    */
   dataSources?: Record<string, string>;
@@ -334,7 +334,7 @@ export interface StepRequest {
    * as each step finishes under AI its transcript is queued for generation
    * while the browser moves on. At run end the queue drains and the proposed
    * `.steps.ts` files ride back on `compile:result`. The server never writes
-   * them; TestBench applies them through its diff.
+   * them; Steptix applies them through its diff.
    *
    * - `'run'` — **Run & Compile**: the whole test. The Review pass runs over
    *   each touched file at the end, and the recording replaces the test's
@@ -512,7 +512,7 @@ export interface StepRequest {
    */
   stepMode?: 'continue' | 'into' | 'over' | 'out';
   /**
-   * Per-request logging override. Lets a testbench user flip verbosity on a
+   * Per-request logging override. Lets a Steptix user flip verbosity on a
    * single run (e.g. `consoleLogLevel: 'debug'` + `serverFileLogLevel: 'full'`
    * for a hung run) without restarting the server. Each field falls back to
    * the server-level `logging.*` config when omitted. The override scope is
@@ -550,7 +550,7 @@ export interface StepRequest {
    */
   fullSteps?: string[];
   /**
-   * Re-run seed scope (testbench "re-run a skill step with its variables").
+   * Re-run seed scope (steptix "re-run a skill step with its variables").
    * Captured/runtime variables to inject into the session scope BEFORE the
    * run, so a partial re-run that starts mid-skill (see `startAt`) can resolve
    * values the skipped earlier steps would have produced. Merged over
@@ -746,7 +746,7 @@ export interface FrameInfo {
  * Which tab a step actually ran in (stories/mcp-cdp-browser.md §11).
  *
  * Optional and additive: existing consumers validate `line` and `frame` and
- * ignore extra keys, so TestBench, flick and the MCP client are unaffected.
+ * ignore extra keys, so Steptix, flick and the MCP client are unaffected.
  *
  * `targetId` is the field that matters. Labels are per-session, so two runs
  * sharing one CDP browser both have a `page:2` and only the target id says
@@ -972,7 +972,7 @@ export type RunEvent =
        * identity, so without this the client saw a mixed map with nothing in
        * it saying which half a name came from: `payment.keyword` (a page's
        * column) and `user.apikey` (a data file's own heading) are both
-       * `root.property` to a reader. TestBench answered both the narrow way
+       * `root.property` to a reader. Steptix answered both the narrow way
        * and printed the second in a view sitting beside a report that starred
        * it. With the list, `maskIfSecret` (runner-core) applies the server's
        * two-segment rule to a name that is in it and the flat author rule to
@@ -1045,7 +1045,7 @@ export type RunEvent =
 export type RunEventListener = (event: RunEvent) => void;
 
 /**
- * The frames of a Record Steps stream (stories/testbench-record-steps.md, On
+ * The frames of a Record Steps stream (stories/steptix-record-steps.md, On
  * the wire) — a sibling of {@link RunEvent}, defined beside the recorder in
  * src/recorder/types.ts and re-exported here so the server's event types are
  * named in one place.
@@ -1055,7 +1055,7 @@ export type { RecordEvent, RecordStreamEvent } from '../recorder/types.js';
 /**
  * A steps request reached a session whose queue a recording holds.
  *
- * Refused rather than queued (stories/testbench-record-steps.md, "What the
+ * Refused rather than queued (stories/steptix-record-steps.md, "What the
  * server half decided"): a run that waited behind a recording would sit with
  * its stream open and nothing on it for as long as the author keeps clicking,
  * and then run in a browser the author has moved on from. `POST
@@ -1097,7 +1097,7 @@ export const RECORD_STEPS_HEADLESS_BROWSER_MESSAGE =
  * the author has to change, not a moment to retry.
  */
 export const RECORD_STEPS_NO_MODEL_MESSAGE =
-  'Record Steps needs a model to write the steps; configure ai in aiui.config.json or .env.';
+  'Record Steps needs a model to write the steps; configure ai in steptix.config.json or .env.';
 
 /** §10's sentence for a run holding the session. */
 export const RECORD_STEPS_RUN_EXECUTING_MESSAGE =
@@ -1171,7 +1171,7 @@ export interface InternalRunOptions {
    */
   bypassAiPolicy?: boolean;
   /**
-   * The scoreboard suite this batch records under, over `AIUI_STATS_SUITE`
+   * The scoreboard suite this batch records under, over `STEPTIX_STATS_SUITE`
    * (docs/specs/SPEC-scoreboard.md §5.6): `compile` for the record and replay
    * runs `POST /codebehind/compile` drives. A batch carrying `compile` or
    * `withinCompileRun` on the wire is tagged the same way without it.
@@ -1501,7 +1501,7 @@ interface ManagedSession {
    * `browser` = DOM snapshot + Playwright, `computer` = a screenshot of the
    * whole screen driven through nut.js.
    *
-   * Session state, not file state: TestBench posts steps one request at a
+   * Session state, not file state: Steptix posts steps one request at a
    * time, so `[use computer]` in step 1 of a file is a fact about the session
    * from then on, not something the server could read off the document.
    *
@@ -1515,7 +1515,7 @@ interface ManagedSession {
    * (SPEC-use-computer.md §5.1 item 2), for as long as it is on that surface.
    *
    * On the SESSION rather than on the run, for the reason `surface` is:
-   * TestBench posts steps one batch at a time, so a run that entered computer
+   * Steptix posts steps one batch at a time, so a run that entered computer
    * mode in batch 1 must still be on it — same adapter — when batch 2
    * arrives. Dropped on the way back to `browser`, and at `closeSession`.
    *
@@ -1530,7 +1530,7 @@ interface ManagedSession {
    * at the end of every batch — whatever ended it — in the step loop's
    * `finally`, and taken again at the step boundary before the next step that
    * reads or drives the screen. A session idling on the computer surface
-   * between batches (an MCP session waiting for its next call, a TestBench run
+   * between batches (an MCP session waiting for its next call, a Steptix run
    * stopped at a test-file breakpoint, which the client implements by ending
    * the batch there) holds nothing, so it cannot refuse another session's
    * computer-mode run.
@@ -1609,7 +1609,7 @@ interface ManagedSession {
    * `browserConfig` is and fixing a measured defect: `[use computer]` and the
    * computer step's §5.10 values used to be read off `runConfig`, which
    * `resolveRunSettings` rebuilds from the SERVER's startup config — so a
-   * project whose `aiui.config.json` said `desktop.enabled: true` was refused
+   * project whose `steptix.config.json` said `desktop.enabled: true` was refused
    * by a server whose own config said nothing.
    *
    * Seeded from the server's startup config (which carries the `enabled:
@@ -1641,7 +1641,7 @@ interface ManagedSession {
    * carries none reuses it.
    *
    * Session-scoped and never process-wide: the same server also serves
-   * TestBench, and a global setting would let an agent's choice change the cost
+   * Steptix, and a global setting would let an agent's choice change the cost
    * and speed of a human's concurrent run.
    */
   runSettings: RunSettings;
@@ -1740,19 +1740,19 @@ interface ManagedSession {
    * Step batches enqueued on `queueTail` and not yet finished — queued ones
    * included, which is what `status === 'executing'` cannot say. Record Steps
    * reads it to answer 409 when "a run holds the session's queue"
-   * (stories/testbench-record-steps.md, On the wire).
+   * (stories/steptix-record-steps.md, On the wire).
    */
   activeBatches: number;
   /**
    * The recording holding this session's queue, while one does
-   * (stories/testbench-record-steps.md, decision 3). A steps request is refused
+   * (stories/steptix-record-steps.md, decision 3). A steps request is refused
    * for as long as it is set — see {@link RecordingInProgressError}.
    */
   recording?: RecordStepsRun | undefined;
   /**
    * The last recording in this session, kept after it ends: its toolbar may
    * still be in the page (Done shows for six seconds), and the next batch
-   * takes it out before its first step (stories/testbench-record-toolbar.md;
+   * takes it out before its first step (stories/steptix-record-toolbar.md;
    * review, finding 6).
    */
   lastRecording?: RecordStepsRun | undefined;
@@ -1766,7 +1766,7 @@ interface ManagedSession {
  * The secrets a session already holds, by name — what a recording masks out of
  * everything it shows and sends, and what lets a value typed into an
  * innocently-named field still come out as `{{password}}`
- * (stories/testbench-record-steps.md, decision 7). The author rule
+ * (stories/steptix-record-steps.md, decision 7). The author rule
  * (`isSecretName`) on the session's variable map: every name in it is one the
  * test chose.
  */
@@ -1963,7 +1963,7 @@ export class SessionManager {
   /**
    * The Map key for a session id.
    *
-   * TestBench's session ids ARE file paths — `uri.fsPath`, which lower-cases
+   * Steptix's session ids ARE file paths — `uri.fsPath`, which lower-cases
    * the drive letter (batch runs append `::run-N`) — while a CLI, MCP or test
    * caller spells the same file with an uppercase drive. Windows paths are
    * case-insensitive, so on win32 two spellings of one file must be one
@@ -2113,7 +2113,7 @@ export class SessionManager {
    *
    * The returned release is idempotent and MUST be called in a `finally`: a
    * stranded increment disables the idle timeout for the rest of the process's
-   * life and makes every later `aiui stop` answer 409.
+   * life and makes every later `steptix stop` answer 409.
    */
   beginExternalRun(): () => void {
     this.activeRuns++;
@@ -2126,7 +2126,7 @@ export class SessionManager {
   }
 
   // -------------------------------------------------------------------------
-  // Record Steps (stories/testbench-record-steps.md)
+  // Record Steps (stories/steptix-record-steps.md)
   // -------------------------------------------------------------------------
 
   /** Is a recording holding this session's queue? The steps route asks before
@@ -2178,7 +2178,7 @@ export class SessionManager {
    * The session is created here when it does not exist, exactly as the first
    * steps request creates it: the same `config` (baseUrl, viewport, …), the same
    * per-project recording outputs, the same deferred launcher. So the session a
-   * recording creates is the one the next Run uses — which is why TestBench
+   * recording creates is the one the next Run uses — which is why Steptix
    * marks the config sent (decision 3).
    */
   async beginRecordSteps(sessionId: string, request: RecordStepsRequest): Promise<RecordStepsBegin> {
@@ -2217,7 +2217,7 @@ export class SessionManager {
           status: 400,
           error:
             'Record Steps does not record in a CDP-attached browser yet ' +
-            '(stories/testbench-record-steps.md, "Not in the first version").',
+            '(stories/steptix-record-steps.md, "Not in the first version").',
         };
       }
       const outputs = await this.resolveSessionOutput({
@@ -2251,7 +2251,7 @@ export class SessionManager {
         status: 400,
         error:
           'Record Steps does not record in a CDP-attached browser yet ' +
-          '(stories/testbench-record-steps.md, "Not in the first version").',
+          '(stories/steptix-record-steps.md, "Not in the first version").',
       };
     }
     // Again, after every await above: the slot is taken synchronously from here.
@@ -2429,7 +2429,7 @@ export class SessionManager {
    * Resolve the per-project config + env/data bundle for a step batch from the
    * test file's project root. mtime-cached; returns the cached bundle when no
    * input file changed, otherwise reloads. A null project root (no
-   * `aiui.config.json` above the file) falls back to server defaults with no
+   * `steptix.config.json` above the file) falls back to server defaults with no
    * project `.env`/data.
    */
   private async resolveProjectBundle(
@@ -2661,8 +2661,8 @@ export class SessionManager {
       // session creation, BEFORE the per-batch project bundle is resolved. So
       // the record mode (`browser.video`) AND the output dir
       // (`reports.outputDir`, anchored at the project root) must come from the
-      // TEST's own aiui.config.json, resolved up front here — not the server's
-      // startup config. This makes both take effect on the server/TestBench
+      // TEST's own steptix.config.json, resolved up front here — not the server's
+      // startup config. This makes both take effect on the server/Steptix
       // path, matching how env/data are already per-project, and the CLI
       // runner. (Props consumed at session creation read this.config unless
       // threaded — see feedback_thread_new_config_to_server_bundle.)
@@ -3832,12 +3832,12 @@ export class SessionManager {
     // can see what's happening inside a step. Without this, a hanging step
     // produces only `step:start` followed by silence — the user has no signal
     // about which sub-action is stuck. The bridge mirrors the configured log
-    // level (via `shouldEmit`) so the testbench output panel matches the
+    // level (via `shouldEmit`) so the Steptix output panel matches the
     // server console.
     //
     // Caveat: logger callbacks are process-global, so concurrent sessions in
     // the same server will see each other's logs. Acceptable for the dev
-    // testbench; if multi-tenancy is needed later, switch to AsyncLocalStorage.
+    // steptix; if multi-tenancy is needed later, switch to AsyncLocalStorage.
     const removeLogBridge = onEvent
       ? addLogCallback((level, message) => {
           if (!shouldEmit(level)) return;
@@ -4069,7 +4069,7 @@ export class SessionManager {
     // `projectConfig`, never `this.config`. `resolvedSettings.config` is spread
     // from the SERVER's startup config, so reading `tables` off it would give
     // every project the server's own answer and silently ignore the
-    // `aiui.config.json` sitting beside the test (the same trap `browserConfig`
+    // `steptix.config.json` sitting beside the test (the same trap `browserConfig`
     // above is a note about).
     const tableStructure = resolveTableStructure(
       request.config?.tableStructure,
@@ -4175,7 +4175,7 @@ export class SessionManager {
     // `## Config: unmask: keyword, data.keys.public` — names and `${…}` refs
     // this test declares are NOT secrets, despite `isSecretName` matching them
     // (stories/placeholder-preserving-actions.md, decision 2). Comma-separated,
-    // matched against the exact name or the exact ref. TestBench does not send
+    // matched against the exact name or the exact ref. Steptix does not send
     // this field yet; a request without it behaves exactly as before.
     const unmaskNames: ReadonlySet<string> = new Set(
       (request.config?.unmask ?? '')
@@ -4189,7 +4189,7 @@ export class SessionManager {
      * whose the dotted names are, and which names the author has unmasked
      * (§7.6). Without them the client has a mixed map and no way to read it —
      * a copy carries none of the loop-binding registry's marks, and `unmask`
-     * lived entirely server-side — so TestBench applied the two-segment rule
+     * lived entirely server-side — so Steptix applied the two-segment rule
      * to every dotted name and the mask to every unmasked one.
      *
      * Computed at each emit rather than once: `applyPassBindings` rewrites the
@@ -4282,7 +4282,7 @@ export class SessionManager {
     }
     // A batch that omits `toolsDir` deliberately KEEPS a catalogue an earlier
     // batch loaded — `session.toolCatalogue` is sticky, matching the
-    // `envBundle`/`sessionConfig` precedent, so TestBench's Continue (which
+    // `envBundle`/`sessionConfig` precedent, so Steptix's Continue (which
     // re-sends steps without re-sending `toolsDir`) still dispatches tools.
     //
     // stories/mcp-no-project.md's "no tools project-less" guarantee is enforced
@@ -4438,7 +4438,7 @@ export class SessionManager {
     //
     // Resolved per request, after expansion, from the test file's own project
     // — a `.steps.ts` sits beside the markdown, so it rides the same
-    // per-request project resolution as `aiui.config.json` and `.env`.
+    // per-request project resolution as `steptix.config.json` and `.env`.
     //
     // This is safe on a subset batch: an entry is bound by the step's authored
     // text within its frame INSTANCE, so it does not depend on which frame
@@ -4803,7 +4803,7 @@ export class SessionManager {
      * §4.5 — a skill call restores the caller's surface on return.
      *
      * Per RUN rather than per session, and the corner that costs is named
-     * rather than hidden: a batch boundary INSIDE a skill body (TestBench
+     * rather than hidden: a batch boundary INSIDE a skill body (Steptix
      * splits a batch at an `[input:]` or a breakpoint) starts a new stack, so
      * the surface the second batch reads as "the caller's" is whatever the
      * skill left it on. Nothing is lost that `[use browser]` cannot restore,
@@ -5869,7 +5869,7 @@ export class SessionManager {
         // page capture and every `executeStep` call in this loop — and there
         // are a dozen of those, down four branches.
         //
-        // Deliberately NOT at session creation: TestBench posts steps one
+        // Deliberately NOT at session creation: Steptix posts steps one
         // request at a time, so at creation the server cannot know whether
         // step 1 is `[use computer]`. For every test written before computer
         // mode this fires on step 1 and nothing observable changes but the
@@ -7827,7 +7827,7 @@ export class SessionManager {
             // arguments and row values through, so a body step reading `If
             // {{password}} is remembered then return` would put the literal
             // password on the wire, in the run log, in the report and on a
-            // TestBench hover. `rawSteps` is the match side — deliberately
+            // Steptix hover. `rawSteps` is the match side — deliberately
             // never interpolated (expander.ts, `applySkillScope`) — so it is
             // the line as authored, on every shape the wire can describe. A
             // LOOPED SECTION body used to be the exception: the wire shape
@@ -8307,7 +8307,7 @@ export class SessionManager {
     }
 
     // Generate an HTML report for this run. Mirrors the CLI test-runner
-    // behaviour so testbench F5 produces the same artifact under
+    // behaviour so steptix F5 produces the same artifact under
     // `<reports.outputDir>/`. Failures here are logged but never break the
     // run — the SSE stream has already delivered everything the client needs.
     // The returned path flows through to the `done` event so the client
@@ -8344,7 +8344,7 @@ export class SessionManager {
         ).length;
         // The steps a return left behind (stories/step-flow-control.md,
         // decision 15). The CLI and the Electron runner have always set this;
-        // the server did not, so a TestBench run — the way most people run a
+        // the server did not, so a Steptix run — the way most people run a
         // test — produced a report whose header said "4 passed" of 5 steps and
         // never said where the fifth went. `generateReport` reads
         // `skippedSteps ?? 0` and the template hides the tile at 0, so the
@@ -8449,12 +8449,12 @@ export class SessionManager {
 
     // The code-behind last-run sidecar (stories/codebehind-compile.md §The
     // runtime stops generating). The CLI runner writes its own; without this
-    // one a TestBench run — the way most people run a test — leaves the
+    // one a Steptix run — the way most people run a test — leaves the
     // sidecar's two readers nothing: `collectStaleKeys`
     // (src/codebehind/compile.ts), the selection behind `--only-stale`, and
     // `LiveCompiler.priorFailure`, which is what routes a Compile This Step
     // through the repair prompt instead of generating from scratch. NOT the ⚠
-    // gutter — nothing in testbench-native reads this file; the mark and its
+    // gutter — nothing in steptix-vscode reads this file; the mark and its
     // hover come off the live step event's `codeBehindStale`.
     //
     // Only for a run that describes the whole test as it stands: a subset batch
@@ -8642,7 +8642,7 @@ export class SessionManager {
     // on the Run & Compile path, and the proposal rides back on
     // `compile:result` — before `done`, so a client folding the stream has it
     // by the time the run is over. The server writes no `.steps.ts` here;
-    // TestBench applies through its diff, as it does for a boxed compile.
+    // Steptix applies through its diff, as it does for a boxed compile.
     if (liveCompile) {
       // Numbers are the RUN's, not this block's: a client folding the summary
       // is looking at one test, however many requests it took to run it.

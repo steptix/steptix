@@ -14,7 +14,7 @@ import { registerTools } from './tools.js';
 import type { McpDeps } from './types.js';
 
 export function createMcpServer(deps: McpDeps): McpServer {
-  const server = new McpServer({ name: 'aiui', version: getPackageVersion() });
+  const server = new McpServer({ name: 'steptix', version: getPackageVersion() });
   registerTools(server, deps);
   return server;
 }

@@ -1,7 +1,7 @@
 // Mocha entry for the LIVE flick-vscode suite. Discovered by
 // @vscode/test-electron when runLiveTest.cjs launches VS Code.
 //
-// Unlike tests/vscode/, this runs against a REAL ai-ui-automation Sessions
+// Unlike tests/vscode/, this runs against a REAL Steptix Sessions
 // API server (URL in FLICK_LIVE_API_URL, key in FLICK_LIVE_API_KEY) and a
 // real test-app (URL in FLICK_LIVE_TEST_APP_URL). A real browser opens,
 // real AI calls are made.

@@ -1,6 +1,6 @@
 /**
  * Record Steps — the draft engine's locks and the author's steps, without a
- * browser (stories/testbench-record-toolbar.md, "Steps you write", "Undo and
+ * browser (stories/steptix-record-toolbar.md, "Steps you write", "Undo and
  * locked steps", "Pause and resume").
  *
  * The HTTP suite (api-server-record-steps.test.ts) drives these through the

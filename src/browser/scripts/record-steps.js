@@ -1,4 +1,4 @@
-// Browser-side half of Record Steps (stories/testbench-record-steps.md).
+// Browser-side half of Record Steps (stories/steptix-record-steps.md).
 //
 // Installed by src/recorder/step-recorder.ts in two ways at once, because a
 // recording has to cover pages that already exist AND pages that do not yet:
@@ -26,7 +26,7 @@
 //   SECRET_FIELD_RULE (double-underscored) → ./secret-field.js, the one copy
 //                           of `isSecretField` the snapshot also uses
 //   RECORD_TOOLBAR (double-underscored) → ./record-toolbar.js, the recording
-//                           controls in the page (stories/testbench-record-toolbar.md),
+//                           controls in the page (stories/steptix-record-toolbar.md),
 //                           spliced into this closure so they share its state
 //
 // ── The token ───────────────────────────────────────────────────────────────

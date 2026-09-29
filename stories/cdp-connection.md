@@ -104,7 +104,7 @@ The change lives in `src/browser/manager.ts` (the shared `launchBrowser` functio
 
 ## Future enhancements (out of scope)
 
-- A `cdp:` field in `aiui.config.json` to set a default port for tests that omit it.
+- A `cdp:` field in `steptix.config.json` to set a default port for tests that omit it.
 - Auto-discovery of running Chrome instances (`http://localhost:<scan>/json/version` across a range).
 - Tab focus/foreground after attach (CDP `Page.bringToFront`).
 - Automatic profile-dir spin-up via the harness (an opt-in convenience for users who *do* want a managed Chrome).

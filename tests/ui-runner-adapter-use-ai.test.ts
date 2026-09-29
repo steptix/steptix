@@ -62,7 +62,7 @@ const originalCwd = process.cwd();
 let root: string;
 
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(path.join(tmpdir(), 'aiui-ui-use-ai-')));
+  root = realpathSync(mkdtempSync(path.join(tmpdir(), 'steptix-ui-use-ai-')));
   process.chdir(root);
   model.replies = [];
   model.requests = [];

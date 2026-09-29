@@ -81,7 +81,7 @@ export interface TestConfig {
    *
    *  Held as the RAW string, not a resolved size: the value travels the wire
    *  verbatim and the server resolves it (§3), so one validator and one error
-   *  message serve the CLI, TestBench and MCP alike. `resolveViewportSpec`
+   *  message serve the CLI, Steptix and MCP alike. `resolveViewportSpec`
    *  (src/config/viewport.ts) is that validator.
    *
    *  Refused alongside `cdp:` — a viewport cannot be imposed on a browser the
@@ -108,7 +108,7 @@ export interface TestConfig {
    *  answer for the rest of the run; `strict` asks nothing and lets the shape
    *  refusal stand.
    *
-   *  Overrides the project's `tables.structure` in `aiui.config.json`. Held as
+   *  Overrides the project's `tables.structure` in `steptix.config.json`. Held as
    *  the raw string, like `viewport` and `unmask`: one validator
    *  (`resolveTableStructure`, src/config/table-structure.ts) serves the CLI,
    *  the Sessions API and MCP, so an unrecognised value produces one sentence

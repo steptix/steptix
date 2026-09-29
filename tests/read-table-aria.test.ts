@@ -180,22 +180,22 @@ describe('readTable — MUI DataGrid (§5.8, §7.9)', () => {
     expect(result.placeholdersSkipped).toBe(1);
   });
 
-  it('stamps data-aiui-row on the grid rows it numbered', async () => {
+  it('stamps data-steptix-row on the grid rows it numbered', async () => {
     // §7.4's stamp, on an ARIA grid: "row 2 of the People grid" has to be a
     // selector rather than a sum, and a grid's rows carry no number of their
     // own that means what `_row` means (`aria-rowindex` counts the header).
     await load(muiGrid());
     await readTableRecords(page, { selector: '#mui', columns: MUI_COLUMNS });
     const stamped = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('#mui [data-aiui-row]')).map((e) => ({
-        n: e.getAttribute('data-aiui-row'),
+      Array.from(document.querySelectorAll('#mui [data-steptix-row]')).map((e) => ({
+        n: e.getAttribute('data-steptix-row'),
         text: (e as HTMLElement).innerText.replace(/\s+/g, ' ').trim(),
       })));
     expect(stamped.map((s) => s.n)).toEqual(['1', '2', '3']);
     expect(stamped[1]?.text).toContain('Cersei');
     // Never the header row.
     const headerStamped = await page.evaluate(() =>
-      document.querySelector('[aria-rowindex="1"]')?.hasAttribute('data-aiui-row'));
+      document.querySelector('[aria-rowindex="1"]')?.hasAttribute('data-steptix-row'));
     expect(headerStamped).toBe(false);
   });
 
@@ -389,8 +389,8 @@ describe('readTable — ag-Grid pinned fragments (§5.8, §7.9)', () => {
     await load(agGrid((i) => `row-index="${i}" aria-rowindex="${i + 2}"`));
     await readTableRecords(page, { selector: '#ag', columns: AG_COLUMNS });
     const stamps = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('#ag [data-aiui-row]')).map((e) => ({
-        n: e.getAttribute('data-aiui-row'),
+      Array.from(document.querySelectorAll('#ag [data-steptix-row]')).map((e) => ({
+        n: e.getAttribute('data-steptix-row'),
         pinned: e.parentElement?.className ?? '',
       })));
     expect(stamps).toEqual([

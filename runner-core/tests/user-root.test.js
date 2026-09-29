@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { readMachineKey, userRootEnvPath, MACHINE_KEY_VAR } from '../dist/user-root.js';
 
 function tmpDeps() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-rc-user-root-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-rc-user-root-'));
   return {
     dir,
     deps: { env: { LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir }, platform: process.platform },
@@ -17,15 +17,15 @@ function tmpDeps() {
 test('userRootEnvPath: win32 uses LOCALAPPDATA, POSIX uses XDG then ~', () => {
   assert.equal(
     userRootEnvPath({ env: { LOCALAPPDATA: 'C:\\U\\x\\AppData\\Local' }, platform: 'win32' }),
-    path.join('C:\\U\\x\\AppData\\Local', 'aiui', '.env'),
+    path.join('C:\\U\\x\\AppData\\Local', 'steptix', '.env'),
   );
   assert.equal(
     userRootEnvPath({ env: { XDG_CONFIG_HOME: '/home/x/.config' }, platform: 'linux' }),
-    path.join('/home/x/.config', 'aiui', '.env'),
+    path.join('/home/x/.config', 'steptix', '.env'),
   );
   assert.equal(
     userRootEnvPath({ env: {}, platform: 'linux', homedir: () => '/home/x' }),
-    path.join('/home/x', '.aiui', '.env'),
+    path.join('/home/x', '.steptix', '.env'),
   );
 });
 

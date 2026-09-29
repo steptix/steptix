@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 /**
  * Assert that a file exists on the machine running the SERVER, and capture its
@@ -28,7 +28,7 @@ import { defineTool } from 'ai-ui-automation/tools';
  *
  * Usage:
  *
- *   1. [tool: assert_file_exists path="{{save_dir}}\aiui-statement.pdf"]
+ *   1. [tool: assert_file_exists path="{{save_dir}}\steptix-statement.pdf"]
  *   2. Verify that {{file_size}} is more than 0
  *
  * The `path` argument is a literal path on the server's file system, usually
@@ -43,7 +43,7 @@ export default defineTool({
     path: {
       type: 'string',
       description:
-        'Absolute path to the file that must exist, e.g. "C:\\Users\\me\\AppData\\Local\\Temp\\aiui-statement.pdf".',
+        'Absolute path to the file that must exist, e.g. "C:\\Users\\me\\AppData\\Local\\Temp\\steptix-statement.pdf".',
     },
   },
   outputs: {

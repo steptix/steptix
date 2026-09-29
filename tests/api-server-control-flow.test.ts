@@ -882,7 +882,7 @@ describe('For each over object rows', () => {
    * this pass) and `user.apikey` (a data file's own heading, typed by the
    * author) are the same shape to a reader, and the server tells them apart
    * with a registry keyed on the live map's object identity — which a copy
-   * sent over HTTP arrives without. So TestBench read every dotted entry as a
+   * sent over HTTP arrives without. So Steptix read every dotted entry as a
    * binding, took the narrow record rule to it, and printed `uk_live_1234` in
    * the Variables view beside a report that starred it.
    *
@@ -944,7 +944,7 @@ describe('For each over object rows', () => {
    *
    * It is parsed from the request the client itself sent, and was then read
    * only by the prompt's `## Values` block — so after an author unmasked
-   * `keyword`, the model saw the value and every TestBench surface went on
+   * `keyword`, the model saw the value and every Steptix surface went on
    * starring it. Now it rides each `frame:scope`, and the client exempts a
    * named entry from all three rules exactly as `formatParameterBlock` does.
    */
@@ -1678,7 +1678,7 @@ describe('For each over object rows', () => {
 
 /**
  * Every `step:start` a guard's line opens is closed by a `step:pass` or a
- * `step:fail` on that same line — the paint rule TestBench relies on.
+ * `step:fail` on that same line — the paint rule Steptix relies on.
  *
  * `ActiveFileTracker` paints `running` on `step:start` and clears it only on
  * the next event for that line, so an unpaired start is a line left painted
@@ -2022,7 +2022,7 @@ describe('compiling a file with control flow', () => {
   });
 
   it('lets a compile of the looped SECTION proceed — it arrives detached', async () => {
-    // TestBench runs a selection made entirely of section-body lines detached,
+    // Steptix runs a selection made entirely of section-body lines detached,
     // at the root frame, so the guard is not in the batch at all: the section
     // runs once and one entry per line is exactly right. This is the compile
     // the refusal's advice names, so it has to work.

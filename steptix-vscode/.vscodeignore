@@ -1,0 +1,16 @@
+.vscode/**
+src/**
+tests/**
+node_modules/**
+*.test.js
+*.test.ts
+tsconfig.extension.json
+vite.config.webview.js
+scripts/**
+PLAN.md
+SPEC.md
+package-lock.json
+**/*.map
+**/*.ts
+!dist/**
+!icons/**

@@ -1,21 +1,21 @@
 /**
- * Help text for `aiui mcp`.
+ * Help text for `steptix mcp`.
  *
  * Its own module so `src/index.ts` can load it lazily inside the `--help`
  * guard. A static import of anything under `src/mcp/` from the entry point
- * would defeat the CLI bypass on every ordinary `aiui` invocation, and a
+ * would defeat the CLI bypass on every ordinary `steptix` invocation, and a
  * string literal in the entry would drift from the README.
  */
 export const MCP_USAGE = `
-aiui mcp — drive browsers and run tests from an MCP client over stdio
+steptix mcp — drive browsers and run tests from an MCP client over stdio
 
   Speaks the Model Context Protocol on stdin/stdout. Agent hosts spawn it;
   you do not normally run it by hand.
 
-  A project is optional. Inside one (a directory with aiui.config.json), you
+  A project is optional. Inside one (a directory with steptix.config.json), you
   get its tests, skills, tools and environments. From anywhere else, the
   browser verbs, run_steps and run_errand still work against the user root
-  (%LOCALAPPDATA%\\aiui, ~/.aiui elsewhere) — your own signed-in CDP browsers,
+  (%LOCALAPPDATA%\\steptix, ~/.steptix elsewhere) — your own signed-in CDP browsers,
   reachable from any directory. Results say which via a "scope" field;
   [skill:]/[tool:] steps and the two test-file tools still need a project.
 
@@ -39,7 +39,7 @@ Tools
   server_status     health of the Sessions API server
 
 Environment
-  AIUI_MCP_ROOTS    ${'`'}${'$'}{path.delimiter}${'`'}-separated directories the server may
+  STEPTIX_MCP_ROOTS    ${'`'}${'$'}{path.delimiter}${'`'}-separated directories the server may
                     touch. Defaults to the process working directory.
                     REQUIRED for hosts whose config is machine-global
                     (Codex CLI, Copilot CLI), whose spawn directory is not
@@ -50,9 +50,9 @@ Environment
                     Project-less calls default to http://127.0.0.1:3141 —
                     a distinct port, so they never collide with a project
                     server on 3100.
-  AIUI_SERVER_API_KEY    Sessions API key. Chain: project .env, then this
-                    variable, then the machine key at %LOCALAPPDATA%\aiui\.env
-                    (~/.aiui elsewhere) — which is generated on first need,
+  STEPTIX_SERVER_API_KEY    Sessions API key. Chain: project .env, then this
+                    variable, then the machine key at %LOCALAPPDATA%\steptix\.env
+                    (~/.steptix elsewhere) — which is generated on first need,
                     so most setups never set this anywhere.
 
 Host configuration
@@ -62,6 +62,6 @@ Host configuration
 Notes
   Hosts execute dist/, so run \`npm run build\` after changing the source.
   If you let this server auto-start the API server, use
-  \`aiui status --url $SERVER_URL\` — plain \`aiui status\` reads
-  aiui.config.json, which can name a different host or port.
+  \`steptix status --url $SERVER_URL\` — plain \`steptix status\` reads
+  steptix.config.json, which can name a different host or port.
 `.trimStart();

@@ -133,7 +133,7 @@ try {
   for await (const ev of sseEvents(url, {
     steps: ['[tool: uuid]'],
     sourceLines: [1],
-    // toolsDir comes from the project's aiui.config.json via the server's
+    // toolsDir comes from the project's steptix.config.json via the server's
     // own resolution path — we don't need to send it explicitly.
     toolsDir: process.cwd() + '/fixtures/tools/src',
     pauseAtNextTool: true,

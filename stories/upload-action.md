@@ -160,7 +160,7 @@ them as payloads, under a 50 MB cap (`lib/server/fileUploadUtils.js:58-68`).
 A collocated (launched) browser gets the absolute path via
 `DOM.setFileInputFiles` instead. Either way: **the file must be readable by
 the Sessions API server process**, and never by the browser or the
-TestBench machine. That is the rule to document.
+Steptix machine. That is the rule to document.
 
 ## Locked decisions
 
@@ -188,7 +188,7 @@ TestBench machine. That is the rule to document.
    decision, file-upload-steps.md Decisions). Consequences per path into the
    executor:
    - CLI `run`: `path.dirname(test.filePath)`.
-   - Sessions API: `path.dirname(request.testFilePath)` per request. TestBench
+   - Sessions API: `path.dirname(request.testFilePath)` per request. Steptix
      sends the open document's path on a full run
      (run-controller.ts:2692) and on an interactive step (2899) — the *test*
      file even when the step being run lives in a skill.
@@ -206,7 +206,7 @@ TestBench machine. That is the rule to document.
      client may omit it: a relative path is refused with a message that
      says so; an absolute path still works.
 5. **Fence at the project root, lexically.** `..` is allowed, but a path
-   whose resolved form is outside the folder holding `aiui.config.json` is
+   whose resolved form is outside the folder holding `steptix.config.json` is
    refused. With no project root, the fence is the base folder. The
    comparison is `path.resolve` plus case-folding on Windows — the same
    `comparable()` helper `resolveProjectRoot` uses (project-root.ts:9,
@@ -288,7 +288,7 @@ TestBench machine. That is the rule to document.
     calls `showOpenFilePicker()` emits a chooser event Playwright cannot
     answer (`crPage.js:694` drops the event because it carries no backend
     node id) — the chooser-timeout message says so. Shipping a file from a
-    remote TestBench to the server is a separate story; today the message
+    remote Steptix to the server is a separate story; today the message
     says where the file was looked for.
 
 ## Design, by layer
@@ -381,7 +381,7 @@ New `src/browser/upload-paths.ts`, no Playwright, unit-testable:
 export interface UploadPathContext {
   /** Folder of the test file being run; undefined when no test file (Flick). */
   baseDir?: string;
-  /** Folder holding aiui.config.json; null when there is none. */
+  /** Folder holding steptix.config.json; null when there is none. */
   projectRoot?: string | null;
 }
 export type UploadPathResult =
@@ -756,7 +756,7 @@ matches and needs nothing.
   too or a plain success renders nothing.
 - Flick renders every action field generically
   (flick-vscode/src/webview/main.ts:922-935, arrays via `formatValue`):
-  `filePaths` shows with no change. TestBench never sees actions (no action
+  `filePaths` shows with no change. Steptix never sees actions (no action
   event in the SSE protocol): no change, no version bump.
 - MCP `STEP_SYNTAX` crib ([tools.ts:1686](../src/mcp/tools.ts)) gains one
   line: `Upload file attachments/logo.png   a file path is relative to the
@@ -883,14 +883,14 @@ harness or by `npx tsx fixtures/test-app/server.ts`):
   verification clauses 1–5 and 8. This story adds the `## Parameters`
   block (`statement: \attachments\statement.pdf`) and a fourteenth step,
   *"Upload file {{statement}} as the statement, then click Upload"*, to
-  that file; the live TestBench suite below counts fourteen.
+  that file; the live Steptix suite below counts fourteen.
 - The same file compiled (`Compile This Test` or the CLI compile command)
   and replayed strict — clause 6; the compile run doubles as the
   measurement-on half of clause 4 when step 12 is temporarily pointed at a
   missing file.
 - The same file with `## Config: cdp` against a `start_cdp_browser` Chrome
   — clause 7.
-- A live TestBench suite `testbench-native/tests/integration/live/upload-steps.test.cjs`
+- A live Steptix suite `steptix-vscode/tests/integration/live/upload-steps.test.cjs`
   modelled on `pause-resume.test.cjs`, asserting all fourteen steps reach
   pass or pass-cached. That harness observes step statuses only, so the
   absolute-path log line is asserted in `upload-action.test.ts` via the
@@ -900,7 +900,7 @@ harness or by `npx tsx fixtures/test-app/server.ts`):
 ## Rollout
 
 Server-side only: `npm run build`, restart the `:3100` server, reload any
-TestBench windows so their next run hits the new build. No TestBench or
+Steptix windows so their next run hits the new build. No Steptix or
 runner-core change, so no version bump and no `.vsix`. The
 `securebank-upload.md` test that has been failing since PR #117 turns
 green; that is the smoke test.
@@ -912,7 +912,7 @@ green; that is the smoke test.
 - **File System Access API pickers** (`showOpenFilePicker`) — Playwright
   cannot answer them; the chooser-timeout message says so.
 - **Downloads** — the reverse direction; separate story.
-- **Shipping bytes from a remote TestBench to the server** — the file must
+- **Shipping bytes from a remote Steptix to the server** — the file must
   be readable by the server process. The E3 message says where it looked.
 - **`accept` / size enforcement in the framework** — the site decides.
 - **A base folder for Flick** — Flick has no test file; relative paths get
@@ -924,11 +924,11 @@ green; that is the smoke test.
 
 ## Follow-ons worth a chip, not this story
 
-- **TestBench diagnostic for a missing attachment**: a squiggle under
+- **Steptix diagnostic for a missing attachment**: a squiggle under
   `\attachments\missing.png` at edit time, before any run. Fits the
   `computeSectionDiagnostics` pattern
-  (testbench-native/src/extension/section-diagnostics-core.ts:41) with a
-  new TB code beside TB020 (runner-core/src/errors.ts:160) — remember the
+  (steptix-vscode/src/extension/section-diagnostics-core.ts:41) with a
+  new TB code beside STX020 (runner-core/src/errors.ts:160) — remember the
   `SAMPLE_CONTEXTS` audit in runner-core/tests/errors.test.js and the
   `node --test` run. Needs a step-text heuristic for "this token is a file
   path", which is why it is not here.

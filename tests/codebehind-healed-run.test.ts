@@ -9,7 +9,7 @@
  *  1. `TestReport.healedSteps` — set by the runner, `status` still 'passed';
  *  2. the report's amber "PASSED — 4 steps healed, 18.2k tokens" banner, in
  *     the shape `aborted` already established;
- *  3. `aiui run --fail-on-healed` — a non-zero exit, and only under the flag;
+ *  3. `steptix run --fail-on-healed` — a non-zero exit, and only under the flag;
  *  4. the sidecar's consecutive-stale count, which is what lets the ⚠ read
  *     "healed under AI (3 runs in a row)" with no threshold to tune.
  *
@@ -421,7 +421,7 @@ describe('the healed banner', () => {
 
 // ─── 3. --fail-on-healed ────────────────────────────────────────────────────
 
-describe('aiui run --fail-on-healed', () => {
+describe('steptix run --fail-on-healed', () => {
   it('is a declared boolean flag, off by default', () => {
     const program = new Command();
     registerRunCommand(program);

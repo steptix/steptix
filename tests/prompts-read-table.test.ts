@@ -87,21 +87,21 @@ describe('step prompt — readTable rule', () => {
     // Loan applications grid" — because that is what it read on pass 7 before
     // it counted the rows itself and built `#RadGrid1_ctl00__7`, clicking row
     // 8 and passing green. The row number is not arithmetic on an id: the read
-    // leaves `data-aiui-row` on the page and the selector uses that.
+    // leaves `data-steptix-row` on the page and the selector uses that.
     expect(prompt).toContain('ROW IDS.');
     expect(prompt).toMatch(/means the SEVENTH DATA row of that table, counting from 1/);
     expect(prompt).toMatch(
       /Header rows, a filter row, hidden rows and an expanded detail row are not data rows/,
     );
-    expect(prompt).toContain('carries data-aiui-row="N"');
-    expect(prompt).toContain('the row matching [data-aiui-row="7"] INSIDE that table');
+    expect(prompt).toContain('carries data-steptix-row="N"');
+    expect(prompt).toContain('the row matching [data-steptix-row="7"] INSIDE that table');
     expect(prompt).toContain('"#RadGrid1_ctl00__7" is row EIGHT');
     // SCOPING is in the prose, not only in the example. Every read of this run
     // leaves the same attribute on ITS table, so a selector that is just
-    // `[data-aiui-row="7"]` matches row 7 of the first table in the page —
+    // `[data-steptix-row="7"]` matches row 7 of the first table in the page —
     // shown once in an example, the model wrote the bare attribute.
     expect(prompt).toContain(
-      'the selector is ALWAYS the TABLE\'s own selector followed by [data-aiui-row="N"]',
+      'the selector is ALWAYS the TABLE\'s own selector followed by [data-steptix-row="N"]',
     );
     expect(prompt).toContain(
       'NEVER write the attribute on its own: it matches a row in EVERY table read this run',

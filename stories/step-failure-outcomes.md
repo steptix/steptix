@@ -26,7 +26,7 @@ failure; the third lets a failure pass through.
 
 **You get:** the model judges the condition, the way it judges an
 `If … then return` today. When it holds, the step fails, the run stops as it
-does on any failure, and the error on the row, in the run log, in the TestBench
+does on any failure, and the error on the row, in the run log, in the Steptix
 hover and in the MCP summary is *The variable value was peanuts. Expected
 apples*. When it does not hold, nothing happens and the next step runs. The
 failure is not retried: the author asked for it, and a retry would hand the
@@ -135,7 +135,7 @@ Three facts shape the design, and each would be a trap if ignored:
   ([protocol.ts](../runner-core/src/protocol.ts)), and `StepStatus` is
   `passed | failed | error | skipped`. Widening the status union again would
   be found by the compiler everywhere, which is safe, and would also touch
-  every switch in the report, the MCP fold, TestBench and the IPC types, which
+  every switch in the report, the MCP fold, Steptix and the IPC types, which
   is a lot of churn for one flag's worth of meaning.
 - **There is a precedent for "failed, but not counted".** A step the user
   stopped on carries `status: 'failed'` with `interrupted: true`
@@ -207,7 +207,7 @@ tell a tolerated failure from a real one.
    explanation: `Failed as the step says. What failed: <original error>`. The
    log line at failure time prints the original before the swap, so nothing
    is lost for a reader with the run log. On the wire `step:fail.error` is M;
-   the MCP summary, the TestBench hover and the report's failure block lead
+   the MCP summary, the Steptix hover and the report's failure block lead
    with M.
 
 6. **`otherwise continue` tolerates the final failure.** The step's status
@@ -231,7 +231,7 @@ tell a tolerated failure from a real one.
      `StepResult.warning`, the Electron IPC step update, the MCP row. The
      explanation alone was not enough and the gap was silent: it does not
      travel on `step:fail`, so the sentence the author wrote reached no client
-     at all. With the field it leads — the TestBench hover's first line, the
+     at all. With the field it leads — the Steptix hover's first line, the
      run log's `⚠ step N failed — continuing: <warning> (<what failed>)`, the
      panel's amber line, the MCP row and the tally's content lines — and the
      error stays the framework's, underneath it, on every one of them.
@@ -440,7 +440,7 @@ and 6.
 - **MCP errands** ([errand-runner.ts](../src/server/errand-runner.ts)) — flat
   list, same seam.
 
-### runner-core, TestBench, MCP
+### runner-core, Steptix, MCP
 
 `StepFailEvent` gains the two booleans. The extension paints a `tolerated`
 fail with a new `fail-tolerated` status — an amber ✗, its own SVG, a hover
@@ -450,7 +450,7 @@ line) exempts it; a `deliberate` fail logs `✗ step N failed as written: M`.
 The MCP fold records `tolerated` on the row, does not set `sawFailure` for
 it, and words the summary *7 passed, 1 failed (tolerated)*; `KNOWN_EVENTS`
 needs nothing, because no event is new. Patch bump in
-`testbench-native/package.json`.
+`steptix-vscode/package.json`.
 
 ### Report
 
@@ -515,7 +515,7 @@ the two fields. CHANGELOG.
 - **Report** — header counts, the two badges, `merge-rows` summing.
 - **run-fold** — `tolerated` on the row, run status passed, the summary
   wording; `deliberate` error verbatim.
-- **TestBench** — fast suite with `FakeApiClient`: amber paint, hover text,
+- **Steptix** — fast suite with `FakeApiClient`: amber paint, hover text,
   summary line, `done` not red for a tolerated fail.
 - **Code-behind** — `step.fail` not healed, explanation wording; generator
   prompt carries the three rules; the compile prefix steps over a tolerated
@@ -562,7 +562,7 @@ replay fails at step 9 with the same message and no model call.
 ## Open questions
 
 - **Who reads the message.** The design assumes the report reader, the
-  TestBench hover, the CI log and an MCP agent's run summary all want the
+  Steptix hover, the CI log and an MCP agent's run summary all want the
   author's sentence first and the framework's diagnostic second. If the CI
   consumer is a parser that keys on the framework's wording, decision 5
   should append rather than replace.
@@ -582,7 +582,7 @@ replay fails at step 9 with the same message and no model call.
 
 **Built 2026-09-11**, by parallel agents working the parser/executor, the
 compiler and the run loops/clients at the same time. The live fixture above ran
-once through TestBench against the fixture app and produced exactly the
+once through Steptix against the fixture app and produced exactly the
 statuses this story predicted: steps 1-6 and 8 passed, step 7 `fail-tolerated`,
 step 9 `fail` carrying the author's message, step 10 never started, and the
 report header read *7 passed, 1 failed, 1 tolerated*. The two sibling live
@@ -687,7 +687,7 @@ with this round by the agent that owns those files.
 
 The live compile of the fixture found the one thing the design had not said
 out loud: a deliberate failure on the RECORDING run is evidence, not a defect.
-`aiui compile failure-outcomes-live.md --all` recorded step 9, the model
+`steptix compile failure-outcomes-live.md --all` recorded step 9, the model
 answered `fail`, the run ended — and the compiler called it *Record stopped at
 step 9*, dropped it and everything after it, and told the author *Step 9 failed
 under AI … Fix that step, run, and compile again for the rest*, over a step
@@ -721,8 +721,8 @@ code*. The recording on disk stays honest — a deliberate failure makes it a
 `failed` recording, flag and all — and nothing refuses a compile over that.
 
 And then it had to be fixed a second time, because there are two compilers
-reading one recording and only one of them had been told. `aiui compile` reads
-it off the file; a TestBench Run & Compile reads it off the run it is riding,
+reading one recording and only one of them had been told. `steptix compile` reads
+it off the file; a Steptix Run & Compile reads it off the run it is riding,
 and the server's live path picked the step to caption the compile with by
 asking for the first failure that was neither interrupted nor tolerated —
 `deliberate` was not in the filter. So the same fixture that made the boxed

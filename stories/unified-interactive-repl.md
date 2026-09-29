@@ -15,7 +15,7 @@ Three differences:
 2. FSD has `:screenshot` (capture into report on demand).
 3. FSD is failure-triggered + gated; interactive is marker-triggered + unconditional.
 
-Everything else — typing a line and routing it through `executeStep`, conversation-history tracking, live-page targeting, exit-aborts-the-run — is duplicated. The runner-core REPL ([`runner-core/src/repl.ts`](../runner-core/src/repl.ts)) used by the testbench is a third copy with yet another command vocabulary.
+Everything else — typing a line and routing it through `executeStep`, conversation-history tracking, live-page targeting, exit-aborts-the-run — is duplicated. The runner-core REPL ([`runner-core/src/repl.ts`](../runner-core/src/repl.ts)) used by the Steptix extension is a third copy with yet another command vocabulary.
 
 ## Goal
 
@@ -241,7 +241,7 @@ The `/repl` escape hatch is always available within the clarification prompt whe
 ### Out of scope (still)
 
 - Generic "drop into REPL anytime" via signal/keybinding — would need stdin multiplexing or a second TTY. Separate story if desired.
-- Testbench wiring of clarification REPL — the clarification prompt is CLI-only today (uses readline against stdin). The testbench would need a new prompt mode (`mode: 'clarification'`) and the same UI affordances; defer to a follow-up.
+- Steptix wiring of clarification REPL — the clarification prompt is CLI-only today (uses readline against stdin). The steptix would need a new prompt mode (`mode: 'clarification'`) and the same UI affordances; defer to a follow-up.
 
 ## Annotation rename in `src/report/types.ts`
 
@@ -259,7 +259,7 @@ Breaking JSON schema change. Update every reader:
 
 History-file (`.runs/`) read-side: accept either old or new key on read for one release. Write-side uses new names only.
 
-## runner-core / testbench REPL
+## runner-core / steptix REPL
 
 Update [`runner-core/src/repl.ts`](../runner-core/src/repl.ts) `interpretReplCommand` to match the new vocabulary:
 
@@ -270,7 +270,7 @@ Update [`runner-core/src/repl.ts`](../runner-core/src/repl.ts) `interpretReplCom
 - `/screenshot` → new action `{ kind: 'screenshot' }`.
 - `/list` and `/help` already there; bodies updated to match new vocabulary.
 
-Testbench's [`run-controller.ts`](../testbench/src/extension/run-controller.ts) gains handlers for `'resume'` and `'screenshot'` actions. `/resume` against top-level steps works fine; `/resume` from an `[interactive]` *inside* a skill body has the classifier-doesn't-expand-skills limitation noted as a follow-up — out of scope here.
+Steptix's [`run-controller.ts`](../steptix/src/extension/run-controller.ts) gains handlers for `'resume'` and `'screenshot'` actions. `/resume` against top-level steps works fine; `/resume` from an `[interactive]` *inside* a skill body has the classifier-doesn't-expand-skills limitation noted as a follow-up — out of scope here.
 
 ## Tests
 
@@ -290,7 +290,7 @@ Testbench's [`run-controller.ts`](../testbench/src/extension/run-controller.ts) 
 - [SPEC-SESSIONS-API.md](../docs/specs/SPEC-SESSIONS-API.md) — still skipped server-side, no change.
 - [README.md](../README.md) — `[interactive]` cheat-sheet.
 - [stories/full-self-driving-supervised.md](full-self-driving-supervised.md) — mark superseded by this story.
-- [testbench/stories/interactive-input-and-fsd.md](../testbench/stories/interactive-input-and-fsd.md) — REPL command list.
+- [steptix/stories/interactive-input-and-fsd.md](../steptix/stories/interactive-input-and-fsd.md) — REPL command list.
 
 ## Sequencing
 
@@ -300,7 +300,7 @@ Testbench's [`run-controller.ts`](../testbench/src/extension/run-controller.ts) 
 2. Rename annotation fields in `report/types.ts` + update generator/template/history readers.
 3. Rewire test-runner failure path; delete `fsd-repl.ts`; move/rename its tests.
 4. Rewire test-runner planned `[interactive]` path.
-5. Update runner-core `repl.ts` + testbench controller.
+5. Update runner-core `repl.ts` + steptix controller.
 6. Docs sweep.
 
 **Phase 2 — `/repl` escape hatch from AI clarification prompts**
@@ -314,6 +314,6 @@ Testbench's [`run-controller.ts`](../testbench/src/extension/run-controller.ts) 
 
 ## Out of scope
 
-- Skill-body `[interactive]` visibility from the testbench classifier (separate issue: testbench needs to expand skills before classifying).
+- Skill-body `[interactive]` visibility from the Steptix classifier (separate issue: Steptix needs to expand skills before classifying).
 - Sessions API support for `[interactive]` (still silently skipped server-side; orthogonal).
 - Report HTML redesign for the new annotations (existing badge logic just gets renamed fields).

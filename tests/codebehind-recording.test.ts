@@ -68,7 +68,7 @@ function step(index: number, over: Partial<StepResult> = {}): StepResult {
 describe('the recording', () => {
   it('lives in the test\'s cache dir, named after the test', () => {
     expect(recordingDirFor(path.join(dir, 'tests', 'checkout.md'))).toBe(
-      path.join(dir, 'tests', '.aiui-codebehind-cache', 'checkout.recording'),
+      path.join(dir, 'tests', '.steptix-codebehind-cache', 'checkout.recording'),
     );
   });
 

@@ -207,7 +207,7 @@ function hiddenList(hidden: HiddenFromModel): string {
  *
  * A name-rule mask says the name is the reason, because renaming is then the
  * whole fix and nothing else in the message points at it. Not `unmask:`: only
- * `aiui run` sends it, so it is no fix under TestBench, MCP or Flick.
+ * `steptix run` sends it, so it is no fix under Steptix, MCP or Flick.
  *
  * A secret in the step's own words is explained, because the author usually
  * wrote `{{password}}` in a section body or a skill and is looking at a
@@ -518,7 +518,7 @@ async function askTheModel(args: UseAiStepArgs): Promise<UseAiStepOutcome> {
     // and fails both. That false failure is loud, names what was hidden, and
     // has a fix — keep the secret out of that step, or rename a variable
     // whose name only looks secret — where the false pass it rules out was
-    // silent. (`unmask:` is no general fix: only `aiui run` sends it.)
+    // silent. (`unmask:` is no general fix: only `steptix run` sends it.)
     //
     // The value is one string — a list or an object in "value" is malformed
     // (above) — and `holdsMask` looks for the mask in the spellings an echo

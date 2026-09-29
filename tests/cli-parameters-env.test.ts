@@ -6,7 +6,7 @@
  * The CLI already does this — `resolveEnvBundle({ mutateProcessEnv: true })`
  * overlays base `.env` + `.env.<name>` into the real `process.env`, and
  * `resolveParameters` reads `process.env` directly. This test pins that chain
- * so it can't silently regress (the TestBench extension had the equivalent gap;
+ * so it can't silently regress (the Steptix extension had the equivalent gap;
  * see issues/034).
  */
 import { describe, it, expect, afterEach } from 'vitest';
@@ -27,7 +27,7 @@ describe('CLI: ## Parameters honour the selected env file', () => {
   });
 
   it('resolves a $VAR defined only in .env.<name> when that env is selected', async () => {
-    const root = mkdtempSync(path.join(tmpdir(), 'aiui-cli-param-'));
+    const root = mkdtempSync(path.join(tmpdir(), 'steptix-cli-param-'));
     try {
       // T2_ONLY exists ONLY in the overlay; SHARED is in both (overlay wins).
       writeFileSync(path.join(root, '.env'), 'SHARED=base\n');
@@ -50,9 +50,9 @@ describe('CLI: ## Parameters honour the selected env file', () => {
   });
 
   it('an unset $VAR (in neither base nor overlay) stays unresolved — proves the overlay is what makes it resolve', async () => {
-    delete process.env['AIUI_T2_ONLY_REGRESSION'];
+    delete process.env['STEPTIX_T2_ONLY_REGRESSION'];
     const resolved = await resolveParameters(
-      { token: '$AIUI_T2_ONLY_REGRESSION' },
+      { token: '$STEPTIX_T2_ONLY_REGRESSION' },
       undefined,
       false,
     );

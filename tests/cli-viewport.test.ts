@@ -253,7 +253,7 @@ describe('a test with no viewport key', () => {
   });
 
   it('still carries a PROJECT-wide pin through, and names it as the project\'s (§8)', async () => {
-    // `browser.fixedViewport` in aiui.config.json means every test in the
+    // `browser.fixedViewport` in steptix.config.json means every test in the
     // project. A test that says nothing must not clear it — the precedence is
     // test-over-project, not test-or-nothing.
     const config = makeConfig();

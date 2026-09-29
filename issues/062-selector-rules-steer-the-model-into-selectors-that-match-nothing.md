@@ -199,7 +199,7 @@ In the code, so the advice is true everywhere a model-written selector goes:
 - **`expand` and `find`'s scope** (`expandDomSubtree`, `findInDom` in
   `src/browser/dom-cleaner.ts`) resolve the selector through
   `page.locator(...)`, stamp the first match with a temporary
-  `data-aiui-target` attribute, and let their in-page scripts find it by that
+  `data-steptix-target` attribute, and let their in-page scripts find it by that
   stamp. They used to call `document.querySelector` on the model's selector,
   which throws on `role=` and ` >> `. The readTable structure question expands
   its region the same way, so it is fixed by the same change.

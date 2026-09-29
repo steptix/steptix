@@ -7,7 +7,7 @@
  * anywhere.
  *
  * Append-only JSON Lines, with no lock. Several processes write at once —
- * TestBench's server, a CLI run, four live-suite servers — and that is safe
+ * Steptix's server, a CLI run, four live-suite servers — and that is safe
  * because each line is ONE append of one short, complete line, which appends
  * do not interleave. A reader that still meets a line that does not parse (a
  * crash mid-write), or one that is not the shape §5 describes, skips it and
@@ -32,7 +32,7 @@ import type { StatsLine, StatsSuite } from './types.js';
 export const MAX_LINE_BYTES = 4096;
 /** Where `stepText` and `selector` are cut (§6.2). */
 export const MAX_TEXT_CHARS = 500;
-/** Months kept when the machine `.env` has no usable `AIUI_STATS_RETAIN_MONTHS` (§6.3). */
+/** Months kept when the machine `.env` has no usable `STEPTIX_STATS_RETAIN_MONTHS` (§6.3). */
 export const DEFAULT_RETAIN_MONTHS = 6;
 
 const MONTH_FILE = /^actions-(\d{4})-(\d{2})\.jsonl$/;
@@ -455,7 +455,7 @@ export async function listStatsMonths(deps?: UserRootDeps): Promise<StatsMonthFi
  *
  * A missing stats folder is no lines, not an error, and so is a month file
  * pruned between the listing and the read. Throws only when the folder or a
- * file in it exists and cannot be read — `aiui stats` should say so rather
+ * file in it exists and cannot be read — `steptix stats` should say so rather
  * than report an empty month.
  */
 export async function readStatsLines(
@@ -518,7 +518,7 @@ function monthIndex(year: number, month: number): number {
  * and February goes. So the current month and the `retainMonths` before it
  * are kept, and nothing younger than the window is ever deleted.
  *
- * `keepFrom` is for `aiui stats`, which prunes after it reads: no month that
+ * `keepFrom` is for `steptix stats`, which prunes after it reads: no month that
  * ends after `keepFrom` — the start of the window it was asked for — is
  * deleted, however old. Asking about January must not be what deletes
  * January, and the months after it hold the run lines its lines link through.
@@ -568,7 +568,7 @@ export async function pruneStatsFiles(opts: {
 export interface StatsSettings {
   /** Whether this run records at all (§6.4). */
   enabled: boolean;
-  /** Who is running (§5.6): `AIUI_STATS_SUITE`, else `user`. */
+  /** Who is running (§5.6): `STEPTIX_STATS_SUITE`, else `user`. */
   suite: StatsSuite;
   /** Months of files to keep (§6.3). */
   retainMonths: number;
@@ -596,19 +596,19 @@ function machineEnv(deps?: UserRootDeps): Record<string, string> {
 /**
  * Whether to record, under which suite, and how long to keep the files.
  *
- * - **Off** (§6.4) when `AIUI_STATS` is off in the environment OR in the
+ * - **Off** (§6.4) when `STEPTIX_STATS` is off in the environment OR in the
  *   machine `.env` — either one turns off the whole machine, so a value set in
  *   one place cannot quietly be undone by the other — or when the project's
  *   `stats.enabled` is `false`. "Off" is whatever `parseBoolEnv` reads as
  *   false (`off`, `0`, `false`, `no`, any case), the one rule every boolean
  *   variable here follows. Pass `env: {}` to ask about the machine alone.
- * - **Suite** from `AIUI_STATS_SUITE` in the environment only. It says who is
+ * - **Suite** from `STEPTIX_STATS_SUITE` in the environment only. It says who is
  *   running THIS process — `runLiveTest.cjs` sets it on each server it starts
  *   — so a machine-wide value would tag every run on the machine and hide the
  *   user's own from the default view. Anything unknown is `user`.
- * - **Retention** (§6.3) from `AIUI_STATS_RETAIN_MONTHS` in the machine `.env`
+ * - **Retention** (§6.3) from `STEPTIX_STATS_RETAIN_MONTHS` in the machine `.env`
  *   only, else 6. Never from the environment: the server prunes at start and
- *   every `aiui stats` prunes too, each in its own environment, and a CLI run
+ *   every `steptix stats` prunes too, each in its own environment, and a CLI run
  *   from a shell that says 1 must not delete months the machine was told to
  *   keep. The machine file is the one place they all read. A value that is
  *   not a whole number of at least 1 is ignored.
@@ -627,14 +627,14 @@ export function statsSettings(
   const machine = machineEnv(opts.deps);
 
   const enabled =
-    parseBoolEnv(env['AIUI_STATS']) !== false
-    && parseBoolEnv(machine['AIUI_STATS']) !== false
+    parseBoolEnv(env['STEPTIX_STATS']) !== false
+    && parseBoolEnv(machine['STEPTIX_STATS']) !== false
     && opts.projectEnabled !== false;
 
-  const named = env['AIUI_STATS_SUITE']?.trim().toLowerCase();
+  const named = env['STEPTIX_STATS_SUITE']?.trim().toLowerCase();
   const suite = named !== undefined && SUITES.has(named) ? (named as StatsSuite) : 'user';
 
-  const retainMonths = retainFrom(machine['AIUI_STATS_RETAIN_MONTHS']) ?? DEFAULT_RETAIN_MONTHS;
+  const retainMonths = retainFrom(machine['STEPTIX_STATS_RETAIN_MONTHS']) ?? DEFAULT_RETAIN_MONTHS;
 
   return { enabled, suite, retainMonths };
 }

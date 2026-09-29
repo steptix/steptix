@@ -21,7 +21,7 @@
  * loudly instead of quietly passing on a stub.
  *
  * The project is real, though: a temp directory with its own
- * `aiui.config.json`, `.env.staging` and markdown, parsed by the real parser
+ * `steptix.config.json`, `.env.staging` and markdown, parsed by the real parser
  * from disk. That is the only way `envName` and the project bundle can be
  * observed reaching the core at all.
  */
@@ -87,7 +87,7 @@ vi.mock('../src/codebehind/compile.js', async (importOriginal) => ({
         unproven: [],
         writtenOffAi: [],
         notAttempted: [],
-        recordingDir: '/x/.aiui-codebehind-cache/smoke.recording',
+        recordingDir: '/x/.steptix-codebehind-cache/smoke.recording',
       },
     };
   }),
@@ -444,10 +444,10 @@ afterAll(async () => {
 beforeEach(() => {
   // A fresh project per test, so the bundle resolver's per-root cache never
   // carries one test's config or `.env` into the next.
-  projectRoot = mkdtempSync(path.join(tmpdir(), 'aiui-compile-'));
+  projectRoot = mkdtempSync(path.join(tmpdir(), 'steptix-compile-'));
   mkdirSync(path.join(projectRoot, 'tests'), { recursive: true });
   writeFileSync(
-    path.join(projectRoot, 'aiui.config.json'),
+    path.join(projectRoot, 'steptix.config.json'),
     JSON.stringify({ execution: { maxTurns: PROJECT_MAX_TURNS } }),
   );
   writeFileSync(path.join(projectRoot, '.env'), 'COMPILE_FIXTURE_USER=alice\n');
@@ -517,7 +517,7 @@ describe('the compile stream', () => {
     const result = events[4]!.data;
     expect(result.status).toBe('green');
     // The files ride the stream instead of being written, so this frame is the
-    // only place TestBench can get them from.
+    // only place Steptix can get them from.
     expect(result.files).toEqual({
       [testFile('smoke.steps.ts')]: 'export default { entries: [] };',
     });
@@ -533,7 +533,7 @@ describe('the compile stream', () => {
       unproven: [],
       writtenOffAi: [],
       notAttempted: [],
-      recordingDir: '/x/.aiui-codebehind-cache/smoke.recording',
+      recordingDir: '/x/.steptix-codebehind-cache/smoke.recording',
     });
   });
 
@@ -629,7 +629,7 @@ describe('recording in the caller\'s session', () => {
         summary: {
           test: options.test.filePath, totalSteps: 3, compiled: 0, kept: 3, keptAi: 0, rounds: 0,
           tokensUsed: 0, written: [], unproven: [], writtenOffAi: [], notAttempted: [],
-          recordingDir: '/x/.aiui-codebehind-cache/smoke.recording',
+          recordingDir: '/x/.steptix-codebehind-cache/smoke.recording',
         },
       };
     });
@@ -689,7 +689,7 @@ describe('recording in the caller\'s session', () => {
         summary: {
           test: options.test.filePath, totalSteps: 3, compiled: 1, kept: 0, keptAi: 1, rounds: 2,
           tokensUsed: 0, written: [], unproven: [], writtenOffAi: [2], notAttempted: [],
-          recordingDir: '/x/.aiui-codebehind-cache/smoke.recording',
+          recordingDir: '/x/.steptix-codebehind-cache/smoke.recording',
         },
       };
     });
@@ -726,7 +726,7 @@ describe('recording in the caller\'s session', () => {
     expect(close).not.toHaveBeenCalledWith('editor-session');
     expect(events.at(-1)!.data.status).toBe('partial');
     expect(events.at(-1)!.data.summary.writtenOffAi).toEqual([2]);
-    expect(events.at(-1)!.data.summary.recordingDir).toBe('/x/.aiui-codebehind-cache/smoke.recording');
+    expect(events.at(-1)!.data.summary.recordingDir).toBe('/x/.steptix-codebehind-cache/smoke.recording');
     run.mockRestore();
     close.mockRestore();
   });
@@ -772,8 +772,8 @@ describe('recording in the caller\'s session', () => {
 
 describe('the parameters a compile\'s runs start from', () => {
   // Caught live (stories/codebehind-compile-as-a-run.md §What was built): a
-  // test declaring `- username: $GITHUB_USERNAME` ran green from TestBench and
-  // compiled with the literal typed into the field. TestBench resolves `$VAR`
+  // test declaring `- username: $GITHUB_USERNAME` ran green from Steptix and
+  // compiled with the literal typed into the field. Steptix resolves `$VAR`
   // on the client; the compile builds its own runs on the server, so the
   // server has to hand the core the env a Run would have resolved against.
 
@@ -785,8 +785,8 @@ describe('the parameters a compile\'s runs start from', () => {
     expect(env.PATH ?? env.Path).toBeDefined();
   });
 
-  it('takes the nearest .env above the test file, as TestBench does, not only the root one', async () => {
-    // TestBench walks up from the test file and stops at the first `.env`; a
+  it('takes the nearest .env above the test file, as Steptix does, not only the root one', async () => {
+    // Steptix walks up from the test file and stops at the first `.env`; a
     // server that read only `<projectRoot>/.env` would resolve a different
     // value than the Run the author just watched.
     writeFileSync(path.join(projectRoot, 'tests', '.env'), 'COMPILE_FIXTURE_USER=nearer-alice\n');
@@ -819,7 +819,7 @@ describe('the parameters a compile\'s runs start from', () => {
         summary: {
           test: options.test.filePath, totalSteps: 3, compiled: 0, kept: 3, keptAi: 0, rounds: 0,
           tokensUsed: 0, written: [], unproven: [], writtenOffAi: [], notAttempted: [],
-          recordingDir: '/x/.aiui-codebehind-cache/smoke.recording',
+          recordingDir: '/x/.steptix-codebehind-cache/smoke.recording',
         },
       };
     });
@@ -845,7 +845,7 @@ describe('the parameters a compile\'s runs start from', () => {
         summary: {
           test: options.test.filePath, totalSteps: 3, compiled: 0, kept: 3, keptAi: 0, rounds: 0,
           tokensUsed: 0, written: [], unproven: [], writtenOffAi: [], notAttempted: [],
-          recordingDir: '/x/.aiui-codebehind-cache/smoke.recording',
+          recordingDir: '/x/.steptix-codebehind-cache/smoke.recording',
         },
       };
     });
@@ -984,7 +984,7 @@ describe('the request allow-list', () => {
 describe('the server never writes the real .steps.ts', () => {
   it('compiles dry even when the request asks for a real write', async () => {
     // `dryRun` is accepted and echoed by the parser, and then overridden. The
-    // files come back on the stream and TestBench applies them through a diff,
+    // files come back on the stream and Steptix applies them through a diff,
     // so the write is undoable and shows up in Source Control — a server-side
     // write would be neither.
     const events = await compileStream({ testFilePath: testFile('smoke.md'), dryRun: false });

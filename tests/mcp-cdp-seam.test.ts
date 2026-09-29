@@ -25,7 +25,7 @@ function fakeProject(overrides: Partial<ProjectContext> = {}): ProjectContext {
     scope: 'project',
     configSearch: [],
     projectRoot: PROJECT_ROOT,
-    configPath: `${PROJECT_ROOT}/aiui.config.json`,
+    configPath: `${PROJECT_ROOT}/steptix.config.json`,
     env: {},
     envName: null,
     serverUrl: 'http://127.0.0.1:3100',
@@ -179,7 +179,7 @@ async function connect(
         engine: 'edge',
         profile: 'default',
         port: 51000,
-        profileDir: 'c:/proj/.aiui/cdp-profiles/edge-default',
+        profileDir: 'c:/proj/.steptix/cdp-profiles/edge-default',
         binary: 'C:/msedge.exe',
         tabs: [],
         outcome: 'launched_into_new_profile',
@@ -317,7 +317,7 @@ describe('list_cdp_browsers', () => {
 
   it('does NOT ask for foreign tabs without the opt-in', async () => {
     // Not asking IS the withholding. The server honours whatever it is asked,
-    // because it cannot tell an agent from a human — TestBench and flick are
+    // because it cannot tell an agent from a human — Steptix and flick are
     // authenticated clients too.
     const h = await connect({ browsers: { running: RUNNING, foreign: FOREIGN } });
     await h.client.callTool({ name: 'list_cdp_browsers', arguments: {} });
@@ -1606,7 +1606,7 @@ const RUNNING_BOTH_SCOPES = [
     engine: 'edge',
     profile: 'default',
     port: 51000,
-    profileDir: 'c:/proj/.aiui/cdp-profiles/edge-default',
+    profileDir: 'c:/proj/.steptix/cdp-profiles/edge-default',
     tabs: [{ targetId: 'P1', title: 'Project tab', url: 'https://proj.test', sessionId: null }],
     scope: 'project',
   },
@@ -1614,7 +1614,7 @@ const RUNNING_BOTH_SCOPES = [
     engine: 'edge',
     profile: 'default',
     port: 52000,
-    profileDir: 'c:/users/x/aiui/.aiui/cdp-profiles/edge-default',
+    profileDir: 'c:/users/x/steptix/.steptix/cdp-profiles/edge-default',
     tabs: [{ targetId: 'U1', title: 'User tab', url: 'https://user.test', sessionId: null }],
     scope: 'user',
   },
@@ -1735,7 +1735,7 @@ describe('start_cdp_browser scope routing', () => {
 
   it('refuses scope: "project" when no project resolved', async () => {
     const h = await connect({
-      project: fakeProject({ scope: 'user', projectRoot: 'c:/users/x/aiui' }),
+      project: fakeProject({ scope: 'user', projectRoot: 'c:/users/x/steptix' }),
     });
     const result = await h.client.callTool({
       name: 'start_cdp_browser',
@@ -1749,7 +1749,7 @@ describe('start_cdp_browser scope routing', () => {
 
   it('a project-less start defaults to the user root', async () => {
     const h = await connect({
-      project: fakeProject({ scope: 'user', projectRoot: 'c:/users/x/aiui' }),
+      project: fakeProject({ scope: 'user', projectRoot: 'c:/users/x/steptix' }),
     });
     const result = await h.client.callTool({
       name: 'start_cdp_browser',
@@ -1759,7 +1759,7 @@ describe('start_cdp_browser scope routing', () => {
     expect(result.isError).toBeFalsy();
     // project.projectRoot IS the user root on a project-less resolution, so
     // the launch lands there without the caller saying anything.
-    expect(h.startCalls[0]).toMatchObject({ projectRoot: 'c:/users/x/aiui' });
+    expect(h.startCalls[0]).toMatchObject({ projectRoot: 'c:/users/x/steptix' });
     expect((structured(result) as { scope: string }).scope).toBe('user');
   });
 });

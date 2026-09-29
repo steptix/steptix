@@ -370,7 +370,7 @@ async function run(
 }
 
 beforeAll(async () => {
-  tmpRoot = mkdtempSync(path.join(tmpdir(), 'aiui-runsettings-'));
+  tmpRoot = mkdtempSync(path.join(tmpdir(), 'steptix-runsettings-'));
   const { app } = createApiServer(testConfig);
   ({ server, baseUrl } = await listenOnRandomPort(app));
 }, 30_000);
@@ -552,7 +552,7 @@ describe('retention', () => {
 
 describe('isolation between sessions', () => {
   it('session A\'s settings do not appear in session B\'s resolved config', async () => {
-    // The same server also serves TestBench. A setting that leaked across
+    // The same server also serves Steptix. A setting that leaked across
     // sessions would let an agent silently change the cost and speed of a run
     // somebody is doing by hand.
     await run('rs-iso-a', { runSettings: { capture: 'every-step', sendScreenshots: true } });
@@ -658,7 +658,7 @@ describe('the model override', () => {
 // AI_GATEWAY_URL (stories/keyless-replay-and-gateway-env.md Part A)
 //
 // Here rather than in a loader unit test because the loader is not on this
-// path at all: TestBench ships the project's `.env` as `request.env`, and the
+// path at all: Steptix ships the project's `.env` as `request.env`, and the
 // server folds it in with `applyEnvToAiConfig`. A var added to the loader and
 // not there passes every loader test and does nothing through the extension —
 // the exact trap the codebehind-env-data work hit with `envName`.
@@ -1223,7 +1223,7 @@ describe('the project bundle as a source', () => {
     const root = path.join(tmpRoot, 'proj');
     mkdirSync(path.join(root, 'tests'), { recursive: true });
     writeFileSync(
-      path.join(root, 'aiui.config.json'),
+      path.join(root, 'steptix.config.json'),
       JSON.stringify({ browser: { fullPageScreenshots: true } }),
     );
     const testFilePath = path.join(root, 'tests', 't.md');

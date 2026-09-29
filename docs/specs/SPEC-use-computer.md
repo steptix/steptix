@@ -151,7 +151,7 @@ Everywhere a step is classified: the markdown parser (`## Steps` and every
 (`config/loader.ts`) where it is REFUSED (a hook runs on the page surface),
 the step grouper, the code-behind classifiers (§9), the session manager's
 loop, the CLI runner's loop, and the errand runner, where it is refused in
-v1 (an errand is a browser errand). TestBench recognises it through the
+v1 (an errand is a browser errand). Steptix recognises it through the
 runner-core mirror (§10.3).
 
 ### 4.5 Mode is session state
@@ -183,14 +183,14 @@ runner-core mirror (§10.3).
   if the session is already on it; on a browser-surface session it runs on
   the browser and the log names the `[use computer]` line to run from,
   because entering computer mode is that step's job, preconditions and row
-  included. Why: TestBench reuses one session per test file and MCP's
+  included. Why: Steptix reuses one session per test file and MCP's
   `run_test_file` reuses `mcp:<path>`, and a run that failed or was stopped
   between `[use computer]` and `[use browser]` used to hand the next run the
   computer surface — its "Navigate to statement.pdf" went to the real mouse
   and keyboard with VS Code in front. The server cannot infer a run's start
   from the request's shape (a Run From Here and a Continue both send a
   tail), so the client says it:
-  - **TestBench** sends it on the first block of every run the user started
+  - **Steptix** sends it on the first block of every run the user started
     — Run, Run From Here, Run Step Here, a selection, Run & Compile, and each
     row of a kept-session row loop — with `stepIndex` from runner-core's
     `runStartFor`, the block's first step's position in `extractSteps`,
@@ -273,7 +273,7 @@ runner-core mirror (§10.3).
 ### 4.6 The browser launches lazily
 
 **The browser launches when the first step executes while the surface is
-`browser`.** Not at session creation, and not from the file: TestBench
+`browser`.** Not at session creation, and not from the file: Steptix
 posts steps one request at a time, so the server cannot know at creation
 whether step 1 will be `[use computer]`. A test that opens with it never
 triggers the launch; a later `[use browser]` triggers it at the next step
@@ -297,7 +297,7 @@ What moves:
   VALIDATED at creation, exactly as today, and consumed by the deferred
   launch. The `viewport`/`cdp` conflict error still fires at creation.
 - A launch failure at step N is that step's failure, with the launch error
-  as its message. TestBench needs no change (it is an HTTP client), but the
+  as its message. Steptix needs no change (it is an HTTP client), but the
   error appears one screen later than before.
 - Endpoints and tools that read a page — `GET /sessions/:id/content`,
   `POST /sessions/:id/login`, the MCP `peek_tab` / `get_page_content` /
@@ -317,9 +317,9 @@ What moves:
 
 On `[use computer]`, in order, each failing the STEP with the message given:
 
-1. **Project opt-in.** `desktop.enabled` (aiui.config.json, default
+1. **Project opt-in.** `desktop.enabled` (steptix.config.json, default
    `false`) must be `true`. Message: computer mode is disabled for this
-   project; set `desktop.enabled: true` in aiui.config.json. A test file in
+   project; set `desktop.enabled: true` in steptix.config.json. A test file in
    a shared project must not be able to move the mouse on a machine whose
    owner did not allow it.
 
@@ -346,9 +346,9 @@ On `[use computer]`, in order, each failing the STEP with the message given:
    in the other direction: the string `"false"` kept captures in the report.
    `maxImageWidth` and `settleMs` must be numbers.)
 
-   And nothing switches it on for a project that did not: `aiui init`
-   writes its own starter `aiui.config.json` (`SCAFFOLD_CONFIG`,
-   src/cli/commands/init.ts) and never copies `templates/init/aiui.config.json`,
+   And nothing switches it on for a project that did not: `steptix init`
+   writes its own starter `steptix.config.json` (`SCAFFOLD_CONFIG`,
+   src/cli/commands/init.ts) and never copies `templates/init/steptix.config.json`,
    which is the live suite's fixture workspace config and carries
    `desktop.enabled: true`, `browser.launchArgs: ["--disable-print-preview"]`
    and a `toolsDir` into `fixtures/`. It used to be copied verbatim into every
@@ -356,7 +356,7 @@ On `[use computer]`, in order, each failing the STEP with the message given:
 
 1b. **The model can see the screen** (§15.4). For a gateway-routed model
    (`gateway/…`, `aibroker/…`) with a custom gateway URL, `GET
-   {gatewayUrl}/v1/models` (3 s) is asked whether the route is the TestBench
+   {gatewayUrl}/v1/models` (3 s) is asked whether the route is the Steptix
    Copilot bridge and what it does with images; a bridge that strips images,
    or that marks the selected model `image_input: false`, fails the step with
    §15.4's message. Any other answer, or none, proceeds. Checked against the
@@ -676,7 +676,7 @@ primitives together is `bring-to-front.ts`.
 ### 5.9 The lock
 
 One computer-mode session per machine: two would fight over the mouse. A
-lock file at `path.join(os.tmpdir(), 'aiui-computer.lock')` holding
+lock file at `path.join(os.tmpdir(), 'steptix-computer.lock')` holding
 `{ pid, sessionId, since }`.
 
 **The lock is held only while a run is executing and not waiting for a
@@ -743,7 +743,7 @@ computer-mode tests (§13.3).
 
 Why only while a run executes: an MCP `run_test_file` of
 `calc-one-plus-one.md`, which ends in computer mode with no `[use browser]`,
-passed on 2026-09-23 and left `aiui-computer.lock` held by its idle session,
+passed on 2026-09-23 and left `steptix-computer.lock` held by its idle session,
 because MCP keeps a session open between calls. That would have refused
 every other computer-mode session on the machine until something closed it.
 
@@ -768,7 +768,7 @@ fixture workspace can pass `--disable-print-preview`, which makes Chromium's
 Print button open the OPERATING SYSTEM's print dialog instead of its own
 preview. Both are dialogs outside the page and both have a Cancel button;
 the test in §13.2 is written to pass against either. Both it and
-`desktop.enabled: true` live in the FIXTURE workspace's config only — `aiui
+`desktop.enabled: true` live in the FIXTURE workspace's config only — `steptix
 init` does not copy that file (§5.1 item 1).
 
 ## 6. Browser mode, unchanged
@@ -815,7 +815,7 @@ timeout: 600s
 10. Verify the page URL ends with statement.pdf
 ```
 
-Step 4 matters more than it looks: when a run starts from TestBench, VS Code
+Step 4 matters more than it looks: when a run starts from Steptix, VS Code
 is frontmost and the browser is behind it; this is the step that brings it
 forward. The docs say plainly that `[use computer]` does nothing to arrange
 the screen, and that the user must not touch the mouse during a computer
@@ -881,9 +881,9 @@ model always gets the capture it is asked about — that is the surface. With
 | --- | --- |
 | A computer step's turn image (`TurnResult.computer.screenshotBase64`) and its AI interaction's screenshot — report turn blocks | not recorded (`computer-step.ts`) |
 | A computer step's row screenshot (`StepResult.screenshotBase64`, pass or fail) — the report's step-end image, `results[].screenshot` in the JSON response, a recording's `<step>.failure.png` | not recorded, so none of them has one |
-| The same, on the SSE `step:pass` / `step:fail` event — TestBench, and the MCP server | not sent: the event's `screenshot` comes from the row |
+| The same, on the SSE `step:pass` / `step:fail` event — Steptix, and the MCP server | not sent: the event's `screenshot` comes from the row |
 | A §5.6 condition judge's AI interaction — the guard row's turn in the report | not recorded (`evaluateConditions`); the row says the capture was left out by this switch |
-| MCP `run_test_file` / `run_steps` result image | not returned: the MCP server reads the switch from the project's `aiui.config.json` and drops any screenshot on an event marked `surface: 'computer'`, whatever the server sent, and says why instead of advising `capture`. A computer step's `step:pass` or `step:fail` also clears the picture before it whether or not it carried one — a current server strips it before sending — so `final` never hands back the page as it looked before the excursion |
+| MCP `run_test_file` / `run_steps` result image | not returned: the MCP server reads the switch from the project's `steptix.config.json` and drops any screenshot on an event marked `surface: 'computer'`, whatever the server sent, and says why instead of advising `capture`. A computer step's `step:pass` or `step:fail` also clears the picture before it whether or not it carried one — a current server strips it before sending — so `final` never hands back the page as it looked before the excursion |
 
 A page capture taken while the run is on the computer surface — the error
 screenshot of a step that threw, an unconditional `Fail the test …` — is of
@@ -906,7 +906,7 @@ Computer-mode lines are prefixed `[computer]`. The mapped screen point is
 logged beside the image point on every pointer action:
 `click image(812,544) → screen(1746,1170)`.
 
-### 10.3 TestBench (runner-core mirror)
+### 10.3 Steptix (runner-core mirror)
 
 runner-core's line classifier recognises `[use …]` so the extension paints
 the line as a directive, shows the §4.1 / §4.2 diagnostics as squiggles
@@ -975,7 +975,7 @@ and measured on.
 7. `desktop.enabled: false` refuses `[use computer]` with the §5.1 message.
 8. Both §7 tests pass live on this machine (§13.2).
 
-### 13.1 Unit (vitest, runner-core `node --test`, testbench-native)
+### 13.1 Unit (vitest, runner-core `node --test`, steptix-vscode)
 
 Parser accept/refuse table; unknown-whole-step-bracket rule with
 did-you-mean; resolution order and tail composition; mode state machine;
@@ -984,7 +984,7 @@ opening; one call at the first page step; baseUrl navigated there; endpoint
 answers when unlaunched); `mapToScreen` table; computer action parser;
 executor with the fake adapter; lock; config defaults and schema; prompt
 states image size; report marker; compile classification;
-runner-core mirror paired test; TestBench completion and paint.
+runner-core mirror paired test; Steptix completion and paint.
 
 ### 13.2 Live
 
@@ -1000,9 +1000,9 @@ whether zoom was used.
 
 ### 13.3 Live suite
 
-A `computer-use.test.cjs` under `testbench-native/tests/integration/live`
+A `computer-use.test.cjs` under `steptix-vscode/tests/integration/live`
 drives `pdf-dialog-cancel.md` through the extension, and is **gated by
-`TESTBENCH_LIVE_COMPUTER=1`**: it skips itself otherwise, because the
+`STEPTIX_LIVE_COMPUTER=1`**: it skips itself otherwise, because the
 parallel shards cannot share a mouse and the default run must stay
 parallel. CLAUDE.md gains a "computer-mode live test" section saying so and
 giving the one-shard command.
@@ -1011,7 +1011,7 @@ Beside it, behind the same gate, `computer-calc.test.cjs` drives
 `calc-one-plus-one.md` through the extension twice in one kept session: Run
 All with a breakpoint on step 5, then Continue, then a second Run All. It
 reads the §5.9 lock file from outside the server and requires it free of the
-server's pid while TestBench is parked at the breakpoint and after each run,
+server's pid while Steptix is parked at the breakpoint and after each run,
 and held by that pid at some point during each run phase — the positive
 control that makes the "free" readings mean something. After the second run it
 checks `GET /sessions/:id` reports `surface` (§4.5).
@@ -1144,7 +1144,7 @@ attempt 3 brought the browser forward.
 
 ### 15.1 The problem
 
-TestBench's Copilot bridge (`testbench-native/src/extension/lm-bridge*.ts`,
+Steptix's Copilot bridge (`steptix-vscode/src/extension/lm-bridge*.ts`,
 stories/copilot-lm-bridge.md) is a local OpenAI-compatible endpoint that the
 server reaches as `AI_MODEL=gateway/copilot/<model>` + `AI_GATEWAY_URL`. It
 carries text only: every `image_url` block is replaced with
@@ -1189,7 +1189,7 @@ Two changes, each useful without the other.
 ```json
 {
   "object": "list",
-  "aiui_bridge": { "name": "testbench-copilot-bridge", "images": "forward" },
+  "steptix_bridge": { "name": "steptix-copilot-bridge", "images": "forward" },
   "data": [
     { "id": "copilot/gpt-5.6-luna", "object": "model", "owned_by": "copilot",
       "family": "gpt-5.6-luna", "image_input": null }
@@ -1197,7 +1197,7 @@ Two changes, each useful without the other.
 }
 ```
 
-- `aiui_bridge.images` is `"forward"` when §15.2's detection found the data
+- `steptix_bridge.images` is `"forward"` when §15.2's detection found the data
   part, `"strip"` otherwise. Its presence is how the server knows the endpoint
   is this bridge and not a corporate gateway.
 - `image_input` per model is `true` / `false` when the running VS Code exposes
@@ -1220,10 +1220,10 @@ A new precondition on `[use computer]`, after the project opt-in (§5.1 item
   gateway answers an image sent to a text-only model with an error, which is
   loud rather than blind.
 - `GET {gatewayUrl}/v1/models` with the configured key, 3-second timeout.
-  - No `aiui_bridge` field, a non-200, or no answer → proceed (not the
+  - No `steptix_bridge` field, a non-200, or no answer → proceed (not the
     bridge, or not reachable yet — the first real request will say so).
-  - `aiui_bridge.images === "strip"` → the step fails: *Computer mode needs
-    the model to see the screen, but the TestBench Copilot bridge drops
+  - `steptix_bridge.images === "strip"` → the step fails: *Computer mode needs
+    the model to see the screen, but the Steptix Copilot bridge drops
     images on this VS Code (it has no image support for language models).
     Update VS Code, or run computer-mode steps with a model that is not
     routed through the bridge.*
@@ -1250,7 +1250,7 @@ Bridge (runner-free `node --test` over `lm-bridge-core`, plus the fake-`vscode.l
 integration suite): data-URL decode to bytes + mime; order of text and image
 parts preserved; forward vs strip by feature detection; non-data URL
 stripped; assistant image stripped; model rejection → 400
-`image_input_unsupported`; `/v1/models` carries `aiui_bridge` and
+`image_input_unsupported`; `/v1/models` carries `steptix_bridge` and
 `image_input`; `countTokens` with an image part does not throw; body limit
 admits a realistic screenshot. Server (vitest): the §15.4 decision table with
 a fake fetch; precondition order; the session and CLI wiring; the
@@ -1263,11 +1263,11 @@ consent, and the server started from their terminal.
 ### 15.7 Live result (2026-09-23)
 
 Over real Copilot, VS Code 1.138, an Extension Development Host running this
-branch's TestBench 0.5.145 as the only VS Code window (see CLAUDE.md on the
-bridge port), the server started from a terminal, **TestBench: Use Copilot for
+branch's Steptix 0.5.145 as the only VS Code window (see CLAUDE.md on the
+bridge port), the server started from a terminal, **Steptix: Use Copilot for
 AI** having written `AI_MODEL=gateway/copilot/gpt-6-luna`:
 
-- `GET /v1/models` answered `aiui_bridge: {"images":"forward"}`, and VS Code
+- `GET /v1/models` answered `steptix_bridge: {"images":"forward"}`, and VS Code
   exposed a capability for every model: 42 `true`, two `false`
   (`copilot/gpt-4o-mini`, `copilot/copilot-utility-small`) — none `null`,
   as §15.3 now says.

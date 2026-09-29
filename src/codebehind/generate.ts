@@ -1701,7 +1701,7 @@ export function aiEntryFor(source: string, reason: string): string {
   logger.debug(`Code-behind keeps "${source}" on AI: ${reason}`);
   return [
     `{`,
-    `  // Kept as AI by \`aiui compile\`: ${sanitiseComment(reason)}`,
+    `  // Kept as AI by \`steptix compile\`: ${sanitiseComment(reason)}`,
     `  source: ${JSON.stringify(source)},`,
     `  ai: true,`,
     `}`,

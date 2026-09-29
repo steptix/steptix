@@ -3,32 +3,32 @@ import { strict as assert } from 'node:assert';
 import { ALL_ERROR_CODES, reportError } from '../dist/errors.js';
 
 const SAMPLE_CONTEXTS = {
-  TB001: { searchedDirs: ['/ws/a/b', '/ws/a', '/ws'], fallbackSetting: '' },
-  TB002: { envPath: '/ws/.env' },
-  TB003: { envPath: '/ws/.env', machineEnvPath: '/home/x/.aiui/.env' },
-  TB004: { envPath: '/ws/.env', value: 'not-a-url' },
-  TB005: { envPath: '/ws/.env', lineNumber: 4, line: 'bad line' },
-  TB006: { envName: 't2', expectedPath: '/ws/.env.t2', baseEnvPath: '/ws/base/.env' },
-  TB010: { serverUrl: 'http://localhost:3100', reason: 'ECONNREFUSED' },
-  TB011: { envPath: '/ws/.env', serverUrl: 'http://localhost:3100' },
-  TB012: { serverUrl: 'http://localhost:3100' },
-  TB013: { serverUrl: 'http://localhost:3100', status: 500, bodyExcerpt: 'oops' },
-  TB014: { serverUrl: 'http://localhost:3100', reason: 'ECONNRESET' },
-  TB020: { filePath: '/ws/foo.md' },
-  TB021: {},
-  TB024: { detail: 'duplicate section "Login" at line 12' },
-  TB025: {},
-  TB026: {},
-  TB027: { serverUrl: 'http://localhost:3100', service: 'grafana' },
-  TB028: {
+  STX001: { searchedDirs: ['/ws/a/b', '/ws/a', '/ws'], fallbackSetting: '' },
+  STX002: { envPath: '/ws/.env' },
+  STX003: { envPath: '/ws/.env', machineEnvPath: '/home/x/.steptix/.env' },
+  STX004: { envPath: '/ws/.env', value: 'not-a-url' },
+  STX005: { envPath: '/ws/.env', lineNumber: 4, line: 'bad line' },
+  STX006: { envName: 't2', expectedPath: '/ws/.env.t2', baseEnvPath: '/ws/base/.env' },
+  STX010: { serverUrl: 'http://localhost:3100', reason: 'ECONNREFUSED' },
+  STX011: { envPath: '/ws/.env', serverUrl: 'http://localhost:3100' },
+  STX012: { serverUrl: 'http://localhost:3100' },
+  STX013: { serverUrl: 'http://localhost:3100', status: 500, bodyExcerpt: 'oops' },
+  STX014: { serverUrl: 'http://localhost:3100', reason: 'ECONNRESET' },
+  STX020: { filePath: '/ws/foo.md' },
+  STX021: {},
+  STX024: { detail: 'duplicate section "Login" at line 12' },
+  STX025: {},
+  STX026: {},
+  STX027: { serverUrl: 'http://localhost:3100', service: 'grafana' },
+  STX028: {
     serverUrl: 'http://localhost:3100',
     reason: 'the server did not become healthy within 20s',
     logPath: '/ws/globalStorage/server.log',
     logTail: 'Error: Cannot find module dist/index.js',
   },
-  TB030: {},
-  TB031: {},
-  TB032: {
+  STX030: {},
+  STX031: {},
+  STX032: {
     // Verbatim `danglingChainMemberError` output, which is verbatim the CLI
     // parser's — see tests/control-line-parity.test.ts.
     detail:
@@ -63,13 +63,13 @@ test('every fix sentence ends with a period', () => {
 
 test('errors involving a file path mention the path verbatim', () => {
   const cases = [
-    ['TB002', '/ws/.env'],
-    ['TB003', '/ws/.env'],
-    ['TB004', '/ws/.env'],
-    ['TB005', '/ws/.env'],
-    ['TB006', '/ws/.env.t2'],
-    ['TB011', '/ws/.env'],
-    ['TB020', '/ws/foo.md'],
+    ['STX002', '/ws/.env'],
+    ['STX003', '/ws/.env'],
+    ['STX004', '/ws/.env'],
+    ['STX005', '/ws/.env'],
+    ['STX006', '/ws/.env.t2'],
+    ['STX011', '/ws/.env'],
+    ['STX020', '/ws/foo.md'],
   ];
   for (const [code, expected] of cases) {
     const payload = reportError(code, SAMPLE_CONTEXTS[code]);
@@ -78,7 +78,7 @@ test('errors involving a file path mention the path verbatim', () => {
 });
 
 test('errors involving SERVER_URL mention it verbatim', () => {
-  const cases = ['TB010', 'TB011', 'TB012', 'TB013', 'TB014', 'TB027', 'TB028'];
+  const cases = ['STX010', 'STX011', 'STX012', 'STX013', 'STX014', 'STX027', 'STX028'];
   for (const code of cases) {
     const payload = reportError(code, SAMPLE_CONTEXTS[code]);
     assert.ok(
@@ -88,21 +88,21 @@ test('errors involving SERVER_URL mention it verbatim', () => {
   }
 });
 
-test('TB001 lists searched directories and the fallback setting name', () => {
-  const payload = reportError('TB001', SAMPLE_CONTEXTS.TB001);
+test('STX001 lists searched directories and the fallback setting name', () => {
+  const payload = reportError('STX001', SAMPLE_CONTEXTS.STX001);
   assert.ok(payload.message.includes('/ws/a/b'));
   assert.ok(payload.message.includes('/ws'));
-  assert.ok(payload.message.includes('testbench.defaultEnvFile'));
+  assert.ok(payload.message.includes('steptix.defaultEnvFile'));
 });
 
-test('TB005 mentions the offending line number and content', () => {
-  const payload = reportError('TB005', SAMPLE_CONTEXTS.TB005);
+test('STX005 mentions the offending line number and content', () => {
+  const payload = reportError('STX005', SAMPLE_CONTEXTS.STX005);
   assert.ok(payload.message.includes('line 4'));
   assert.ok(payload.message.includes('bad line'));
 });
 
-test('TB006 names the selected env and the expected .env.<name> path', () => {
-  const payload = reportError('TB006', SAMPLE_CONTEXTS.TB006);
+test('STX006 names the selected env and the expected .env.<name> path', () => {
+  const payload = reportError('STX006', SAMPLE_CONTEXTS.STX006);
   assert.ok(payload.message.includes('t2'), 'mentions the env name');
   assert.ok(payload.message.includes('/ws/.env.t2'), 'mentions the expected overlay path');
   // Distinct from expectedPath so this proves baseEnvPath is actually surfaced
@@ -110,38 +110,38 @@ test('TB006 names the selected env and the expected .env.<name> path', () => {
   assert.ok(payload.message.includes('/ws/base/.env'), 'mentions the base .env path');
 });
 
-test('TB010 points at the auto-start settings (the §5.5 hint)', () => {
-  // "Down + auto-start unconfigured" lands on TB010, and the whole point of
+test('STX010 points at the auto-start settings (the §5.5 hint)', () => {
+  // "Down + auto-start unconfigured" lands on STX010, and the whole point of
   // the hint is that the user learns the feature exists at the moment they
   // would want it.
-  const payload = reportError('TB010', SAMPLE_CONTEXTS.TB010);
-  assert.ok(payload.message.includes('testbench-native.serverAutoStart.command'));
+  const payload = reportError('STX010', SAMPLE_CONTEXTS.STX010);
+  assert.ok(payload.message.includes('steptix.serverAutoStart.command'));
 });
 
-test('TB027 names the foreign service so the user knows what is on the port', () => {
-  const payload = reportError('TB027', SAMPLE_CONTEXTS.TB027);
+test('STX027 names the foreign service so the user knows what is on the port', () => {
+  const payload = reportError('STX027', SAMPLE_CONTEXTS.STX027);
   assert.ok(payload.message.includes('grafana'), 'names the service it identified as');
   // The refusal must read as deliberate, not as a transient failure — this is
   // the code that says "we will not spawn on top of someone else's port".
   assert.ok(/will not start a server/i.test(payload.message), 'explains the refusal');
 });
 
-test('TB028 names the log path and the settings that control auto-start', () => {
-  const payload = reportError('TB028', SAMPLE_CONTEXTS.TB028);
+test('STX028 names the log path and the settings that control auto-start', () => {
+  const payload = reportError('STX028', SAMPLE_CONTEXTS.STX028);
   assert.ok(payload.message.includes('/ws/globalStorage/server.log'), 'names the log path');
-  assert.ok(payload.message.includes('testbench-native.serverAutoStart.command'), 'names the command setting');
-  assert.ok(payload.message.includes('testbench-native.serverAutoStart.cwd'), 'names the cwd setting');
+  assert.ok(payload.message.includes('steptix.serverAutoStart.command'), 'names the command setting');
+  assert.ok(payload.message.includes('steptix.serverAutoStart.cwd'), 'names the cwd setting');
   assert.ok(payload.message.includes('Cannot find module'), 'surfaces the log tail when supplied');
 });
 
-test('TB028 still names both settings when no log is available', () => {
+test('STX028 still names both settings when no log is available', () => {
   // The cwd-not-set refusal never spawns, so there is no log to point at —
   // the message must still say which settings to fix.
-  const payload = reportError('TB028', {
+  const payload = reportError('STX028', {
     serverUrl: 'http://localhost:3100',
-    reason: 'testbench-native.serverAutoStart.cwd is not set',
+    reason: 'steptix.serverAutoStart.cwd is not set',
   });
-  assert.ok(payload.message.includes('testbench-native.serverAutoStart.cwd'));
+  assert.ok(payload.message.includes('steptix.serverAutoStart.cwd'));
   assert.ok(!payload.message.includes('undefined'), 'no undefined leaks into the message');
 });
 

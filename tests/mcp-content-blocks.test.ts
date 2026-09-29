@@ -35,7 +35,7 @@ const RUNNING_BROWSER = {
   engine: 'edge',
   profile: 'default',
   port: 51000,
-  profileDir: 'c:/proj/.aiui/cdp-profiles/edge-default',
+  profileDir: 'c:/proj/.steptix/cdp-profiles/edge-default',
   tabs: [
     {
       targetId: 'A1B2C3',
@@ -59,18 +59,18 @@ beforeAll(async () => {
   // `allowedRoots()`, and `run_test_file` reads the file it is given, so
   // neither can be answered from a fabricated root.
   tmpDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-blocks-')));
-  await fs.writeFile(path.join(tmpDir, 'aiui.config.json'), JSON.stringify({}));
+  await fs.writeFile(path.join(tmpDir, 'steptix.config.json'), JSON.stringify({}));
   await fs.mkdir(path.join(tmpDir, 'tests'));
   testFile = path.join(tmpDir, 'tests', 'simple.md');
   await fs.writeFile(testFile, '# Simple\n\n## Steps\n1. Click Login\n');
 
-  previousRoots = process.env['AIUI_MCP_ROOTS'];
-  process.env['AIUI_MCP_ROOTS'] = tmpDir;
+  previousRoots = process.env['STEPTIX_MCP_ROOTS'];
+  process.env['STEPTIX_MCP_ROOTS'] = tmpDir;
 });
 
 afterAll(async () => {
-  if (previousRoots === undefined) delete process.env['AIUI_MCP_ROOTS'];
-  else process.env['AIUI_MCP_ROOTS'] = previousRoots;
+  if (previousRoots === undefined) delete process.env['STEPTIX_MCP_ROOTS'];
+  else process.env['STEPTIX_MCP_ROOTS'] = previousRoots;
   await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
 });
 
@@ -83,7 +83,7 @@ function fakeProject(): ProjectContext {
     scope: 'project',
     configSearch: [],
     projectRoot: tmpDir,
-    configPath: path.join(tmpDir, 'aiui.config.json'),
+    configPath: path.join(tmpDir, 'steptix.config.json'),
     env: {},
     envName: null,
     serverUrl: DEAD_SERVER,
@@ -182,7 +182,7 @@ async function connect(): Promise<Client> {
         engine: 'edge',
         profile: 'default',
         port: 51000,
-        profileDir: 'c:/proj/.aiui/cdp-profiles/edge-default',
+        profileDir: 'c:/proj/.steptix/cdp-profiles/edge-default',
         binary: 'C:/msedge.exe',
         tabs: [],
         outcome: 'reused_running_browser',

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `aiui mcp` deliberately bypasses the commander program.
+ * `steptix mcp` deliberately bypasses the commander program.
  *
  * Two reasons, both load-bearing:
  *
@@ -32,7 +32,7 @@ if (process.argv[2] === 'mcp') {
   const { setLogStream } = await import('./utils/logger.js');
   setLogStream('stderr');
 
-  // `aiui mcp --help` (or `-h`, `--version`, `help`) must not start a server —
+  // `steptix mcp --help` (or `-h`, `--version`, `help`) must not start a server —
   // it would silently block a human's terminal on a stdio transport that
   // nobody is speaking to.
   const rest = process.argv[3];

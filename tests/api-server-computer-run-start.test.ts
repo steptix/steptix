@@ -2,7 +2,7 @@
  * A new run starts on the surface its file says, over HTTP
  * (SPEC-use-computer.md §4.5, `StepRequest.runStart`).
  *
- * The defect: TestBench reuses one server session per test file, and MCP's
+ * The defect: Steptix reuses one server session per test file, and MCP's
  * `run_test_file` reuses `mcp:<path>`. The session's surface outlived the
  * batch — as it must, or a Continue after a breakpoint inside a desktop
  * excursion would land on the browser — and so a run that FAILED or was
@@ -14,11 +14,11 @@
  * builds `StepRequest` from a per-field allow-list and a field it does not
  * name is dropped silently — a session-manager test would pass against a
  * server that never sees `runStart`. The project bundle is real too (a temp
- * project whose own `aiui.config.json` opts in), so `desktop.enabled` is read
+ * project whose own `steptix.config.json` opts in), so `desktop.enabled` is read
  * the way a real run reads it. The desktop seams are injected through
  * `createApiServer` — `FakeDesktopAdapter` and a lock file in this test's own
  * temp directory — so nothing here loads nut.js, moves the mouse, or touches
- * the machine's real `aiui-computer.lock`.
+ * the machine's real `steptix-computer.lock`.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
@@ -226,7 +226,7 @@ const loadDesktopAdapter = vi.fn(async () => new FakeDesktopAdapter({ width: 200
 function project(name: string, config: Record<string, unknown>): string {
   const dir = path.join(tmpDir, name);
   mkdirSync(path.join(dir, 'tests'), { recursive: true });
-  writeFileSync(path.join(dir, 'aiui.config.json'), JSON.stringify(config, null, 2));
+  writeFileSync(path.join(dir, 'steptix.config.json'), JSON.stringify(config, null, 2));
   const file = path.join(dir, 'tests', 'pdf-print-cancel.md');
   writeFileSync(file, '# placeholder — the server never reads the test file\n');
   return file;
@@ -234,7 +234,7 @@ function project(name: string, config: Record<string, unknown>): string {
 
 beforeAll(async () => {
   tmpDir = mkdtempSync(path.join(os.tmpdir(), 'computer-run-start-'));
-  lockPath = path.join(tmpDir, 'aiui-computer.lock');
+  lockPath = path.join(tmpDir, 'steptix-computer.lock');
   testFile = project('opted-in', {
     desktop: { enabled: true, maxImageWidth: 400, settleMs: 0 },
     reports: { outputDir: './reports' },
@@ -270,7 +270,7 @@ beforeEach(() => {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/** `pdf-print-cancel.md`'s steps, as TestBench's `fullSteps` carries them. */
+/** `pdf-print-cancel.md`'s steps, as Steptix's `fullSteps` carries them. */
 const FILE_STEPS = [
   'Navigate to statement.pdf',
   '[use computer]',
@@ -645,7 +645,7 @@ describe('desktop.enabled as the STRING "false" does not enable computer mode', 
     const error = events.find((e) => e.type === 'output' && e.kind === 'error');
     expect(error?.msg).toContain('Invalid desktop.enabled');
     expect(error?.msg).toContain('the string "false"');
-    expect(error?.msg).toContain(path.join(path.dirname(path.dirname(stringFalseTestFile)), 'aiui.config.json'));
+    expect(error?.msg).toContain(path.join(path.dirname(path.dirname(stringFalseTestFile)), 'steptix.config.json'));
     expect(events.at(-1)).toMatchObject({ type: 'done', status: 'error' });
   });
 });

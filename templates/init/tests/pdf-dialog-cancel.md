@@ -29,7 +29,7 @@ the dialog are both just pixels on the screen.
 
 **Step 4 matters more than it looks.** `[use computer]` does nothing to
 arrange the screen — it changes what the model is shown and how the answer is
-performed, and nothing else. When a run starts from TestBench, VS Code is
+performed, and nothing else. When a run starts from Steptix, VS Code is
 frontmost and the browser is behind it, so without step 4 the first screenshot
 is a picture of the editor. `Focus the window whose title contains
 "statement.pdf"` is what brings the browser forward. (Chromium titles the
@@ -37,7 +37,7 @@ window after the file, which is why the PDF carries no `/Title` of its own.)
 
 **Either print dialog passes.** Chromium's Print button normally opens
 Chromium's OWN print preview, a separate web contents laid over the tab. With
-`--disable-print-preview` — which `templates/init/aiui.config.json` passes via
+`--disable-print-preview` — which `templates/init/steptix.config.json` passes via
 `browser.launchArgs` — it opens the operating system's print dialog instead.
 Both are outside the page, both are what this test is about, and both have a
 Cancel button, so steps 6 to 8 are written to pass against either. Neither is
@@ -55,7 +55,7 @@ mouse and the real keyboard:
   The framework enforces this with a lock file; the parallel live suite keeps
   computer-mode tests out of the shards for the same reason (see CLAUDE.md,
   "Computer-mode live test").
-- The project must opt in: `desktop.enabled: true` in `aiui.config.json`.
+- The project must opt in: `desktop.enabled: true` in `steptix.config.json`.
 - The server must be able to read the screen. A server started by a sandboxed
   spawner cannot (measured — see the spec's §5.1), so start it from a normal
   terminal or from VS Code.

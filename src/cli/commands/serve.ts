@@ -17,7 +17,7 @@ export function registerServeCommand(program: Command): void {
   program
     .command('serve')
     .description('Start the Sessions API server')
-    .option('-c, --config <path>', 'Path to config file (default: auto-discover aiui.config.json)')
+    .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
     .option('-p, --port <number>', 'Port to listen on', parseInt)
     .option('-H, --host <host>', 'Host to bind to')
     .option(
@@ -87,7 +87,7 @@ export function registerServeCommand(program: Command): void {
       setLogLevel(config.logging.consoleLogLevel);
 
       // The scoreboard's retention (docs/specs/SPEC-scoreboard.md §6.3): month
-      // files older than AIUI_STATS_RETAIN_MONTHS go at every server start. Not
+      // files older than STEPTIX_STATS_RETAIN_MONTHS go at every server start. Not
       // awaited — it never throws, and a slow disk must not hold the port — and
       // here rather than in `startServer`, which the test suites call directly
       // and must never reach the real user root through.

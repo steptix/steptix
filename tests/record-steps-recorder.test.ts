@@ -1,6 +1,6 @@
 /**
  * Record Steps — the page script and the recorder, against a real Chromium
- * (stories/testbench-record-steps.md §Tests, "The page script against the
+ * (stories/steptix-record-steps.md §Tests, "The page script against the
  * fixture app").
  *
  * Real, because every claim here is a browser behaviour: which events a trusted

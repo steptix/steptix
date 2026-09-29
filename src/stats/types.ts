@@ -154,7 +154,7 @@ export interface StatsStepFields {
   /** Set when `stepText` or `selector` was cut, or a field was dropped to keep
    *  the line under 4 KB. */
   truncated?: true;
-  /** Written by `aiui stats import` from a report on disk (§10). */
+  /** Written by `steptix stats import` from a report on disk (§10). */
   imported?: true;
 }
 

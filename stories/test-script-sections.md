@@ -31,9 +31,9 @@ named section — an inline skill, minus the file and the parameter ceremony.**
 A step invokes it by writing the section's name as the entire step text.
 
 Two companion specs cover the editor side:
-[testbench-native/stories/specs/inline-sections-runtime.md](../testbench-native/stories/specs/inline-sections-runtime.md)
-(TestBench execution, decorations, breakpoints, step-into, re-run) and
-[inline-sections-authoring.md](../testbench-native/stories/specs/inline-sections-authoring.md)
+[steptix-vscode/stories/specs/inline-sections-runtime.md](../steptix-vscode/stories/specs/inline-sections-runtime.md)
+(Steptix execution, decorations, breakpoints, step-into, re-run) and
+[inline-sections-authoring.md](../steptix-vscode/stories/specs/inline-sections-authoring.md)
 (go-to-definition, completion, diagnostics).
 
 ## Goals
@@ -153,7 +153,7 @@ Two companion specs cover the editor side:
 ### The match rule (one derivation, every parser)
 
 Whether a step is a call must be decided identically by the CLI parser, the
-server, and the TestBench editors — otherwise the same file executes
+server, and the Steptix editors — otherwise the same file executes
 differently depending on how it was launched. One derivation, applied to
 both sides of the comparison:
 
@@ -213,7 +213,7 @@ host/webview copies (canonical home: see the runtime spec §9).
     inherits the first's arguments).
 - **`[input:]` / `[interactive]` inside a body.** Same carve-out that
   already applies to skill bodies: on the CLI path they prompt exactly as
-  at the call site; on the server/TestBench path the client's block
+  at the call site; on the server/Steptix path the client's block
   splitter sees only main-flow lines, so a body-line `[input:]` rides the
   expansion to the server and is auto-skipped ("not supported in API
   mode") like any server-side `[input:]` today. Scope transparency is
@@ -230,7 +230,7 @@ host/webview copies (canonical home: see the runtime spec §9).
   themselves never resolve to sections (see Non-goals).
 - **Errors and warnings.**
   - Duplicate section name in one file (case-insensitive) → parse error.
-    (TestBench-native additionally refuses to *run* such a file client-side
+    (Steptix additionally refuses to *run* such a file client-side
     — the wire format cannot represent duplicates; see the runtime spec.)
   - Reserved / `[`-prefixed / `{{`-containing / empty section name → parse
     error.
@@ -508,7 +508,7 @@ behaviour change for existing files; see Migration).
   describe sections beside it.
 - `templates/init/tests/` — add a `sections-demo.md` template modelling the
   feature (mirrors the fixture).
-- Companion-spec updates on the TestBench side are enumerated in the
+- Companion-spec updates on the Steptix side are enumerated in the
   runtime spec (§11).
 
 ## Migration
@@ -540,7 +540,7 @@ Additive except four edges:
    existing *skill* projects this trades occasional (and occasionally
    wrong — the frame-id collision) cache hits on continuation batches for
    guaranteed-correct misses.
-5. TestBench's run-selection resolution: a cursor/selection entirely past
+5. Steptix's run-selection resolution: a cursor/selection entirely past
    the last main-flow step currently resolves to "run everything"; it
    becomes an explicit refusal (runtime spec §5) — a pre-existing silent
    footgun fixed because section bodies would have made it the *common*
@@ -570,7 +570,7 @@ field forwarding + malformed-payload 400, cache rules, anchor guard).
   `ExpandedFrame.skillName`) to origin-neutral names — mechanical, touches
   server + runner-core + native; do it as a standalone cleanup, not inside
   this feature.
-- **"Extract section to skill" refactor tooling** in TestBench — natural
+- **"Extract section to skill" refactor tooling** in Steptix — natural
   follow-on once both features are stable.
 - **Honouring `[no-hooks]` on individual body steps** (today discarded for
   skill bodies too) — revisit if anyone asks; needs expander-level plumbing

@@ -17,7 +17,7 @@ import { resolveCodeBehindCacheDir } from './loader.js';
  * The recording a compile generates from, on disk beside the test
  * (stories/codebehind-recording-on-disk.md).
  *
- * `.aiui-codebehind-cache/<name>.recording/` — one JSON per step with what
+ * `.steptix-codebehind-cache/<name>.recording/` — one JSON per step with what
  * the step did and where it was, the DOM before and after it as files the
  * author can open, and the failure screenshot when there is one. Written by
  * the run that made it, when it ends; replaced wholesale by the next one.
@@ -224,7 +224,7 @@ export interface RecordingInput {
 
 const DIR_SUFFIX = '.recording';
 
-/** `tests/checkout.md` → `tests/.aiui-codebehind-cache/checkout.recording`. */
+/** `tests/checkout.md` → `tests/.steptix-codebehind-cache/checkout.recording`. */
 export function recordingDirFor(testFilePath: string): string {
   const resolved = path.resolve(testFilePath);
   const base = path.basename(resolved, path.extname(resolved));
@@ -501,7 +501,7 @@ function identityKey(step: {
  * A comparable form of a `.steps.ts` path.
  *
  * The discriminator is compared across writers that do not agree on drive
- * case — TestBench's paths come from `uri.fsPath`, which lower-cases the
+ * case — Steptix's paths come from `uri.fsPath`, which lower-cases the
  * drive, while a CLI or MCP caller's usually does not (the same hazard
  * `compileLockKey` folds for the lock). Comparing raw would leave a splice
  * with no slot to claim, and it would append a duplicate rather than replace.

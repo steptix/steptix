@@ -1,11 +1,11 @@
 {
   "servers": {
-    "aiui": {
+    "steptix": {
       "type": "stdio",
       "command": "node",
       "args": ["${workspaceFolder}/dist/index.js", "mcp"],
       "env": {
-        "AIUI_MCP_ROOTS": "${workspaceFolder}"
+        "STEPTIX_MCP_ROOTS": "${workspaceFolder}"
       }
     }
   }

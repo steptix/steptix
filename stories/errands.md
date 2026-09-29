@@ -211,7 +211,7 @@ An errand is: **attach → act → return → detach**, in one request.
   test file supplies ([src/mcp/types.ts:168](../src/mcp/types.ts:168)),
   which a fileless request never carries, so a bare section-name line is
   already just prose. The errand DOES carry a synthetic `testFilePath`
-  (`<project_root>/.aiui-errand.md`, the same device `run_steps` already
+  (`<project_root>/.steptix-errand.md`, the same device `run_steps` already
   uses, [src/mcp/assemble.ts:335](../src/mcp/assemble.ts:335)) and an
   optional `env_name` — that path is the only thing the server resolves a
   project root from
@@ -543,7 +543,7 @@ to the seam + dialect tool-name manifests (`mcp-seam.test.ts`,
 ## Live pass record
 
 **2026-08-13, MCP-client smoke — 17/17 checks passed.** A real MCP client
-over stdio spawned the real `aiui mcp`, which auto-started a fresh API
+over stdio spawned the real `steptix mcp`, which auto-started a fresh API
 server for a throwaway project; `start_cdp_browser` launched a real
 project-scope Chrome, and `run_errand` drove it with real AI resolution
 (model `aibroker/openrouter/openai/gpt-5.6-luna`, 3/3 steps): navigation,

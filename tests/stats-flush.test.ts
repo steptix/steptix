@@ -1,6 +1,6 @@
 /**
  * The CLI's bounded flush (docs/specs/SPEC-scoreboard.md §6.2; finding 11):
- * `aiui run` exits the moment `runTests` settles — `process.exit(1)` on a
+ * `steptix run` exits the moment `runTests` settles — `process.exit(1)` on a
  * throw — so queued lines are flushed in a `finally`, and a stalled append
  * must not be able to hold that exit.
  *
@@ -65,20 +65,20 @@ describe('flushRunStats', () => {
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
-  it('bounds `aiui run` at two seconds by default', () => {
+  it('bounds `steptix run` at two seconds by default', () => {
     expect(STATS_FLUSH_TIMEOUT_MS).toBe(2_000);
   });
 });
 
 describe('runTests flushes in a finally (finding 11)', () => {
-  const test = () => parseTestContent('# Flush\n\n## Steps\n1. Click Go\n', path.join(os.tmpdir(), 'aiui-flush-test', 'flush.md'));
+  const test = () => parseTestContent('# Flush\n\n## Steps\n1. Click Go\n', path.join(os.tmpdir(), 'steptix-flush-test', 'flush.md'));
   const config = {
     ...DEFAULT_CONFIG,
-    tests: { ...DEFAULT_CONFIG.tests, contextDir: path.join(os.tmpdir(), 'aiui-flush-test-no-context') },
+    tests: { ...DEFAULT_CONFIG.tests, contextDir: path.join(os.tmpdir(), 'steptix-flush-test-no-context') },
     reports: { ...DEFAULT_CONFIG.reports, openInBrowserAfterRun: false },
   };
 
-  it('a run that throws waits for its queued lines before the throw reaches `aiui run`', async () => {
+  it('a run that throws waits for its queued lines before the throw reaches `steptix run`', async () => {
     queue.drainAfterMs = 120;
     const failing = runTests([test()], config, {
       runTestFn: async () => {

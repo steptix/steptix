@@ -57,8 +57,8 @@ the run may be built from a row number**: RadGrid's row ids are
 record came from and pass green — which is exactly what the first live run of
 this test did on pass 7, clicking Grace Abernathy for Kwame Boateng's record.
 Each read now leaves its own numbering on the page: every data row of the
-table it read carries `data-aiui-row="N"`, so `row {{application._row}}` is
-`[data-aiui-row="7"]` inside the grid and there is no arithmetic to get wrong.
+table it read carries `data-steptix-row="N"`, so `row {{application._row}}` is
+`[data-steptix-row="7"]` inside the grid and there is no arithmetic to get wrong.
 A `${application._row}` — the wrong braces — is refused before the action runs
 (§6.3), which is the other half of the same measurement.
 

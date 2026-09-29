@@ -332,14 +332,14 @@ describe('buildConditionCodePrompt', () => {
 
 describe('the review prompt, over a file with a condition entry', () => {
   const withCondition = [
-    "import { defineSteps } from 'ai-ui-automation/codebehind';",
+    "import { defineSteps } from 'steptix/codebehind';",
     'export default defineSteps([',
     "  { source: 'While the Next button is enabled, Go to the next page', async condition({ page }) { return (await page.locator('#next').count()) > 0; } },",
     "  { source: 'Click Next', async run({ page }) { await page.click('#next'); } },",
     ']);',
   ].join('\n');
   const stepsOnly = [
-    "import { defineSteps } from 'ai-ui-automation/codebehind';",
+    "import { defineSteps } from 'steptix/codebehind';",
     "export default defineSteps([{ source: 'Click Next', async run({ page }) { await page.click('#next'); } }]);",
   ].join('\n');
   const review = (file: string): string =>

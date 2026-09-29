@@ -269,7 +269,7 @@ describe('src/parser/control-line.ts and runner-core/src/control-line.ts agree',
  *
  * Three places refuse a dangling `Else if` / `Otherwise` — the CLI parser, the
  * expander (the wire path's only parser) and runner-core's pre-flight — and an
- * author who meets the refusal in TestBench and then again from the CLI has to
+ * author who meets the refusal in Steptix and then again from the CLI has to
  * read the same sentence about the same line, or all three lose their
  * authority. `src/parser/control-line.ts` owns the text; runner-core copies it.
  */
@@ -309,8 +309,8 @@ describe('the dangling-member message is one wording, mirrored', () => {
 describe('the closed-chain message is one wording, mirrored', () => {
   // The other half of the same rule: `Otherwise` is the last member, so an
   // `Else if` or a second `Otherwise` under one is refused. It lived in the
-  // CLI parser alone, so a file TestBench and the Sessions API ran happily was
-  // rejected by `aiui run`.
+  // CLI parser alone, so a file Steptix and the Sessions API ran happily was
+  // rejected by `steptix run`.
   const CASES = [
     { line: 'Else if b, then Sec3', where: 'tests/t.md:6' },
     { line: 'Otherwise, Sec3', where: 'Line 7' },

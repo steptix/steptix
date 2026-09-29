@@ -2,7 +2,7 @@
 
 > **Verification rule for this story.** "Done" means a new fixture
 > `fixtures/tests/multi-browser-demo.md` runs through
-> `npx aiui run … --env local` against a live test-app and exercises **two
+> `npx steptix run … --env local` against a live test-app and exercises **two
 > distinct `Browser` processes in the same test run** — typically one Chrome
 > (channel `chrome`) and one Edge (channel `msedge`) — with the test author
 > writing only natural-language steps plus the new `[openBrowser ...]` /

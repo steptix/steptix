@@ -24,7 +24,7 @@ forever:
 
 ```ts
 {
-  // Kept as AI by `aiui compile`: the step used "switchPage", which changes runner state rather than the page
+  // Kept as AI by `steptix compile`: the step used "switchPage", which changes runner state rather than the page
   source: 'Click "Open New Tab" and switch to the new tab',
   ai: true,
 },
@@ -295,7 +295,7 @@ turn-zero refresh uses.
 
 ### Measured
 
-`aiui compile templates/init/tests/compile-tabs.md`, 2026-09-03: 5 of 5 steps
+`steptix compile templates/init/tests/compile-tabs.md`, 2026-09-03: 5 of 5 steps
 written as code in one round, replay `5/5 passed as code` in 0.8s with
 `Tokens used: Input: 0, Output: 0`. The generated entries read:
 

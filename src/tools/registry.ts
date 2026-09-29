@@ -391,7 +391,7 @@ export class ToolCatalogue {
         lines.push(
           `  tools.dir does not exist: ${toolsDir}`,
           `  Either create the directory and add tool files there, or update`,
-          `  \`tests.toolsDir\` in your aiui.config.json to point at where your tools live.`,
+          `  \`tests.toolsDir\` in your steptix.config.json to point at where your tools live.`,
         );
       } else {
         lines.push(`  Scanned: ${toolsDir} (${filesScanned} file${filesScanned === 1 ? '' : 's'})`);
@@ -410,7 +410,7 @@ export class ToolCatalogue {
         `To register a tool, drop a TypeScript file in your tools.dir whose default export is a defineTool(...) result:`,
         '',
         `    // tools/${name}.ts`,
-        `    import { defineTool } from 'ai-ui-automation/tools';`,
+        `    import { defineTool } from 'steptix/tools';`,
         ``,
         `    export default defineTool({`,
         `      name: '${name}',`,
@@ -496,7 +496,7 @@ export async function loadToolCatalogue(
     // surfaces loudly the first time a `[tool:...]` step is invoked.
     logger.warn(
       `tools.dir "${dir}" does not exist — no tools registered. ` +
-      `Update \`tests.toolsDir\` in aiui.config.json if your tools live elsewhere.`,
+      `Update \`tests.toolsDir\` in steptix.config.json if your tools live elsewhere.`,
     );
     catalogue.diagnostics = { toolsDir: dir, toolsDirMissing: true, filesScanned: 0 };
     return catalogue;

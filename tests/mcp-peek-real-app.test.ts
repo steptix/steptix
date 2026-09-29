@@ -150,7 +150,7 @@ vi.mock('../src/browser/cdp-registry.js', async (importOriginal) => {
         {
           engine: 'edge',
           profile: 'default',
-          profileDir: 'C:/proj/.aiui/cdp-profiles/edge-default',
+          profileDir: 'C:/proj/.steptix/cdp-profiles/edge-default',
           live: true,
           port: CDP_PORT,
           scope: 'project',
@@ -545,23 +545,23 @@ beforeAll(async () => {
   if (typeof addr !== 'object' || addr === null) throw new Error('no port');
   const baseUrl = `http://127.0.0.1:${addr.port}`;
 
-  const env = `SERVER_URL=${baseUrl}\nAIUI_SERVER_API_KEY=${API_KEY}\n`;
+  const env = `SERVER_URL=${baseUrl}\nSTEPTIX_SERVER_API_KEY=${API_KEY}\n`;
   tightDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-peek-tight-')));
   await fs.writeFile(path.join(tightDir, '.env'), env);
   await fs.writeFile(
-    path.join(tightDir, 'aiui.config.json'),
+    path.join(tightDir, 'steptix.config.json'),
     JSON.stringify({ tests: { dir: './tests' }, browser: { domSnapshotCharLimit: PROJECT_DOM_LIMIT } }),
   );
 
   plainDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-peek-plain-')));
   await fs.writeFile(path.join(plainDir, '.env'), env);
   await fs.writeFile(
-    path.join(plainDir, 'aiui.config.json'),
+    path.join(plainDir, 'steptix.config.json'),
     JSON.stringify({ tests: { dir: './tests' } }),
   );
 
-  previousRoots = process.env['AIUI_MCP_ROOTS'];
-  process.env['AIUI_MCP_ROOTS'] = [tightDir, plainDir].join(path.delimiter);
+  previousRoots = process.env['STEPTIX_MCP_ROOTS'];
+  process.env['STEPTIX_MCP_ROOTS'] = [tightDir, plainDir].join(path.delimiter);
 
   const mcp = createMcpServer({
     createApiClient,
@@ -575,8 +575,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (previousRoots === undefined) delete process.env['AIUI_MCP_ROOTS'];
-  else process.env['AIUI_MCP_ROOTS'] = previousRoots;
+  if (previousRoots === undefined) delete process.env['STEPTIX_MCP_ROOTS'];
+  else process.env['STEPTIX_MCP_ROOTS'] = previousRoots;
   await client?.close();
   await new Promise<void>((r) => server?.close(() => r()));
   resetRegistry();
@@ -661,7 +661,7 @@ describe('peek_tab over the real HTTP seam', () => {
     expect(generateReportMock).not.toHaveBeenCalled();
     expect(existsSync(path.join(tightDir, 'reports'))).toBe(false);
     // Nor did the synthetic path ever become a file.
-    expect(existsSync(path.join(tightDir, '.aiui-peek.md'))).toBe(false);
+    expect(existsSync(path.join(tightDir, '.steptix-peek.md'))).toBe(false);
   }, 30_000);
 
   it('navigates a new tab and a named one, over the same real seam', async () => {
@@ -800,7 +800,7 @@ describe('peek_tab over the real HTTP seam', () => {
   }, 30_000);
 
   it('captures under the PROJECT\'s dom limit, not the library default (item 2)', async () => {
-    // The whole reason the request carries a synthetic `<root>/.aiui-peek.md`.
+    // The whole reason the request carries a synthetic `<root>/.steptix-peek.md`.
     // Both numbers below are decided by files on disk and a resolver: the
     // library default is 100 000, the config default is 300 000, and this
     // project says 200 — so all three are distinguishable, and only the

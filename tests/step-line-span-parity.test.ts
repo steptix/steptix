@@ -13,7 +13,7 @@ import { scanStepSpans } from '../src/parser/markdown.js';
  * the type system links the two, so this file is the link: both sides are
  * held to `fixtures/sections/classification.json`, and a divergence surfaces
  * as a failing row here instead of as a test file that executes one way from
- * the CLI and another way through TestBench.
+ * the CLI and another way through Steptix.
  *
  * This is step 6 of issues/035, banked early because sections are the first
  * feature where the two scanners disagreeing changes *what runs* rather than

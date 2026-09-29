@@ -13,8 +13,8 @@
  * no bookkeeping at all.
  *
  * The claim is a *claim*, not proof — anything that can write into
- * `.aiui/cdp-profiles/` can forge one. That is the same trust boundary as
- * `.env` and `aiui.config.json`, both already read without further proof, so
+ * `.steptix/cdp-profiles/` can forge one. That is the same trust boundary as
+ * `.env` and `steptix.config.json`, both already read without further proof, so
  * it adds no new exposure. It is stated here so it is a decision rather than
  * an oversight.
  */
@@ -43,14 +43,14 @@ import {
 export type { LaunchableEngine };
 
 /** Directory under the project root holding every framework-owned profile. */
-export const CDP_PROFILES_DIR = path.join('.aiui', 'cdp-profiles');
+export const CDP_PROFILES_DIR = path.join('.steptix', 'cdp-profiles');
 
 /** Marker written into every profile we create.
  *
  *  This is §12's guard that does not depend on path logic being right: a
  *  directory without it is not one we made, and `reset` will not delete it
  *  whatever the confinement check concluded. */
-export const PROFILE_MARKER = '.aiui-profile';
+export const PROFILE_MARKER = '.steptix-profile';
 
 /** Prefix for the staging directory `reset` renames a profile to before
  *  removing it. Inside `cdp-profiles` so the rename stays on one filesystem
@@ -187,7 +187,7 @@ export type CdpFailureReason =
   | 'profile_dir_unmarked'
   | 'profile_in_use'
   | 'profile_reset_failed'
-  // Raised by the API server's start route: the aiui.config.json of the root a
+  // Raised by the API server's start route: the steptix.config.json of the root a
   // launch was asked into could not be loaded, so the launch settings it
   // governs (browser.cdp.*) are unknowable and nothing was started.
   | 'config_invalid';
@@ -237,7 +237,7 @@ export function cdpProfilesRoot(projectRoot: string): string {
 }
 
 /**
- * `<project_root>/.aiui/cdp-profiles/<engine>-<name>/`, always in that shape —
+ * `<project_root>/.steptix/cdp-profiles/<engine>-<name>/`, always in that shape —
  * including for the default profile, which is `<engine>-default` rather than a
  * bare `<engine>`. One rule instead of two keeps enumeration to a single
  * pattern: split the directory name on its first hyphen, and the left side is
@@ -268,7 +268,7 @@ export function validateProfileName(profile: string): string | null {
   if (!PROFILE_NAME_PATTERN.test(profile)) {
     return (
       `Profile name "${profile}" is not usable. It names a directory under ` +
-      '.aiui/cdp-profiles/, so it may contain only letters, digits, dot, ' +
+      '.steptix/cdp-profiles/, so it may contain only letters, digits, dot, ' +
       'underscore and hyphen — no slashes, no "..".\n' +
       'Use a plain name: admin, uat, signup-test.'
     );
@@ -538,7 +538,7 @@ function writeProfileMarker(
     // marker is rewritten by every launch, so it always describes the live one.
     writeFile(
       path.join(profileDir, PROFILE_MARKER),
-      `${JSON.stringify({ engine, profile, createdBy: 'ai-ui-automation', hideAutomation }, null, 2)}\n`,
+      `${JSON.stringify({ engine, profile, createdBy: 'steptix', hideAutomation }, null, 2)}\n`,
     );
   } catch {
     // A profile without a marker still works; it just cannot be `reset`
@@ -584,7 +584,7 @@ export function hideAutomationMismatch(
         ? 'was started without it'
         : 'has no record of being started with it';
     return (
-      `browser.cdp.hideAutomation is on in aiui.config.json, but this browser was already ` +
+      `browser.cdp.hideAutomation is on in steptix.config.json, but this browser was already ` +
       `running and ${was} — the flag only applies at launch, so pages in it may still read ` +
       'navigator.webdriver as true. Close the browser and start it again for the setting ' +
       'to take effect.'
@@ -592,7 +592,7 @@ export function hideAutomationMismatch(
   }
   if (!wanted && launchedWith === true) {
     return (
-      'browser.cdp.hideAutomation is off in aiui.config.json, but this browser was already ' +
+      'browser.cdp.hideAutomation is off in steptix.config.json, but this browser was already ' +
       'running and was started with it on — the flag only applies at launch, so pages in it ' +
       'read navigator.webdriver as false. Close the browser and start it again for the ' +
       'setting to take effect.'

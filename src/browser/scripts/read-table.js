@@ -44,7 +44,7 @@
 //    search would have looked for, and `{ kind: 'collection', item, fields }`
 //    reads repeated elements that are not a table at all.
 //
-// It also writes ONE thing to the page: `data-aiui-row` on the rows it
+// It also writes ONE thing to the page: `data-steptix-row` on the rows it
 // numbered (§7.4, step 8), so that "row 7 of the Orders table" is a selector a
 // later step can use rather than a sum it has to do. Only a read that
 // SUCCEEDS writes it.
@@ -74,14 +74,14 @@
   // ── page-context helpers ─────────────────────────────────────────────────
   const all = matches;
   /** The attribute this read leaves on the rows it numbered (§7.4, step 8). */
-  const ROW_STAMP = 'data-aiui-row';
+  const ROW_STAMP = 'data-steptix-row';
   /**
    * Number `rows` 1..N inside `root`, clearing whatever was there.
    *
    * Cleared over every DESCENDANT carrying the stamp, not over a row list: a
    * nested table inside a detail row is not in `table.rows`, so a stamp an
    * earlier read of THAT table left behind survived a row-list clear, and
-   * `#outer [data-aiui-row="2"]` then matched the nested row as well as the
+   * `#outer [data-steptix-row="2"]` then matched the nested row as well as the
    * real one. The root itself is never stamped and never cleared — it is not
    * one of its own rows.
    */
@@ -251,7 +251,7 @@
 
   // ── rows and cells, for BOTH providers (§7.9) ────────────────────────────
   //
-  // Everything from §7.3b's header grid down to the `data-aiui-row` stamp is
+  // Everything from §7.3b's header grid down to the `data-steptix-row` stamp is
   // written against these two shapes, so a `<table>` and a `div[role="grid"]`
   // are read by the same code:
   //
@@ -1713,7 +1713,7 @@
     // — so there is no table to read and the record is assembled from one
     // field selector per requested column. Everything the author can observe
     // is the same as a table read: `_row` first, hidden items excluded, the
-    // §7.4 rendered-text rule, the `data-aiui-row` stamp.
+    // §7.4 rendered-text rule, the `data-steptix-row` stamp.
     const itemSel = typeof mapping.item === 'string' ? squash(mapping.item) : '';
     if (itemSel === '') return badStructure('no item selector was given');
     const found = lookup(itemSel);
@@ -2654,8 +2654,8 @@
   // itself and built `#RadGrid1_ctl00__7`, whose ids run from ZERO — so it
   // clicked row 8, Grace Abernathy, and the step passed green. A row's own
   // number is written nowhere in the markup, so the read writes it: every DATA
-  // row of the table it just read carries `data-aiui-row="<_row>"`, which a
-  // later step addresses as `[data-aiui-row="7"]` instead of doing arithmetic
+  // row of the table it just read carries `data-steptix-row="<_row>"`, which a
+  // later step addresses as `[data-steptix-row="7"]` instead of doing arithmetic
   // on an id.
   //
   // Cleared over the table FIRST, so a re-read after paging, sorting or
@@ -2667,7 +2667,7 @@
   //
   // Over every DESCENDANT carrying the stamp, not `table.rows`: a nested table
   // inside a detail row is not in `table.rows`, so a stamp an earlier read of
-  // THAT table left behind survived the clear, and `#outer [data-aiui-row="2"]`
+  // THAT table left behind survived the clear, and `#outer [data-steptix-row="2"]`
   // then matched the nested row as well as the real one.
   //
   // ALL the data rows, not only the `limit` prefix: the numbering describes
@@ -2682,7 +2682,7 @@
   //
   // An ARIA grid's data rows are stamped the same way (§7.9), on the FIRST
   // fragment: ag-Grid's pinned half and its centre half are one row, and
-  // stamping both would make `[data-aiui-row="7"]` match two elements and the
+  // stamping both would make `[data-steptix-row="7"]` match two elements and the
   // step after the read ambiguous.
   stampRows(container, dataRows.map((row) => row.el));
 

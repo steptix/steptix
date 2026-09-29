@@ -95,7 +95,7 @@ export const EXIT_NOT_CLAIMED =
  *
  * Both are "the entry is fine, do not heal it under AI", and that is all
  * `nonRetryable` says — but they need opposite sentences in the report cell
- * and the TestBench hover, and the runner must not have to read the message
+ * and the Steptix hover, and the runner must not have to read the message
  * text to tell them apart. So the kind rides out structurally, set where each
  * is thrown.
  *

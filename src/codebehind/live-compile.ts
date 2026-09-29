@@ -373,7 +373,7 @@ export const COMPUTER_MODE_STAYS_AI = 'computer-mode step; coordinates are not p
  * with no model call at all, as they dispatch `Set`
  * (stories/step-flow-control.md, decision 3; stories/step-failure-outcomes.md,
  * decision 10). No transcript to generate from, so both compilers refuse it and
- * both say this, from here, so an author meeting the refusal in `aiui compile`
+ * both say this, from here, so an author meeting the refusal in `steptix compile`
  * and again in a Run & Compile reads one rule about one line.
  */
 export const DISPATCHED_NOT_COMPILED = 'a Return/Stop/Fail step is dispatched, not compiled';
@@ -658,7 +658,7 @@ export class LiveCompiler {
    * batch. That is what makes "the compile records row 1" true of the server
    * rather than of any one client — a client that drives the server this way
    * gets the same answer (tests/api-server-rows-compile.test.ts does;
-   * TestBench does not).
+   * Steptix does not).
    */
   private readonly takenKeys = new Set<string>();
   /**
@@ -981,7 +981,7 @@ export class LiveCompiler {
     // that drives the server this way — one kept session, row 2's steps sent
     // with `compileContinues`, all of them the same entries again
     // (`takenKeys`). tests/api-server-rows-compile.test.ts drives it;
-    // TestBench does not — run-controller.ts sends the compile fields on the
+    // Steptix does not — run-controller.ts sends the compile fields on the
     // first planned row's batches only, and recycles the session between rows.
     // Row 2 announced "Run finished — 0 entries still to generate, then a
     // review pass" and then reviewed nothing, which is a forecast of something
@@ -1763,7 +1763,7 @@ export class LiveCompiler {
   /**
    * Drain the queue, run Review (on the Run & Compile path only), and hand
    * back the proposal. The server never writes under the project on this
-   * path: the files ride the wire and TestBench applies them through the diff.
+   * path: the files ride the wire and Steptix applies them through the diff.
    */
   async finish(final: LiveCompileFinish): Promise<LiveCompileOutcome> {
     // Normally a no-op — `runStepsEnded` queued them — but a block that ended

@@ -8,7 +8,7 @@
  * request from a script and reports usage the way the v2 envelope does, so the
  * token path from `complete()` to the step line is the production one.
  *
- * Every line lands in a temporary user root; the suite-wide `AIUI_STATS=off`
+ * Every line lands in a temporary user root; the suite-wide `STEPTIX_STATS=off`
  * (vitest.config.ts) is lifted for this file only.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -250,12 +250,12 @@ function hooks(over: Partial<Record<'before' | 'beforeEach' | 'afterEach' | 'aft
   };
 }
 
-/** A project of its own per test: an `aiui.config.json` marks the root, and
+/** A project of its own per test: a `steptix.config.json` marks the root, and
  *  holds `config` when one is given. */
 function project(config: Record<string, unknown> = {}): { root: string; reports: string } {
   const root = path.join(tmp, `proj-${counter++}`);
   fs.mkdirSync(path.join(root, 'tests'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify(config));
+  fs.writeFileSync(path.join(root, 'steptix.config.json'), JSON.stringify(config));
   return { root, reports: path.join(root, 'reports') };
 }
 
@@ -355,12 +355,12 @@ function reportHtml(runLine: StatsRunLine | undefined): string {
 }
 
 beforeAll(() => {
-  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-stats-runner-seam-')));
+  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-stats-runner-seam-')));
   userRoot = path.join(tmp, 'user-root');
   fs.mkdirSync(userRoot, { recursive: true });
-  for (const key of ['AIUI_STATS', 'AIUI_STATS_SUITE', 'LOCALAPPDATA', 'XDG_CONFIG_HOME']) savedEnv[key] = process.env[key];
-  delete process.env['AIUI_STATS'];
-  delete process.env['AIUI_STATS_SUITE'];
+  for (const key of ['STEPTIX_STATS', 'STEPTIX_STATS_SUITE', 'LOCALAPPDATA', 'XDG_CONFIG_HOME']) savedEnv[key] = process.env[key];
+  delete process.env['STEPTIX_STATS'];
+  delete process.env['STEPTIX_STATS_SUITE'];
   process.env['LOCALAPPDATA'] = userRoot;
   process.env['XDG_CONFIG_HOME'] = userRoot;
   deps = { env: { LOCALAPPDATA: userRoot, XDG_CONFIG_HOME: userRoot }, platform: process.platform };
@@ -377,7 +377,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await flushStatsWrites();
-  fs.rmSync(path.join(userRoot, 'aiui', 'stats'), { recursive: true, force: true });
+  fs.rmSync(path.join(userRoot, 'steptix', 'stats'), { recursive: true, force: true });
   hooksStub = hooks();
   gw.requests = [];
   acted.actions = [];
@@ -721,7 +721,7 @@ describe('masking (acceptance 3)', () => {
     expect(action!.selector).toBe('role=row[name="***"] >> role=button[name="Edit"]');
     expect(action!.form).toBe('role');
     expect(stepLines(all)[0]!.stepText).toBe('Edit the row for {{password}}');
-    const onDisk = fs.readFileSync(path.join(userRoot, 'aiui', 'stats', fs.readdirSync(path.join(userRoot, 'aiui', 'stats'))[0]!), 'utf-8');
+    const onDisk = fs.readFileSync(path.join(userRoot, 'steptix', 'stats', fs.readdirSync(path.join(userRoot, 'steptix', 'stats'))[0]!), 'utf-8');
     expect(onDisk).not.toContain('hunter2-Secret');
   });
 });
@@ -729,17 +729,17 @@ describe('masking (acceptance 3)', () => {
 describe('the off switches (acceptance 5)', () => {
   const answer = () => ({ text: plan([{ action: 'click', selector: '#go' }]), usage: { input_tokens: 10, output_tokens: 1 } });
 
-  it('AIUI_STATS=off writes nothing', async () => {
+  it('STEPTIX_STATS=off writes nothing', async () => {
     const { root, reports } = project();
     gw.respond = answer;
-    process.env['AIUI_STATS'] = 'off';
+    process.env['STEPTIX_STATS'] = 'off';
     try {
       await run(root, reports, 'off.md', '# Off\n\n## Steps\n1. Click Go\n');
     } finally {
-      delete process.env['AIUI_STATS'];
+      delete process.env['STEPTIX_STATS'];
     }
     await flushStatsWrites();
-    expect(fs.existsSync(path.join(userRoot, 'aiui', 'stats'))).toBe(false);
+    expect(fs.existsSync(path.join(userRoot, 'steptix', 'stats'))).toBe(false);
   });
 
   it('a project with stats.enabled false writes nothing, and the next project still records', async () => {
@@ -747,7 +747,7 @@ describe('the off switches (acceptance 5)', () => {
     const quiet = project({ stats: { enabled: false } });
     await run(quiet.root, quiet.reports, 'quiet.md', '# Quiet\n\n## Steps\n1. Click Go\n');
     await flushStatsWrites();
-    expect(fs.existsSync(path.join(userRoot, 'aiui', 'stats'))).toBe(false);
+    expect(fs.existsSync(path.join(userRoot, 'steptix', 'stats'))).toBe(false);
 
     const loud = project();
     await run(loud.root, loud.reports, 'loud.md', '# Loud\n\n## Steps\n1. Click Go\n');
@@ -758,7 +758,7 @@ describe('the off switches (acceptance 5)', () => {
 
   it('the switch is the TEST’s project’s, not the working directory’s config (finding 12)', async () => {
     gw.respond = answer;
-    // `aiui run` loaded a config that says off — the working directory's — but
+    // `steptix run` loaded a config that says off — the working directory's — but
     // the test lives in a project that says nothing: its lines are filed under
     // that project, so that project's switch decides.
     const loud = project();
@@ -768,11 +768,11 @@ describe('the off switches (acceptance 5)', () => {
 
     // And the other way round: a run config that records, over a test whose
     // project said never.
-    fs.rmSync(path.join(userRoot, 'aiui', 'stats'), { recursive: true, force: true });
+    fs.rmSync(path.join(userRoot, 'steptix', 'stats'), { recursive: true, force: true });
     const quiet = project({ stats: { enabled: false } });
     await run(quiet.root, quiet.reports, 'quiet.md', '# Quiet\n\n## Steps\n1. Click Go\n', { stats: { enabled: true } });
     await flushStatsWrites();
-    expect(fs.existsSync(path.join(userRoot, 'aiui', 'stats'))).toBe(false);
+    expect(fs.existsSync(path.join(userRoot, 'steptix', 'stats'))).toBe(false);
   });
 });
 
@@ -1002,7 +1002,7 @@ describe('a hook step is recorded as authored (finding 9)', () => {
     const all = await lines();
     const hook = stepLines(all).find((s) => s.hook === 'before')!;
     expect(hook).toMatchObject({ hookIndex: 1, stepText: 'Sign in as ${env.USER_NAME}' });
-    const onDisk = fs.readFileSync(path.join(userRoot, 'aiui', 'stats', fs.readdirSync(path.join(userRoot, 'aiui', 'stats'))[0]!), 'utf-8');
+    const onDisk = fs.readFileSync(path.join(userRoot, 'steptix', 'stats', fs.readdirSync(path.join(userRoot, 'steptix', 'stats'))[0]!), 'utf-8');
     expect(onDisk).not.toContain('alice-SECRET-name');
   });
 });
@@ -1059,7 +1059,7 @@ describe('a skill body\'s steps are recorded as authored (finding 9)', () => {
       'Read the order number [store as: order]',
       'Search for {{order}}',
     ]);
-    const dir = path.join(userRoot, 'aiui', 'stats');
+    const dir = path.join(userRoot, 'steptix', 'stats');
     expect(fs.readdirSync(dir).map((name) => fs.readFileSync(path.join(dir, name), 'utf-8')).join('')).not.toContain('__skill');
   });
 });

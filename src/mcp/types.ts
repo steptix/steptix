@@ -91,8 +91,8 @@ export interface ServerConfigReport {
 /**
  * Which root a call resolved against (stories/mcp-no-project.md).
  *
- * `project` — a directory whose `aiui.config.json` the config walk found.
- * `user` — the machine-wide user root (`%LOCALAPPDATA%\aiui` / `~/.aiui`),
+ * `project` — a directory whose `steptix.config.json` the config walk found.
+ * `user` — the machine-wide user root (`%LOCALAPPDATA%\steptix` / `~/.steptix`),
  * used when no project resolved or when the caller addressed it explicitly.
  * The two are peers, not a hierarchy: browsers resolve against both, and a
  * name that exists in both is refused rather than decided by precedence.
@@ -118,7 +118,7 @@ export interface ProjectContext {
   /** Absolute, realpath'd, confined to an allowed root. */
   projectRoot: string;
   /**
-   * Absolute path of the `aiui.config.json` that defined this root.
+   * Absolute path of the `steptix.config.json` that defined this root.
    *
    * For `scope: 'user'` the file may not exist — nothing machine-writes it
    * (stories/mcp-no-project.md, locked) — but the path is still resolved,
@@ -150,7 +150,7 @@ export interface ProjectContext {
   /** Env files actually consulted, for error messages that name them. */
   envFilesConsulted: string[];
   /**
-   * `mcp.cdp` from `aiui.config.json` — how much reach an agent has over CDP
+   * `mcp.cdp` from `steptix.config.json` — how much reach an agent has over CDP
    * browsers (stories/mcp-cdp-browser.md §6).
    *
    * Resolved here, once, rather than re-read at the moment the gate runs. Two
@@ -161,7 +161,7 @@ export interface ProjectContext {
    */
   cdpPermissions: { allowUnowned: boolean; ports: number[] | null };
   /**
-   * `desktop.reportScreenshots` from `aiui.config.json`: false means a
+   * `desktop.reportScreenshots` from `steptix.config.json`: false means a
    * computer-mode capture is never handed back to the caller as an image
    * (SPEC-use-computer.md §10.1). Read once, here, beside `cdpPermissions`, and
    * for the same reason — it is a human's decision in a file an agent cannot
@@ -187,7 +187,7 @@ export interface McpStepRequest {
   /** `tableStructure` is the raw `## Config: tableStructure:` value — `ask` or
    *  `strict` (docs/specs/SPEC-structured-table-reads.md §7.10) — forwarded
    *  the same way and for the same reason: the Sessions API owns the one
-   *  validator, so an MCP run and a Run in TestBench treat a typo alike. */
+   *  validator, so an MCP run and a Run in Steptix treat a typo alike. */
   config?: {
     baseUrl?: string;
     timeout?: string;
@@ -240,7 +240,7 @@ export interface ErrandRequestBody {
    *  `resolveCdpTab` is never asked to arbitrate. */
   targetId: string;
   steps: string[];
-  /** The synthetic `<root>/.aiui-errand.md`. The only thing the server resolves
+  /** The synthetic `<root>/.steptix-errand.md`. The only thing the server resolves
    *  a project root from; without it the project layer of `effectiveSettings`
    *  falls back to server defaults with nothing saying so. */
   testFilePath: string;
@@ -518,7 +518,7 @@ export interface FocusedCdpTab {
 export interface PeekCdpTabArgs {
   port: number;
   targetId: string;
-  /** The synthetic `<root>/.aiui-peek.md`. The only thing the server resolves
+  /** The synthetic `<root>/.steptix-peek.md`. The only thing the server resolves
    *  a project root from — and therefore the only thing that makes the capture
    *  run under the PROJECT's dom limits rather than the library defaults. */
   testFilePath: string;
@@ -546,7 +546,7 @@ export interface NavigateCdpTabArgs {
   port: number;
   url: string;
   targetId?: string | undefined;
-  /** The synthetic `<root>/.aiui-navigate.md`, resolving the project exactly as
+  /** The synthetic `<root>/.steptix-navigate.md`, resolving the project exactly as
    *  a peek's does. */
   testFilePath: string;
 }
@@ -586,7 +586,7 @@ export interface NavigatedTab {
  */
 export interface PeekedTab {
   targetId: string;
-  /** Null when no `aiui.config.json` stood above the synthetic path, so the
+  /** Null when no `steptix.config.json` stood above the synthetic path, so the
    *  server's own defaults were used. */
   root: string | null;
   url: string;
@@ -741,7 +741,7 @@ export interface LogIntoSiteArgs {
  * Worth its own type because the status genuinely changes what the agent
  * should be told, and several of the mappings are non-obvious: validation
  * 400s arrive as real HTTP even on the streaming path (they fire before
- * headers flush), a 503 means a concurrent `aiui stop` is draining the
+ * headers flush), a 503 means a concurrent `steptix stop` is draining the
  * server, and body-parser's 413 surfaces as a 500 because the error
  * middleware hardcodes the status.
  */

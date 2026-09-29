@@ -672,7 +672,7 @@ describe('recordStep and recordRun', () => {
   let deps: UserRootDeps;
 
   beforeEach(() => {
-    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-stats-recorder-')));
+    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-stats-recorder-')));
     deps = { env: { LOCALAPPDATA: tmp, XDG_CONFIG_HOME: tmp }, platform: process.platform };
   });
 
@@ -700,7 +700,7 @@ describe('recordStep and recordRun', () => {
   it('write nothing for a step that asked the model nothing', async () => {
     recordStep(stepResult({ flowControl: { kind: 'return', verb: 'return' } }), { ...CTX, deps }, META);
     await flushStatsWrites();
-    expect(fs.existsSync(path.join(tmp, 'aiui', 'stats'))).toBe(false);
+    expect(fs.existsSync(path.join(tmp, 'steptix', 'stats'))).toBe(false);
   });
 
   it('write nothing when recording is off', async () => {
@@ -708,7 +708,7 @@ describe('recordStep and recordRun', () => {
     recordStep(result(), ctx, META);
     recordRun(ctx, { status: 'passed', steps: 1, firstTry: 1, failed: 0, report: null, now: NOW });
     await flushStatsWrites();
-    expect(fs.existsSync(path.join(tmp, 'aiui', 'stats'))).toBe(false);
+    expect(fs.existsSync(path.join(tmp, 'steptix', 'stats'))).toBe(false);
   });
 
   it('a malformed result costs its lines, never the step', async () => {
@@ -716,6 +716,6 @@ describe('recordStep and recordRun', () => {
     expect(() => recordStep(broken, { ...CTX, deps }, META)).not.toThrow();
     expect(() => recordRun({ ...CTX, deps }, { status: 'passed', steps: 1, firstTry: 1, failed: 0, report: null, now: new Date(Number.NaN) })).not.toThrow();
     await flushStatsWrites();
-    expect(fs.existsSync(path.join(tmp, 'aiui', 'stats'))).toBe(false);
+    expect(fs.existsSync(path.join(tmp, 'steptix', 'stats'))).toBe(false);
   });
 });

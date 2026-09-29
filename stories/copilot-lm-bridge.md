@@ -9,15 +9,15 @@ this story adds the `gateway/` alias), and step code-behind
 
 ## What we're building
 
-A TestBench user whose only approved AI is a GitHub Copilot subscription can
+A Steptix user whose only approved AI is a GitHub Copilot subscription can
 compile, repair and author tests with it. No AI API key, no external endpoint
 to clear with security, nothing new leaves the machine — prompts go out through
 Copilot's own channel, which the org has already approved.
 
 The flow, from the user's chair:
 
-1. Run **TestBench: Use Copilot for AI** once. VS Code shows Copilot's consent
-   dialog ("TestBench wants to access language models"), they pick a model from
+1. Run **Steptix: Use Copilot for AI** once. VS Code shows Copilot's consent
+   dialog ("Steptix wants to access language models"), they pick a model from
    a list of what their seat offers, and the command writes three lines into
    the project's `.env`.
 2. **Compile This Step** / **Repair this step** / compiling a test now run on
@@ -29,7 +29,7 @@ The flow, from the user's chair:
 `.env` after setup:
 
 ```
-# written by "TestBench: Use Copilot for AI"
+# written by "Steptix: Use Copilot for AI"
 AI_MODEL=gateway/copilot/gpt-4.1
 AI_GATEWAY_URL=http://127.0.0.1:18790
 AI_API_KEY=<bridge token>
@@ -54,7 +54,7 @@ Meanwhile every AI call in this framework is made by `AiClient` inside the
 Sessions API server process (`test-runner`, `session-manager`,
 `compile-runner`, `errand-runner`) — a different process from the extension
 host. The only join that respects both facts is a protocol adapter: the
-TestBench extension publishes `vscode.lm` as an OpenAI-compatible endpoint on
+Steptix extension publishes `vscode.lm` as an OpenAI-compatible endpoint on
 127.0.0.1, and the server consumes it through routing that already shipped
 (the `gateway/` prefix + `AI_GATEWAY_URL`, which the extension already
 delivers per-run by shipping the project `.env`). Framework changes: **one
@@ -71,7 +71,7 @@ user-initiated kind a seat survives. The bridge does not try to enforce this —
 an uncompiled test with a bridge configured will execute steps through Copilot
 and hit its limits; that is the user's quota to spend and the docs say so.
 
-## Part A — the bridge (`testbench-native`)
+## Part A — the bridge (`steptix-vscode`)
 
 ### Lifecycle
 
@@ -80,11 +80,11 @@ and hit its limits; that is the user's quota to spend and the docs say so.
   floats under the caret) and die at runtime on 1.85–1.89 hosts, where
   `vscode.lm` is undefined.
 - New module `src/extension/lm-bridge.ts`, started on activation when
-  `testbench-native.lmBridge.enabled` is true. **User scope, default false** —
+  `steptix.lmBridge.enabled` is true. **User scope, default false** —
   the same reasoning as `serverAutoStart.cwd`: a workspace-settable switch
   would let any cloned repo open a listener; and a port plus subscription
   spend should never appear silently.
-- Binds **127.0.0.1 only**, port from `testbench-native.lmBridge.port`
+- Binds **127.0.0.1 only**, port from `steptix.lmBridge.port`
   (default 18790). One instance per machine: on EADDRINUSE the window stands
   by and periodically retries, claiming the port when the owning window
   closes — the same probe-and-adopt pattern the fixture app uses on 8787.
@@ -101,7 +101,7 @@ and hit its limits; that is the user's quota to spend and the docs say so.
 
 - `GET /v1/models` — the result of `vscode.lm.selectChatModels()` mapped to
   OpenAI's list shape (`{data: [{id, owned_by: vendor}]}`), so a user can see
-  valid ids without guessing. Additively, `aiui_bridge: {name, images}` and a
+  valid ids without guessing. Additively, `steptix_bridge: {name, images}` and a
   per-model `image_input` ([SPEC-use-computer §15.3](../docs/specs/SPEC-use-computer.md#153-the-bridge-says-what-it-will-do-with-images)).
 - `POST /v1/chat/completions` — non-streaming and `stream: true` (SSE,
   OpenAI delta framing, terminated by `data: [DONE]`).
@@ -150,11 +150,11 @@ consent moment**: it makes a one-line warm-up request under the user's
 command invocation, which raises the consent dialog; once granted, consent
 persists for the extension and background-triggered requests succeed. If
 consent is later revoked, the bridge maps the `NoPermissions` error to a
-response telling the user to rerun **TestBench: Use Copilot for AI**.
+response telling the user to rerun **Steptix: Use Copilot for AI**.
 
 ### The setup command
 
-**TestBench: Use Copilot for AI** — one command, four effects:
+**Steptix: Use Copilot for AI** — one command, four effects:
 
 1. Ensure the bridge is enabled and running (flips the User setting with a
    confirmation).
@@ -163,7 +163,7 @@ response telling the user to rerun **TestBench: Use Copilot for AI**.
 3. Write/update the three `.env` lines in the workspace folder of the active
    test (created if absent, existing unrelated lines preserved, shown as a
    confirm before writing — this file holds the user's other secrets).
-4. Status bar item while the bridge is up: `$(copilot) TestBench bridge :18790`,
+4. Status bar item while the bridge is up: `$(copilot) Steptix bridge :18790`,
    with request count as tooltip — the visible answer to "is my seat being
    spent".
 
@@ -253,7 +253,7 @@ Costs to document rather than change:
   as always, that the diagnosis pass attaches its own screenshot regardless of
   `sendScreenshots` ([diagnose.ts:46](../src/ai/diagnose.ts)) and a hard
   refusal would break diagnosis on every failed keyed run on an older VS Code.
-  `GET /v1/models` now says which it does (`aiui_bridge.images`) and what each
+  `GET /v1/models` now says which it does (`steptix_bridge.images`) and what each
   model accepts (`image_input`), so the server can refuse computer mode up
   front on a route that would drop the screen (§15.4).
 - **CLI / CI / MCP-from-another-host.** No extension host, no bridge. Green

@@ -2,7 +2,7 @@
  * The `## Config: viewport:` value, resolved (stories/per-test-viewport.md §1).
  *
  * ONE validator with ONE error message, deliberately (§3). The raw spec string
- * is what travels the wire — TestBench forwards whatever the file says, like it
+ * is what travels the wire — Steptix forwards whatever the file says, like it
  * does `baseUrl` — so the CLI and the server must refuse the same values with
  * the same words, or a test that runs from the terminal and a test that runs
  * from the editor disagree about what `390` means.
@@ -110,7 +110,7 @@ export function viewportCdpConflictError(rawViewport: string, rawCdp: string): s
  * but blank is treated as absent for the same reason `cdp:` does — an empty
  * value is a half-written line, not a request for a 0×0 page.
  *
- * Interpolation has already happened by the time this runs: `$VAR` (TestBench)
+ * Interpolation has already happened by the time this runs: `$VAR` (Steptix)
  * and `${env.X}` (server/CLI) are resolved against the Config block before the
  * value reaches here, so validation always sees the string the run will use
  * (§1).

@@ -263,7 +263,7 @@ export interface StepCodeEntry {
  * types, exactly like `defineTool`.
  *
  * ```ts
- * import { defineSteps } from 'ai-ui-automation/codebehind';
+ * import { defineSteps } from 'steptix/codebehind';
  *
  * export default defineSteps([
  *   {

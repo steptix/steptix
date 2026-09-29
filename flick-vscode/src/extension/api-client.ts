@@ -1,4 +1,4 @@
-// Thin client for the ai-ui-automation Sessions API (see SPEC-SESSIONS-API.md).
+// Thin client for the Steptix Sessions API (see SPEC-SESSIONS-API.md).
 // Uses the global `fetch` available in the VS Code extension host (Node 18+).
 
 import type { FlickSettings, StepStatus } from '../shared/protocol';

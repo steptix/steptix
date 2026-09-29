@@ -9,7 +9,7 @@
 
 Stop a run that you've **run before**, and the recovered report can be the
 *previous* run's — e.g. a green **PASSED** report for a run you actually aborted.
-The live stop-report test (`testbench-native/.../stop-report.test.cjs`) caught
+The live stop-report test (`steptix-vscode/.../stop-report.test.cjs`) caught
 this: after a mid-run STOP, the recovered report had no `ABORTED` marker even
 though the run was aborted. The *correct* aborted report was generated on disk
 (`…-github.html` with `■ ABORTED`); it just wasn't what the client recovered.

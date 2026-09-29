@@ -27,7 +27,7 @@
  * when it puts a step on the wire, so the Sessions API and the errand runner
  * receive it verbatim — and they were the two callers that then failed to
  * recognise `[no-hooks] Set {{x}} to "y"` and sent it to the model as prose.
- * Since TestBench is the primary client of that path, the marker had to be
+ * Since Steptix is the primary client of that path, the marker had to be
  * handled here rather than at each call site, where it had already been
  * forgotten twice.
  */
@@ -85,7 +85,7 @@ const TARGET_BRACES_RE = /^set\s+(\{\{\s*(\w+)\s*\}\})/i;
 
 /** The `[no-hooks]` prefix, matching `NO_HOOKS_MARKER` in section-match.ts.
  *  Duplicated rather than imported to keep this module import-free — the
- *  TestBench mirror suite loads it directly under Node's type stripping. */
+ *  Steptix mirror suite loads it directly under Node's type stripping. */
 const NO_HOOKS_PREFIX = /^\[no-hooks\]\s*/i;
 
 /** The instruction as the grammar sees it: trimmed, marker removed. */

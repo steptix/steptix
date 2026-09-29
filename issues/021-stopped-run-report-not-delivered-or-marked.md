@@ -1,6 +1,6 @@
 # 021 — A stopped run's report isn't delivered to the client, can't be opened, and doesn't mark the abort
 
-**Status:** ✅ resolved 2026-06-02 — implemented per the revised plan; reviewed (4-lens plan workflow + final correctness pass, no must-fix); root suite 996 green, runner-core 145, testbench-native integration suite 108 (incl. 3 new stop tests), both extensions bumped + built. Live `stop-report.test.cjs` added (run manually).
+**Status:** ✅ resolved 2026-06-02 — implemented per the revised plan; reviewed (4-lens plan workflow + final correctness pass, no must-fix); root suite 996 green, runner-core 145, steptix-vscode integration suite 108 (incl. 3 new stop tests), both extensions bumped + built. Live `stop-report.test.cjs` added (run manually).
 
 ## Resolution (2026-06-02)
 
@@ -8,7 +8,7 @@ All four gaps fixed via the revised plan below.
 - **Delivery (Gap 1):** server records a manager-level `lastRunInfo` map (survives
   session deletion) with a frozen token snapshot + reportPath + `finalized`,
   served by new `GET /sessions/:id/last-run`. runner-core gains `getLastRun()`.
-  testbench-native polls it **on STOP only** (gated `!pauseRequested`, locals
+  steptix-vscode polls it **on STOP only** (gated `!pauseRequested`, locals
   captured before the finally, background/fire-and-forget so `isRunning` flips
   promptly, generation-guarded against a newer run, injectable backoff, ~12s
   ceiling, poll-until-finalized).
@@ -20,7 +20,7 @@ All four gaps fixed via the revised plan below.
 - **Tokens (Gap 4):** recording was already correct; delivered as a frozen
   snapshot via `getLastRun` (never recomputed live). A cancelled in-flight call
   records nothing (documented contract).
-- **Build:** root `dist/` rebuilt; `testbench-native` 0.5.51→0.5.52 (VSIX
+- **Build:** root `dist/` rebuilt; `steptix-vscode` 0.5.51→0.5.52 (VSIX
   packaged), `testbench-monaco` 0.1.55→0.1.56 (both bump because runner-core, a
   bundled `file:` dep, changed — per CLAUDE.md).
 
@@ -72,13 +72,13 @@ on closed sessions). Instead:
    `isSessionAlive`): GET the new route, mirror `isSessionAlive`'s
    401/connect-failed taxonomy, parse defensively (`await res.json().catch(()=>({}))`),
    return `{ reportPath?, tokens?, finalized } | null` (null on 404). Add optional
-   `getLastRun?` to the `ApiClientLike` interface ([run-controller.ts:43-49](../testbench-native/src/extension/run-controller.ts#L43)).
-4. **testbench-native — poll on STOP only.** In the user-abort branch
-   ([run-controller.ts:1100-1115](../testbench-native/src/extension/run-controller.ts#L1100)):
+   `getLastRun?` to the `ApiClientLike` interface ([run-controller.ts:43-49](../steptix-vscode/src/extension/run-controller.ts#L43)).
+4. **steptix-vscode — poll on STOP only.** In the user-abort branch
+   ([run-controller.ts:1100-1115](../steptix-vscode/src/extension/run-controller.ts#L1100)):
    gate on `if (!this.pauseRequested)` (line 1113 is reachable on a pause edge
    case when `resumeLine == null` — must not poll on pause). **Capture
    `this.currentClient`/`this.currentSessionId`/`this.currentServerUrl` into locals
-   BEFORE any await** (the `finally` nulls them at [1126-1127](../testbench-native/src/extension/run-controller.ts#L1126)),
+   BEFORE any await** (the `finally` nulls them at [1126-1127](../steptix-vscode/src/extension/run-controller.ts#L1126)),
    guard `typeof c.getLastRun === 'function'`, then `await` a **poll-until-finalized**
    helper (injectable backoff for deterministic tests; safety ceiling ~10-15s, not
    a blind 2s — `generateReport` writes HTML + copies screenshots and can exceed
@@ -120,7 +120,7 @@ from) — documented, accepted.
 
 ### Build / version (hard requirements)
 - Root `npm run build` (server runs `dist/`, not `src/`) — see [[feedback_rebuild_dist_after_src]].
-- `runner-core` change ⇒ bump **both** `testbench-native` AND `testbench-monaco`
+- `runner-core` change ⇒ bump **both** `steptix-vscode` AND `testbench-monaco`
   patch versions, rebuild + repackage + reinstall both (the bundled `dist/`
   changes in both even though Monaco never calls the new code; per CLAUDE.md).
 
@@ -133,12 +133,12 @@ from) — documented, accepted.
   emits `step:fail`).
 - **runner-core** — `getLastRun` parses fields; 404 → null; older server missing
   fields → undefined, no throw.
-- **testbench-native unit (`node --test`, stub api-client, injectable backoff)** —
+- **steptix-vscode unit (`node --test`, stub api-client, injectable backoff)** —
   stop polls and sets `lastResolvedReportPath` + tokens; the race (absent on first
   poll, present later) resolves; **pause does NOT poll**.
-- **testbench-native live (`tests/integration/live/stop-report.test.cjs`, NEW,
+- **steptix-vscode live (`tests/integration/live/stop-report.test.cjs`, NEW,
   auto-discovered by the glob)** — rebuild `dist/` + restart the server first; run
-  github.md, let ≥1 step pass, `testbench-native.stop`; assert `isRunning` flips
+  github.md, let ≥1 step pass, `steptix.stop`; assert `isRunning` flips
   false promptly, `controller.lastReportPath` resolves to an existing file for THIS
   run, the report marks aborted + the interrupted step, and the run token total
   > 0 — assert **before** any `restartSession` teardown. Add a `lastRunTokens`
@@ -149,7 +149,7 @@ from) — documented, accepted.
 
 **Status (original):** 🟡 open — diagnosed (4 gaps: delivery, content, step-1, tokens); plan below pending multi-perspective review
 **Area:**
-- Delivery: [src/server/api-server.ts:252-255, 273](../src/server/api-server.ts#L252) (stop closes SSE → `clientGone` drops the final `done`), [testbench-native/src/extension/run-controller.ts:593](../testbench-native/src/extension/run-controller.ts#L593) (stop aborts the fetch), [runner-core/src/api-client.ts:256](../runner-core/src/api-client.ts#L256) (aborted read throws before `done` is read), [run-controller.ts:1262](../testbench-native/src/extension/run-controller.ts#L1262) (the only place `reportPath` is captured — never reached on abort)
+- Delivery: [src/server/api-server.ts:252-255, 273](../src/server/api-server.ts#L252) (stop closes SSE → `clientGone` drops the final `done`), [steptix-vscode/src/extension/run-controller.ts:593](../steptix-vscode/src/extension/run-controller.ts#L593) (stop aborts the fetch), [runner-core/src/api-client.ts:256](../runner-core/src/api-client.ts#L256) (aborted read throws before `done` is read), [run-controller.ts:1262](../steptix-vscode/src/extension/run-controller.ts#L1262) (the only place `reportPath` is captured — never reached on abort)
 - Content: [src/server/session-manager.ts:2430-2433](../src/server/session-manager.ts#L2430) (report only when ≥1 step completed; aborted→`'failed'`), the post-step abort check breaks **before** the result push so the stopped step isn't recorded, [src/report/types.ts:3](../src/report/types.ts#L3) (`StepStatus` has no `aborted`)
 - Tokens: [src/server/session-manager.ts:2452-2454](../src/server/session-manager.ts#L2452) (the aborted report reads `tokenTracker.runTotal/runInputTotal/runOutputTotal` — see Gap 4), [src/ai/client.ts](../src/ai/client.ts) (`addUsage` runs only after a response completes; a cancelled call records nothing)
 **Related:** [020](020-stop-not-instant-current-step-runs-to-completion.md) — made stop fast, which exposed these report gaps.
@@ -157,7 +157,7 @@ from) — documented, accepted.
 
 ## Symptom (user report)
 
-> If I stop the test in TestBench does it still generate a report and should I
+> If I stop the test in Steptix does it still generate a report and should I
 > still be able to see the report? Does the report say which step was aborted? I
 > don't think the report opens.
 
@@ -175,14 +175,14 @@ on stop**:
    `clientGone = true` ([api-server.ts:252-255](../src/server/api-server.ts#L252)),
    and the emit callback early-returns when `clientGone` ([api-server.ts:273](../src/server/api-server.ts#L273)).
    The `done`/`reportPath` is generated but never written.
-2. **Client stops reading.** Stop calls `ac.abort()` ([run-controller.ts:593](../testbench-native/src/extension/run-controller.ts#L593));
+2. **Client stops reading.** Stop calls `ac.abort()` ([run-controller.ts:593](../steptix-vscode/src/extension/run-controller.ts#L593));
    the next `reader.read()` throws `ApiClientError('aborted')` ([api-client.ts:256](../runner-core/src/api-client.ts#L256))
    which unwinds the `for await` loop **before** the `done` capture at
-   [run-controller.ts:1262](../testbench-native/src/extension/run-controller.ts#L1262).
+   [run-controller.ts:1262](../steptix-vscode/src/extension/run-controller.ts#L1262).
 
 There is no fallback (no reports-dir scan). So `lastResolvedReportPath` keeps its
 value from a *previous completed* run (or stays null), and "Open Last Report"
-([commands/index.ts:431-450](../testbench-native/src/extension/commands/index.ts#L431))
+([commands/index.ts:431-450](../steptix-vscode/src/extension/commands/index.ts#L431))
 opens the wrong report or says "no report yet". **This is why the report doesn't
 open.**
 
@@ -221,7 +221,7 @@ in the on-disk report. Two real risks to nail down rather than assume:
 Fix all three. Direction confirmed with the user (fetch-on-abort for delivery; a
 real aborted state for content). Constraints:
 - **Touches client code → version bump + repackage.** Delivery needs
-  `runner-core` (api-client) + `testbench-native` (abort path) edits, which are
+  `runner-core` (api-client) + `steptix-vscode` (abort path) edits, which are
   bundled into the VSIX — per CLAUDE.md, bump the affected variant's patch
   version, rebuild, repackage, reinstall. `runner-core` is a `file:` dep bundled
   into **both** extensions; assess whether the Monaco variant also needs a bump.
@@ -245,7 +245,7 @@ Reuse the existing `GET /sessions/:id` rather than add a route.
 2. **runner-core api-client** — extend `getSession(id)` (or add a tiny
    `getLastReportPath(id)`) to return `lastReportPath` + token totals. Additive,
    optional fields; absent on an older server → undefined, no throw.
-3. **testbench-native** — on the user-abort branch ([run-controller.ts:1113](../testbench-native/src/extension/run-controller.ts#L1113)),
+3. **steptix-vscode** — on the user-abort branch ([run-controller.ts:1113](../steptix-vscode/src/extension/run-controller.ts#L1113)),
    after marking the run aborted, `GET /sessions/:id` and, if present, set
    `this.lastResolvedReportPath` (so "Open Last Report" resolves the stopped run)
    and surface the run token totals to the UI.
@@ -301,7 +301,7 @@ this as invasive).
 - **runner-core api-client (`runner-core/tests/api-client.test.js`):** `getSession`
   surfaces `lastReportPath` + token totals; absent fields on an older server →
   undefined, no throw.
-- **testbench-native — TWO layers (the user asked specifically to ensure stop is
+- **steptix-vscode — TWO layers (the user asked specifically to ensure stop is
   covered here):**
   - **Controller unit (`tests/*.test.js`, `node --test`):** on user-abort the
     controller polls `getSession` and sets `lastResolvedReportPath`; the race
@@ -309,9 +309,9 @@ this as invasive).
     bounded budget; "Open Last Report" then resolves the stopped run's path; token
     totals are surfaced. Use a stub api-client so this stays in the fast suite.
   - **Live integration (`tests/integration/live/stop-report.test.cjs`, NEW):**
-    mirror [pause-resume.test.cjs](../testbench-native/tests/integration/live/pause-resume.test.cjs)
+    mirror [pause-resume.test.cjs](../steptix-vscode/tests/integration/live/pause-resume.test.cjs)
     — run github.md against the real server, let ≥1 step pass, fire
-    `testbench-native.stop`, then assert: `isRunning` flips false promptly (ties
+    `steptix.stop`, then assert: `isRunning` flips false promptly (ties
     to 020's fast-stop), `controller.lastReportPath` resolves to an existing file
     for **this** run, the report marks the run aborted + the interrupted step, and
     the run token total is > 0. Runs via `runLiveTest.cjs` (needs a running

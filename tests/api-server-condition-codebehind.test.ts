@@ -545,7 +545,7 @@ describe('step.fail() in a condition entry, over HTTP', () => {
 
     const fail = events.find((e) => e.type === 'step:fail');
     // Measured before the fix: `{ line: 4, error: …, fromCodeBehind: true }`
-    // with no `deliberate` — TestBench and the MCP fold then worded the
+    // with no `deliberate` — Steptix and the MCP fold then worded the
     // author's own sentence as a code-behind defect.
     expect(fail).toMatchObject({
       line: 4,

@@ -138,7 +138,7 @@ A peek is: **attach → extract → detach**, in one request.
   `captureDomSnapshot` for `format: "dom"`, `expandDomSubtree` under a
   `selector`. The settings come from the project, by the same device
   the errand uses and for the same reason: the request carries a
-  synthetic `testFilePath` (`<root>/.aiui-peek.md`) — the only thing
+  synthetic `testFilePath` (`<root>/.steptix-peek.md`) — the only thing
   the server resolves a project root from — and the handler feeds
   `bundle.config.browser` to both `launchBrowser` and the capture.
   Without it the capture would silently run under library defaults
@@ -313,7 +313,7 @@ New, each named because round 1 caught them being assumed:
   [page-content](page-content.md) §Locked's GET-not-POST reasoning
   applies verbatim (a read, no body, scalar params). Query: `format`,
   `selector`, `max_chars` (the sibling content route's spelling),
-  `testFilePath` (the synthetic `<root>/.aiui-peek.md`), `envName?`.
+  `testFilePath` (the synthetic `<root>/.steptix-peek.md`), `envName?`.
   Error contract: reuses `GET /sessions/:id/content`'s
   `PageCaptureError` mapping (409 `navigated`, 400 for the selector
   family). The gone-tab 404 has a NAMED device: the route pre-checks the

@@ -992,7 +992,7 @@ function field(label: string, value: string, extra = ''): HTMLElement {
 }
 
 function statusBadge(status: StepStatus): HTMLElement {
-  // Matches TestBench: ✓ for pass, ✗ for fail, ⚠ for error, ◌ for a step a
+  // Matches Steptix: ✓ for pass, ✗ for fail, ⚠ for error, ◌ for a step a
   // return left unrun. Coloured via VS Code's --vscode-testing-icon* tokens
   // with our pass/fail/error CSS vars as fallback.
   const icon = statusGlyph(status);

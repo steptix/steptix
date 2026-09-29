@@ -35,7 +35,7 @@
  * that merely shout.
  *
  * Import-free for the reason `use-step.ts` gives: `runner-core` mirrors it and
- * cannot import `src/`, and testbench-native's mirror suite loads it directly
+ * cannot import `src/`, and steptix-vscode's mirror suite loads it directly
  * as `.ts` under Node's type stripping. That is why the `[use` claim below is
  * a copy of `CLAIM_RE` rather than an import of it;
  * `tests/use-step-parity.test.ts` is what keeps the copies honest.

@@ -3554,11 +3554,11 @@ async function stamps(selector: string): Promise<Array<[string, string | null]>>
   return page.locator(`${selector} tr`).evaluateAll((rows) =>
     rows.map((row) => [
       (row.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 24),
-      row.getAttribute('data-aiui-row'),
+      row.getAttribute('data-steptix-row'),
     ] as [string, string | null]));
 }
 
-describe('readTable — data-aiui-row, the numbering left on the page', () => {
+describe('readTable — data-steptix-row, the numbering left on the page', () => {
   it('stamps the data rows 1..N and nothing else', async () => {
     await load(`
       <table id="t" aria-label="Orders">
@@ -3648,14 +3648,14 @@ describe('readTable — data-aiui-row, the numbering left on the page', () => {
       </table>`);
     expect(await refusal({ selector: '#t', columns: [{ header: 'Order ID', key: 'id' }] }))
       .toContain('merged headers or cells');
-    expect(await page.locator('#t [data-aiui-row]').count()).toBe(0);
+    expect(await page.locator('#t [data-steptix-row]').count()).toBe(0);
   });
 
   it('clears a stale stamp inside a NESTED table, and nothing outside this one', async () => {
     // The clear runs over every descendant carrying the stamp, not over
     // `table.rows` — a nested table's rows are not in `table.rows` at all, so
     // a stamp an earlier read of THAT table left behind survived, and
-    // `#outer [data-aiui-row="2"]` matched the nested row as well as the real
+    // `#outer [data-steptix-row="2"]` matched the nested row as well as the real
     // one. "Row 2 of the Outer table" was then two elements.
     await load(`
       <table id="outer" aria-label="Outer">
@@ -3675,15 +3675,15 @@ describe('readTable — data-aiui-row, the numbering left on the page', () => {
       </table>`);
     await readTableRecords(page, { selector: '#inner', columns: [{ header: 'X', key: 'x' }] });
     await readTableRecords(page, { selector: '#other', columns: [{ header: 'A', key: 'a' }] });
-    expect(await page.locator('#inner [data-aiui-row]').count()).toBe(2);
+    expect(await page.locator('#inner [data-steptix-row]').count()).toBe(2);
 
     await readTableRecords(page, { selector: '#outer', columns: [{ header: 'A', key: 'a' }] });
-    expect(await page.locator('#inner [data-aiui-row]').count()).toBe(0);
-    expect(await page.locator('#outer [data-aiui-row="2"]').count()).toBe(1);
-    expect(await page.locator('#outer [data-aiui-row="2"] td').first().innerText()).toBe('a2');
+    expect(await page.locator('#inner [data-steptix-row]').count()).toBe(0);
+    expect(await page.locator('#outer [data-steptix-row="2"]').count()).toBe(1);
+    expect(await page.locator('#outer [data-steptix-row="2"] td').first().innerText()).toBe('a2');
     // A table that was not read keeps its own numbering: the clear is scoped
     // to the table being read and reaches nothing above or beside it.
-    expect(await page.locator('#other [data-aiui-row]').count()).toBe(1);
+    expect(await page.locator('#other [data-steptix-row]').count()).toBe(1);
   });
 
   it('numbers the RadGrid rows so __7 is row 8, detail row and all (§5.7)', async () => {
@@ -3691,8 +3691,8 @@ describe('readTable — data-aiui-row, the numbering left on the page', () => {
     // built `#RadGrid1_ctl00__7` for is row EIGHT, and it now says so itself.
     await load(radgrid());
     await readTableRecords(page, { selector: '#RadGrid1', columns: LOAN_COLUMNS });
-    expect(await page.locator('#RadGrid1_ctl00__7').getAttribute('data-aiui-row')).toBe('8');
-    expect(await page.locator('#RadGrid1_ctl00__0').getAttribute('data-aiui-row')).toBe('1');
+    expect(await page.locator('#RadGrid1_ctl00__7').getAttribute('data-steptix-row')).toBe('8');
+    expect(await page.locator('#RadGrid1_ctl00__0').getAttribute('data-steptix-row')).toBe('1');
     // Nothing outside the table that was read, including the two tables in the
     // same box: the header table's spacer row and the pager's row.
     expect((await stamps('#RadGrid1_ctl00_Header')).map(([, n]) => n)).toEqual([null, null, null, null]);
@@ -3704,8 +3704,8 @@ describe('readTable — data-aiui-row, the numbering left on the page', () => {
         <tr role="row"><td class="rgExpandCol">&nbsp;</td><td colspan="8">Detail</td></tr>`));
     const expanded = await readTableRecords(page, { selector: '#RadGrid1', columns: LOAN_COLUMNS });
     expect(expanded.records).toEqual(LOAN_RECORDS);
-    expect(await page.locator('#RadGrid1_ctl00__7').getAttribute('data-aiui-row')).toBe('8');
-    expect(await page.locator('#RadGrid1_ctl00 tbody tr:not([id])').getAttribute('data-aiui-row'))
+    expect(await page.locator('#RadGrid1_ctl00__7').getAttribute('data-steptix-row')).toBe('8');
+    expect(await page.locator('#RadGrid1_ctl00 tbody tr:not([id])').getAttribute('data-steptix-row'))
       .toBeNull();
   });
 });

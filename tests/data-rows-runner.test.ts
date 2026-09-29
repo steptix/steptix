@@ -35,7 +35,7 @@ let outputDir: string;
 let config: Config;
 
 beforeEach(async () => {
-  outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-rows-'));
+  outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-rows-'));
   config = structuredClone(DEFAULT_CONFIG);
   config.reports.outputDir = outputDir;
   config.reports.appendRunHistoryToTestFile = false;

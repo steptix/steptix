@@ -331,8 +331,8 @@ export function danglingChainMemberMessage(args: {
  * the other half of the dangling rule.
  *
  * Mirrored for the same reason the sentence above it is: this half used to be
- * refused by the CLI parser alone, so a file TestBench and the Sessions API
- * ran happily was rejected by `aiui run`. Pinned to the original by
+ * refused by the CLI parser alone, so a file Steptix and the Sessions API
+ * ran happily was rejected by `steptix run`. Pinned to the original by
  * `tests/control-line-parity.test.ts`.
  */
 export function closedChainMemberMessage(args: { line: string; where?: string }): string {

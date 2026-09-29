@@ -12,8 +12,8 @@ export interface ServerTargetOptions {
  * fields `serve` binds to (story server-lifecycle §4).
  *
  * Note this deliberately does not know about `serve`'s `--port`/`--host`
- * overrides: a server started with `aiui serve --port 4000` needs
- * `aiui status --url http://127.0.0.1:4000`. Lives here rather than in either
+ * overrides: a server started with `steptix serve --port 4000` needs
+ * `steptix status --url http://127.0.0.1:4000`. Lives here rather than in either
  * command so the two can never disagree about the target, and so a third
  * caller doesn't have to import from a sibling command module.
  */

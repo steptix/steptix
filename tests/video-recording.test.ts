@@ -34,7 +34,7 @@ describe('finalizeMainPageVideo — real recording context', () => {
 
   // Fresh recording dir per test so .webm-count assertions don't cross-talk.
   async function freshVideoDir(): Promise<string> {
-    return fsp.mkdtemp(path.join(os.tmpdir(), 'aiui-rec-'));
+    return fsp.mkdtemp(path.join(os.tmpdir(), 'steptix-rec-'));
   }
 
   /** Create a recording context + a page that did some painting, so Playwright

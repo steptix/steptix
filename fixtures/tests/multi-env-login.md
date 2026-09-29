@@ -9,9 +9,9 @@ This test demonstrates `${env.X}` and `${data.X.Y}` interpolation. Run it
 against different environments by passing `--env <name>`:
 
 ```
-aiui run fixtures/tests/multi-env-login.md --env local
-aiui run fixtures/tests/multi-env-login.md --env uat
-aiui run fixtures/tests/multi-env-login.md --env staging
+steptix run fixtures/tests/multi-env-login.md --env local
+steptix run fixtures/tests/multi-env-login.md --env uat
+steptix run fixtures/tests/multi-env-login.md --env staging
 ```
 
 Each `--env` selects:

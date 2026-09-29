@@ -333,11 +333,11 @@ export class BitwardenVault implements VaultProvider {
     this.environment = opts.environment ?? process.env;
     this.run = opts.runner ?? runBw;
     this.now = opts.now ?? Date.now;
-    // `AIUI_BW_BINARY` for a `bw` that is installed but not on PATH — which on
+    // `STEPTIX_BW_BINARY` for a `bw` that is installed but not on PATH — which on
     // Windows is the normal outcome of an npm-global or Scoop install seen from
     // a service-spawned process, where PATH is not the user's shell PATH.
     this.binary = resolveBinary(
-      opts.binary ?? this.environment['AIUI_BW_BINARY'] ?? 'bw',
+      opts.binary ?? this.environment['STEPTIX_BW_BINARY'] ?? 'bw',
       this.environment,
     );
     // An ambient BW_SESSION is honoured deliberately: it lets the user unlock

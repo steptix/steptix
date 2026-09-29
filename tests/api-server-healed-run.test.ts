@@ -3,7 +3,7 @@
  * (stories/codebehind-selector-ambiguity.md §"A healed run stops reporting as
  * a clean pass").
  *
- * TestBench's closing summary line — "8 passed, 1 healed under AI (4.1k
+ * Steptix's closing summary line — "8 passed, 1 healed under AI (4.1k
  * tokens)" — is fed by the `done` event, so this covers the server half: the
  * count and the token cost ride the event when something healed, and nothing
  * new appears on a clean run. Display is the extension's business.
@@ -261,7 +261,7 @@ describe('the run-complete payload', () => {
 // ── Failures keep their code-behind story on the wire ───────────────────────
 //
 // The step:fail event used to carry only the (final) error string, so a
-// TestBench user could not see what the code-behind died of: a broken entry
+// Steptix user could not see what the code-behind died of: a broken entry
 // whose AI fallback also failed lost the crash entirely, and a failed
 // `step.expect` was indistinguishable from an AI-run failure.
 describe('the step:fail payload', () => {

@@ -23,8 +23,8 @@ Two things to know:
   dataSource on a **skill** (e.g. `endpoints: ../data/${envName}-endpoints.json`,
   see `fixtures/skills/open_dashboard_for_env.md`) and call it from the test.
 - **Where it resolves.** Run on the CLI with an env so the parse-time data load
-  kicks in: `aiui run fixtures/tests/named-datasource-demo.md --env local`.
-  (Skill-level dataSources additionally resolve in the TestBench, since skills
+  kicks in: `steptix run fixtures/tests/named-datasource-demo.md --env local`.
+  (Skill-level dataSources additionally resolve in the Steptix, since skills
   are parsed server-side during expansion.)
 
 ## Steps

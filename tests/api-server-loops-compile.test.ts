@@ -20,7 +20,7 @@
  * with the file unchanged.
  *
  * The fixtures live under `tests/` rather than the OS temp dir, so a
- * `.steps.ts` importing `ai-ui-automation/codebehind` resolves through the
+ * `.steps.ts` importing `steptix/codebehind` resolves through the
  * package's own name — the same walk-up the loader does for an author's file.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -390,7 +390,7 @@ async function project(name: string, entries?: string): Promise<{ md: string; st
   if (entries !== undefined) {
     await fs.writeFile(
       steps,
-      `import { defineSteps } from 'ai-ui-automation/codebehind';\n\nexport default defineSteps([\n${entries}\n]);\n`,
+      `import { defineSteps } from 'steptix/codebehind';\n\nexport default defineSteps([\n${entries}\n]);\n`,
     );
   }
   return { md, steps };
@@ -536,7 +536,7 @@ describe('a While whose body runs three passes, in one Run & Compile', () => {
     // The guard row's decision, and never the page it was decided on.
     expect(byIndex(2).guard).toEqual({ decidedBy: 'model', holds: true });
     const raw = await fs.readFile(
-      path.join(tmpDir, '.aiui-codebehind-cache', 'while-recording.recording', 'step-02.json'),
+      path.join(tmpDir, '.steptix-codebehind-cache', 'while-recording.recording', 'step-02.json'),
       'utf-8',
     );
     expect(raw).not.toContain('judge call');

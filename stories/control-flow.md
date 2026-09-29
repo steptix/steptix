@@ -1,7 +1,7 @@
 # Control flow: if, else and loops on numbered lines, with sections as bodies
 
 **Built 2026-09-09.** The grammar, the expander, the planner, all three run
-loops, the judge, the report, TestBench and the Electron runner, with the docs
+loops, the judge, the report, Steptix and the Electron runner, with the docs
 and a live-proven fixture. §"What the build showed" at the end records where
 the build departed from this spec and what the first live run found.
 
@@ -58,7 +58,7 @@ more than one step is a section, as it already is for reuse.
 **You write:** `If the Cash checkbox is ticked, then Pay with cash` and, on
 the next line, `Otherwise, Pay by card`.
 **You get:** the page settles, the model is asked once whether the Cash
-checkbox is ticked, and exactly one of the two sections runs. In TestBench the
+checkbox is ticked, and exactly one of the two sections runs. In Steptix the
 taken line and its section paint ✓; the other line and its section paint as
 skipped, so you can read which way it went off the editor. The report shows
 the same: the guard row carries the model's reasoning, the untaken section's
@@ -148,7 +148,7 @@ becomes its continuation and the watch swallows it.
 runner sees `steps[]` with parallel `origins[]` (input index, frame id) and a
 `frames{}` table ([src/skills/expander.ts](../src/skills/expander.ts)). Every
 downstream consumer assumes that list is fixed before the run starts: line
-anchors for pause and resume (`startAt` / `endAt`), breakpoints, TestBench
+anchors for pause and resume (`startAt` / `endAt`), breakpoints, Steptix
 painting, the report, code-behind occurrence indexing (`spliceEntry` places
 an entry at `spans[occurrence]`), the cache-bundle hash over `fullSteps`.
 A section called once expands once; a section with a table expands once per
@@ -343,7 +343,7 @@ label, index, count }`, where `label` is the section's name for a section
 tail and the tail's own text otherwise. Two things are new:
 
 - `iterationCount` is **unknown while a `While` or `Repeat` runs**. The frame
-  and the live marker omit it; TestBench's frame label reads `Name (3/?)`;
+  and the live marker omit it; Steptix's frame label reads `Name (3/?)`;
   the server back-fills `count` on every marker of that loop when the loop
   ends, so the rendered report reads `(3/7)`. `For each` knows its count from
   the start and reads `(3/7)` throughout.
@@ -356,7 +356,7 @@ tail and the tail's own text otherwise. Two things are new:
 
 A breakpoint on a guard line pauses before the decision. A breakpoint on a
 body line fires on every pass when the body is a section. A loop whose tail is
-a plain instruction shares the guard's own main-flow line; in TestBench a
+a plain instruction shares the guard's own main-flow line; in Steptix a
 breakpoint there is handled by the client's batch split and pauses once per
 run, while the Electron Runner UI, which pauses in-process, stops on every
 pass. F11 on a guard steps into the tail.
@@ -378,7 +378,7 @@ The bounded-run rules extend the snapping the branched group already has:
 - An `[input:]` line **between chain members** cannot happen in a file the
   parser accepts: a chain is consecutive step lines and an `[input:]` line is a
   step, so the `Otherwise` after it is refused as dangling. What can happen is
-  a client running a file the CLI would refuse — TestBench does not parse with
+  a client running a file the CLI would refuse — Steptix does not parse with
   `parseTestContent` — and a subset batch that *begins* with a dangling
   `Otherwise` would, left alone, run its tail unconditionally. So the same
   dangling-member rule is enforced three times with one wording: the parser,
@@ -592,13 +592,13 @@ right tool for "if it appears, dismiss it".
   bands already render from `loop`. The generator back-fills `count` per
   loop before rendering (a `chainId`-free key: guard index plus batch).
 - `ExpandedFrame.iterationCount` and `LoopMarker.count` become **optional**,
-  and the contract's §3.3 records why. TestBench's variables and call-stack
+  and the contract's §3.3 records why. Steptix's variables and call-stack
   labels render `?` for an absent count; nothing else in the extension reads
   it.
 - `execution.maxLoopIterations` (number, default 25) joins `ExecutionConfig`,
   `defaults.ts` and the generated JSON schema.
 
-### runner-core and TestBench
+### runner-core and Steptix
 
 - `section-index.ts`: tails are call sites (liveness clause above), with the
   existing tests extended. `step-lines.ts` is unchanged — a control line is a
@@ -606,9 +606,9 @@ right tool for "if it appears, dismiss it".
 - A pre-flight refuses a dangling chain member — an `Else if` or `Otherwise`
   whose previous step line in the same flow is not a chain member, which is
   exactly what an `[input:]` between members produces — with the parser's
-  wording, under its own TB code, beside the sections pre-flight (TB024).
+  wording, under its own TB code, beside the sections pre-flight (STX024).
 - Frame labels tolerate an absent `iterationCount`.
-- `testbench-native/package.json` patch bump, per the rule in CLAUDE.md.
+- `steptix-vscode/package.json` patch bump, per the rule in CLAUDE.md.
 
 ### Docs and fixtures
 
@@ -622,7 +622,7 @@ right tool for "if it appears, dismiss it".
   over handbook fences covers the new examples.
 - `templates/init/tests/control-flow.md` drives `fixtures/test-app` through
   one chain, one `While`, one `Repeat … until` and one `For each`, and a live
-  suite `testbench-native/tests/integration/live/control-flow.test.cjs`
+  suite `steptix-vscode/tests/integration/live/control-flow.test.cjs`
   asserts the taken/skipped pattern on the painted lines and the loop pass
   count. If the fixture app has no page that supports a bounded loop, it gains
   one small page for it, as [PR #117](https://github.com/pkent/ai-ui-automation/pull/117)
@@ -694,7 +694,7 @@ right tool for "if it appears, dismiss it".
     rest, the way rows record row 1, is its own story. (The draft of this
     decision said the opposite; §"What the build showed" says why.) That
     story is [codebehind-loops-and-conditions.md](codebehind-loops-and-conditions.md):
-    neither Run & Compile nor `aiui compile` refuses a loop any more — a body
+    neither Run & Compile nor `steptix compile` refuses a loop any more — a body
     line is one entry, generated from the first pass that ran it and proven on
     every pass by the boxed replay — and a guard whose condition the model
     decides compiles to a `condition` entry.
@@ -744,7 +744,7 @@ right tool for "if it appears, dismiss it".
   tails are non-call steps with the right `nameStart`; a step that IS a
   section name resolves as a call before the control split (rung 2); the
   dangling-member pre-flight.
-- `testbench-native/tests/*` — frame label with absent count.
+- `steptix-vscode/tests/*` — frame label with absent count.
 - Live: `control-flow.test.cjs` against the fixture app, run at
   `--shards=1` first, then in the pool.
 
@@ -752,7 +752,7 @@ right tool for "if it appears, dismiss it".
 
 1. Merge; from the **main** checkout pull, `npm run build`, restart `:3100`
    (the judge and the planner are server code), package and install the
-   bumped `testbench-native`, reload windows.
+   bumped `steptix-vscode`, reload windows.
 2. The handbook and guide changes ship with the same PR.
 3. Nothing to migrate: no existing line claims a new form except a `While …`
    prose opener or a `Repeat … until …` prose step, and both are loops in
@@ -778,7 +778,7 @@ right tool for "if it appears, dismiss it".
 
 ## Open questions
 
-- Should a skipped guard hover, in TestBench, say *which* condition won
+- Should a skipped guard hover, in Steptix, say *which* condition won
   instead (e.g. "skipped — `Else if the Card checkbox is ticked` held")? The
   data is in the guard's result; the hover plumbing is the failure-hover path.
 - The judge prompt's wording for "first that holds" against a model that
@@ -815,7 +815,7 @@ Since superseded on the Run & Compile path by
 [codebehind-loops-and-conditions.md](codebehind-loops-and-conditions.md): the
 slot problem is solved by generating each body line once, from the first pass
 to reach the compiler (the live compiler's per-entry dedupe), and the summary
-counts expanded steps rather than passes. The boxed `aiui compile` followed
+counts expanded steps rather than passes. The boxed `steptix compile` followed
 in that story's boxed half: it keeps every pass of the Record, generates from
 the first, proves every pass on replay, and checks the replay's condition
 decisions against the recording's.
@@ -833,7 +833,7 @@ decisions against the recording's.
   with one chain and nothing else shipped `If …, then …` to the model as prose.
   The expansion gate now also fires on a control line, on both the CLI and the
   server.
-- **TestBench had never painted a skipped step.** The server has emitted
+- **Steptix had never painted a skipped step.** The server has emitted
   `step:pass` with `output: 'skipped'` for an unmatched watch member since the
   lookahead story; six client surfaces mapped it to ✓ (the run gutter, the
   compile gutter, the run log, the compile log, the panel's own run log, the
@@ -890,7 +890,7 @@ reviewer's own reproductions.
   `Repeat` until the loop ends. A loop nested in another loop's body clones
   against the current pass's own alias map — the first cut asked the whole
   stack and gave the inner loop no frames of its own.
-- TestBench does not render `Name (3/?)` anywhere; runtime loops pass through
+- Steptix does not render `Name (3/?)` anywhere; runtime loops pass through
   the row machinery untouched (`startSectionIteration` returns early for a
   section with no table). Only the rendered report shows the band.
 - The Electron runner is a real third copy and got the hooks its pointer can
@@ -906,7 +906,7 @@ reviewer's own reproductions.
   validated at parse time, and an unevaluated guard plus an unconditional tail
   is worse than one prose step.
 - The chain rule is enforced three times with one wording — parser, expander,
-  runner-core pre-flight (TB032) — including its closed half (`Else if` or a
+  runner-core pre-flight (STX032) — including its closed half (`Else if` or a
   second `Otherwise` after an `Otherwise`), which the first cut enforced in the
   parser only.
 
@@ -1079,7 +1079,7 @@ The shape that really does not clamp is a return in the MAIN FLOW, outside every
 control record — `inner` is null, `enclosed` is false, and the planner must not
 be consulted, which is the third bullet under **Where a return lands**.
 
-**TestBench paints one skip.** A step that never ran reaches the client two
+**Steptix paints one skip.** A step that never ran reaches the client two
 ways — `step:skip`, and `step:pass` carrying `output: 'skipped'` — and both
 stay, because the extension is an HTTP client of whichever server the workspace
 points at and dropping the older convention would repaint the untaken branch

@@ -363,7 +363,7 @@ describe('test-runner runnerControl handling', () => {
 //
 // The server path (session-manager.ts) already auto-surfaces a read/count
 // action's `as` capture into both the MCP response and the HTML report.
-// This mirrors that fix for `aiui run`, whose step loop is otherwise
+// This mirrors that fix for `steptix run`, whose step loop is otherwise
 // unrelated to session-manager.ts (shares only the `executeStep` executor).
 
 describe('test-runner — captured `as` values reach the report', () => {
@@ -674,7 +674,7 @@ describe('test-runner — the recording', () => {
     const fsp = await import('node:fs/promises');
     const pathMod = await import('node:path');
     const { recordingDirFor } = await import('../src/codebehind/recording.js');
-    const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), 'aiui-recording-'));
+    const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), 'steptix-recording-'));
     const testPath = pathMod.join(dir, 'fake-test.md');
     const instance = makeInstance(['step one', 'step two']);
     instance.test = { ...instance.test, filePath: testPath };
@@ -724,11 +724,11 @@ describe('test-runner — a strict run whose code-behind did not load', () => {
     const fsp = await import('node:fs/promises');
     const pathMod = await import('node:path');
     const { parseTestFile } = await import('../src/parser/markdown.js');
-    const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), 'aiui-strict-'));
+    const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), 'steptix-strict-'));
     const md = pathMod.join(dir, 'booking.md');
     await fsp.writeFile(md, ['# Booking', '', '## Steps', '1. step one', '2. step two'].join('\n'));
     const stepsFile = pathMod.join(dir, 'booking.steps.ts');
-    await fsp.writeFile(stepsFile, `import { defineSteps } from 'ai-ui-automation/codebehind';
+    await fsp.writeFile(stepsFile, `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([{ source: 'step one', async run() { const x = ; } }]);
 `);
     const parsed = await parseTestFile(md);
@@ -779,7 +779,7 @@ describe('test-runner — the env/data context reaches the step', () => {
     const fsp = await import('node:fs/promises');
     const pathMod = await import('node:path');
     const { parseTestFile } = await import('../src/parser/markdown.js');
-    const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), 'aiui-envdata-'));
+    const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), 'steptix-envdata-'));
     const md = pathMod.join(dir, 'login.md');
     await fsp.writeFile(md, ['# Login', '', '## Steps', '1. Navigate to ${data.url}', '2. Click Sign in'].join('\n'));
     executeStepMock.mockImplementation(async (index: number, _total: number, instruction: string) =>
@@ -872,7 +872,7 @@ describe('test-runner — secrets stay out of what the run writes (stories/secre
         'Enter the username octocat',
         'Enter the password ***',
       ]);
-      // The report — what `aiui run` renders, summarises and appends to the
+      // The report — what `steptix run` renders, summarises and appends to the
       // test file — carries it nowhere but the screenshot bytes.
       expect(report.status).toBe('passed');
       expect(report.parameters).toEqual({ username: 'octocat', password: '***' });

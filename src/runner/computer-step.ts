@@ -112,7 +112,7 @@ export type ComputerStepOptions = StepExecutorOptions & {
 
 /** §5.1 item 1, in the spec's own words. */
 export const COMPUTER_DISABLED_MESSAGE =
-  'computer mode is disabled for this project; set `desktop.enabled: true` in aiui.config.json';
+  'computer mode is disabled for this project; set `desktop.enabled: true` in steptix.config.json';
 
 /**
  * The state a run keeps about which surface it is on (§4.5).
@@ -133,11 +133,11 @@ export interface SurfaceState {
    * surface.
    *
    * The surface outlives a run; the lock does not. A session's surface stays
-   * `computer` across a batch boundary (TestBench posts one batch at a time,
+   * `computer` across a batch boundary (Steptix posts one batch at a time,
    * MCP keeps a session open between calls), but the lock is released at the
    * end of every run and taken again, lazily, at the next step that reads or
    * drives the screen. Measured: an MCP `run_test_file` that ended in computer
-   * mode left `aiui-computer.lock` held by an idle session, which would have
+   * mode left `steptix-computer.lock` held by an idle session, which would have
    * refused every other computer-mode run on the machine until something
    * closed it.
    *
@@ -181,7 +181,7 @@ export interface EnterComputerModeInput {
   lockId: string;
   /**
    * THIS project's `desktop` section — the one loaded from the test file's
-   * `aiui.config.json`, not the server's startup config.
+   * `steptix.config.json`, not the server's startup config.
    *
    * The section alone rather than the whole `Config`, and that narrowing is
    * the fix for a measured defect: on the server path the `Config` an
@@ -641,7 +641,7 @@ export function undispatchedDirectiveError(
     return context.toolsLoaded
       ? `${call} was not run: the runner did not dispatch it as a tool call. ${neverActedOut('tool')}`
       : `${call} was not run: this request carried no tools directory (toolsDir), so no tool ` +
-          `is loaded — declare tests.toolsDir in the project's aiui.config.json so the client ` +
+          `is loaded — declare tests.toolsDir in the project's steptix.config.json so the client ` +
           `sends one. ${neverActedOut('tool')}`;
   }
 
@@ -659,7 +659,7 @@ export function undispatchedDirectiveError(
           `this line reached the step loop unexpanded. ${neverActedOut('skill')}`
       : `${call} was not run: this request carried no skills directory (skillsDir), so the ` +
           `skill was never expanded into its steps — declare tests.skillsDir in the project's ` +
-          `aiui.config.json so the client sends one. ${neverActedOut('skill')}`;
+          `steptix.config.json so the client sends one. ${neverActedOut('skill')}`;
   }
 
   // §4.2 is enforced where a FILE is parsed and where MCP assembles steps; a

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { logger, setLogStream, setLogLevel, getLogLevel } from '../src/utils/logger.js';
 
 // ---------------------------------------------------------------------------
-// `aiui mcp` speaks JSON-RPC over stdout. One stray log line corrupts the
+// `steptix mcp` speaks JSON-RPC over stdout. One stray log line corrupts the
 // frame and the host drops the connection — a failure that shows up as "the
 // MCP server doesn't work" with nothing in it pointing at logging.
 //

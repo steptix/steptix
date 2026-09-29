@@ -300,7 +300,7 @@ the unlock dialog (SPEC 29 §10: never inside a web page, never on the phone).
   Your browser extension is separate."* — the confusion that started this.
 - Timeout **120s**, the unlock dialog's figure: no answer = cancelled.
 - Always-on-top and revealed with the existing `DIALOG_PREAMBLE` /
-  `AiuiWin.Reveal` (the `SW_HIDE` trap is already solved there; the new dialog
+  `SteptixWin.Reveal` (the `SW_HIDE` trap is already solved there; the new dialog
   reuses it, not a copy of it).
 
 **The code dialog** appears only if `bw` asks (§4.2): one plain field,
@@ -601,7 +601,7 @@ POST after 3s returned `200` after 3025ms.
 PowerShell 5.1 writes redirected stdout in the console code page, which on a
 default install is not UTF-8 (fact 9). So:
 
-- `DIALOG_PREAMBLE` gains one function, `Write-AiuiFields`, which writes each
+- `DIALOG_PREAMBLE` gains one function, `Write-SteptixFields`, which writes each
   value as **Base64 of its UTF-8 bytes**, one per line. Base64 is ASCII and
   survives any code page; a value can contain anything, including newlines.
 - It writes with `[Console]::Out.Write`, as the unlock script does today, and
@@ -817,14 +817,14 @@ In a new `tests/credential-dialog-fields.test.ts`:
 
 38. `decodeDialogFields` round-trips `pässwörd-é-€-日本`, an empty value, and a
     value containing a newline.
-39. **Windows only (skipped elsewhere):** the `Write-AiuiFields` function from
+39. **Windows only (skipped elsewhere):** the `Write-SteptixFields` function from
     `DIALOG_PREAMBLE`, run through `powershell.exe` with
     `[Console]::OutputEncoding` set to 437 as fact 9's probe did, emits a value
     that `decodeDialogFields` returns intact — with no window shown (the
     function runs alone, not a dialog).
-40. The sign-in, code and unlock scripts each call `Write-AiuiFields`; none
+40. The sign-in, code and unlock scripts each call `Write-SteptixFields`; none
     writes a field with `[Console]::Out.Write` directly or through
-    `Write-Output`; and `Write-AiuiFields` itself writes with
+    `Write-Output`; and `Write-SteptixFields` itself writes with
     `[Console]::Out.Write`.
 
 ### 10.3 Real processes (opt-in: Windows, and `bw` where named)

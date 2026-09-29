@@ -1,9 +1,9 @@
 # 014 — AI clarification prompt hangs the run under the Sessions API server
 
 **Status:** partially resolved — option A (fail-fast safety valve) shipped; option B (first-class clarification over SSE) still open
-**Update (2026-05-20):** Option A landed. `StepExecutorOptions.nonInteractive` ([src/runner/step-executor.ts](../src/runner/step-executor.ts)) makes a clarification request fail the step fast — with the AI's question as the error — instead of calling `readline`; the session manager passes `nonInteractive: true` ([src/server/session-manager.ts](../src/server/session-manager.ts)). No run can hang anymore. Regression test: [tests/clarification-noninteractive.test.ts](../tests/clarification-noninteractive.test.ts). **Option B below is the remaining work** — making the question answerable in the TestBench UI rather than only surfaced as a failure.
+**Update (2026-05-20):** Option A landed. `StepExecutorOptions.nonInteractive` ([src/runner/step-executor.ts](../src/runner/step-executor.ts)) makes a clarification request fail the step fast — with the AI's question as the error — instead of calling `readline`; the session manager passes `nonInteractive: true` ([src/server/session-manager.ts](../src/server/session-manager.ts)). No run can hang anymore. Regression test: [tests/clarification-noninteractive.test.ts](../tests/clarification-noninteractive.test.ts). **Option B below is the remaining work** — making the question answerable in the Steptix UI rather than only surfaced as a failure.
 **Area:** [src/runner/step-executor.ts:593-604](../src/runner/step-executor.ts#L593-L604) — `prompt` action handling; [src/runner/step-executor.ts:2020-2090](../src/runner/step-executor.ts#L2020-L2090) — `promptUserWithReplEscape` / `promptUser` (Node `readline` on `process.stdin`)
-**Related:** [src/server/session-manager.ts](../src/server/session-manager.ts) — `executeStepsInternal` calls `executeStep` with no clarification handler; [testbench-native/src/extension/run-controller.ts](../testbench-native/src/extension/run-controller.ts) — `requestPrompt` (the existing `[input:]` / `[interactive]` prompt UI); endpoint precedents `run-control` + `tool-debugger-ack`
+**Related:** [src/server/session-manager.ts](../src/server/session-manager.ts) — `executeStepsInternal` calls `executeStep` with no clarification handler; [steptix-vscode/src/extension/run-controller.ts](../steptix-vscode/src/extension/run-controller.ts) — `requestPrompt` (the existing `[input:]` / `[interactive]` prompt UI); endpoint precedents `run-control` + `tool-debugger-ack`
 **Opened:** 2026-05-20
 
 ## Summary
@@ -24,14 +24,14 @@ const rl = readline.createInterface({ input, output });   // process.stdin / std
 const raw = await reader.question('  Your answer: ');
 ```
 
-That works for the **CLI** (`aiui run`), where `executeStep` runs in the
+That works for the **CLI** (`steptix run`), where `executeStep` runs in the
 same terminal the user is sitting in. But under the **Sessions API
-server** (the path TestBench-native drives), `executeStep` runs inside
+server** (the path Steptix drives), `executeStep` runs inside
 the long-lived server process. There is no interactive console for the
 end user, so:
 
 1. The question text is written to the **server's** stdout (the
-   `aiui serve` / `npm run dev` console) — invisible to the TestBench
+   `steptix serve` / `npm run dev` console) — invisible to the Steptix
    user.
 2. `rl.question(...)` blocks on the server's stdin, which nobody is
    typing into → the SSE stream stalls → **the test hangs** with no
@@ -40,7 +40,7 @@ end user, so:
 There is no SSE event for the clarification and no endpoint to deliver
 an answer, so the client can neither show the prompt nor unblock it.
 
-## Why TestBench can't see it today
+## Why Steptix can't see it today
 
 Compare with `[input: ...]` / `[interactive]`, which *do* prompt cleanly
 in the UI: those are classified **client-side** in `run-controller.ts`,
@@ -80,7 +80,7 @@ Mirror the `tool-debugger-ack` / `run-control` pattern:
   or adapted to control messages.
 
 This makes AI questions a real, answerable UI affordance — the
-interactive clarification flow the CLI has, but in TestBench.
+interactive clarification flow the CLI has, but in Steptix.
 
 ### C. Hybrid (recommended)
 Ship **A** immediately so no run can hang, and schedule **B** as the

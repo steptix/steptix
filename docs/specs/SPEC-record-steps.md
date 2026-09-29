@@ -2,13 +2,13 @@
 
 **Status:** spec, for build. Medium-large.
 **Opened:** 2026-09-26
-**Change record:** [stories/testbench-record-steps.md](../../stories/testbench-record-steps.md)
+**Change record:** [stories/steptix-record-steps.md](../../stories/steptix-record-steps.md)
 — the decisions, and what each half of the build decided. Where the two
 disagree after the build, this spec is updated to match what shipped.
 
 ## 1. What this is
 
-An author presses **Record** in TestBench, uses the application in the test's
+An author presses **Record** in Steptix, uses the application in the test's
 own browser the way a user would, and presses **Stop**. The framework watches
 what they did, and a model writes it down as numbered natural-language steps
 in the test file — the same steps the author would have written by hand,
@@ -25,7 +25,7 @@ following [the handbook](../test-writing-handbook.md).
 | Presses **Add check**, then clicks the payment panel | `Verify the Payment method panel says "Paid in cash"` — the click is not performed |
 | Clicks a trash-can icon with no text | `Click the delete (trash can) icon on the "Everyday" account row` — the model saw a crop of the screen |
 
-It lives in TestBench only, writes Markdown only (no code-behind), and exists
+It lives in Steptix only, writes Markdown only (no code-behind), and exists
 to make authoring faster for people who already know the format.
 
 ## 2. Why
@@ -43,22 +43,22 @@ per line, values as parameters.
 
 | Command | Where | Does |
 | --- | --- | --- |
-| **TestBench: Record Steps** | editor title bar, panel, palette | Records into the active test at the cursor (§7.1) |
-| **TestBench: Record New Test** | panel, palette | Asks for a name, creates the file (§7.2), records into it |
-| **TestBench: Add Check** | while recording | Arms pick mode: the next click becomes a check (§6) |
-| **TestBench: Stop Recording** | while recording | Ends the recording and writes the steps |
-| **TestBench: Cancel Recording** | while recording | Ends it and writes nothing |
-| **TestBench: Pause Recording** / **Resume Recording** | while recording | Nothing is recorded, and no draft call starts, until Resume (stories/testbench-record-toolbar.md §"Pause and resume, in detail") |
-| **TestBench: Add Step to Recording** | while recording, palette, panel | Asks for a step and adds it exactly as typed; several lines are several steps (§7.6) |
+| **Steptix: Record Steps** | editor title bar, panel, palette | Records into the active test at the cursor (§7.1) |
+| **Steptix: Record New Test** | panel, palette | Asks for a name, creates the file (§7.2), records into it |
+| **Steptix: Add Check** | while recording | Arms pick mode: the next click becomes a check (§6) |
+| **Steptix: Stop Recording** | while recording | Ends the recording and writes the steps |
+| **Steptix: Cancel Recording** | while recording | Ends it and writes nothing |
+| **Steptix: Pause Recording** / **Resume Recording** | while recording | Nothing is recorded, and no draft call starts, until Resume (stories/steptix-record-toolbar.md §"Pause and resume, in detail") |
+| **Steptix: Add Step to Recording** | while recording, palette, panel | Asks for a step and adds it exactly as typed; several lines are several steps (§7.6) |
 
 While recording, the editor title bar shows Stop, Add check and Pause (Resume
 while paused) in place of Run and Record, and the context key
-`testbench-native.recording` is set; `testbench-native.recordingPaused` is set
+`steptix.recording` is set; `steptix.recordingPaused` is set
 while paused.
 
 The same controls — Pause, Add check, Add step, Undo, Stop, Cancel — are in a
-toolbar inside the recorded page (stories/testbench-record-toolbar.md), the
-server's half. The setting `testbench-native.recordSteps.browserToolbar`
+toolbar inside the recorded page (stories/steptix-record-toolbar.md), the
+server's half. The setting `steptix.recordSteps.browserToolbar`
 (default on) turns it off; where the author docks it, and whether it is
 minimised, is remembered in the workspace's state between recordings and sent
 in the next start body (§9.1).
@@ -89,7 +89,7 @@ in the next start body (§9.1).
   Restore) strikes or restores the row (`record:dropped`).
 - **Steps so far** marks each of the author's steps, and each they reworded
   (`record:draft.edited`), with a `yours` tag — and no lock: nothing is locked
-  against the author (stories/testbench-record-edit-steps.md, decision 1).
+  against the author (stories/steptix-record-edit-steps.md, decision 1).
   Each step has a **✕** that deletes it by its id (`drop`, §9.3) — a step the
   model wrote with the recorded actions behind it (§8) — and the file's line
   for it goes at once. A deleted step stays in the list, struck through where
@@ -109,7 +109,7 @@ in the next start body (§9.1).
 
 The status bar reads `● Recording — N actions`, and `❚❚ Recording paused — N
 actions` while paused. A Cancel pressed in the browser ends the recording as
-TestBench's own Cancel does, quietly: the drafts come out of the file and the
+Steptix's own Cancel does, quietly: the drafts come out of the file and the
 log says "Recording cancelled in the browser — nothing was written." — no
 notification, no error.
 
@@ -138,7 +138,7 @@ A Run cannot start while a recording holds the session.
 
 ### 3.4 The toolbar in the browser
 
-The server puts a toolbar into the recorded page (stories/testbench-record-toolbar.md,
+The server puts a toolbar into the recorded page (stories/steptix-record-toolbar.md,
 which has the design and every state): a dark bar docked bottom centre with
 the recording's status (`● REC 02:14 · 9 actions`), **Pause**, **Add check**,
 **Add step**, **Undo**, **Stop**, **Cancel** and a minimise button, and a
@@ -180,7 +180,7 @@ take the shortcuts.
 - **Steps so far**, the drawer the status row opens, lists the draft
   numbered, `yours` on the author's own steps and on the ones they reworded,
   and no lock: nothing is locked against the author
-  (stories/testbench-record-edit-steps.md). Clicking a step's words — or
+  (stories/steptix-record-edit-steps.md). Clicking a step's words — or
   Enter on a focused row — edits it in place: Enter saves (§8, "The author's
   edits"), Esc cancels, an empty save removes it. **✕** removes a step — one
   the model wrote with the recorded actions behind it (§8) — and the row stays
@@ -452,7 +452,7 @@ For a secret field:
 
 **Known secrets.** From the first action, the recording also knows secret
 VALUES: the session's secret-named variables, the file's secret-named literal
-parameters, and the `.env` the request brought (TestBench sends the test's) —
+parameters, and the `.env` the request brought (Steptix sends the test's) —
 every secret-named key's value, and what each `$VAR` parameter with a
 secret-sounding name (or naming a secret-sounding variable) resolves to, the
 request's `.env` first and the server's environment after. A value from the
@@ -647,7 +647,7 @@ what is followed.
 A result is never lost. One that cannot be written — `## Steps` deleted
 before anything was written, the file closed or deleted while recording (a
 rename is followed, §7), the edit rejected three times, or the drafts not
-found and the anchor's flow gone (§7.4) — is written to the TestBench
+found and the anchor's flow gone (§7.4) — is written to the Steptix
 output, and the error offers **Copy steps**; any draft still found in the
 file is taken out. A result with no steps (nothing recorded, or every action
 dropped) is said as the server's note, as information rather than an error.
@@ -655,16 +655,16 @@ dropped) is said as the server's note, as information rather than an error.
 ### 7.2 A new test
 
 **Record New Test** asks for a name, and creates `<tests dir>/<name>.md` —
-the project's `tests.dir`, or `./tests` beside its `aiui.config.json` when
+the project's `tests.dir`, or `./tests` beside its `steptix.config.json` when
 it declares none (the server's default) — refusing if it exists, and
 refusing, before anything is created, a tests folder outside the workspace.
-The project is the nearest `aiui.config.json` above the active editor,
+The project is the nearest `steptix.config.json` above the active editor,
 within the workspace folder. When that finds none (no editor open, or one
 outside any project) the workspace folder is searched a few levels down,
 past `node_modules`, `dist` and dot-folders: one config found is the
 project; several, and the author is asked which — before the name, so the
 name prompt can say where the file goes. None at all: the fixed start of
-`testbench-native.testsGlob`, else the workspace folder. The file:
+`steptix.testsGlob`, else the workspace folder. The file:
 
 ```markdown
 # <Name, in title case>
@@ -757,7 +757,7 @@ after converting the recording's text to the file's.
 
 With the author editing recorded lines (§7.6), the states an undo can bring
 back are more than the drafts', and the search knows them all
-(stories/testbench-record-edit-steps.md):
+(stories/steptix-record-edit-steps.md):
 
 - **Undo, measured.** In VS Code 1.95 an undo reports the exact inverse of the
   edits it undoes — the author's typing, a line deleted, a write of two ranges
@@ -832,7 +832,7 @@ record is forgotten either way.
 ### 7.6 Steps the author writes
 
 The author can write steps into the recording themselves
-(stories/testbench-record-toolbar.md §"Steps you write"). Each is **locked**
+(stories/steptix-record-toolbar.md §"Steps you write"). Each is **locked**
 with everything recorded before it (§8), goes in exactly as written — a
 leading number or list marker is the recording's to give — and is a
 `✎ Your step` row in the panel (§3.2).
@@ -850,7 +850,7 @@ leading number or list marker is the recording's to give — and is a
   is a step, or becomes one when the recording numbers it (text or a list
   item under `## Steps`), counts: a heading, a data table, a fence, an HTML
   comment — or anything below a heading that ends `## Steps` — is the
-  author's text and never sent. Then TestBench sends `add-step` with
+  author's text and never sent. Then Steptix sends `add-step` with
   `source: 'editor'`, `afterStep` the index of the step it follows in the
   draft that was in the file when the line counted (absent when nothing the
   recording wrote is below it) and `revision` that draft's (§9.3). Lines that
@@ -859,7 +859,7 @@ leading number or list marker is the recording's to give — and is a
   the author's between those same two steps was sent and no draft in the file
   holds it yet: both would name the same step, and the server would put them
   in whichever order it takes them. It goes after the next draft write, naming
-  its neighbour. **Stop** — TestBench's, or the browser's as `record:writing`
+  its neighbour. **Stop** — Steptix's, or the browser's as `record:writing`
   arrives — first sends every line that counts, the cursor's included, waiting
   for nothing, after the add-steps already on their way. A call that fails, or
   that the server answers `ignored`, leaves the line the author's text in the
@@ -959,9 +959,9 @@ theirs for good, as a later step's is.
   around the line as it would have been over the draft — not with the line at
   the top of the block, or at its end.
 
-**Editing and deleting recorded lines** (stories/testbench-record-edit-steps.md
+**Editing and deleting recorded lines** (stories/steptix-record-edit-steps.md
 §"In the file"). With a server whose drafts name their steps
-(`record:draft.ids`), TestBench keys every recorded line to its step's id, and
+(`record:draft.ids`), Steptix keys every recorded line to its step's id, and
 no step is locked against the author:
 
 - **A recorded line changed** is **being edited** from the first keystroke
@@ -1139,7 +1139,7 @@ to `steps`: for each, the numbers (`n`, as the recording in the prompt gives
 them — an action's place among the ones still in) of the actions it
 describes, typing and choices included. `notes` are shown to the author.
 
-**Which actions a step stands for** (stories/testbench-record-edit-steps.md).
+**Which actions a step stands for** (stories/steptix-record-edit-steps.md).
 The engine checks `stepActions`: every number one this call may give out —
 its own actions, and the ones the steps it replaces stood for — each action in
 one step at most, and in the order the author acted. An answer that does not
@@ -1228,7 +1228,7 @@ for nothing else goes, one the model merged it into keeps the rest and is
 redrafted; Restore puts the named step back in the words the author last saw,
 by where its actions are.
 
-**Locks** (stories/testbench-record-toolbar.md, "Steps you write"). A step of
+**Locks** (stories/steptix-record-toolbar.md, "Steps you write"). A step of
 the author's locks everything before it. The draft is kept as STRETCHES — the
 steps between two locks and the actions they are written from — and only the
 open stretch, after the last lock, is ever drafted on the model's own
@@ -1314,8 +1314,8 @@ every route.
     cursorLine?: number;       // 1-based; mode 'cursor' only
   };
   toolbar?: {                  // the browser toolbar; absent = { enabled: true, dock: 'bc', minimised: false }
-    enabled: boolean;          // TestBench: the testbench-native.recordSteps.browserToolbar setting
-    dock?: 'tl' | 'tc' | 'tr' | 'bl' | 'bc' | 'br';   // TestBench: where the last record:toolbar left it
+    enabled: boolean;          // Steptix: the steptix.recordSteps.browserToolbar setting
+    dock?: 'tl' | 'tc' | 'tr' | 'bl' | 'bc' | 'br';   // Steptix: where the last record:toolbar left it
     minimised?: boolean;
   };
 }
@@ -1371,20 +1371,20 @@ every route.
   cancelledBy?: 'browser' }    // `aborted` by Cancel in the browser's toolbar: no error, ends quietly
 ```
 
-TestBench reads an absent `locked` as 0 and absent `authored` as none (a
+Steptix reads an absent `locked` as 0 and absent `authored` as none (a
 server that predates the toolbar). `record:step` comes before the draft that
 holds the step; a client that meets them the other way round still maps an
 editor step to its line by the text it sent (§7.6). `record:toolbar` is not the
-panel's: TestBench keeps it for the next start body. A Stop pressed in the
+panel's: Steptix keeps it for the next start body. A Stop pressed in the
 browser needs no frame of its own (`record:writing`, `record:result`, `done`).
 
-TestBench reads an absent `ids` as a server that predates editing: the
+Steptix reads an absent `ids` as a server that predates editing: the
 recorded lines are then written over when the author edits them, as before,
 Steps so far offers no ✕ on a step, and the log says so once ("This server
 does not name its steps, so recorded lines cannot be edited or deleted while
 recording: an edit inside them is rewritten by the next draft — edit them
 after Stop."). An absent `edited` reads as none, and a `record:dropped`
-without `actions` strikes only its own row. TestBench never counts on
+without `actions` strikes only its own row. Steptix never counts on
 `record:edited` coming before the draft that shows it, nor on the id it names
 being the one its `edit-step` named: a draft that shows the step `edited`
 with the words a line went as is that line either way (§7.6). The words a
@@ -1461,7 +1461,7 @@ empty text, or a lone number or list marker such as `3.` or `-`, is not an
 edit — send `drop`), the step's own words, or — from the
 editor — a secret the recording knows (from the panel it is written
 `{{name}}`, with `name: $NAME`, as in §7.6), anything but `cancel` after
-`stop`), which TestBench says where the author asked (an `add-step` or an
+`stop`), which Steptix says where the author asked (an `add-step` or an
 `edit-step` from the file leaves the line theirs); `404` when no recording is
 running for the session; `400` for a body that is none of these (an
 `add-step` with no `text`, an `edit-step` with no `id` or `text`, a `source`
@@ -1557,13 +1557,13 @@ more state with no `toolbar` block, which takes the bar out of the page.
 | Cursor not in a step region | "Put the cursor on a step, or the blank line after one, under ## Steps." |
 | A run is executing | "Stop the run before recording." |
 | The server is headless | "Record Steps needs a visible browser: this server runs headless (browser.headed: false)." |
-| No model configured | "Record Steps needs a model to write the steps; configure ai in aiui.config.json or .env." |
+| No model configured | "Record Steps needs a model to write the steps; configure ai in steptix.config.json or .env." |
 | The model's answer could not be read | "The steps could not be written: <reason>. Nothing was inserted." |
 | A step entered in the browser's toolbar after Stop (§3.4) | "A step typed in the browser after Stop was not added to the recording: "<text>". Add it to the test by hand." — a warning; the bar's last line says it too |
 | A step changed in the browser's drawer after Stop (§3.4) | "A change to a step made in the browser after Stop was not made: "<text>". Change the step in the test by hand." — a warning; the bar says "Your change came after Stop, so it was not made." |
 | The author edits a line being recorded, with a server whose drafts name no steps (§7) | "Lines being recorded are rewritten as the model updates them — edit them after Stop." — a warning, once per recording |
 | A server whose drafts name no steps (§9.2) | "This server does not name its steps, so recorded lines cannot be edited or deleted while recording: an edit inside them is rewritten by the next draft — edit them after Stop." — in the log, once per recording |
-| A step typed in the file that the server does not take (§7.6) | "Your step on line <n> was not added to the recording (<why>); it stays in the file as you wrote it." — in the log. By line, never quoting the step: the server refuses a line holding a secret it knows, and TestBench cannot tell which |
+| A step typed in the file that the server does not take (§7.6) | "Your step on line <n> was not added to the recording (<why>); it stays in the file as you wrote it." — in the log. By line, never quoting the step: the server refuses a line holding a secret it knows, and Steptix cannot tell which |
 | A step reworded in the file that the server does not take (§7.6) | "Your edit on line <n> was not taken by the recording (<why>); it stays in the file as you wrote it." — in the log, by line, never quoting it, for the same reason |
 | A step deleted in the file (or brought back by Ctrl+Z) that the server does not take | "A step whose line you deleted from the file was not taken out of the recording (<why>)." / "A step whose line you brought back in the file was not put back in the recording (<why>)." — in the log |
 | A step deleted or restored from the panel's Steps so far that the server does not take | "Could not delete that step (<why>)." / "Could not restore that step (<why>)." — in the log; the row shows what the recording has |
@@ -1574,13 +1574,13 @@ more state with no `toolbar` block, which takes the bar out of the page.
 | The file for Record New Test exists | "<path> already exists." |
 | Record New Test's tests folder is outside the workspace | "The project's tests folder (<path>) is outside this workspace, so Record New Test cannot create a test there. …" |
 | The session was closed under the recording (another window's Run, Close Session, the idle reaper) | "The session was closed while recording." — a warning, nothing inserted |
-| The result could not be inserted | "Record Steps: the recorded steps were not inserted — <reason>. They are in the TestBench output." with **Copy steps** |
+| The result could not be inserted | "Record Steps: the recorded steps were not inserted — <reason>. They are in the Steptix output." with **Copy steps** |
 
 ## 11. Limits
 
 - One straight path: loops, decisions and waits are not inferred.
 - The actions of §4's table only.
-- TestBench only; no MCP or CLI recording.
+- Steptix only; no MCP or CLI recording.
 - Markdown only; compile the recorded test afterwards for code-behind.
 - The Electron app is not covered.
 

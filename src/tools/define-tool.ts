@@ -12,7 +12,7 @@ import type {
  * Example:
  *
  * ```ts
- * import { defineTool } from 'ai-ui-automation/tools';
+ * import { defineTool } from 'steptix/tools';
  *
  * export default defineTool({
  *   name: 'fetch_otp',

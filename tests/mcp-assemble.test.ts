@@ -29,7 +29,7 @@ const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtur
 
 const BASE_ENV = {
   SERVER_URL: 'http://127.0.0.1:3100',
-  AIUI_SERVER_API_KEY: 'project-key',
+  STEPTIX_SERVER_API_KEY: 'project-key',
   BASE_URL: 'https://base.example.com',
   GREETING: 'Welcome back',
   TEST_PASSWORD: 'hunter2',
@@ -44,14 +44,14 @@ function writeEnvFile(file: string, vars: Record<string, string>): void {
 
 /** A project with the fixture tests copied into `<root>/tests`. */
 function makeProject(config: Record<string, unknown>, dirs: string[] = []): string {
-  const dir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'aiui-mcp-asm-')));
+  const dir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'steptix-mcp-asm-')));
   created.push(dir);
-  writeFileSync(path.join(dir, 'aiui.config.json'), JSON.stringify(config, null, 2));
+  writeFileSync(path.join(dir, 'steptix.config.json'), JSON.stringify(config, null, 2));
   writeEnvFile(path.join(dir, '.env'), BASE_ENV);
   writeEnvFile(path.join(dir, '.env.uat'), { BASE_URL: 'https://uat.example.com' });
   for (const sub of dirs) mkdirSync(path.join(dir, sub), { recursive: true });
   cpSync(FIXTURES, path.join(dir, 'tests'), { recursive: true });
-  process.env['AIUI_MCP_ROOTS'] = dir;
+  process.env['STEPTIX_MCP_ROOTS'] = dir;
   return dir;
 }
 
@@ -81,7 +81,7 @@ const originalEnv = { ...process.env };
 
 beforeEach(() => {
   delete process.env['SERVER_URL'];
-  delete process.env['AIUI_SERVER_API_KEY'];
+  delete process.env['STEPTIX_SERVER_API_KEY'];
   root = makeProject(
     { tests: { skillsDir: './skills', toolsDir: './tools/src' } },
     ['skills', 'tools/src', 'data'],
@@ -166,7 +166,7 @@ describe('assembleTestFile — goldens', () => {
    * `rawSteps` on the wire, `steps[i]` IS the match side and the code-behind
    * binding's `source`. Sending the marked reading bound a looped body's
    * entries to text that no other producer writes — every iteration ran under
-   * AI and the run warned that the entry matched no step — while TestBench,
+   * AI and the run warned that the entry matched no step — while Steptix,
    * whose `extractSections` sends the raw line, bound them fine.
    */
   it('sends the raw body line as `steps`, byte-identical to the CLI parser', async () => {
@@ -427,7 +427,7 @@ describe('assembleSteps', () => {
       envName: 'uat',
     });
 
-    expect(run.request.testFilePath).toBe(path.join(root, '.aiui-mcp-steps.md'));
+    expect(run.request.testFilePath).toBe(path.join(root, '.steptix-mcp-steps.md'));
     expect(existsSync(run.request.testFilePath!)).toBe(false);
     expect(run.request.sourceLines).toEqual([1, 2, 3]);
     expect(run.request.sections).toBeUndefined();

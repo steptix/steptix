@@ -3,7 +3,7 @@
  *
  * Every other string a folded run carries is text the SERVER masked on its
  * way out. A `capture` event is the exception, and deliberately so: it exists
- * so TestBench's Variables panel can hold the real value and reveal it on
+ * so Steptix's Variables panel can hold the real value and reveal it on
  * request, so the server sends it raw and each client decides what to show.
  * The MCP client made no such decision — `foldRun`'s `captures{}` went into
  * `run_test_file`, `run_steps` and `run_errand`'s results verbatim

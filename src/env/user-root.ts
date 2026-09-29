@@ -1,5 +1,5 @@
 /**
- * The user root's `.env` — the machine-level home of `AIUI_SERVER_API_KEY`
+ * The user root's `.env` — the machine-level home of `STEPTIX_SERVER_API_KEY`
  * (stories/machine-key.md).
  *
  * The key is a shared secret between local processes, not user
@@ -9,8 +9,8 @@
  * as good as a typed one — and why this module may *create* the key when
  * nobody has one.
  *
- * Location: `%LOCALAPPDATA%\aiui\.env` on Windows, `$XDG_CONFIG_HOME/aiui/`
- * or `~/.aiui/` elsewhere. One path per machine on purpose — a framework
+ * Location: `%LOCALAPPDATA%\steptix\.env` on Windows, `$XDG_CONFIG_HOME/steptix/`
+ * or `~/.steptix/` elsewhere. One path per machine on purpose — a framework
  * *checkout* is not unique (worktrees each carry a copied `.env`, an npm
  * install has no checkout at all), so the checkout can never be the key's
  * address.
@@ -25,7 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { parseEnvFile } from './loader.js';
 
-export const MACHINE_KEY_VAR = 'AIUI_SERVER_API_KEY';
+export const MACHINE_KEY_VAR = 'STEPTIX_SERVER_API_KEY';
 
 /** Injection seam for tests — the path derives entirely from these. */
 export interface UserRootDeps {
@@ -34,7 +34,7 @@ export interface UserRootDeps {
   homedir?: () => string;
 }
 
-/** `%LOCALAPPDATA%\aiui` / `$XDG_CONFIG_HOME/aiui` / `~/.aiui`. */
+/** `%LOCALAPPDATA%\steptix` / `$XDG_CONFIG_HOME/steptix` / `~/.steptix`. */
 export function userRootDir(deps?: UserRootDeps): string {
   const env = deps?.env ?? process.env;
   const platform = deps?.platform ?? process.platform;
@@ -46,12 +46,12 @@ export function userRootDir(deps?: UserRootDeps): string {
       localAppData !== undefined && localAppData.trim() !== ''
         ? localAppData
         : path.join(homedir(), 'AppData', 'Local');
-    return path.join(base, 'aiui');
+    return path.join(base, 'steptix');
   }
 
   const xdg = env['XDG_CONFIG_HOME'];
-  if (xdg !== undefined && xdg.trim() !== '') return path.join(xdg, 'aiui');
-  return path.join(homedir(), '.aiui');
+  if (xdg !== undefined && xdg.trim() !== '') return path.join(xdg, 'steptix');
+  return path.join(homedir(), '.steptix');
 }
 
 export function userRootEnvPath(deps?: UserRootDeps): string {
@@ -78,7 +78,7 @@ export function readUserRootEnv(deps?: UserRootDeps): Record<string, string> {
 
 /**
  * The machine key from the user root's `.env`, or null when there is none.
- * Trimmed-empty reads as absent — an `AIUI_SERVER_API_KEY=` line someone
+ * Trimmed-empty reads as absent — a `STEPTIX_SERVER_API_KEY=` line someone
  * blanked out must not become the literal empty-string key that every
  * request then fails to match.
  */
@@ -115,12 +115,12 @@ export function ensureMachineKey(deps?: UserRootDeps): {
 
   // 32 bytes of entropy; the prefix marks provenance in logs and .env files
   // without any parser anywhere caring about the shape.
-  const key = `aiui_${crypto.randomBytes(32).toString('hex')}`;
+  const key = `steptix_${crypto.randomBytes(32).toString('hex')}`;
 
   fs.mkdirSync(path.dirname(envPath), { recursive: true });
 
   const line =
-    `# Machine key for the ai-ui-automation Sessions API server.\n` +
+    `# Machine key for the Steptix Sessions API server.\n` +
     `# Generated ${new Date().toISOString()} — see stories/machine-key.md.\n` +
     `${MACHINE_KEY_VAR}=${key}\n`;
 

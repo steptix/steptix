@@ -104,7 +104,7 @@ export interface ErrandRequest {
   targetId: string;
   steps: string[];
   /**
-   * The synthetic `<root>/.aiui-errand.md` — the only thing a project root is
+   * The synthetic `<root>/.steptix-errand.md` — the only thing a project root is
    * resolved from. Without it the project layer of `effectiveSettings` would
    * silently fall back to server defaults.
    */
@@ -819,7 +819,7 @@ export class ErrandRunner {
           ? buildEnrichedInstruction(cleanedInstruction, outputVars)
           : interpolated;
 
-      // Under `aiui mcp` this line goes to stderr — the host's MCP log — so
+      // Under `steptix mcp` this line goes to stderr — the host's MCP log — so
       // it is masked like the runners' (stories/secret-redaction.md).
       logger.step(
         line,

@@ -1,4 +1,4 @@
-// A real HTTP server that implements the subset of the ai-ui-automation
+// A real HTTP server that implements the subset of the steptix
 // Sessions API (SPEC-SESSIONS-API.md) that Flick calls. Tests drive the
 // controller against this so the API client, fetch, JSON handling and
 // screenshot decoding all run for real.

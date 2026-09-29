@@ -3,7 +3,7 @@
  * (docs/specs/SPEC-use-computer.md §15.4, §15.2.)
  *
  * Computer mode's whole input is a screenshot, and one route in this repo can
- * drop it without the server finding out: TestBench's Copilot bridge, reached
+ * drop it without the server finding out: Steptix's Copilot bridge, reached
  * as `AI_MODEL=gateway/copilot/<model>` + `AI_GATEWAY_URL`, strips every image
  * on a VS Code with no image support for language models — AFTER the request
  * has left the server. The model is then asked to click by coordinates on a
@@ -19,7 +19,7 @@
  *
  * Only the bridge is asked. A direct provider, or a real gateway, answers an
  * image sent to a text-only model with an error of its own — loud rather than
- * blind — and the `aiui_bridge` field is how the bridge says it is the bridge
+ * blind — and the `steptix_bridge` field is how the bridge says it is the bridge
  * and not a corporate gateway that happens to share the URL shape.
  */
 import { gatewayRoutePrefix, isCustomGatewayUrl } from '../ai/client.js';
@@ -52,9 +52,9 @@ export type VisionRouteResult = { ok: true; note?: string } | { ok: false; error
  *  the first real request will say whatever is wrong. */
 export const VISION_ROUTE_TIMEOUT_MS = 3_000;
 
-/** §15.4's message for `aiui_bridge.images === "strip"`, verbatim. */
+/** §15.4's message for `steptix_bridge.images === "strip"`, verbatim. */
 export const BRIDGE_STRIPS_IMAGES_MESSAGE =
-  'Computer mode needs the model to see the screen, but the TestBench Copilot bridge drops ' +
+  'Computer mode needs the model to see the screen, but the Steptix Copilot bridge drops ' +
   'images on this VS Code (it has no image support for language models). Update VS Code, or ' +
   'run computer-mode steps with a model that is not routed through the bridge.';
 
@@ -107,10 +107,10 @@ async function decide(ai: VisionRouteAi, deps: VisionRouteDeps): Promise<VisionR
   }
 
   const body = answer.body;
-  if (!isRecord(body) || !isRecord(body.aiui_bridge)) {
-    return { ok: true, note: `${url} is not the TestBench Copilot bridge; not checked` };
+  if (!isRecord(body) || !isRecord(body.steptix_bridge)) {
+    return { ok: true, note: `${url} is not the Steptix Copilot bridge; not checked` };
   }
-  if (body.aiui_bridge.images === 'strip') {
+  if (body.steptix_bridge.images === 'strip') {
     return { ok: false, error: BRIDGE_STRIPS_IMAGES_MESSAGE };
   }
 
@@ -194,7 +194,7 @@ function textOnlyModelMessage(
     if (suggestions.length >= MAX_SUGGESTIONS) break;
   }
   const head =
-    `Computer mode needs the model to see the screen, but the TestBench Copilot bridge ` +
+    `Computer mode needs the model to see the screen, but the Steptix Copilot bridge ` +
     `reports that ${model} does not accept images.`;
   return suggestions.length > 0
     ? `${head} Models on the same bridge not marked text-only: ${suggestions.join(', ')}. ` +

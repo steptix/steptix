@@ -324,7 +324,7 @@ describe('expandDomSubtree — live value, real browser', () => {
     expect(expanded).toContain('value="line one line two"');
   }, 30_000);
 
-  it('keeps data-aiui-row in the whole-page snapshot, where nothing else data-* survives', async () => {
+  it('keeps data-steptix-row in the whole-page snapshot, where nothing else data-* survives', async () => {
     // The numbering `readTable` leaves on the rows it read
     // (SPEC-structured-table-reads §7.4) is the framework's own answer to
     // "row 7 of the Orders table". The snapshot's allowlist drops every other
@@ -337,34 +337,34 @@ describe('expandDomSubtree — live value, real browser', () => {
     // about the snapshot and not about the read.
     await page.setContent(
       `<body><table id="t"><tbody>`
-      + `<tr data-aiui-row="1" data-row-key="ORD-1001"><td><button>Review</button></td></tr>`
-      + `<tr data-aiui-row="2" data-row-key="ORD-1002"><td><button>Review</button></td></tr>`
+      + `<tr data-steptix-row="1" data-row-key="ORD-1001"><td><button>Review</button></td></tr>`
+      + `<tr data-steptix-row="2" data-row-key="ORD-1002"><td><button>Review</button></td></tr>`
       + `</tbody></table></body>`,
     );
 
     const snapshot = await captureDomSnapshot(page);
-    expect(snapshot).toContain('data-aiui-row="1"');
-    expect(snapshot).toContain('data-aiui-row="2"');
+    expect(snapshot).toContain('data-steptix-row="1"');
+    expect(snapshot).toContain('data-steptix-row="2"');
     // The rest of the `data-*` family is still dropped, which is what makes
     // the line above a decision rather than an accident.
     expect(snapshot).not.toContain('data-row-key');
   }, 30_000);
 
-  it('emits data-aiui-row exactly ONCE in the expand walk', async () => {
+  it('emits data-steptix-row exactly ONCE in the expand walk', async () => {
     // `expand` prints the named allowlist AND then sweeps every `data-*`, so
     // an attribute in both lists comes out twice:
-    // `data-aiui-row="8" data-aiui-row="8"`. The sweep skips this one (and
+    // `data-steptix-row="8" data-steptix-row="8"`. The sweep skips this one (and
     // `data-testid`) for that reason; drop the skip and the row a read had
     // numbered prints its number twice on one line.
     await page.setContent(
       `<body><div id="wrap"><table><tbody>`
-      + `<tr data-aiui-row="8" data-state="expanded"><td><button id="b">Review</button></td></tr>`
+      + `<tr data-steptix-row="8" data-state="expanded"><td><button id="b">Review</button></td></tr>`
       + `</tbody></table></div></body>`,
     );
 
     const expanded = await expandDomSubtree(page, '#wrap');
-    expect(expanded).toContain('data-aiui-row="8"');
-    expect(expanded.match(/data-aiui-row="8"/g)).toHaveLength(1);
+    expect(expanded).toContain('data-steptix-row="8"');
+    expect(expanded.match(/data-steptix-row="8"/g)).toHaveLength(1);
     // The sweep itself is still running on this element — otherwise the
     // assertion above would pass for the wrong reason.
     expect(expanded).toContain('data-state="expanded"');

@@ -148,7 +148,7 @@ test('a hashes-only heading DOES close the body and open a new section', () => {
 
 test('a bare ### is a section heading, not prose', () => {
   // ANY_HEADING_RE demands a non-space after the hashes and cannot see this.
-  // Left as prose, TestBench would run the body below it as a main-flow step
+  // Left as prose, Steptix would run the body below it as a main-flow step
   // while the CLI refused the file — the exact divergence sections exist to
   // remove.
   const classified = classifyLines(read('classification-hashes.md'));

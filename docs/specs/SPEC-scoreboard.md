@@ -13,7 +13,7 @@ on this machine, one line per action, and read with one command.
 What you would type, and what you would see:
 
 ```
-> aiui stats
+> steptix stats
 
 Last 30 days · your runs · all sites
 
@@ -31,7 +31,7 @@ The numbers above are invented to show the shape. The command can also list
 the failures themselves, each with a link to the report that shows why:
 
 ```
-> aiui stats --failures --since 1d
+> steptix stats --failures --since 1d
 
 Last 1 day · your runs · all sites · 1 failed action, newest first
 
@@ -43,7 +43,7 @@ Last 1 day · your runs · all sites · 1 failed action, newest first
 And, after a change to the prompt's rules, whether the change helped:
 
 ```
-> aiui stats --by prompt --site www.super.test
+> steptix stats --by prompt --site www.super.test
 
 Last 30 days · your runs · sites matching www.super.test
 
@@ -117,7 +117,7 @@ missing is keeping it, and adding it up.
   what the framework knows: an action that "succeeded" on the wrong element
   counts as ok. Catching that is the separate pre-action check proposed in
   issue 062.
-- A TestBench view. Possible later; the command and its `--json` output come
+- A Steptix view. Possible later; the command and its `--json` output come
   first.
 
 ## 5. What is recorded
@@ -163,7 +163,7 @@ attempt produces a second line with `"attempt": 2`.
 | `suite` | `user`, `live`, `bench` or `compile` (§5.6) | `"user"` |
 | `source` | `ai` or `code` (§5.6) | `"ai"` |
 | `truncated` | `true` when `stepText` or `selector` was cut, or a field was dropped to keep the line under 4 KB (§6.2); absent otherwise | `true` |
-| `imported` | `true` on a line `aiui stats import` rebuilt from a report (§10); absent otherwise | `true` |
+| `imported` | `true` on a line `steptix stats import` rebuilt from a report (§10); absent otherwise | `true` |
 
 Actions with no selector (`navigate`, `wait` on a URL, `keypress`, and so on)
 are recorded too, with `selector` and `form` set to `null`. Their success rate
@@ -183,7 +183,7 @@ neither do its actions.
 | `model` | The step's first action line's model, or failing that its first model call's |
 | `status` | The step's final `StepStatus`: `passed`, `failed` or `skipped` |
 | `tolerated` | `true` for a failure the run carried on past (`otherwise continue`); absent otherwise |
-| `interrupted` | `true` for the step a Stop cut short. Its `status` is `failed`, and neither the run line's `failed` nor `aiui stats` counts it; absent otherwise |
+| `interrupted` | `true` for the step a Stop cut short. Its `status` is `failed`, and neither the run line's `failed` nor `steptix stats` counts it; absent otherwise |
 | `attempts` | Attempts made |
 | `turns` | Model turns across all attempts |
 | `firstTry` | `true` when the step passed on attempt 1 with no failed action |
@@ -195,12 +195,12 @@ neither do its actions.
 
 `firstTry` is the headline number. A step that passed only after a retry is a
 pass in the report and not a first try here, and neither is one whose model
-recovered from a failed action inside its first attempt; `aiui stats` counts
+recovered from a failed action inside its first attempt; `steptix stats` counts
 those two apart (§9).
 
 `status` can still be `skipped`: a `StepResult` can carry it, and older
 writers recorded steps that asked no model, skipped ones among them. So
-`aiui stats` counts only steps that ran to an end — `passed` or `failed`, and
+`steptix stats` counts only steps that ran to an end — `passed` or `failed`, and
 not `interrupted` — and ignores any `source: "ai"` step line with no call and
 no turn (§7).
 
@@ -243,7 +243,7 @@ WAS first, and by its error text only where that text is Playwright's
 | `outcome` | When |
 |---|---|
 | `ok` | no error |
-| `conceded` | a page `assert` carrying `"holds": false`: the model reported that the step cannot be done, and nothing evaluated it. `aiui stats` shows it as "model gave up" |
+| `conceded` | a page `assert` carrying `"holds": false`: the model reported that the step cannot be done, and nothing evaluated it. `steptix stats` shows it as "model gave up" |
 | `assert-failed` | any other `assert` that failed: its check came back false. Shown as "assertion failed" |
 | `unknown-action` | the action type is not one the framework knows (page surface only: the computer surface refuses an unknown action before anything is recorded under it) |
 | `other` | an error that did not come from the browser action layer: a framework refusal, an API's response, the author's `fail` message, a desktop action's message. Their wording is a page's, a server's, an author's or a model's, and reading it for Playwright's words would file "the server said it timed out" as a selector problem |
@@ -257,7 +257,7 @@ WAS first, and by its error text only where that text is Playwright's
 Every outcome but `ok` is a failure. The reader also counts an outcome it does
 not know as a failure, so a line from a newer framework is counted rather than
 lost; where two failures are equally common, this table's order decides which
-one `aiui stats` names.
+one `steptix stats` names.
 
 ### 5.5 Rules fingerprint
 
@@ -286,19 +286,19 @@ Which lines carry no fingerprint, and why:
 - **A line over 4 KB** may have given its fingerprint up to fit, and then
   carries `truncated` (§6.2).
 
-`aiui stats --by prompt` keeps the first two apart, as "(imported, no
+`steptix stats --by prompt` keeps the first two apart, as "(imported, no
 fingerprint)" and "(not the step prompt)", after the rules versions.
 
 ### 5.6 Suites and sources
 
 `suite` says who ran it:
 
-- **`user`**: the default. TestBench, the CLI, MCP, the Sessions API.
+- **`user`**: the default. Steptix, the CLI, MCP, the Sessions API.
 - **`live`**: the live integration suite. `runLiveTest.cjs` sets
-  `AIUI_STATS_SUITE=live` in the environment of every server it starts.
+  `STEPTIX_STATS_SUITE=live` in the environment of every server it starts.
 - **`bench`**: the simple-steps suite (§11). Its runner sets
-  `AIUI_STATS_SUITE=bench`.
-- **`compile`**: the recording run of `aiui compile` and Run & Compile.
+  `STEPTIX_STATS_SUITE=bench`.
+- **`compile`**: the recording run of `steptix compile` and Run & Compile.
 
 `source` says what drove the step: `ai` for the model, `code` for a
 code-behind replay (`StepResult.fromCodeBehind`). Code steps have no model
@@ -326,8 +326,8 @@ one flag away (§9).
 ### 6.1 Location
 
 `<user root>/stats/actions-YYYY-MM.jsonl`, one file per calendar month (UTC).
-`<user root>` is `userRootDir()` in `src/env/user-root.ts`: `%LOCALAPPDATA%\aiui`
-on Windows, `$XDG_CONFIG_HOME/aiui` or `~/.aiui` elsewhere. That folder
+`<user root>` is `userRootDir()` in `src/env/user-root.ts`: `%LOCALAPPDATA%\steptix`
+on Windows, `$XDG_CONFIG_HOME/steptix` or `~/.steptix` elsewhere. That folder
 already holds the machine-wide `.env`. It is per OS user, which is what
 decision 1 needs.
 
@@ -339,7 +339,7 @@ decision 1 needs.
   line still too big gives up `stepText`, then `site`, `model`, `fw`, `prompt`
   and `matchCount`, in that order, rather than be written oversized; one that
   does not fit even then is not written.
-- Several processes can write at once (TestBench's server, a CLI run, four
+- Several processes can write at once (Steptix's server, a CLI run, four
   live-suite servers). Appending whole short lines keeps them from
   interleaving.
 - Writing never fails a run. Errors are logged once per process at `debug`
@@ -359,15 +359,15 @@ Reading (`readStatsLines`, src/stats/store.ts):
 - A line the window needs is checked against §5 for its kind: the fields
   every line of that kind carries, with the right types, and the optional
   ones' types when present. One that fails — or does not parse, or has a `v`
-  other than 1 — is skipped and counted, and `aiui stats` says how many.
+  other than 1 — is skipped and counted, and `steptix stats` says how many.
   Suites, sources and outcomes are checked as words, not against today's
   lists: a newer framework's new outcome is still a failure worth counting.
   Fields the reader does not know are let through.
 
 ### 6.3 Retention
 
-Month files older than `AIUI_STATS_RETAIN_MONTHS` months (default 6) are
-deleted at server start and by every `aiui stats`. `pruneStatsFiles` and
+Month files older than `STEPTIX_STATS_RETAIN_MONTHS` months (default 6) are
+deleted at server start and by every `steptix stats`. `pruneStatsFiles` and
 `statsSettings` (src/stats/store.ts) do it for both.
 
 - **How old.** A file goes when even its last day is older than the window:
@@ -375,15 +375,15 @@ deleted at server start and by every `aiui stats`. `pruneStatsFiles` and
   the six before it are always kept. A value that is not a whole number of at
   least 1 is ignored.
 - **Read from the machine-wide `.env` only**, never from a process's
-  environment. The server and each `aiui stats` run in different
-  environments — TestBench's, a terminal's, a project folder's `.env` loaded
+  environment. The server and each `steptix stats` run in different
+  environments — Steptix's, a terminal's, a project folder's `.env` loaded
   at CLI start — and they must agree on what to keep: a CLI started from a
   shell that says 1 must not delete months the server was told to keep. The
   machine file is the one place they all read.
-- **`aiui stats` prunes after it reads**, and only once the flags have been
+- **`steptix stats` prunes after it reads**, and only once the flags have been
   checked and the read has succeeded, so a mistyped flag or an unreadable file
   deletes nothing.
-- **Never the window asked for.** `aiui stats` does not delete a month file
+- **Never the window asked for.** `steptix stats` does not delete a month file
   from the start of the window it was asked for onward, however old: asking
   about January is not what deletes January, and the months after it hold the
   run lines January's lines link through. The server's prune at start has no
@@ -391,16 +391,16 @@ deleted at server start and by every `aiui stats`. `pruneStatsFiles` and
 
 ### 6.4 Turning it off
 
-- `AIUI_STATS=off`, in the machine-wide `.env` or in the environment of the
+- `STEPTIX_STATS=off`, in the machine-wide `.env` or in the environment of the
   process that records (the server, a CLI run), turns off recording. The
   machine file turns it off for every process on the machine; an environment
   only for the processes started from it.
-- `"stats": { "enabled": false }` in a project's `aiui.config.json` turns it
+- `"stats": { "enabled": false }` in a project's `steptix.config.json` turns it
   off for that project, for a project whose step text should not be kept even
   locally.
 
-`aiui stats` says whether recording is on from the machine file — the one
-switch a server started elsewhere also reads — and names an `AIUI_STATS=off`
+`steptix stats` says whether recording is on from the machine file — the one
+switch a server started elsewhere also reads — and names a `STEPTIX_STATS=off`
 in its own shell's environment separately, since that one covers only runs
 started from that shell.
 
@@ -454,7 +454,7 @@ and counting it would drag the headline rate down. Their condition judgements,
 and the polls of a watch group, still cost tokens, so those land in the run
 line's totals (§8.2), which is why the step lines alone can add up to less.
 
-Older writers did record some of those, with no call and no turn; `aiui stats`
+Older writers did record some of those, with no call and no turn; `steptix stats`
 ignores any `source: "ai"` step line like that.
 
 Each recorded step takes the run's next execution number, `exec` (§5.1): the
@@ -522,7 +522,7 @@ Written when the run ends, where the report is written:
 | `report` | Absolute path of the HTML report, or `null` when the run wrote none |
 
 The report path isn't known until the run ends, so it goes on this one line,
-not on every action line, and `aiui stats` joins on `run`. Errands and
+not on every action line, and `steptix stats` joins on `run`. Errands and
 ad hoc Sessions API batches that write no report get a run line with
 `"report": null`; their lines still count.
 
@@ -534,7 +534,7 @@ in a data-row report, and for a hook's step its scope and place,
 report or line from before `hookIndex` gets `hook-before-step-0`). One
 function builds them, `stepAnchor` in `src/report/anchors.ts`, from exactly
 the fields a line records (`step`, `row`, `hook`, `hookIndex`), so the report
-generator and `aiui stats` cannot drift apart.
+generator and `steptix stats` cannot drift apart.
 
 Where the ids are set, all in `src/report/generator.ts`: `renderSteps` hands
 an id to every card it draws — a step's own card and a mode switch's
@@ -550,7 +550,7 @@ so a link lands on the step's FIRST pass. The lines tell the passes apart
 (`exec`), but the anchor does not carry the pass, so a failure on the third
 pass links to the first; the report's cards below it show the rest.
 
-`aiui stats --failures` prints the report as a `file:` URL with the anchor
+`steptix stats --failures` prints the report as a `file:` URL with the anchor
 after `#`: `file:///C:/…/reports/2026-09-28_07-12-50-recording.html#step-11`,
 which a terminal or editor opens at the failing step. A Windows path with
 `#step-11` stuck on the end opens nothing, and a space in it would end the
@@ -564,17 +564,17 @@ is linked to the report without an anchor, with a note saying so.
 ### 8.4 When the report is gone, or not there yet
 
 Reports are deleted and moved. The link is a convenience and the counts don't
-depend on it: `aiui stats` still reports a line whose report is missing, and
+depend on it: `steptix stats` still reports a line whose report is missing, and
 marks it `(report deleted)`.
 
 A run with no run line has not ended, or never will: it crashed or was killed
-before it could write one. `aiui stats` tells the two apart by the run's
+before it could write one. `steptix stats` tells the two apart by the run's
 newest line — within the last day, `(not written yet)`; older than that,
 `(run did not finish)` — so a crashed run does not read as pending forever.
 
-## 9. Reading it: `aiui stats`
+## 9. Reading it: `steptix stats`
 
-A new CLI command, next to `aiui status` and `aiui stop`.
+A new CLI command, next to `steptix status` and `steptix stop`.
 
 | Flag | Effect |
 |---|---|
@@ -628,7 +628,7 @@ steps. A `--model` that matches nothing lists the model ids the window has,
 since the flag wants the whole id.
 
 **Recording.** Whether recording is on comes from the machine-wide `.env`,
-with a shell's own `AIUI_STATS=off` named apart (§6.4). Lines skipped as
+with a shell's own `STEPTIX_STATS=off` named apart (§6.4). Lines skipped as
 unreadable (§6.2) and month files pruned (§6.3) are counted in a note at the
 end.
 
@@ -641,14 +641,14 @@ summary or the list. A list entry's `report` has a `state`: `linked`, with
 null`; `deleted`, with `path`; or `none`, `pending` or `unfinished` (§8.4). A
 failure entry also carries `hook`, `hookIndex` and `exec` when its line does.
 
-Output follows the house style of `aiui status`: plain text, one table, no
+Output follows the house style of `steptix status`: plain text, one table, no
 colour required. Nothing the command does is allowed to escape as an
 exception: a bad flag, an unreadable folder or anything unexpected is a
 message on stderr and exit code 1.
 
 ## 10. Starting with history
 
-`aiui stats import <reports folder>` reads HTML reports already on disk and
+`steptix stats import <reports folder>` reads HTML reports already on disk and
 writes the lines they contain, tagged `"imported": true`, with the report
 itself as `report`. It is idempotent: `stats/imported.json` records each
 report's path and modification time, and a report already imported is
@@ -657,7 +657,7 @@ skipped.
 It's best-effort. A report that can't be parsed is skipped and counted.
 Imported lines have no rules fingerprint (`prompt: null`), because the report
 doesn't carry one, and no `exec`, so their steps join their actions by the
-older key (§9). `aiui stats --by prompt` shows them as "(imported, no
+older key (§9). `steptix stats --by prompt` shows them as "(imported, no
 fingerprint)", apart from today's steps that were never shown the step
 prompt (§5.5). Import is what gives the scoreboard a "before": for example,
 the 17 super.test runs from before PR #162.
@@ -683,8 +683,8 @@ number, in two halves.
   no sign-in.
 
 `npm run bench -- --runs 3 --models <a>,<b>` runs the real-site half several
-times per model with `AIUI_STATS_SUITE=bench`. It then prints first-try rate,
-time and tokens per step, from the same files `aiui stats` reads.
+times per model with `STEPTIX_STATS_SUITE=bench`. It then prints first-try rate,
+time and tokens per step, from the same files `steptix stats` reads.
 
 ## 12. Performance
 
@@ -713,10 +713,10 @@ take 4.9 s and 790 MB for a 30-day view that keeps them all, and 0.9 s and
 ## 13. Phases
 
 - **A: record and read.** The recorder, `StatsContext` threaded through every
-  loop, per-interaction token usage (§7.1), the run line, `aiui stats` with
+  loop, per-interaction token usage (§7.1), the run line, `steptix stats` with
   its filters, `--failures`, `--costly` and `--json`, the report's step
   anchors, retention and the off switches. Useful on its own.
-- **B: history.** `aiui stats import`.
+- **B: history.** `steptix stats import`.
 - **C: the suite.** The fixture trap pages, the real-site steps and
   `npm run bench`.
 
@@ -727,13 +727,13 @@ take 4.9 s and 790 MB for a 30-day view that keeps them all, and 0.9 s and
    - a step line with `firstTry: false`
    - a run line whose `report` is the report written, with a `#step-N` anchor
      that exists in that report
-2. `aiui stats` on that data shows the failure under its form, and
+2. `steptix stats` on that data shows the failure under its form, and
    `--failures` prints the step text, the selector and the report link.
 3. A test with a secret-named parameter used in a selector writes the selector
    masked. Its `stepText` shows the placeholder, not the value.
-4. A live-suite run writes `suite: live` lines, and the default `aiui stats`
+4. A live-suite run writes `suite: live` lines, and the default `steptix stats`
    leaves them out.
-5. `AIUI_STATS=off` writes nothing. A project with `"stats": {"enabled": false}`
+5. `STEPTIX_STATS=off` writes nothing. A project with `"stats": {"enabled": false}`
    writes nothing, and other projects on the machine still record.
 6. Four processes appending at once for a minute leave a file in which every
    line parses.
@@ -768,14 +768,14 @@ take 4.9 s and 790 MB for a 30-day view that keeps them all, and 0.9 s and
 - **Concurrency:** parallel appends from child processes, then read back
   (acceptance 6).
 - **The rest of the suite never writes real data.** `vitest.config.ts` sets
-  `AIUI_STATS=off` for every test; the recording tests turn it back on and point
+  `STEPTIX_STATS=off` for every test; the recording tests turn it back on and point
   the user root at a temporary folder.
 - **The reader:** streaming across chunk boundaries (multi-byte text, CRLF, a
   byte-order mark); a line outside the window never parsed; a line in another
   key order still read; every field §5 requires, per kind, checked and a bad
   line skipped and counted; run lines kept past `--until`; retention from the
   machine file only, and never the window's months.
-- **The command:** `aiui stats`, every `--by`, `--failures`, `--costly` and
+- **The command:** `steptix stats`, every `--by`, `--failures`, `--costly` and
   `--json` against a fixture month file in a project whose path has a space;
   each empty-view message; every refused flag, including spans of 0 and spans
   past the calendar; and a failure deep inside reported with exit 1, not

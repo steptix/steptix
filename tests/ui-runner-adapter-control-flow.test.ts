@@ -107,7 +107,7 @@ const originalCwd = process.cwd();
 let root: string;
 
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(path.join(tmpdir(), 'aiui-ui-control-')));
+  root = realpathSync(mkdtempSync(path.join(tmpdir(), 'steptix-ui-control-')));
   process.chdir(root);
   generatedReports.length = 0;
   executeStepMock.mockReset();
@@ -305,7 +305,7 @@ describe('movePointer into a loop body', () => {
  * The renderer's row spins on `runner:step-start` and settles on
  * `runner:step-complete`, so a start with no completion is a row that spins
  * for the rest of the run — the same defect the server's `step:start` had on
- * TestBench's gutter (stories/control-flow.md §"What the live run found").
+ * Steptix's gutter (stories/control-flow.md §"What the live run found").
  *
  * `runner:step-complete` for a guard lives inside `if (rows.guard)`, and a
  * visit that asks nobody produces no row: a `Repeat`'s first pass, and every

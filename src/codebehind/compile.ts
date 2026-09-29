@@ -85,7 +85,7 @@ import {
  * The compiler (stories/codebehind-compile.md, "The compile pipeline").
  *
  * Record → Select → Generate → Review → Replay → Write, one core used by the
- * CLI in-process and, later, by the server for TestBench. It prints nothing
+ * CLI in-process and, later, by the server for Steptix. It prints nothing
  * and writes nothing outside the gitignored candidate until the last phase:
  * callers observe progress through `onEvent` and decide what to do with the
  * proposed files.
@@ -175,7 +175,7 @@ export interface CompileSummary {
    *  them. */
   notAttempted: number[];
   /** Where the recording — and the candidate, and any replay failure — were
-   *  written: the test's `.aiui-codebehind-cache/<name>.recording/`. */
+   *  written: the test's `.steptix-codebehind-cache/<name>.recording/`. */
   recordingDir: string;
   /**
    * References the model did not name in its actions and the compile recovered
@@ -183,7 +183,7 @@ export interface CompileSummary {
    * (stories/placeholder-preserving-actions.md, decision 6).
    *
    * The compliance metric, and the only one: the sweep that decides the
-   * fallback's fate is `aiui compile` over `templates/init/tests/*.md` and
+   * fallback's fate is `steptix compile` over `templates/init/tests/*.md` and
    * `fixtures/tests/*.md`, summing this field. Empty is the goal.
    *
    * Optional so every existing producer of a summary — the server's failure
@@ -291,13 +291,13 @@ export interface CompileOptions {
   /**
    * The env map `$VAR` parameter values resolve against — the project's
    * `.env` layers, composed the way the caller's runs compose them. A Run
-   * resolves these before it starts (TestBench on the client, `aiui run`
+   * resolves these before it starts (Steptix on the client, `steptix run`
    * from `process.env`); the compile has to do the same for its own runs,
    * and nothing downstream does it.
    */
   env?: Record<string, string> | undefined;
   /**
-   * A data-file row to apply over the parameters, as `aiui run` does for a
+   * A data-file row to apply over the parameters, as `steptix run` does for a
    * test with `dataFile:` in its frontmatter. A compile records once, so the
    * caller picks a row — `firstDataRow` picks the first.
    */
@@ -3109,7 +3109,7 @@ function allEnvRefs(test: ParsedTest): Array<{ name: string; value: string }> {
 /**
  * The parameter map a compile's runs start from.
  *
- * The same chain `resolveParameters` walks for `aiui run`, minus the prompt —
+ * The same chain `resolveParameters` walks for `steptix run`, minus the prompt —
  * a compile never asks — and against an explicit env map rather than
  * `process.env`, because on the server `process.env` is deliberately not the
  * project's: a data-row value wins, then a `$VAR` looks itself up in the env,
@@ -3161,7 +3161,7 @@ export function resolveCompileParameters(
 
 /**
  * The first row of the test's data file, when it names one, as the row a
- * compile records with. `aiui run` runs one instance per row; a compile
+ * compile records with. `steptix run` runs one instance per row; a compile
  * records once, and the entries it writes read parameters through
  * `step.getVar`, so they are the same code for every row.
  */
@@ -3214,7 +3214,7 @@ export function createTestFileRunner(options: CompileOptions): CompileRunner {
         ...(request.throughStep !== undefined && { stopAfterStep: request.throughStep }),
         // Always, the way src/server/compile-runner.ts always sets it on its
         // own runner. A compile is a request FOR AI (stories/run-settings.md
-        // §9), so `ai.allowInRuns: false` must not gate it — otherwise `aiui
+        // §9), so `ai.allowInRuns: false` must not gate it — otherwise `steptix
         // compile` refuses every step and writes nothing on precisely the
         // projects that turned the switch off so they would have compiled
         // steps to replay.

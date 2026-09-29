@@ -114,10 +114,10 @@ function makeHarness() {
 function makeProject(overrides: Record<string, unknown> = {}): any {
   return {
     projectRoot: root,
-    configPath: path.join(root, 'aiui.config.json'),
+    configPath: path.join(root, 'steptix.config.json'),
     env: {
       SERVER_URL: 'http://localhost:3100',
-      AIUI_SERVER_API_KEY: 'project-key',
+      STEPTIX_SERVER_API_KEY: 'project-key',
       AI_API_KEY: 'ai-secret',
     },
     envName: null,
@@ -165,14 +165,14 @@ const savedUserRoot: Record<string, string | undefined> = {};
 
 beforeEach(() => {
   resetRegistry();
-  root = mkdtempSync(path.join(tmpdir(), 'aiui-mcp-start-'));
+  root = mkdtempSync(path.join(tmpdir(), 'steptix-mcp-start-'));
   distEntry = path.join(root, 'dist-index.js');
   writeFileSync(distEntry, '// stand-in for dist/index.js\n');
-  logPath = path.join(root, '.aiui', 'mcp-server.log');
-  process.env['AIUI_TEST_INHERITED'] = 'from-parent';
+  logPath = path.join(root, '.steptix', 'mcp-server.log');
+  process.env['STEPTIX_TEST_INHERITED'] = 'from-parent';
   // The arm-4 fill writes a generated machine key to the user root — point
-  // it into this test's tmp dir, never the real %LOCALAPPDATA%\aiui.
-  userRootTmp = mkdtempSync(path.join(tmpdir(), 'aiui-user-root-'));
+  // it into this test's tmp dir, never the real %LOCALAPPDATA%\steptix.
+  userRootTmp = mkdtempSync(path.join(tmpdir(), 'steptix-user-root-'));
   for (const key of ['LOCALAPPDATA', 'XDG_CONFIG_HOME'] as const) {
     savedUserRoot[key] = process.env[key];
     process.env[key] = userRootTmp;
@@ -180,7 +180,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete process.env['AIUI_TEST_INHERITED'];
+  delete process.env['STEPTIX_TEST_INHERITED'];
   for (const [key, value] of Object.entries(savedUserRoot)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -204,14 +204,14 @@ describe('ensureServerReady — probe arms', () => {
 
   it('refuses an unrecognized service without spawning or leaking the key', async () => {
     const h = makeHarness();
-    h.probeImpl = () => ({ kind: 'unrecognized', detail: 'service is "grafana", not "ai-ui-automation"' });
+    h.probeImpl = () => ({ kind: 'unrecognized', detail: 'service is "grafana", not "steptix"' });
 
     const err = await failure(ensureServerReadyWith(makeProject(), undefined, h.deps));
 
     expect(text(err)).toContain('3100');
     expect(text(err)).toContain('grafana');
     // Arm 2 exists precisely so the next request — which carries
-    // AIUI_SERVER_API_KEY and the whole composed .env — is never sent.
+    // STEPTIX_SERVER_API_KEY and the whole composed .env — is never sent.
     expect(h.deps.spawn).not.toHaveBeenCalled();
     expect(text(err)).not.toContain('project-key');
     expect(text(err)).not.toContain('ai-secret');
@@ -238,10 +238,10 @@ describe('ensureServerReady — probe arms', () => {
     const err = await failure(ensureServerReadyWith(project, undefined, h.deps));
 
     expect(text(err)).toContain('already');
-    expect(text(err)).toMatch(/aiui[\\/]\.env/); // names the file to write
+    expect(text(err)).toMatch(/steptix[\\/]\.env/); // names the file to write
     expect(h.deps.spawn).not.toHaveBeenCalled();
     // No key was invented behind the refusal's back.
-    expect(readFileSyncOptional(path.join(userRootTmp, 'aiui', '.env'))).toBe(null);
+    expect(readFileSyncOptional(path.join(userRootTmp, 'steptix', '.env'))).toBe(null);
   });
 
   it('arm 4 with no key generates one, persists it, and spawns the child with it', async () => {
@@ -254,13 +254,13 @@ describe('ensureServerReady — probe arms', () => {
     await ready;
 
     // The generated key is persisted where every other client will read it…
-    const written = readFileSyncOptional(path.join(userRootTmp, 'aiui', '.env'));
-    expect(written).toMatch(/AIUI_SERVER_API_KEY=aiui_[0-9a-f]{64}/);
+    const written = readFileSyncOptional(path.join(userRootTmp, 'steptix', '.env'));
+    expect(written).toMatch(/STEPTIX_SERVER_API_KEY=steptix_[0-9a-f]{64}/);
     // …the project now carries it for the requests that follow…
-    expect(project.apiKey).toMatch(/^aiui_[0-9a-f]{64}$/);
+    expect(project.apiKey).toMatch(/^steptix_[0-9a-f]{64}$/);
     // …and the child was spawned with the SAME key, so both sides agree.
     const env = h.spawns[0]!.options.env as Record<string, string>;
-    expect(env['AIUI_SERVER_API_KEY']).toBe(project.apiKey);
+    expect(env['STEPTIX_SERVER_API_KEY']).toBe(project.apiKey);
   });
 
   it('does not spawn for an aborted call, even though an aborted probe reads as down', async () => {
@@ -297,7 +297,7 @@ describe('ensureServerReady — SERVER_URL validation', () => {
   it('accepts an https URL that is answering — the check is spawn-time only', async () => {
     const h = makeHarness();
     h.up = true;
-    const project = makeProject({ serverUrl: 'https://aiui.internal.example' });
+    const project = makeProject({ serverUrl: 'https://steptix.internal.example' });
 
     await expect(ensureServerReadyWith(project, undefined, h.deps)).resolves.toBeUndefined();
     expect(h.deps.spawn).not.toHaveBeenCalled();
@@ -360,7 +360,7 @@ describe('ensureServerReady — the spawn', () => {
       distEntry,
       'serve',
       // `localhost` would resolve via dns.lookup to ::1 first on a dual-stack
-      // Windows box, leaving a server `aiui status`/`aiui stop` cannot see.
+      // Windows box, leaving a server `steptix status`/`steptix stop` cannot see.
       '--host',
       '127.0.0.1',
       '--port',
@@ -405,28 +405,28 @@ describe('ensureServerReady — the spawn', () => {
     const h = await coldStart();
     const env = h.spawns[0]!.options.env as Record<string, string>;
 
-    expect(env['AIUI_SERVER_API_KEY']).toBe('project-key');
+    expect(env['STEPTIX_SERVER_API_KEY']).toBe('project-key');
     expect(env['AI_API_KEY']).toBe('ai-secret');
-    expect(env['AIUI_TEST_INHERITED']).toBe('from-parent');
+    expect(env['STEPTIX_TEST_INHERITED']).toBe('from-parent');
   });
 
   const winIt = process.platform === 'win32' ? it : it.skip;
   winIt('collapses a case-differing parent key rather than sending both', async () => {
-    delete process.env['AIUI_SERVER_API_KEY'];
-    process.env['Aiui_Server_Api_Key'] = 'stale-parent-key';
+    delete process.env['STEPTIX_SERVER_API_KEY'];
+    process.env['Steptix_Server_Api_Key'] = 'stale-parent-key';
     try {
       const h = await coldStart();
       const env = h.spawns[0]!.options.env as Record<string, string>;
-      const keys = Object.keys(env).filter((k) => k.toLowerCase() === 'aiui_server_api_key');
+      const keys = Object.keys(env).filter((k) => k.toLowerCase() === 'steptix_server_api_key');
 
       expect(keys).toHaveLength(1);
       expect(env[keys[0]!]).toBe('project-key');
     } finally {
-      delete process.env['Aiui_Server_Api_Key'];
+      delete process.env['Steptix_Server_Api_Key'];
     }
   });
 
-  it('writes the child output to <root>/.aiui/mcp-server.log', async () => {
+  it('writes the child output to <root>/.steptix/mcp-server.log', async () => {
     const h = await coldStart();
 
     expect(h.spawns[0]!.options.stdio[1]).toEqual(expect.any(Number));

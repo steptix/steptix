@@ -1,5 +1,20 @@
 # Project notes
 
+## The name is Steptix
+
+This product was called AI UI Automation (package `ai-ui-automation`, CLI
+`aiui`) and its VS Code extension TestBench (`testbench-native/`,
+`pkent.testbench-native`, error codes `TBxxx`). Both are Steptix now — see the
+top CHANGELOG entry for the full map. Resolved issues and older CHANGELOG
+entries keep the old names on purpose; read `aiui` there as `steptix` and
+`TB028` as `STX028`.
+
+Two old names are still live: the checkout folder
+`c:\Projects\vibe\ai-ui-automation` and the GitHub repo
+`pkent/ai-ui-automation`. Renaming those moves every worktree and the Claude
+memory folder keyed on the path, so it is a separate step, done with no
+worktrees open.
+
 ## Flick: one client
 
 `flick-vscode/` is the Flick client — a chat panel inside VS Code for driving
@@ -14,11 +29,11 @@ reason this repo needed a Rust/MSVC toolchain.
 `SPEC-FLICK.md` stays: it is still the behavioural spec flick-vscode follows,
 with a note marking which sections described the removed desktop shell.
 
-## TestBench: one extension
+## Steptix: one extension
 
-`testbench-native/` is the TestBench VS Code extension — it uses VS Code's
+`steptix-vscode/` is the Steptix VS Code extension — it uses VS Code's
 native editor surface and hosts the multi-test runner. Extension ID
-`pkent.testbench-native`.
+`pkent.steptix-vscode`.
 
 There used to be a second variant, `testbench-monaco/` (extension ID
 `pkent.testbench`), which hosted the editor inside a webview using Monaco.
@@ -27,22 +42,22 @@ It was removed in favour of the native variant — see
 If you still have `pkent.testbench` installed, uninstall it; it is no longer
 built from this repo.
 
-## TestBench: bump the patch version on every change
+## Steptix: bump the patch version on every change
 
-Whenever you change code that ends up bundled into the TestBench VS Code
-extension (anything under `testbench-native/`, **and** anything under
+Whenever you change code that ends up bundled into the Steptix VS Code
+extension (anything under `steptix-vscode/`, **and** anything under
 `runner-core/` since that's a `file:` dep bundled into the extension's
-`dist/`), bump the patch field in `testbench-native/package.json`
+`dist/`), bump the patch field in `steptix-vscode/package.json`
 (e.g. `0.1.1` → `0.1.2`) as part of the same change.
 
 The install/verify loop is then:
 
 ```powershell
-cd c:\Projects\vibe\ai-ui-automation\testbench-native
+cd c:\Projects\vibe\ai-ui-automation\steptix-vscode
 npm run build
 npm run package
 & "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd" `
-    --install-extension testbench-native-<new-version>.vsix --force
+    --install-extension steptix-vscode-<new-version>.vsix --force
 ```
 
 Then reload the VS Code window. The Extensions panel will show the new
@@ -62,7 +77,7 @@ Installing from two (a worktree and main, or two worktrees) collides:
 
 - **Same version in both** — the likely case, since two branches off one
   commit read the same version until someone bumps — and they extract into
-  the *same* `pkent.testbench-native-<version>/` directory. Last writer wins,
+  the *same* `pkent.steptix-vscode-<version>/` directory. Last writer wins,
   `--force` suppresses any prompt, and the Extensions panel shows that version
   either way: no signal about whose code is live. Genuinely concurrent
   installs are worse than last-write-wins, since two processes unzipping into
@@ -81,7 +96,7 @@ To work on the extension in a worktree, don't install it — run an Extension
 Development Host from that worktree instead:
 
 ```powershell
-cd <worktree>\testbench-native
+cd <worktree>\steptix-vscode
 npm run build
 & "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd" `
     --extensionDevelopmentPath="$PWD" <folder-to-open>
@@ -105,12 +120,12 @@ same time without touching `~/.vscode/extensions/`.
 One thing it does NOT isolate: the Copilot bridge's port. Its setting is
 machine-scoped and one window per machine owns `127.0.0.1:18790`; the others
 stand by and claim it when the owner closes. So with ordinary windows open on
-the installed TestBench and `lmBridge.enabled` on, a dev host's bridge never
+the installed Steptix and `lmBridge.enabled` on, a dev host's bridge never
 serves — requests reach the installed copy's bridge instead. To exercise a
 worktree's bridge, close every other VS Code window first (and run anything
 that must survive that, such as the server, from a terminal outside VS Code).
 `GET /v1/models` on the port tells them apart once the bridge carries
-`aiui_bridge` (tb 0.5.145+).
+`steptix_bridge` (tb 0.5.145+).
 
 `npm run dev` is the same two steps, but shells out to plain `code`. Unlike
 `--install-extension`, the GUI exe does accept `--extensionDevelopmentPath` —
@@ -127,9 +142,9 @@ extension isn't on the path at all.
 After creating a worktree (via `git worktree add` or the `EnterWorktree`
 tool), the new directory only contains tracked files. The repo needs several
 gitignored files/dirs to actually run — `.env` (API keys) and the five
-`node_modules/` trees (root, `flick-vscode/`, `testbench-native/`,
+`node_modules/` trees (root, `flick-vscode/`, `steptix-vscode/`,
 `runner-core/`, and `fixtures/tools/`, without which every fixture tool's
-`import 'ai-ui-automation/tools'` fails and 22 root tests go red). Without
+`import 'steptix/tools'` fails and 22 root tests go red). Without
 them, nothing works and `npm install` × 5 costs several minutes.
 
 Run this script once, right after the worktree is created:
@@ -161,23 +176,23 @@ To recall a worktree's port later, read it back off the file that decides it:
 
 ### Which server does the worktree talk to?
 
-`aiui.config.json` pins port 3100 and is tracked, so two checkouts can't both
+`steptix.config.json` pins port 3100 and is tracked, so two checkouts can't both
 serve on the default; the second dies on EADDRINUSE. You only need a second
 server when you changed `src/` — a running server resolves each request's
 project bundle from the test file's path
 ([src/server/project-bundle.ts](src/server/project-bundle.ts)), so it already
-honours a worktree's own `aiui.config.json` and `.env`, but it executes
+honours a worktree's own `steptix.config.json` and `.env`, but it executes
 whatever `src/` build it booted from. `-AutoPort` (or `-Port <n>`) plus
 `node dist/index.js serve -p <n>` gives the worktree its own.
 
-TestBench won't auto-start that server for you:
-`testbench-native.serverAutoStart.cwd` is machine-scoped (User settings only,
+Steptix won't auto-start that server for you:
+`steptix.serverAutoStart.cwd` is machine-scoped (User settings only,
 by design — a workspace-settable value would let any cloned repo run arbitrary
 code on Run), so a worktree window auto-starts the server from whichever
 checkout that setting names. Start the worktree's server yourself. On a
 non-default port that's not optional: the auto-start command carries no `-p`,
 so it would start the *other* checkout's server on 3100, keep polling your
-port, and fail with TB028 — leaving a stray server behind.
+port, and fail with STX028 — leaving a stray server behind.
 
 ### Live integration tests in a worktree
 
@@ -185,7 +200,7 @@ They run in parallel, and they start everything they need. One command, from
 any checkout:
 
 ```powershell
-cd <worktree>\testbench-native
+cd <worktree>\steptix-vscode
 npm run test:live
 ```
 
@@ -199,7 +214,7 @@ to start the slow ones first next time.
 
 Because the runner starts those servers, it also builds what they run: it
 shells `npm run build` at the repo root (~7 s) before picking ports. The
-`test:live` script's own build covers `testbench-native` and `runner-core`
+`test:live` script's own build covers `steptix-vscode` and `runner-core`
 only, which was right while a human started the server and owned its
 checkout. It is not right now, and the gap is silent — a worktree three days
 stale ran the whole suite against a `dist/` predating the `@url` fallback in
@@ -212,7 +227,7 @@ server is yours, started from a checkout this runner should not compile.
 npm run test:live -- --shards=6        # a bigger box
 npm run test:live -- --shards=1        # serial: one VS Code, one launch
 npm run test:live -- --files=data-rows.test.cjs,sections.test.cjs
-$env:TESTBENCH_LIVE_GREP = "inline sections"   # mocha --grep, as before
+$env:STEPTIX_LIVE_GREP = "inline sections"   # mocha --grep, as before
 ```
 
 Measured on this machine (12 cores, 32 GB): 17 files, 1881 s of serial work,
@@ -236,7 +251,7 @@ on its own with the window visible.
 Three things are per shard, and each one is load-bearing rather than tidy:
 
 - **Workspace.** Five compile suites `rmSync` the *same*
-  `templates/init/tests/.aiui-codebehind-cache`, two of them compile the same
+  `templates/init/tests/.steptix-codebehind-cache`, two of them compile the same
   `compile-codebehind.md`, and `templates/.env` sets
   `APPEND_RUN_HISTORY_TO_TEST_FILE`, which rewrites the fixture `.md` a run
   just used. Grouping those conflicts onto one worker would put the five
@@ -247,7 +262,7 @@ Three things are per shard, and each one is load-bearing rather than tidy:
   the extension drives.
 
   A copy also breaks any config path that climbs out of the workspace, and
-  `templates/init/aiui.config.json` has one: `"toolsDir":
+  `templates/init/steptix.config.json` has one: `"toolsDir":
   "../../fixtures/tools/src"`, which in a copy points at a `fixtures/` that was
   never copied. The server does not fail on that — it logs one `no tools
   registered` WARN and carries on — so the run dies minutes later in a
@@ -258,17 +273,17 @@ Three things are per shard, and each one is load-bearing rather than tidy:
   know about climbs out too — the next `toolsDir`.
 
   **Where** the copy lives matters as much as what is in it, which is why it
-  sits at the repo root rather than under `testbench-native/`. Node resolves a
+  sits at the repo root rather than under `steptix-vscode/`. Node resolves a
   bare import by walking up from the file: from `<repo>/templates/...` that
   walk sees only `<repo>/node_modules`, but from
-  `<repo>/testbench-native/.live-shards/...` it passes through
-  `testbench-native/node_modules` first — a tree full of packages the real
+  `<repo>/steptix-vscode/.live-shards/...` it passes through
+  `steptix-vscode/node_modules` first — a tree full of packages the real
   workspace cannot see. That is enough to make the esbuild bundle of a
   `.steps.ts` fail to load, and `loadCodeBehindFile` answers a load failure
   with a WARN and `Steps fall back to AI` — so every compile suite compiled,
   applied, and then failed its proving run with a plain ✓ where a `</>` was
   expected. Measured: `compile-tabs` passed serially and in a repo-root shard,
-  and failed in a `testbench-native/` one.
+  and failed in a `steptix-vscode/` one.
 - **VS Code.** A second VS Code sharing a `--user-data-dir` does not start a
   second instance — it forwards its arguments to the first one and exits, so
   every shard after the first would report nothing while the first silently
@@ -286,17 +301,17 @@ included, which is why `--shards=1` is the usual companion:
 
 ```powershell
 cd <worktree>
-$env:AIUI_STATS_SUITE = 'live'
+$env:STEPTIX_STATS_SUITE = 'live'
 node dist/index.js serve -p <n> --idle-timeout 60
 ```
 
-`AIUI_STATS_SUITE=live` tags every line that server writes to the first-try
+`STEPTIX_STATS_SUITE=live` tags every line that server writes to the first-try
 scoreboard (docs/specs/SPEC-scoreboard.md), so test runs stay out of
-`aiui stats`'s default view. The parallel runner sets it on the servers it
+`steptix stats`'s default view. The parallel runner sets it on the servers it
 starts; a server you start yourself records as `user` unless you set it.
 
 ```powershell
-cd <worktree>\testbench-native
+cd <worktree>\steptix-vscode
 npm run test:live -- --shards=1 --server=http://localhost:<n>
 ```
 
@@ -314,8 +329,8 @@ fall back to `:3100` regardless. Set only one and the tests assert against a
 different server than the extension is driving. The parallel path writes both
 from the same value, so it cannot drift.
 
-`serve` needs no `--env-file`: `%LOCALAPPDATA%\aiui\.env` carries
-`AIUI_SERVER_API_KEY`, `AI_API_KEY` and `AI_MODEL` machine-wide, and its key
+`serve` needs no `--env-file`: `%LOCALAPPDATA%\steptix\.env` carries
+`STEPTIX_SERVER_API_KEY`, `AI_API_KEY` and `AI_MODEL` machine-wide, and its key
 matches the one in `.env` and `templates/.env`.
 
 The rest is already handled: `runLiveTest.cjs` boots the `fixtures/test-app`
@@ -356,7 +371,7 @@ arrangement:
   own worktree's `.live-shards/`, so the fixture files, the caches and the
   `reports/` two runs would otherwise share are already separated.
 - **CDP browsers** — profiles resolve to
-  `<project_root>/.aiui/cdp-profiles/<engine>-<name>/`
+  `<project_root>/.steptix/cdp-profiles/<engine>-<name>/`
   (`profileDirFor`, src/browser/cdp-registry.ts), and the project root is now
   the shard's own copied workspace, so profiles are per shard. The launcher
   passes `--remote-debugging-port=0`, so the OS assigns the port and it is
@@ -405,7 +420,7 @@ worktree, four shards and two shards have both come back clean.
 which leaves the browser at `[use computer]` and clicks a PDF toolbar and a
 print dialog with the **real mouse**
 ([SPEC-use-computer.md](docs/specs/SPEC-use-computer.md) §13.3). It skips
-itself unless `TESTBENCH_LIVE_COMPUTER=1` is set, and the reason is the
+itself unless `STEPTIX_LIVE_COMPUTER=1` is set, and the reason is the
 sharding section above: a default run is four shards on one box, and there is
 one pointer. Two shards moving it do not produce two flaky runs — they produce
 one run clicking where the other run's dialog used to be. The framework's lock
@@ -420,13 +435,13 @@ scoreboard, as above):
 
 ```powershell
 cd <worktree>
-$env:AIUI_STATS_SUITE = 'live'
+$env:STEPTIX_STATS_SUITE = 'live'
 node dist/index.js serve -p <n> --idle-timeout 60
 ```
 
 ```powershell
-cd <worktree>\testbench-native
-$env:TESTBENCH_LIVE_COMPUTER = '1'
+cd <worktree>\steptix-vscode
+$env:STEPTIX_LIVE_COMPUTER = '1'
 npm run test:live -- --shards=1 --files=computer-use.test.cjs --server=http://localhost:<n>
 ```
 
@@ -452,8 +467,8 @@ it is not always the person who wrote it.
 
 `computer-calc.test.cjs` sits beside it behind the same gate and runs the same
 way, with `--files=computer-calc.test.cjs`. It drives `calc-one-plus-one.md` —
-desktop only, no browser at all — twice in one TestBench session: once with a
-breakpoint on step 5, reading `aiui-computer.lock` itself while the run is
+desktop only, no browser at all — twice in one Steptix session: once with a
+breakpoint on step 5, reading `steptix-computer.lock` itself while the run is
 parked to show the server gave the lock back, then Continue to 9/9; then a
 second Run All in the kept session. Every phase also watches the file while it
 runs and requires seeing the server's pid in it, so "not held" cannot pass by
@@ -463,17 +478,17 @@ that fails partway can leave Calculator open; close it before the next attempt.
 
 ### Why the junction repair matters
 
-`testbench-native/node_modules/ai-ui-automation-runner-core` is the
+`steptix-vscode/node_modules/steptix-runner-core` is the
 `file:../runner-core` dep, which npm materialises as a junction holding an
 **absolute** path to whichever checkout ran `npm install`. robocopy follows it
 and writes a real directory, so a naively-seeded worktree holds a frozen copy
 of main's runner-core. `npm run build` then reports success while esbuild
 bundles the stale code — it resolves through `node_modules`, whereas
 `build:runner-core` compiles `../runner-core`, a different place. The script
-re-points the junction after copying; `npm install` in `testbench-native/`
+re-points the junction after copying; `npm install` in `steptix-vscode/`
 also fixes it.
 
-`fixtures/tools/node_modules/ai-ui-automation` is the second such junction
+`fixtures/tools/node_modules/steptix` is the second such junction
 (the `file:../..` dep), but its target is the whole repo root — following it
 during a copy would recurse the entire checkout into itself — so the script
 excludes it from the robocopy outright and creates it fresh, pointed at the
@@ -481,7 +496,7 @@ worktree.
 
 ### Why `dist/` has to be built in the worktree
 
-The package self-import `ai-ui-automation/tools` (used
+The package self-import `steptix/tools` (used
 by the fixture tools) resolves via the `exports` field + the *nearest*
 `package.json` to `dist/tools/index.js` **under whichever package root the
 importing file lives in**. For a worktree fixture that's the worktree's own

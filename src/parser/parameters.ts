@@ -147,7 +147,7 @@ const PROPERTY_SEGMENT_SOURCE = '[A-Za-z_][A-Za-z0-9_]*';
  * This is the one definition; every other copy of the grammar in `src/`
  * imports it, because a step's text and its actions resolving differently is
  * the failure that keeps recurring. The copies that must stay hand-written —
- * TestBench's `env-data-completion-core.ts` / `env-data-definition-core.ts`,
+ * Steptix's `env-data-completion-core.ts` / `env-data-definition-core.ts`,
  * which cannot import `src/` — are kept honest by
  * `tests/placeholder-dotted.test.ts`.
  *

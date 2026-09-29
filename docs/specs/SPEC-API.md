@@ -1,4 +1,4 @@
-# ai-ui-automation — API Testing Extension Specification v1.0
+# Steptix — API Testing Extension Specification v1.0
 
 **Author:** Greg (AI Tech Lead) / Paul Kent
 **Date:** 2026-03-27
@@ -9,7 +9,7 @@
 
 ## 1. Overview
 
-This specification extends ai-ui-automation to support **API testing alongside UI testing** within a single framework. Test authors write natural language instructions that can freely mix browser interactions and API calls in the same test. The AI determines from the instruction whether a step is a UI action or an API call and executes accordingly.
+This specification extends Steptix to support **API testing alongside UI testing** within a single framework. Test authors write natural language instructions that can freely mix browser interactions and API calls in the same test. The AI determines from the instruction whether a step is a UI action or an API call and executes accordingly.
 
 ### Core Principles
 
@@ -87,13 +87,13 @@ API specs are the primary source of endpoint knowledge — request schemas, resp
 
 ```bash
 # Sync all specs referenced in context files (re-download from URLs)
-npx aiui specs sync
+npx steptix specs sync
 
 # Sync a specific spec
-npx aiui specs sync delegates
+npx steptix specs sync delegates
 
 # List cached specs and their source URLs
-npx aiui specs list
+npx steptix specs list
 ```
 
 ### 3.2 Context Files for APIs
@@ -386,7 +386,7 @@ my-project/
 ├── .env.t2
 ├── .env.staging
 ├── .env.production
-├── aiui.config.json
+├── steptix.config.json
 ├── context/
 ├── specs/
 ├── tests/
@@ -431,13 +431,13 @@ NOTIFICATIONS_API_KEY=prod-notif-key-xxxxx
 
 ```bash
 # Run tests against T1 environment
-npx aiui run tests/ --env t1
+npx steptix run tests/ --env t1
 
 # Run against staging
-npx aiui run tests/ --env staging
+npx steptix run tests/ --env staging
 
 # Run specific test against production
-npx aiui run tests/delegates.md --env production
+npx steptix run tests/delegates.md --env production
 ```
 
 ### 6.3 Environment Resolution
@@ -580,7 +580,7 @@ Full values are available in a debug mode (`--debug-report`) for troubleshooting
 
 ### 9.1 New Config Fields
 
-Added to `aiui.config.json` (merged with the existing config from SPEC.md §7):
+Added to `steptix.config.json` (merged with the existing config from SPEC.md §7):
 
 ```json
 {
@@ -606,9 +606,9 @@ Added to `aiui.config.json` (merged with the existing config from SPEC.md §7):
 
 ```bash
 # Spec management
-npx aiui specs sync              # Download/update all referenced specs
-npx aiui specs sync delegates    # Sync a specific spec (matched by context file name)
-npx aiui specs list              # List cached specs with source URLs and last-synced date
+npx steptix specs sync              # Download/update all referenced specs
+npx steptix specs sync delegates    # Sync a specific spec (matched by context file name)
+npx steptix specs list              # List cached specs with source URLs and last-synced date
 ```
 
 ---
@@ -618,7 +618,7 @@ npx aiui specs list              # List cached specs with source URLs and last-s
 New files and directories added to the existing structure (SPEC.md §11):
 
 ```
-ai-ui-automation/
+steptix/
 ├── ...existing files...
 ├── specs/                            # Cached OpenAPI/Swagger specs
 │   ├── delegates-swagger.json

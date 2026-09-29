@@ -23,14 +23,14 @@ const preserved: Record<string, string | undefined> = {};
 // `loadConfig` now ends in the machine-AI floor, which reads the user root's
 // `.env` off the real machine. Every test in this file redirects that root
 // into a per-test tmp dir — without this, whatever AI_MODEL the developer has
-// in their real %LOCALAPPDATA%\aiui\.env would leak into assertions here.
+// in their real %LOCALAPPDATA%\steptix\.env would leak into assertions here.
 // ---------------------------------------------------------------------------
 
 let userRootTmp: string;
 const preservedUserRoot: Record<string, string | undefined> = {};
 
 beforeEach(async () => {
-  userRootTmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-user-root-'));
+  userRootTmp = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-user-root-'));
   for (const key of ['LOCALAPPDATA', 'XDG_CONFIG_HOME'] as const) {
     preservedUserRoot[key] = process.env[key];
     process.env[key] = userRootTmp;
@@ -46,7 +46,7 @@ afterEach(async () => {
 });
 
 async function writeUserRootEnv(content: string): Promise<void> {
-  const dir = path.join(userRootTmp, 'aiui');
+  const dir = path.join(userRootTmp, 'steptix');
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(path.join(dir, '.env'), content, 'utf8');
 }
@@ -101,11 +101,11 @@ describe('loadConfig — INTERACTIVE_ON_FAILURE env handling', () => {
   });
 });
 
-describe('loadConfig — aiui.config.json loading + deep merge', () => {
+describe('loadConfig — steptix.config.json loading + deep merge', () => {
   let tmpDir: string;
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-config-'));
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-config-'));
   });
 
   afterEach(async () => {
@@ -113,7 +113,7 @@ describe('loadConfig — aiui.config.json loading + deep merge', () => {
   });
 
   async function writeConfig(obj: unknown): Promise<string> {
-    const file = path.join(tmpDir, 'aiui.config.json');
+    const file = path.join(tmpDir, 'steptix.config.json');
     await fs.writeFile(file, JSON.stringify(obj), 'utf8');
     return file;
   }
@@ -243,7 +243,7 @@ describe('loadConfig — aiui.config.json loading + deep merge', () => {
   });
 
   it('throws when an explicit --config path is not a .json file', async () => {
-    await expect(loadConfig(path.join(tmpDir, 'aiui.config.ts'))).rejects.toThrow(
+    await expect(loadConfig(path.join(tmpDir, 'steptix.config.ts'))).rejects.toThrow(
       /\.json/,
     );
   });
@@ -261,14 +261,14 @@ describe('loadConfig — aiui.config.json loading + deep merge', () => {
   });
 
   it('throws with the file path on malformed JSON', async () => {
-    const file = path.join(tmpDir, 'aiui.config.json');
+    const file = path.join(tmpDir, 'steptix.config.json');
     await fs.writeFile(file, '{ "server": { "port": 3100, }', 'utf8'); // trailing comma
     await expect(loadConfig(file)).rejects.toThrow(file);
   });
 
   it('ignores a top-level $schema key', async () => {
     const file = await writeConfig({
-      $schema: 'https://example.com/aiui.config.schema.json',
+      $schema: 'https://example.com/steptix.config.schema.json',
       server: { port: 5000 },
     });
     const config = await loadConfig(file);
@@ -276,12 +276,12 @@ describe('loadConfig — aiui.config.json loading + deep merge', () => {
     expect((config as unknown as Record<string, unknown>)['$schema']).toBeUndefined();
   });
 
-  it('auto-discovers only aiui.config.json — a legacy .ts is ignored', async () => {
+  it('auto-discovers only steptix.config.json — a legacy .ts is ignored', async () => {
     // Only a .ts config exists in the dir, no .json. Auto-discovery (no
     // explicit path) must NOT pick it up — the project is treated as
     // unconfigured and falls back to defaults.
     await fs.writeFile(
-      path.join(tmpDir, 'aiui.config.ts'),
+      path.join(tmpDir, 'steptix.config.ts'),
       'export default { server: { port: 9999 } };',
       'utf8',
     );
@@ -302,7 +302,7 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
   const preservedAi: Record<string, string | undefined> = {};
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-floor-'));
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-floor-'));
     for (const key of AI_KEYS) {
       preservedAi[key] = process.env[key];
       delete process.env[key];
@@ -318,7 +318,7 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
   });
 
   async function writeConfig(obj: unknown): Promise<string> {
-    const file = path.join(tmpDir, 'aiui.config.json');
+    const file = path.join(tmpDir, 'steptix.config.json');
     await fs.writeFile(file, JSON.stringify(obj), 'utf8');
     return file;
   }
@@ -461,13 +461,13 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
   });
 });
 
-describe('aiui.config.schema.json validates configs', () => {
+describe('steptix.config.schema.json validates configs', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let validate: any;
 
   beforeEach(async () => {
     const schemaText = await fs.readFile(
-      path.resolve(__dirname, '../schema/aiui.config.schema.json'),
+      path.resolve(__dirname, '../schema/steptix.config.schema.json'),
       'utf8',
     );
     const ajv = new Ajv({ strict: false, allErrors: true });

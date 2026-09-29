@@ -41,7 +41,7 @@ export interface UploadPathContext {
    *  file — Flick never sends one, and the Sessions API's `testFilePath` is
    *  optional — in which case only absolute paths can resolve. */
   baseDir?: string | undefined;
-  /** Folder holding `aiui.config.json`; `null` when the walk found none. The
+  /** Folder holding `steptix.config.json`; `null` when the walk found none. The
    *  fence falls back to `baseDir`, and with neither there is no fence. */
   projectRoot?: string | null | undefined;
 }

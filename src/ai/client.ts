@@ -83,7 +83,7 @@ const PROFILES: Record<CompleteProfile, { effort?: Effort; maxTokens: number }> 
  * BLOCKS the machine `.env` on purpose (`withMachineAiFloor` is a floor for
  * unset values, not for empty ones), and that is how a project deliberately
  * forces keyless. A message listing the places with no key would be flatly
- * wrong for the reader who has one in `%LOCALAPPDATA%\aiui\.env` and cannot
+ * wrong for the reader who has one in `%LOCALAPPDATA%\steptix\.env` and cannot
  * see why it is being ignored, so the parenthetical names the rule instead.
  */
 export const AI_NOT_CONFIGURED_MESSAGE =
@@ -160,7 +160,7 @@ export class GatewayUrlRequiredError extends Error {
  */
 export const AI_FORBIDDEN_BY_POLICY_MESSAGE =
   'This step needs AI and this run forbids AI: it was asked to make no AI ' +
-  'calls (runSettings.ai: off, or ai.allowInRuns: false in aiui.config.json). ' +
+  'calls (runSettings.ai: off, or ai.allowInRuns: false in steptix.config.json). ' +
   'Compiled steps replay either way — compile this step, or run again with ' +
   'ai: "on" (or "default") to allow it.';
 
@@ -395,7 +395,7 @@ export class AiClient {
   /**
    * Whether the veil is down right now — read by a caller that lifts it for one
    * request FOR AI and must put it back as it found it (Record Steps,
-   * stories/testbench-record-steps.md, decision 9), rather than guess.
+   * stories/steptix-record-steps.md, decision 9), rather than guess.
    */
   get aiPolicyAllowed(): boolean {
     return !this.aiForbidden;

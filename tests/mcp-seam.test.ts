@@ -27,7 +27,7 @@ function fakeProject(overrides: Partial<ProjectContext> = {}): ProjectContext {
     scope: 'project',
     configSearch: [],
     projectRoot: PROJECT_ROOT,
-    configPath: `${PROJECT_ROOT}/aiui.config.json`,
+    configPath: `${PROJECT_ROOT}/steptix.config.json`,
     env: { AI_API_KEY: 'project-key' },
     envName: null,
     serverUrl: 'http://127.0.0.1:3100',
@@ -188,7 +188,7 @@ async function connect(opts: {
         engine: 'edge',
         profile: 'default',
         port: 51000,
-        profileDir: 'c:/proj/.aiui/cdp-profiles/edge-default',
+        profileDir: 'c:/proj/.steptix/cdp-profiles/edge-default',
         binary: 'C:/msedge.exe',
         tabs: [],
         outcome: 'launched_into_new_profile',
@@ -314,8 +314,8 @@ beforeEach(() => {
 
 describe('tool registration', () => {
   it('exposes exactly the registered tools, under bare names', async () => {
-    // Bare because the host prefixes them — an `aiui_` prefix here would
-    // render as `mcp__aiui__aiui_run_steps` in Claude Code.
+    // Bare because the host prefixes them — a `steptix_` prefix here would
+    // render as `mcp__steptix__steptix_run_steps` in Claude Code.
     //
     // The two CDP tools carry `cdp` in their own names on purpose: the
     // framework has two kinds of browser, and a bare `start_browser` would
@@ -1665,7 +1665,7 @@ describe('get_page_content format: screenshot', () => {
 
     const res = await client.callTool({
       name: 'get_page_content',
-      arguments: { session_id: 'testbench:1', project_root: PROJECT_ROOT, format: 'screenshot' },
+      arguments: { session_id: 'steptix:1', project_root: PROJECT_ROOT, format: 'screenshot' },
     });
 
     expect(res.isError).toBe(true);
@@ -1712,7 +1712,7 @@ describe('pre-flight failures', () => {
   it('come back as isError with no structured content', async () => {
     const { client } = await connect({
       resolveProjectError: new PreflightFailure(
-        preflightError('No aiui.config.json found, so there is no project to run against.'),
+        preflightError('No steptix.config.json found, so there is no project to run against.'),
       ),
     });
 
@@ -1723,7 +1723,7 @@ describe('pre-flight failures', () => {
 
     expect(res.isError).toBe(true);
     expect(res.structuredContent).toBeUndefined();
-    expect(JSON.stringify(res.content)).toContain('aiui.config.json');
+    expect(JSON.stringify(res.content)).toContain('steptix.config.json');
   });
 });
 
@@ -1965,7 +1965,7 @@ describe('the other tools', () => {
   });
 
   // The read/act tools now auto-start (stories/mcp-no-project.md follow-up):
-  // whichever aiui tool an agent reaches for first should bring the server up
+  // whichever steptix tool an agent reaches for first should bring the server up
   // rather than fail on a bare connect error. Only server_status and
   // get_run_settings (above) keep the report-only path, because their contract
   // is to be able to answer "nothing is running".
@@ -1993,8 +1993,8 @@ describe('project-less run_steps', () => {
   const userScope = () =>
     fakeProject({
       scope: 'user',
-      projectRoot: 'c:/users/x/aiui',
-      configPath: 'c:/users/x/aiui/aiui.config.json',
+      projectRoot: 'c:/users/x/steptix',
+      configPath: 'c:/users/x/steptix/steptix.config.json',
       configSearch: ['c:/somewhere', 'c:/'],
       skillsDir: null,
       toolsDir: null,
@@ -2014,7 +2014,7 @@ describe('project-less run_steps', () => {
     expect(res.isError).toBeFalsy();
     const structured = res.structuredContent as Record<string, unknown>;
     expect(structured.scope).toBe('user');
-    expect(structured.projectRoot).toBe('c:/users/x/aiui');
+    expect(structured.projectRoot).toBe('c:/users/x/steptix');
     const first = (res.content as { text?: string }[])[0]?.text ?? '';
     expect(first).toContain('user root');
   });

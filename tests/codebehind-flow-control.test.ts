@@ -279,7 +279,7 @@ const FLOW_TEST_MD = [
 describe('runCodeBehindStep and a compiled return', () => {
   it('maps the exit onto the StepResult, keeps the entry, and never heals', async () => {
     const md = await write('booking.md', FLOW_TEST_MD);
-    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   {
     source: ${JSON.stringify(RETURN_STEP)},
@@ -326,7 +326,7 @@ export default defineSteps([
 
   it('passes with no flowControl when the condition does not hold', async () => {
     const md = await write('booking.md', FLOW_TEST_MD);
-    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   {
     source: ${JSON.stringify(RETURN_STEP)},
@@ -358,7 +358,7 @@ export default defineSteps([
 
   it('fails the step, without healing it, when an unclaimed entry calls exit', async () => {
     const md = await write('booking.md', FLOW_TEST_MD);
-    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   {
     source: 'Enter the booking code',
@@ -391,7 +391,7 @@ export default defineSteps([
     expect(binding.entry).toBeDefined();
     expect(result.codeBehindStale).toBeUndefined();
 
-    // The explanation is what the report cell and the TestBench hover show,
+    // The explanation is what the report cell and the Steptix hover show,
     // and it has to name the rule that was broken. This case used to fall into
     // the branch written for `step.filePath` — the only non-retryable failure
     // there was when it was written — and told the author a file could not be
@@ -406,7 +406,7 @@ export default defineSteps([
     // reach one branch in `runCodeBehindStep`, and separating them must not
     // cost the original its sentence.
     const md = await write('booking.md', FLOW_TEST_MD);
-    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   {
     source: 'Enter the booking code',
@@ -719,7 +719,7 @@ describe('compile — a step the recording skipped', () => {
   it('says so and writes nothing when every selected step was behind the return', async () => {
     const md = await write('booking.md', THREE_STEP_MD);
     const test = await parseTestFile(md);
-    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: 'Enter the booking code', async run({ page }) { await page.locator('#code').waitFor(); } },
   { source: ${JSON.stringify(RETURN_STEP)}, async run({ page, step }) { if ((await page.title()).includes('Dashboard')) step.exit(); } },

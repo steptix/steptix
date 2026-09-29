@@ -319,7 +319,7 @@ export interface StepResult {
    * (stories/codebehind-compile.md, "The runtime stops generating").
    *
    * Runs no longer rewrite the file, so the failure has to be *flagged*
-   * instead: the report renders ⚠, the summary counts it, and `aiui compile
+   * instead: the report renders ⚠, the summary counts it, and `steptix compile
    * --only-stale` regenerates exactly these steps.
    *
    * The flag says the ENTRY broke — it does NOT say the step recovered. The
@@ -562,7 +562,7 @@ export interface StepResult {
    *
    * Structural rather than folded into `aiExplanation` alone, because the
    * explanation does not travel on the `step:fail` wire event and the warning has
-   * to: it is the first line of the TestBench hover and the MCP row's reason.
+   * to: it is the first line of the Steptix hover and the MCP row's reason.
    */
   warning?: string;
 }
@@ -687,7 +687,7 @@ export interface TestReport {
    * `status !== 'passed'` to decide how much of a recording is usable — so a
    * healed step that stopped being `'passed'` would make a compile silently
    * truncate the prefix. `status` stays `'passed'`; this drives the distinct
-   * amber "PASSED — N steps healed" banner and `aiui run --fail-on-healed`.
+   * amber "PASSED — N steps healed" banner and `steptix run --fail-on-healed`.
    *
    * Omitted (not `0`) on a run that healed nothing, so an unchanged run
    * writes an unchanged report.

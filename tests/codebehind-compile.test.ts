@@ -246,7 +246,7 @@ describe('compileTest — the happy path', () => {
     const written = await fs.readFile(path.join(dir, 'booking.steps.ts'), 'utf-8');
     expect(written).toContain(`source: 'Enter the booking code'`);
     expect(written).toContain(`source: 'Confirm the booking'`);
-    expect(written).toContain(`import { defineSteps } from 'ai-ui-automation/codebehind';`);
+    expect(written).toContain(`import { defineSteps } from 'steptix/codebehind';`);
     // Formatted as an author would write it, not the model's one line per
     // entry: the entry's fields and its body on their own lines, no line past
     // 100 columns.
@@ -266,9 +266,9 @@ describe('compileTest — the happy path', () => {
     // The candidate trail survives a green compile: it is the proposal, and it
     // is the file (stories/codebehind-recording-on-disk.md).
     expect(
-      await fs.readFile(path.join(dir, '.aiui-codebehind-cache', 'booking.steps.ts.candidate'), 'utf-8'),
+      await fs.readFile(path.join(dir, '.steptix-codebehind-cache', 'booking.steps.ts.candidate'), 'utf-8'),
     ).toBe(written);
-    expect(result.summary.recordingDir).toBe(path.join(dir, '.aiui-codebehind-cache', 'booking.recording'));
+    expect(result.summary.recordingDir).toBe(path.join(dir, '.steptix-codebehind-cache', 'booking.recording'));
     // Step 2's prompt saw the whole test and step 1's entry in the candidate.
     expect(prompts[1]).toContain('## The whole test');
     expect(prompts[1]).toContain('## The code-behind file as it stands');
@@ -323,7 +323,7 @@ describe('compileTest — the happy path', () => {
 });
 
 describe('compileTest — selection', () => {
-  const EXISTING = `import { defineSteps } from 'ai-ui-automation/codebehind';
+  const EXISTING = `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   {
     source: 'Enter the booking code',
@@ -544,7 +544,7 @@ export default defineSteps([
 
   it('never compiles over an `ai: true` entry, even with --all', async () => {
     const md = await write('booking.md', TEST_MD);
-    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: 'Enter the booking code', ai: true },
 ]);
@@ -564,7 +564,7 @@ export default defineSteps([
 
   it('is green — and never records — when every step already has code', async () => {
     const md = await write('booking.md', TEST_MD);
-    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: 'Enter the booking code', async run({ page }) { await page.locator('#a').waitFor(); } },
   { source: 'Confirm the booking', async run({ page }) { await page.locator('#b').waitFor(); } },
@@ -831,7 +831,7 @@ describe('compileTest — replay, repair and the never-converging step', () => {
 
   it('stops on a failure in an entry it did not generate, and says how to recompile it', async () => {
     const md = await write('booking.md', TEST_MD);
-    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: 'Enter the booking code', async run({ page }) { await page.locator('#hand-written').waitFor(); } },
 ]);
@@ -899,10 +899,10 @@ export default defineSteps([
     expect(written).toContain('replay kept failing — nope');
     expect(written).toContain('replay kept failing — and now step 1 too');
     expect(
-      await fs.readFile(path.join(dir, '.aiui-codebehind-cache', 'booking.steps.ts.candidate'), 'utf-8'),
+      await fs.readFile(path.join(dir, '.steptix-codebehind-cache', 'booking.steps.ts.candidate'), 'utf-8'),
     ).toBe(written);
     // Each failed round left its evidence beside the recording.
-    const recordingDir = path.join(dir, '.aiui-codebehind-cache', 'booking.recording');
+    const recordingDir = path.join(dir, '.steptix-codebehind-cache', 'booking.recording');
     expect(result.summary.recordingDir).toBe(recordingDir);
     const failures = (await fs.readdir(recordingDir)).filter((f) => f.endsWith('.failure.json')).sort();
     expect(failures).toEqual(['replay-1.failure.json', 'replay-2.failure.json', 'replay-3.failure.json']);
@@ -1003,7 +1003,7 @@ export default defineSteps([
       // The strict replay refused before its first step: the file did not load.
       return {
         status: 'failed',
-        error: "code-behind file booking.steps.ts could not be loaded: Cannot find package 'ai-ui-automation'",
+        error: "code-behind file booking.steps.ts could not be loaded: Cannot find package 'steptix'",
         steps: [],
         resolvedParameters: {},
         tokensUsed: 0,
@@ -1014,7 +1014,7 @@ export default defineSteps([
 
     expect(result.status).toBe('failed');
     expect(result.files).toEqual({});
-    expect(result.summary.error).toContain("Cannot find package 'ai-ui-automation'");
+    expect(result.summary.error).toContain("Cannot find package 'steptix'");
     expect(result.summary.error).toContain('could not be loaded');
     expect(requests.filter((r) => r.purpose === 'replay')).toHaveLength(1);
   });
@@ -1102,7 +1102,7 @@ describe('compileTest — declines and review', () => {
   it('applies a review revision that compiles', async () => {
     const md = await write('booking.md', TEST_MD);
     const test = await parseTestFile(md);
-    const revised = `import { defineSteps } from 'ai-ui-automation/codebehind';
+    const revised = `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: "Enter the booking code", async run({ page }) { await page.locator('#reviewed').waitFor(); } },
   { source: "Confirm the booking", async run({ page }) { await page.locator('#b').waitFor(); } },
@@ -1130,7 +1130,7 @@ export default defineSteps([
   it('rejects a review revision that does not compile, and the generated file stands', async () => {
     const md = await write('booking.md', TEST_MD);
     const test = await parseTestFile(md);
-    const broken = `import { defineSteps } from 'ai-ui-automation/codebehind';
+    const broken = `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: "Enter the booking code", async run({ page }) { await page.locator('#x'.waitFor(); } },
   { source: "Confirm the booking", async run({ page }) { await page.locator('#code').waitFor(); } },
@@ -1170,7 +1170,7 @@ export default defineSteps([
       '1. Enter the booking code',
     ].join('\n'));
     const test = await parseTestFile(md);
-    const leaky = `import { defineSteps } from 'ai-ui-automation/codebehind';
+    const leaky = `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: "Enter the booking code", async run({ page }) { await page.fill('#p', 'hunter2-correct-horse'); } },
 ]);
@@ -1207,7 +1207,7 @@ export default defineSteps([
       resolvedParameters: {},
       tokensUsed: 0,
     };
-    const inventive = `import { defineSteps } from 'ai-ui-automation/codebehind';
+    const inventive = `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: "Enter the booking code", async run({ page }) { await page.locator('#code').waitFor(); } },
   { source: "Confirm the booking", async run({ page }) { await page.locator('#code').waitFor(); } },
@@ -1252,7 +1252,7 @@ export default defineSteps([
     ].join('\n'));
     const test = await parseTestFile(md);
     expect(test.parameters).toEqual({ username: '$GITHUB_USERNAME', password: '$GITHUB_PASSWORD' });
-    const leaky = `import { defineSteps } from 'ai-ui-automation/codebehind';
+    const leaky = `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: "Enter the booking code", async run({ page }) { await page.fill('#p', 'correct-horse-battery'); } },
 ]);
@@ -1402,12 +1402,12 @@ describe('compileTest — skills span several files', () => {
 describe('the candidate override', () => {
   it('loads entries from the override path and leaves the real file alone', async () => {
     const md = await write('booking.md', TEST_MD);
-    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: 'Enter the booking code', async run({ step }) { step.setVar('from', 'real'); } },
 ]);
 `);
-    const override = await write('.aiui-codebehind-cache/candidate.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    const override = await write('.steptix-codebehind-cache/candidate.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: 'Enter the booking code', async run({ step }) { step.setVar('from', 'candidate'); } },
 ]);
@@ -1449,7 +1449,7 @@ describe('the last-run sidecar', () => {
   it('round-trips beside the test, in the gitignored cache dir', async () => {
     const md = await write('booking.md', TEST_MD);
     expect(lastRunPathFor(md)).toBe(
-      path.join(dir, '.aiui-codebehind-cache', 'booking.last-run.json'),
+      path.join(dir, '.steptix-codebehind-cache', 'booking.last-run.json'),
     );
 
     await writeLastRun(md, [
@@ -1466,7 +1466,7 @@ describe('the last-run sidecar', () => {
   it('reads as nothing-known when there is no sidecar or it is corrupt', async () => {
     const md = await write('booking.md', TEST_MD);
     expect(await readLastRun(md)).toBeNull();
-    await write('.aiui-codebehind-cache/booking.last-run.json', 'not json');
+    await write('.steptix-codebehind-cache/booking.last-run.json', 'not json');
     expect(await readLastRun(md)).toBeNull();
   });
 });

@@ -35,7 +35,7 @@ const CODE_TIMEOUT_MS = 180_000;
  * exists, then pulls it to the front. `$form.Activate()` alone does not do it —
  * activating a window that was never shown leaves it hidden.
  *
- * `Write-AiuiFields` is how every dialog that returns typed values hands them
+ * `Write-SteptixFields` is how every dialog that returns typed values hands them
  * back (stories/bitwarden-sign-in.md §7). PowerShell 5.1 writes redirected
  * stdout in the console code page, which on a default Windows install is not
  * UTF-8: measured, `pässwörd-é-€-日本` arrives as `p�ssw�rd-�-?-??` under code
@@ -52,13 +52,13 @@ Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public class AiuiWin {
+public class SteptixWin {
   [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int c);
   [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
   public static void Reveal(IntPtr h) { ShowWindow(h, 5); SetForegroundWindow(h); }
 }
 "@
-function Write-AiuiFields([string[]]$values) {
+function Write-SteptixFields([string[]]$values) {
   foreach ($v in $values) {
     [Console]::Out.Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$v)) + [char]10)
   }
@@ -77,10 +77,10 @@ function Write-AiuiFields([string[]]$values) {
  */
 const APPROVAL_SCRIPT = `
 
-$domain = $env:AIUI_APPROVAL_DOMAIN
-$framedBy = $env:AIUI_APPROVAL_FRAMEDBY
-$items = $env:AIUI_APPROVAL_ITEMS -split "\`n"
-$timeout = [int]$env:AIUI_APPROVAL_TIMEOUT
+$domain = $env:STEPTIX_APPROVAL_DOMAIN
+$framedBy = $env:STEPTIX_APPROVAL_FRAMEDBY
+$items = $env:STEPTIX_APPROVAL_ITEMS -split "\`n"
+$timeout = [int]$env:STEPTIX_APPROVAL_TIMEOUT
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Approve sign-in'
@@ -169,7 +169,7 @@ $timer.Interval = $timeout
 $timer.Add_Tick({ $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $form.Close() })
 $timer.Start()
 
-$form.Add_Shown({ [AiuiWin]::Reveal($form.Handle) })
+$form.Add_Shown({ [SteptixWin]::Reveal($form.Handle) })
 $result = $form.ShowDialog()
 $timer.Stop()
 
@@ -182,7 +182,7 @@ exit 1
 
 /** The unlock prompt. Masked, and the value crosses one pipe to this process. */
 const UNLOCK_SCRIPT = `
-$timeout = [int]$env:AIUI_APPROVAL_TIMEOUT
+$timeout = [int]$env:STEPTIX_APPROVAL_TIMEOUT
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Unlock Bitwarden'
@@ -227,12 +227,12 @@ $timer.Interval = $timeout
 $timer.Add_Tick({ $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $form.Close() })
 $timer.Start()
 
-$form.Add_Shown({ [AiuiWin]::Reveal($form.Handle); $box.Focus() })
+$form.Add_Shown({ [SteptixWin]::Reveal($form.Handle); $box.Focus() })
 $result = $form.ShowDialog()
 $timer.Stop()
 
 if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-  Write-AiuiFields @($box.Text)
+  Write-SteptixFields @($box.Text)
   exit 0
 }
 exit 1
@@ -247,7 +247,7 @@ exit 1
  * separate app with its own sign-in and fixes nothing here.
  */
 const SIGN_IN_SCRIPT = `
-$timeout = [int]$env:AIUI_APPROVAL_TIMEOUT
+$timeout = [int]$env:STEPTIX_APPROVAL_TIMEOUT
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Sign in to Bitwarden'
@@ -323,12 +323,12 @@ $timer.Interval = $timeout
 $timer.Add_Tick({ $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $form.Close() })
 $timer.Start()
 
-$form.Add_Shown({ [AiuiWin]::Reveal($form.Handle); $email.Focus() })
+$form.Add_Shown({ [SteptixWin]::Reveal($form.Handle); $email.Focus() })
 $result = $form.ShowDialog()
 $timer.Stop()
 
 if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-  Write-AiuiFields @($email.Text, $pw.Text)
+  Write-SteptixFields @($email.Text, $pw.Text)
   exit 0
 }
 exit 1
@@ -340,7 +340,7 @@ exit 1
  * text `bw` printed — `bw`'s output never reaches a dialog.
  */
 const CODE_SCRIPT = `
-$timeout = [int]$env:AIUI_APPROVAL_TIMEOUT
+$timeout = [int]$env:STEPTIX_APPROVAL_TIMEOUT
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Bitwarden verification code'
@@ -352,7 +352,7 @@ $form.MaximizeBox = $false
 $form.MinimizeBox = $false
 
 $head = New-Object System.Windows.Forms.Label
-if ($env:AIUI_CODE_KIND -eq 'new-device') {
+if ($env:STEPTIX_CODE_KIND -eq 'new-device') {
   $head.Text = 'Bitwarden emailed a verification code to your account''s email address because this is a new device. Enter it here.'
 } else {
   $head.Text = 'Enter your two-step login code, from your authenticator app or the email Bitwarden just sent.'
@@ -390,12 +390,12 @@ $timer.Interval = $timeout
 $timer.Add_Tick({ $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $form.Close() })
 $timer.Start()
 
-$form.Add_Shown({ [AiuiWin]::Reveal($form.Handle); $box.Focus() })
+$form.Add_Shown({ [SteptixWin]::Reveal($form.Handle); $box.Focus() })
 $result = $form.ShowDialog()
 $timer.Stop()
 
 if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-  Write-AiuiFields @($box.Text)
+  Write-SteptixFields @($box.Text)
   exit 0
 }
 exit 1
@@ -403,7 +403,7 @@ exit 1
 
 /**
  * The dialog scripts, for tests: test 40 pins that every dialog returning
- * typed values does so through `Write-AiuiFields`, and test 39 runs the helper
+ * typed values does so through `Write-SteptixFields`, and test 39 runs the helper
  * alone under a default code page.
  */
 export const DIALOG_SCRIPTS = {
@@ -414,7 +414,7 @@ export const DIALOG_SCRIPTS = {
 } as const;
 
 /**
- * Reverse `Write-AiuiFields`: one Base64 line per value, each ending in a
+ * Reverse `Write-SteptixFields`: one Base64 line per value, each ending in a
  * newline. Anything else — a missing terminator, a line that is not Base64 —
  * voids the whole answer, because a half-read password is worse than none.
  */
@@ -487,11 +487,11 @@ export class WindowsDialogApproval implements ApprovalProvider {
       APPROVAL_SCRIPT,
       {
         ...process.env,
-        AIUI_APPROVAL_DOMAIN: request.domain,
-        AIUI_APPROVAL_FRAMEDBY: request.framedBy ?? '',
+        STEPTIX_APPROVAL_DOMAIN: request.domain,
+        STEPTIX_APPROVAL_FRAMEDBY: request.framedBy ?? '',
         // Newline-joined because an item name can contain almost anything else.
-        AIUI_APPROVAL_ITEMS: items.join('\n'),
-        AIUI_APPROVAL_TIMEOUT: String(APPROVAL_TIMEOUT_MS),
+        STEPTIX_APPROVAL_ITEMS: items.join('\n'),
+        STEPTIX_APPROVAL_TIMEOUT: String(APPROVAL_TIMEOUT_MS),
       },
       APPROVAL_TIMEOUT_MS,
     );
@@ -519,7 +519,7 @@ export class WindowsDialogApproval implements ApprovalProvider {
   async askMasterPassword(): Promise<string | null> {
     const result = await runDialog(
       UNLOCK_SCRIPT,
-      { ...process.env, AIUI_APPROVAL_TIMEOUT: String(UNLOCK_TIMEOUT_MS) },
+      { ...process.env, STEPTIX_APPROVAL_TIMEOUT: String(UNLOCK_TIMEOUT_MS) },
       UNLOCK_TIMEOUT_MS,
     );
     if (result.code !== 0) return null;
@@ -537,7 +537,7 @@ export class WindowsDialogApproval implements ApprovalProvider {
   async askSignIn(): Promise<{ email: string; password: string } | null> {
     const result = await runDialog(
       SIGN_IN_SCRIPT,
-      { ...process.env, AIUI_APPROVAL_TIMEOUT: String(SIGN_IN_TIMEOUT_MS) },
+      { ...process.env, STEPTIX_APPROVAL_TIMEOUT: String(SIGN_IN_TIMEOUT_MS) },
       SIGN_IN_TIMEOUT_MS,
     );
     if (result.code !== 0) return null;
@@ -556,7 +556,7 @@ export class WindowsDialogApproval implements ApprovalProvider {
   async askLoginCode(kind: 'two-step' | 'new-device'): Promise<string | null> {
     const result = await runDialog(
       CODE_SCRIPT,
-      { ...process.env, AIUI_APPROVAL_TIMEOUT: String(CODE_TIMEOUT_MS), AIUI_CODE_KIND: kind },
+      { ...process.env, STEPTIX_APPROVAL_TIMEOUT: String(CODE_TIMEOUT_MS), STEPTIX_CODE_KIND: kind },
       CODE_TIMEOUT_MS,
     );
     if (result.code !== 0) return null;

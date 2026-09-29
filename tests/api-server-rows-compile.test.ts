@@ -24,10 +24,10 @@
  * ask for, and what are they bound to", never "is the model any good".
  *
  * The third shape a client can send — DELETE the session between rows, which
- * is what TestBench does — cannot be fixed here: closing the session discards
+ * is what Steptix does — cannot be fixed here: closing the session discards
  * the retained compiler, so the server sees three unrelated compiles and is
  * right to. That one is the client's to get right, and
- * testbench-native's integration suite covers it (`codebehind-rows`).
+ * steptix-vscode's integration suite covers it (`codebehind-rows`).
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
@@ -404,7 +404,7 @@ beforeEach(async () => {
   aiPrompts.length = 0;
   aiCalls.length = 0;
   for (const f of fixtures.values()) await fs.rm(f.steps, { force: true });
-  await fs.rm(path.join(tmpDir, '.aiui-codebehind-cache'), { recursive: true, force: true });
+  await fs.rm(path.join(tmpDir, '.steptix-codebehind-cache'), { recursive: true, force: true });
 });
 
 /**
@@ -577,7 +577,7 @@ describe('a kept session compiles row 1 only', () => {
     // `steps`, so it would say 2. The server cannot close that gap: a row-2
     // block and the second half of an `[input:]`-split run arrive in the same
     // shape, and one of them genuinely adds steps. Left as the honest count of
-    // what was executed — and unreachable in practice now, since TestBench
+    // what was executed — and unreachable in practice now, since Steptix
     // sends `compile` on the first row only (rows story, decision 11).
     expect(result.summary.totalSteps).toBe(4);
   }, CASE_TIMEOUT);

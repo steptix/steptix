@@ -1,4 +1,4 @@
-# ai-ui-automation
+# Steptix
 
 AI-powered UI test automation using natural language Markdown test files. Write tests in plain English, and an AI model interprets each step using Playwright to drive the browser.
 
@@ -21,37 +21,37 @@ npm install
 
 ```bash
 # Run all tests in the default tests/ directory
-npx aiui run
+npx steptix run
 
 # Run a specific test file
-npx aiui run tests/login-flow.md
+npx steptix run tests/login-flow.md
 
 # Run a directory of tests
-npx aiui run tests/smoke/
+npx steptix run tests/smoke/
 
 # Filter by tags
-npx aiui run --tag smoke,login
+npx steptix run --tag smoke,login
 
 # Headless mode
-npx aiui run --headless
+npx steptix run --headless
 
 # Use a specific browser
-npx aiui run --browser firefox
+npx steptix run --browser firefox
 
 # Load environment variables from .env.staging
-npx aiui run --env staging
+npx steptix run --env staging
 ```
 
 ### List tests
 
 ```bash
-npx aiui list
+npx steptix list
 ```
 
 ### Initialize a new project
 
 ```bash
-npx aiui init
+npx steptix init
 ```
 
 ## Runner UI
@@ -89,16 +89,16 @@ The renderer hot-reloads as you edit React components. Restart is needed for mai
 npm run build:all
 
 # Launch with default tests/ directory
-npx aiui ui
+npx steptix ui
 
 # Specify a tests directory
-npx aiui ui ./my-tests
+npx steptix ui ./my-tests
 
 # With environment
-npx aiui ui --env staging
+npx steptix ui --env staging
 
 # With custom config
-npx aiui ui --config ./custom.config.ts
+npx steptix ui --config ./custom.config.ts
 ```
 
 ### UI Features
@@ -125,10 +125,10 @@ npx aiui ui --config ./custom.config.ts
 | `npm run lint` | Type-check without emitting |
 | `npm run clean` | Remove build artifacts |
 
-### Testing the TestBench extension
+### Testing the Steptix extension
 
 The VS Code extension has two suites of its own, both run from
-`testbench-native/`. Neither is covered by the root `npm test`.
+`steptix-vscode/`. Neither is covered by the root `npm test`.
 
 | Script | Description |
 |--------|-------------|
@@ -137,7 +137,7 @@ The VS Code extension has two suites of its own, both run from
 | `npm run test:live` | The full stack: real VS Code, real server, real browser, real model calls |
 
 ```bash
-cd testbench-native && npm run test:live
+cd steptix-vscode && npm run test:live
 ```
 
 That is the whole command. It builds what it needs, starts a server per
@@ -161,12 +161,12 @@ for it. See `CLAUDE.md` for the detail.
 
 ## MCP Server
 
-`aiui mcp` exposes this framework to coding agents over the Model Context
+`steptix mcp` exposes this framework to coding agents over the Model Context
 Protocol, so an agent can run steps in a live browser or run a whole test file
 and read structured results back.
 
 It speaks stdio and is spawned by the agent host — you do not run it by hand.
-Under the covers it is an HTTP client of the same Sessions API that TestBench
+Under the covers it is an HTTP client of the same Sessions API that Steptix
 uses, so agent sessions and editor sessions share one server and one browser
 pool. If no server is running it starts one for you.
 
@@ -207,11 +207,11 @@ The agent calls `start_cdp_browser` and gets back a port. Sign in by hand in the
 window that opens. From then on, steps sent with that port run in your
 signed-in browser — and the login survives closing the window, restarting the
 server, and restarting your editor, because it lives in a profile directory
-under `.aiui/cdp-profiles/`.
+under `.steptix/cdp-profiles/`.
 
 ```
-.aiui/cdp-profiles/edge-default/     ← "start an Edge browser"
-.aiui/cdp-profiles/edge-admin/       ← "…with a profile named admin"
+.steptix/cdp-profiles/edge-default/     ← "start an Edge browser"
+.steptix/cdp-profiles/edge-admin/       ← "…with a profile named admin"
 ```
 
 **A few things that surprise people:**
@@ -255,7 +255,7 @@ under `.aiui/cdp-profiles/`.
 An agent may only drive browsers **this project launched**. Anything else — a
 browser you started yourself, or one another tool left on 9222 — is refused,
 and listing it withholds its tab titles and URLs. To lift that, a human edits
-`aiui.config.json`:
+`steptix.config.json`:
 
 ```json
 { "mcp": { "cdp": { "allowUnowned": true } } }
@@ -274,7 +274,7 @@ do in a Chrome you started yourself, at the cost of Chrome's yellow
 "unsupported command-line flag" bar on launch (dismiss it). The file that
 counts is the one in the root the browser is launched into — the project's, or
 for a machine-wide browser (`scope: "user"`) the user root's own
-`aiui.config.json` under `%LOCALAPPDATA%\aiui` (`~/.aiui` elsewhere). It is
+`steptix.config.json` under `%LOCALAPPDATA%\steptix` (`~/.steptix` elsewhere). It is
 deliberately not a tool argument: if a site refuses the browser, the agent is
 told to raise it with you, not to work around the site.
 
@@ -338,10 +338,10 @@ is a separate *profile*.
 **Codex CLI** (and the Codex VS Code extension), in `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.aiui]
+[mcp_servers.steptix]
 command = "node"
 args = ["c:/Projects/vibe/ai-ui-automation/dist/index.js", "mcp"]
-env = { AIUI_MCP_ROOTS = "c:/Projects/vibe/ai-ui-automation" }
+env = { STEPTIX_MCP_ROOTS = "c:/Projects/vibe/ai-ui-automation" }
 ```
 
 **Copilot CLI**, in `~/.copilot/mcp-config.json`:
@@ -349,17 +349,17 @@ env = { AIUI_MCP_ROOTS = "c:/Projects/vibe/ai-ui-automation" }
 ```json
 {
   "mcpServers": {
-    "aiui": {
+    "steptix": {
       "type": "stdio",
       "command": "node",
       "args": ["c:/Projects/vibe/ai-ui-automation/dist/index.js", "mcp"],
-      "env": { "AIUI_MCP_ROOTS": "c:/Projects/vibe/ai-ui-automation" }
+      "env": { "STEPTIX_MCP_ROOTS": "c:/Projects/vibe/ai-ui-automation" }
     }
   }
 }
 ```
 
-### `AIUI_MCP_ROOTS`
+### `STEPTIX_MCP_ROOTS`
 
 The directories the server is allowed to touch, separated by `;` on Windows and
 `:` elsewhere. It defaults to the working directory the host spawned the server
@@ -378,14 +378,14 @@ refused.
 - Hosts run `dist/`, so **run `npm run build`** after changing the source — and
   once on a fresh clone, or the configs above point at a file that isn't there.
 - If you let the MCP server auto-start the API server, check on it with
-  `aiui status --url $SERVER_URL`. Plain `aiui status` reads
-  `aiui.config.json`, which can name a different host or port than `SERVER_URL`.
+  `steptix status --url $SERVER_URL`. Plain `steptix status` reads
+  `steptix.config.json`, which can name a different host or port than `SERVER_URL`.
 - The Codex VS Code extension currently has an open bug picking up MCP servers
   from `config.toml`. Verify with Codex CLI first — a no-show in the extension
   is not a problem with this server.
 - Windows Codex setups sometimes need `startup_timeout_ms` raised in
   `config.toml`.
-- `aiui mcp --help` prints the full reference.
+- `steptix mcp --help` prints the full reference.
 
 ## Test File Format
 
@@ -527,7 +527,7 @@ Invoke it from any test step, passing arguments and aliasing outputs into the ca
 2. Use {{admin_session}} for the next request
 ```
 
-Skills expand inline before the run, so the runner and the report see the fully-expanded flow, and TestBench (Native) can step **into** a skill body, set breakpoints in it, and show a call stack. The skills directory defaults to `skills/` and is configurable via `tests.skillsDir` in `aiui.config.json`.
+Skills expand inline before the run, so the runner and the report see the fully-expanded flow, and Steptix can step **into** a skill body, set breakpoints in it, and show a call stack. The skills directory defaults to `skills/` and is configurable via `tests.skillsDir` in `steptix.config.json`.
 
 Skills may be grouped into subfolders of that directory and referenced path-qualified — `skills/auth/login.md` is `[skill: auth/login]`. A leading slash is optional sugar for the same file (`[skill: /auth/login]`), and the unqualified form (`[skill: login]`) still means a skill sitting directly in `skills/`:
 
@@ -571,7 +571,7 @@ Steps 1 and 4 both call `### Login`; step 3 calls `### Checkout`. Each expands i
 - **Matching** is the step's raw text, trimmed and case-insensitive (`Login` = `login` = `LOGIN`). `1. **Login**` is an ordinary AI step, not a call; a typo or trailing period is a near-miss. A `[skill:]`/`[tool:]`/`[input:]`/`[interactive]` step is never a section call.
 - **Names** may contain spaces. Reserved H2 keywords, names starting with `[` or containing `{{`, empty names, and duplicates are rejected.
 
-TestBench (Native) gives sectioned files full debug support — status on body lines, breakpoints, step-into, go-to-definition, completion, and "did you mean?" diagnostics. TestBench (Monaco), the legacy variant, refuses to run a sectioned file rather than mis-run it; use TestBench (Native) or the CLI. See [SPEC.md](docs/specs/SPEC.md#inline-sections) for the full grammar and semantics.
+Steptix gives sectioned files full debug support — status on body lines, breakpoints, step-into, go-to-definition, completion, and "did you mean?" diagnostics. See [SPEC.md](docs/specs/SPEC.md#inline-sections) for the full grammar and semantics.
 
 ## Tools
 
@@ -589,7 +589,7 @@ Tools live in their own TypeScript subproject so they get the full IDE experienc
 
 ```
 my-test-project/
-├── aiui.config.json        ← framework config
+├── steptix.config.json        ← framework config
 ├── tests/
 │   └── login-flow.md             ← natural-language tests
 ├── skills/
@@ -620,7 +620,7 @@ Inside your test project's `tools/` directory:
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "ai-ui-automation": "^1.0.0",
+    "steptix": "^1.0.0",
     "playwright": "^1.59.1",
     "typescript": "^5.5.0"
   }
@@ -658,7 +658,7 @@ That's it. VS Code now autocompletes `context.request.`, `page.locator(...)`, et
 
 **4. Tell the framework where the tools live**
 
-In `aiui.config.json`:
+In `steptix.config.json`:
 
 ```json
 {
@@ -698,7 +698,7 @@ Call it from a test:
 
 ```ts
 // tools/src/check_health.ts
-import { tool } from 'ai-ui-automation/tools';
+import { tool } from 'steptix/tools';
 
 export default tool(async ({ baseUrl, context }) => {
   const res = await context.request.get(`${baseUrl}/health`);
@@ -718,7 +718,7 @@ You can put multiple tools in one file via named exports — the export key serv
 
 ```ts
 // tools/src/strings.ts
-import { tool } from 'ai-ui-automation/tools';
+import { tool } from 'steptix/tools';
 
 export const slugify = tool<{ s: string }>(({ s }) =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
@@ -734,7 +734,7 @@ When you want a parameter schema with types, multiple outputs, descriptions for 
 
 ```ts
 // tools/src/fetch_otp.ts
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 export default defineTool({
   name: 'fetch_otp',
@@ -864,7 +864,7 @@ A file path named in a step is relative to the folder the test file lives in.
 
 ## Configuration
 
-Create `aiui.config.json` in your project root:
+Create `steptix.config.json` in your project root:
 
 ```json
 {
@@ -891,11 +891,11 @@ Create `aiui.config.json` in your project root:
 and fails that line; a line can override it with `, up to N times`. See
 [stories/control-flow.md](./stories/control-flow.md).
 
-Editing `aiui.config.json` inside VS Code with the TestBench extension gives you
+Editing `steptix.config.json` inside VS Code with the Steptix extension gives you
 autocomplete, enum-checking, and hover docs automatically — the extension ships
 the JSON schema and binds it to that filename, so no `"$schema"` key is needed.
 Outside the extension, add a `"$schema"` key pointing at the schema shipped in
-the installed package, e.g. `"./node_modules/ai-ui-automation/schema/aiui.config.schema.json"`.
+the installed package, e.g. `"./node_modules/steptix/schema/steptix.config.schema.json"`.
 Secrets such as `AI_API_KEY` live in `.env`, never in this file.
 
 ### Environment variables
@@ -906,10 +906,10 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 | --- | --- |
 | `AI_API_KEY` | API key for the aiapi gateway. Required for anything that calls a model — compiling, healing a broken entry, AI-executed steps, errands. A fully compiled test replays without it (see [stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md)). One exception: a `bedrock/` model supplies its own credentials, so a run with no key here is still treated as having AI — see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). The runner now uses aiapi v2 endpoints. |
 | `AI_MODEL` | Overrides `ai.model` from the config file. Optional — falls back to the project default when unset. The first segment decides routing: `gateway/<model>` routes to whatever `AI_GATEWAY_URL` names (your own gateway, a local bridge, Ollama) and **refuses to run when that variable is unset**, rather than quietly sending the traffic elsewhere; `aibroker/<provider>/<model>` is the hosted broker on the built-in endpoint and needs no URL; `bedrock/<model>` is Claude in your own AWS account, needs `AWS_REGION` and no key; anything else (`openai/…`, `anthropic/…`) goes direct to the provider. |
-| `AWS_REGION` | Only for a `bedrock/` model, and then **required** — the client does not read `~/.aws/config`, so an SSO profile carrying a region is not enough. Read by the AWS SDK straight from `process.env`, not by this framework, so unlike every other row in this table it belongs in the **machine environment** — the shell that starts `aiui serve`, or the CI job — rather than in a project `.env`. Same for `AWS_DEFAULT_REGION`, `AWS_PROFILE` and the rest of the credential chain, which work exactly as they do for any AWS tool. A project `.env` reaches it on `aiui run` and the Electron UI only; see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). |
-| `AI_GATEWAY_URL` | Overrides `ai.gatewayUrl` from the config file — the OpenAI-compatible endpoint gateway-routed models go through. Optional; set it when your org runs its own internal gateway, so pointing a shared repo at it stays a one-line `.env` change with nothing tracked to edit. Pair it with `AI_MODEL=gateway/<model>`: that spelling says "route here", and a `gateway/` model with this variable unset is refused rather than sent to the default host. Same precedence as `AI_MODEL` (environment → `aiui.config.json` → machine `.env` → built-in default), and it reaches the server path too: the TestBench extension ships the project's `.env` with each run. |
+| `AWS_REGION` | Only for a `bedrock/` model, and then **required** — the client does not read `~/.aws/config`, so an SSO profile carrying a region is not enough. Read by the AWS SDK straight from `process.env`, not by this framework, so unlike every other row in this table it belongs in the **machine environment** — the shell that starts `steptix serve`, or the CI job — rather than in a project `.env`. Same for `AWS_DEFAULT_REGION`, `AWS_PROFILE` and the rest of the credential chain, which work exactly as they do for any AWS tool. A project `.env` reaches it on `steptix run` and the Electron UI only; see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). |
+| `AI_GATEWAY_URL` | Overrides `ai.gatewayUrl` from the config file — the OpenAI-compatible endpoint gateway-routed models go through. Optional; set it when your org runs its own internal gateway, so pointing a shared repo at it stays a one-line `.env` change with nothing tracked to edit. Pair it with `AI_MODEL=gateway/<model>`: that spelling says "route here", and a `gateway/` model with this variable unset is refused rather than sent to the default host. Same precedence as `AI_MODEL` (environment → `steptix.config.json` → machine `.env` → built-in default), and it reaches the server path too: the Steptix extension ships the project's `.env` with each run. |
 | `AI_EFFORT` | How hard the model thinks on **routine** steps: `low`, `medium`, `high`, `xhigh`, `max` — plus `none` and `minimal`, but see the warning below before using `none`. Optional — **unset is the default and changes nothing on the wire**. Setting it also raises the routine output cap to 8192, since reasoning tokens count against the same cap. Authoring calls (code-behind generation/review, assertions, failure diagnosis) already run at `high` and are deliberately *not* lowered by this. A level the bound model doesn't support fails on the first AI call with `invalid_effort`. Process-level like `maxInputTokens`, not per-session overridable. |
-| `AIUI_SERVER_API_KEY` | Shared secret between the Sessions API server and its clients. **Not usually set anywhere**: `aiui serve` generates a machine key at `%LOCALAPPDATA%\aiui\.env` (`~/.aiui/.env` elsewhere) on first start, and every client falls back to it. Set per-project only to pin a dedicated server's key. |
+| `STEPTIX_SERVER_API_KEY` | Shared secret between the Sessions API server and its clients. **Not usually set anywhere**: `steptix serve` generates a machine key at `%LOCALAPPDATA%\steptix\.env` (`~/.steptix/.env` elsewhere) on first start, and every client falls back to it. Set per-project only to pin a dedicated server's key. |
 | `INTERACTIVE_ON_FAILURE` | `true`/`false`. Pause the runner on failure so you can inspect the browser. |
 | `OPEN_REPORT_IN_BROWSER_AFTER_RUN` | `true`/`false`. Open the generated HTML report in your OS default browser after `run` completes. Skipped automatically when `CI` is set. |
 | `APPEND_RUN_HISTORY_TO_TEST_FILE` | `true`/`false`. Append a "Latest runs" section at the bottom of each test `.md` file after it runs, linking to its HTML report (keeps the most recent 10). Default `false`. |
@@ -932,8 +932,8 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 > `low`.
 
 > The per-environment data directory is configured via `tests.dataDir` in
-> `aiui.config.json` (default `data`) — **not** an env var. The former
-> `AIUI_DATA_DIR` env var has been removed.
+> `steptix.config.json` (default `data`) — **not** an env var. The former
+> `STEPTIX_DATA_DIR` env var has been removed.
 
 ### Corporate networks
 
@@ -1001,16 +1001,16 @@ in the repo — and the region belongs with them.
 
 Concretely: put them in the environment that **starts the Sessions API server**
 (or that runs your CI job). The `AI_*` lines below still go in the project
-`.env`, which is what the TestBench extension ships with each run.
+`.env`, which is what the Steptix extension ships with each run.
 
-The project `.env` does work for the AWS variables on two paths only — `aiui
+The project `.env` does work for the AWS variables on two paths only — `steptix
 run` and the Electron Runner UI — because those load the project's base `.env`
 into their own process at startup. The Sessions API server deliberately does
 not: it serves many projects at once and exports none of their `.env` files
 into its own process (see
 [stories/project-scoped-data-dir-and-env.md](./stories/project-scoped-data-dir-and-env.md)),
 so a project `.env` carrying `AWS_REGION` reaches the run's AI config on the
-CLI and silently does not on TestBench or MCP. Set it once on the machine and
+CLI and silently does not on Steptix or MCP. Set it once on the machine and
 all four paths agree.
 
 Two ways to authenticate, and the framework does neither itself — the AWS SDK
@@ -1023,7 +1023,7 @@ resolves both.
 AI_MODEL=bedrock/global.anthropic.claude-opus-4-6-v1
 AI_API_KEY=<bedrock bearer token>
 
-# machine environment (or the shell that starts `aiui serve`)
+# machine environment (or the shell that starts `steptix serve`)
 AWS_REGION=eu-west-1
 ```
 
@@ -1035,7 +1035,7 @@ credentials, an SSO profile, or an instance role:
 AI_MODEL=bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0
 AI_API_KEY=
 
-# machine environment (or the shell that starts `aiui serve`)
+# machine environment (or the shell that starts `steptix serve`)
 AWS_REGION=eu-west-1
 AWS_PROFILE=acme-dev
 ```
@@ -1044,7 +1044,7 @@ Three things about that second form are worth knowing before you hit them.
 
 **Keep the empty `AI_API_KEY=` line.** Not as a way to force a keyless run — see
 below — but because omitting it entirely is not the same as blanking it. With
-no line at all the machine-wide key at `%LOCALAPPDATA%\aiui\.env` fills the gap,
+no line at all the machine-wide key at `%LOCALAPPDATA%\steptix\.env` fills the gap,
 and that key is then handed to AWS as a Bedrock bearer token: it takes
 precedence over every AWS credential source, so SigV4 never runs and the request
 fails as a 403 that names nothing. A blank line sets the key to empty, which
@@ -1059,9 +1059,9 @@ message naming `AWS_REGION` / `AWS_DEFAULT_REGION`.
 AI as configured when the model routes to a provider that supplies its own
 credentials, which is the whole point — otherwise a correct Bedrock setup would
 be told to set a key Bedrock has no use for. To spend nothing on a run, use
-`ai.allowInRuns: false` in `aiui.config.json`, or `runSettings: {ai: "off"}` on
+`ai.allowInRuns: false` in `steptix.config.json`, or `runSettings: {ai: "off"}` on
 the server path; with no key to blank, that is the switch. Both are honoured by
-the `aiui run` CLI as well as by the server.
+the `steptix run` CLI as well as by the server.
 
 **Model ids normally carry an inference-profile prefix** (`global.`, `eu.`,
 `us.`). That is the norm rather than an edge case: AWS serves most current
@@ -1079,7 +1079,7 @@ See [stories/bedrock-provider.md](./stories/bedrock-provider.md).
 #### Using GitHub Copilot
 
 If the only AI your organisation has approved is a GitHub Copilot subscription,
-the TestBench extension can be that AI. Run **TestBench: Use Copilot for AI**
+the Steptix extension can be that AI. Run **Steptix: Use Copilot for AI**
 once: it raises Copilot's consent dialog, asks which of your seat's models to
 use, and writes three lines into the project's `.env`.
 
@@ -1114,8 +1114,8 @@ switch: `runSettings: {ai: "off"}` makes the run keyless *by policy* — compile
 steps replay, a broken entry takes the skip instead of healing, and anything
 needing a model is refused with a typed error. The report then says the run made
 zero AI calls because it was told to, rather than because a key happened to be
-missing. On the `aiui run` CLI there is no per-run channel, so the project-level
-`ai.allowInRuns: false` in `aiui.config.json` is the equivalent switch — and it
+missing. On the `steptix run` CLI there is no per-run channel, so the project-level
+`ai.allowInRuns: false` in `steptix.config.json` is the equivalent switch — and it
 is the only one for a provider that supplies its own credentials, where there is
 no `AI_API_KEY` to blank.
 
@@ -1138,7 +1138,7 @@ A typical external tests project looks like:
 
 ```
 aitests/
-├── aiui.config.json        # project config (tests.dataDir, skillsDir, …)
+├── steptix.config.json        # project config (tests.dataDir, skillsDir, …)
 ├── .env                    # base config — shared across all envs (e.g. AI_API_KEY)
 ├── .env.local              # env-specific secrets / URLs (BASE_URL, passwords, …)
 ├── .env.staging
@@ -1155,14 +1155,14 @@ Run from that directory:
 
 ```bash
 cd ~/projects/aitests
-aiui run tests/my-test.md --env staging
+steptix run tests/my-test.md --env staging
 ```
 
 #### Where each setting lives
 
 - **Base `.env`** — loaded first, shared across all envs. Put your AI API key and any other settings that don't change between environments here.
 - **`.env.<name>`** — loaded on top of the base when you pass `--env <name>` (or pin the test with `env: <name>` in its frontmatter). Holds env-specific secrets and URLs as flat key/value strings. Reference these in tests as `${env.BASE_URL}`.
-- **`<dataDir>/<name>.json`** — env-specific structured test data (users, fixtures, thresholds), where `<dataDir>` is `tests.dataDir` from `aiui.config.json` (default `data`). Reference values in tests as `${data.users.admin.email}`. JSON string leaves of the form `$VAR_NAME` are resolved against the environment, so secrets stay in `.env.<name>` and the JSON references them.
+- **`<dataDir>/<name>.json`** — env-specific structured test data (users, fixtures, thresholds), where `<dataDir>` is `tests.dataDir` from `steptix.config.json` (default `data`). Reference values in tests as `${data.users.admin.email}`. JSON string leaves of the form `$VAR_NAME` are resolved against the environment, so secrets stay in `.env.<name>` and the JSON references them.
 
 Both layers are env-scoped via the same `<name>` suffix. The data folder is optional — tests that don't use `${data.*}` placeholders run fine without it.
 
@@ -1245,3 +1245,7 @@ To avoid that:
 
 - headed mode uses `windowSize`
 - headless mode uses `viewport`
+
+## License
+
+Steptix is licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2026 Paul Kent; see [NOTICE](NOTICE).

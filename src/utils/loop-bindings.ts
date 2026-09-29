@@ -60,7 +60,7 @@ export function isLoopBinding(map: object, name: string): boolean {
  *
  * {@link isLoopBinding} asks about one name and needs the map object to ask
  * with, which is exactly what a client does not have: `frame:scope` sends a
- * COPY of the scope over HTTP, so every dotted entry arrived at TestBench as
+ * COPY of the scope over HTTP, so every dotted entry arrived at Steptix as
  * nobody's binding and the Variables view fell back to the two-segment rule
  * for all of them — printing a data file's `user.apikey` heading beside a
  * report that starred it (§7.6, §14). This is what the event carries so the

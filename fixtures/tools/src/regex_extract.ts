@@ -1,4 +1,4 @@
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 /**
  * Pull a substring out of a larger string with a regular expression.

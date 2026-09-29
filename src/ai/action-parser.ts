@@ -55,7 +55,7 @@ export function isKnownActionType(type: unknown): type is ActionType {
 
 /**
  * Why an action whose type the framework does not have failed — the sentence
- * a PERSON reads: the ✗ in TestBench, the MCP reason, the report.
+ * a PERSON reads: the ✗ in Steptix, the MCP reason, the report.
  *
  * Short on purpose. The model needs more than this — which types it may send
  * instead, and what to do when none of them does what the step asks — and

@@ -67,7 +67,7 @@
  *
  * Deliberately a SIBLING of `set-step.ts` and `flow-control-step.ts` rather
  * than a private helper of the runtime: these are author-facing forms, a
- * handbook has to list them, and a TestBench hover should one day be able to
+ * handbook has to list them, and a Steptix hover should one day be able to
  * say "this line is decided without a model call" from the same parse.
  */
 

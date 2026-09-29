@@ -5,12 +5,12 @@
 builds the wire body's `steps` from `parsed.steps`.
 **Deliberate counterpart:**
 [runner-core/src/step-lines.ts](../runner-core/src/step-lines.ts)
-(`extractSteps`), which is what TestBench sends: the raw line minus `N. `,
+(`extractSteps`), which is what Steptix sends: the raw line minus `N. `,
 trimmed, `[no-hooks]` intact.
 **Related:** the inline-sections contract
 [§3.2](../stories/test-script-sections-contract.md) (which defines the wire's
 step string as the raw one) and
-[036](036-wrapped-main-flow-steps-truncated-on-the-testbench-path.md) (the
+[036](036-wrapped-main-flow-steps-truncated-on-the-steptix-path.md) (the
 other way one step's text differs between the CLI and a client).
 **Opened:** 2026-09-09
 
@@ -27,7 +27,7 @@ The CLI parser keeps two readings of every step:
 reading — `extractPlainText` has stripped inline markdown (in a loose list
 only — contract §2.3) and the `[no-hooks]` marker is gone.
 
-Every wire producer is supposed to send the raw one. TestBench does
+Every wire producer is supposed to send the raw one. Steptix does
 (`extractSections` / `extractSteps`). The MCP producer sends the marked one
 for the main flow:
 
@@ -65,9 +65,9 @@ was deleted as dead code). It never changes the text anything runs, so the
 conclusion stands. Today the MCP path silently *loses* the opt-out — which
 is harmless in practice, because the server path runs no `## Hooks` at all —
 and sending the raw line would replace that with a visible defect on every
-such step. TestBench already has that defect; joining it is not obviously an
+such step. Steptix already has that defect; joining it is not obviously an
 improvement, and the honest fix (strip main-flow markers server-side, once,
-for every producer) changes the TestBench path as well.
+for every producer) changes the Steptix path as well.
 
 ## What a fix looks like
 
@@ -88,5 +88,5 @@ measured and pinned in `tests/data-rows-sections.test.ts` rather than fixed.
 ## Revisit when
 
 - Someone reports an MCP run behaving differently from the same file run from
-  the CLI or TestBench, or
+  the CLI or Steptix, or
 - code-behind entries authored from one path stop binding on another.

@@ -121,7 +121,7 @@ own frame, numbered; a `[skill:]` call is a frame of kind `skill`; the main
 flow is the root frame, id `''`. The Sessions API server pushes and pops
 frames as execution crosses from one step's frame to the next
 (`transitionToFrame`, [session-manager.ts](../src/server/session-manager.ts)),
-and TestBench paints the call line from those events.
+and Steptix paints the call line from those events.
 
 So "the flow this step is in" already has a precise answer, and "the rest of
 that flow" is computable from data every runner already holds: from step *i*
@@ -148,7 +148,7 @@ ignored:
   `failed` or `error` ([protocol.ts](../runner-core/src/protocol.ts)); the
   server maps its internal `skipped` to a `step:pass` with `output:
   'skipped'`, and the MCP fold reads that as "a step needed a human". The
-  TestBench tracker has a `skip` status and glyph, but until PR #137 nothing
+  Steptix tracker has a `skip` status and glyph, but until PR #137 nothing
   on the wire set it, and now only data-table row lines do.
 - **A clean `frame:pop` paints ✓ on the call line.** If the steps a return
   skips went through the frame transitions, a nested call inside the
@@ -346,7 +346,7 @@ export interface ParsedFlowControlStep {
 export function parseFlowControlStep(instruction: string): ParsedFlowControlStep | null;
 ```
 
-Import-free, like `set-step.ts`, so the TestBench mirror suite can load it
+Import-free, like `set-step.ts`, so the Steptix mirror suite can load it
 under Node's type stripping. A frozen table of accepted and refused lines
 lives beside it in `tests/`, and the same table pins any client mirror.
 
@@ -411,12 +411,12 @@ is dispatched before the model, beside the `Set` branch.
 - **MCP errands** ([errand-runner.ts](../src/server/errand-runner.ts)) — flat
   list; a return ends the errand, remaining steps `step:skip`.
 
-### runner-core and TestBench
+### runner-core and Steptix
 
 `StepSkipEvent` joins `RunEvent` and `isRunEvent`; `StepStatus` widens.
 The extension paints `skip` on `step:skip` lines (and nested call lines),
 logs `skipped — <reason>`, and leaves the call line to the pop. Patch bump
-in `testbench-native/package.json`.
+in `steptix-vscode/package.json`.
 
 ### Code-behind
 
@@ -463,7 +463,7 @@ event and the widened status. CHANGELOG.
 - **Code-behind** — `step.exit()` passes with `flowControl`; not healed; the
   claim guard; generator prompt carries the rule; compile prefix and
   selection with a skipped recording; a proving replay that returns.
-- **TestBench** — fast suite with `FakeApiClient`: `step:skip` paints skip,
+- **Steptix** — fast suite with `FakeApiClient`: `step:skip` paints skip,
   nested call line paints skip, call line paints ✓ on pop. Live suite:
   the fixture below against the fixture app, then a compile of it and a
   replay that returns as code.
@@ -495,7 +495,7 @@ line 4 as `pass`, and `done` as `passed`.
 
 - Breaking out of a loop, or returning from an outer flow by name.
 - A verb that ends the whole test from inside a section.
-- A parse-error family or TestBench near-miss diagnostic for lines that
+- A parse-error family or Steptix near-miss diagnostic for lines that
   almost claim the form.
 - Judging the condition without a model (a predicate mode on `assert`).
   The model already judges page conditions in the branched path; reusing
@@ -511,7 +511,7 @@ line 4 as `pass`, and `done` as `passed`.
 ## What the build showed
 
 **Built 2026-09-09**, three implementation rounds and three review rounds,
-on top of PR #137. The live fixture above ran three times through TestBench
+on top of PR #137. The live fixture above ran three times through Steptix
 against the fixture app, once after each fix round, and behaved identically
 each time: the first `Sign in` call judged the title *Sign In* and ran the
 body, the second returned at body line 1 and painted lines 2 to 5 `skip`,
@@ -534,7 +534,7 @@ reader threw it away. Four of them, in three rounds:
   for the assertion cache too, at one seam (`cacheEnabledFor` in the
   executor) whenever the step claims the form.
 - **The Sessions API report never set `skippedSteps`**, so the header of the
-  report every TestBench run produces showed 13 total, 8 passed, 0 failed
+  report every Steptix run produces showed 13 total, 8 passed, 0 failed
   and nothing else. The test named for it asserted the rows and passed.
 - **Compile-as-you-go never offered the skipped steps** to the live
   compiler, so its `skipped` branch was dead and the compile summary said
@@ -569,7 +569,7 @@ lines.
 - The boxed `/codebehind/compile` route reports section-body events on the
   invocation line rather than the body line. Pre-existing for every event on
   that route, pinned as a fact in its test, not changed here.
-- `aiui compile` answers decision 12's per-entry rule for the forward order
+- `steptix compile` answers decision 12's per-entry rule for the forward order
   only. `selectSteps` keeps the FIRST inlining of an authored line, so a
   recording whose first call to a section returned before a body line drops that
   line and reports it not attempted even though a later call ran it. The live

@@ -15,7 +15,7 @@
  *
  * `keyless` is an explicit option here rather than something derived from
  * `config.ai`, so these cases cannot be quietly un-keylessed by a real
- * AI_API_KEY in the machine-wide `%LOCALAPPDATA%\aiui\.env` or the process
+ * AI_API_KEY in the machine-wide `%LOCALAPPDATA%\steptix\.env` or the process
  * env. The runner-side half of that wiring — where the flag comes FROM — is
  * `keyless-diagnosis.test.ts`.
  */
@@ -152,7 +152,7 @@ function stepsFile(middle: 'works' | 'throws' | 'asserts'): string {
     throws: `throw new Error('#transfers-tab went away in a redesign');`,
     asserts: `step.expect(false, 'the transfers tab never appeared');`,
   };
-  return `import { defineSteps } from 'ai-ui-automation/codebehind';
+  return `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: 'Sign in', async run({ step }) { step.setVar('user', 'ada'); } },
   { source: 'Click the "Transfers" tab', async run({ step }) { ${bodies[middle]} } },

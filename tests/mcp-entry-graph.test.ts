@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // ---------------------------------------------------------------------------
-// `aiui mcp` deliberately bypasses the commander program, and this is the test
+// `steptix mcp` deliberately bypasses the commander program, and this is the test
 // that says whether the bypass still works.
 //
 // It pays for itself twice. Startup: the CLI graph reaches playwright,
@@ -65,7 +65,7 @@ function runWithProbe(args: string[]): Promise<ProbeResult> {
 // dist/ is gitignored, so a fresh clone has none until `npm run build`.
 const built = existsSync(distEntry);
 
-describe.skipIf(!built)('aiui mcp module graph (dist)', () => {
+describe.skipIf(!built)('steptix mcp module graph (dist)', () => {
   it('loads no browser stack, and exits when stdin closes', async () => {
     const result = await runWithProbe(['mcp']);
 

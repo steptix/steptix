@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 /**
  * Open the operating system's Calculator on the machine running the SERVER.

@@ -30,7 +30,7 @@ import type { UserRootDeps } from '../src/env/user-root.js';
 let tmp: string;
 
 beforeEach(() => {
-  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-stats-store-')));
+  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-stats-store-')));
 });
 
 afterEach(async () => {
@@ -117,7 +117,7 @@ function runLine(over: Partial<StatsRunLine> = {}): StatsRunLine {
 }
 
 function monthFile(month: string): string {
-  return path.join(tmp, 'aiui', 'stats', `actions-${month}.jsonl`);
+  return path.join(tmp, 'steptix', 'stats', `actions-${month}.jsonl`);
 }
 
 /** Lines as the writer writes them, one per line. */
@@ -133,7 +133,7 @@ function writeRaw(month: string, content: string): void {
 
 describe('where the lines live (§6.1)', () => {
   it('<user root>/stats', () => {
-    expect(statsDir(deps())).toBe(path.join(tmp, 'aiui', 'stats'));
+    expect(statsDir(deps())).toBe(path.join(tmp, 'steptix', 'stats'));
   });
 
   it('one file per UTC month', () => {
@@ -539,7 +539,7 @@ describe('retention (§6.3)', () => {
 
   it('keepFrom: no month that ends after it is deleted, however old', async () => {
     seed();
-    // `aiui stats --since 2026-01-15`: January is in the window, February and
+    // `steptix stats --since 2026-01-15`: January is in the window, February and
     // on hold what it links through. Only December goes.
     const deleted = await pruneStatsFiles({ retainMonths: 6, now: NOW, deps: deps(), keepFrom: new Date('2026-01-15T00:00:00.000Z') });
     expect(deleted.map((file) => path.basename(file))).toEqual(['actions-2025-12.jsonl']);
@@ -556,8 +556,8 @@ describe('retention (§6.3)', () => {
 describe('writing never fails a run (§6.2)', () => {
   function breakTheFolder(): void {
     // A FILE where the stats folder should be: every append and every mkdir fails.
-    fs.mkdirSync(path.join(tmp, 'aiui'), { recursive: true });
-    fs.writeFileSync(path.join(tmp, 'aiui', 'stats'), 'not a folder');
+    fs.mkdirSync(path.join(tmp, 'steptix'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'steptix', 'stats'), 'not a folder');
   }
 
   it('neither throws nor rejects, and leaves no unhandled rejection behind', async () => {
@@ -613,27 +613,27 @@ describe('writing never fails a run (§6.2)', () => {
 
 describe('statsSettings (§6.4, §5.6, §6.3)', () => {
   function machineEnv(content: string): void {
-    fs.mkdirSync(path.join(tmp, 'aiui'), { recursive: true });
-    fs.writeFileSync(path.join(tmp, 'aiui', '.env'), content);
+    fs.mkdirSync(path.join(tmp, 'steptix'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'steptix', '.env'), content);
   }
 
   it('records by default, as the user, keeping six months', () => {
     expect(statsSettings({ env: {}, deps: deps() })).toEqual({ enabled: true, suite: 'user', retainMonths: 6 });
   });
 
-  it('AIUI_STATS off in the environment turns recording off', () => {
+  it('STEPTIX_STATS off in the environment turns recording off', () => {
     for (const value of ['off', 'OFF', '0', 'false', 'False ', 'no']) {
-      expect(statsSettings({ env: { AIUI_STATS: value }, deps: deps() }).enabled, value).toBe(false);
+      expect(statsSettings({ env: { STEPTIX_STATS: value }, deps: deps() }).enabled, value).toBe(false);
     }
     for (const value of ['on', '1', 'true', '', 'maybe']) {
-      expect(statsSettings({ env: { AIUI_STATS: value }, deps: deps() }).enabled, value).toBe(true);
+      expect(statsSettings({ env: { STEPTIX_STATS: value }, deps: deps() }).enabled, value).toBe(true);
     }
   });
 
-  it('AIUI_STATS off in the machine .env turns it off, whatever the environment says', () => {
-    machineEnv('AI_MODEL=m1\nAIUI_STATS=off\n');
+  it('STEPTIX_STATS off in the machine .env turns it off, whatever the environment says', () => {
+    machineEnv('AI_MODEL=m1\nSTEPTIX_STATS=off\n');
     expect(statsSettings({ env: {}, deps: deps() }).enabled).toBe(false);
-    expect(statsSettings({ env: { AIUI_STATS: 'on' }, deps: deps() }).enabled).toBe(false);
+    expect(statsSettings({ env: { STEPTIX_STATS: 'on' }, deps: deps() }).enabled).toBe(false);
   });
 
   it('a project with stats.enabled false records nothing; others are untouched', () => {
@@ -641,48 +641,48 @@ describe('statsSettings (§6.4, §5.6, §6.3)', () => {
     expect(statsSettings({ env: {}, projectEnabled: true, deps: deps() }).enabled).toBe(true);
     expect(statsSettings({ env: {}, projectEnabled: undefined, deps: deps() }).enabled).toBe(true);
     // A project cannot switch the machine back on.
-    expect(statsSettings({ env: { AIUI_STATS: 'off' }, projectEnabled: true, deps: deps() }).enabled).toBe(false);
+    expect(statsSettings({ env: { STEPTIX_STATS: 'off' }, projectEnabled: true, deps: deps() }).enabled).toBe(false);
   });
 
-  it('the suite comes from AIUI_STATS_SUITE in the environment; anything unknown is user', () => {
-    expect(statsSettings({ env: { AIUI_STATS_SUITE: 'live' }, deps: deps() }).suite).toBe('live');
-    expect(statsSettings({ env: { AIUI_STATS_SUITE: ' Bench ' }, deps: deps() }).suite).toBe('bench');
-    expect(statsSettings({ env: { AIUI_STATS_SUITE: 'compile' }, deps: deps() }).suite).toBe('compile');
-    expect(statsSettings({ env: { AIUI_STATS_SUITE: 'nightly' }, deps: deps() }).suite).toBe('user');
-    expect(statsSettings({ env: { AIUI_STATS_SUITE: '' }, deps: deps() }).suite).toBe('user');
+  it('the suite comes from STEPTIX_STATS_SUITE in the environment; anything unknown is user', () => {
+    expect(statsSettings({ env: { STEPTIX_STATS_SUITE: 'live' }, deps: deps() }).suite).toBe('live');
+    expect(statsSettings({ env: { STEPTIX_STATS_SUITE: ' Bench ' }, deps: deps() }).suite).toBe('bench');
+    expect(statsSettings({ env: { STEPTIX_STATS_SUITE: 'compile' }, deps: deps() }).suite).toBe('compile');
+    expect(statsSettings({ env: { STEPTIX_STATS_SUITE: 'nightly' }, deps: deps() }).suite).toBe('user');
+    expect(statsSettings({ env: { STEPTIX_STATS_SUITE: '' }, deps: deps() }).suite).toBe('user');
     // Not from the machine file: that would tag every run on the machine.
-    machineEnv('AIUI_STATS_SUITE=live\n');
+    machineEnv('STEPTIX_STATS_SUITE=live\n');
     expect(statsSettings({ env: {}, deps: deps() }).suite).toBe('user');
   });
 
   it('retention from the machine .env, else six — never from the environment', () => {
     // A shell that says 1 must not prune months the machine was told to keep:
-    // the server and every `aiui stats` read the same file (§6.3).
-    expect(statsSettings({ env: { AIUI_STATS_RETAIN_MONTHS: '1' }, deps: deps() }).retainMonths).toBe(6);
-    machineEnv('AIUI_STATS_RETAIN_MONTHS=12\n');
+    // the server and every `steptix stats` read the same file (§6.3).
+    expect(statsSettings({ env: { STEPTIX_STATS_RETAIN_MONTHS: '1' }, deps: deps() }).retainMonths).toBe(6);
+    machineEnv('STEPTIX_STATS_RETAIN_MONTHS=12\n');
     expect(statsSettings({ env: {}, deps: deps() }).retainMonths).toBe(12);
-    expect(statsSettings({ env: { AIUI_STATS_RETAIN_MONTHS: '2' }, deps: deps() }).retainMonths).toBe(12);
+    expect(statsSettings({ env: { STEPTIX_STATS_RETAIN_MONTHS: '2' }, deps: deps() }).retainMonths).toBe(12);
     for (const value of ['0', '-2', '1.5', 'abc', '']) {
-      machineEnv(`AIUI_STATS_RETAIN_MONTHS=${value}\n`);
+      machineEnv(`STEPTIX_STATS_RETAIN_MONTHS=${value}\n`);
       expect(statsSettings({ env: {}, deps: deps() }).retainMonths, value).toBe(6);
     }
   });
 
   it('with no env given, reads the seam’s env — never the real one', () => {
-    const seam: UserRootDeps = { env: { LOCALAPPDATA: tmp, XDG_CONFIG_HOME: tmp, AIUI_STATS: 'off' }, platform: process.platform };
+    const seam: UserRootDeps = { env: { LOCALAPPDATA: tmp, XDG_CONFIG_HOME: tmp, STEPTIX_STATS: 'off' }, platform: process.platform };
     expect(statsSettings({ deps: seam }).enabled).toBe(false);
   });
 
   it('an unreadable machine .env counts as empty rather than failing', () => {
-    fs.mkdirSync(path.join(tmp, 'aiui', '.env'), { recursive: true }); // a folder: EISDIR
+    fs.mkdirSync(path.join(tmp, 'steptix', '.env'), { recursive: true }); // a folder: EISDIR
     expect(statsSettings({ env: {}, deps: deps() })).toEqual({ enabled: true, suite: 'user', retainMonths: 6 });
   });
 });
 
-describe('the project switch in aiui.config.json (§6.4)', () => {
+describe('the project switch in steptix.config.json (§6.4)', () => {
   it('the schema accepts stats.enabled as a boolean and nothing else', () => {
     const here = path.dirname(fileURLToPath(import.meta.url));
-    const schema = JSON.parse(fs.readFileSync(path.resolve(here, '../schema/aiui.config.schema.json'), 'utf8'));
+    const schema = JSON.parse(fs.readFileSync(path.resolve(here, '../schema/steptix.config.schema.json'), 'utf8'));
     const validate = new Ajv({ strict: false, allErrors: true }).compile(schema);
     expect(validate({ stats: { enabled: false } })).toBe(true);
     expect(validate({ stats: {} })).toBe(true);

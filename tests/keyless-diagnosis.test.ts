@@ -17,7 +17,7 @@
  *
  * Minimum scenario: every config here is built from `DEFAULT_CONFIG` in
  * memory. `runTest` never calls `loadConfig`, so neither a machine-wide
- * `%LOCALAPPDATA%\aiui\.env` nor a real `AI_API_KEY` in the process env can
+ * `%LOCALAPPDATA%\steptix\.env` nor a real `AI_API_KEY` in the process env can
  * reach it and quietly un-keyless the run — asserted below rather than
  * assumed, because that leak is exactly what would condition the bug out of
  * the test path.
@@ -523,9 +523,9 @@ describe('the CLI honouring ai.allowInRuns', () => {
     expect(report.diagnosis?.rootCause).not.toContain('not configured');
   });
 
-  it('does not gate the runs `aiui compile` makes — a compile is a request FOR AI', async () => {
+  it('does not gate the runs `steptix compile` makes — a compile is a request FOR AI', async () => {
     // The switch and the compiler share one `runTest`, so honouring the switch
-    // there took `aiui compile` down with it: every step refused, nothing
+    // there took `steptix compile` down with it: every step refused, nothing
     // recorded, nothing written — on precisely the projects that set
     // `allowInRuns: false` in order to HAVE compiled steps to replay. Both the
     // config type and the JSON schema promise the opposite in as many words,

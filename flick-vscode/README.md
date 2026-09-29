@@ -1,6 +1,6 @@
 # Flick (VS Code extension)
 
-A chat-style panel inside VS Code for driving the **ai-ui-automation Sessions
+A chat-style panel inside VS Code for driving the **Steptix Sessions
 API** with natural-language steps. It is a fresh, independent reimplementation
 of the desktop **Flick** app described in [`SPEC-FLICK.md`](../docs/specs/SPEC-FLICK.md) —
 it shared no code with the Tauri `flick/` project, which was removed in favour

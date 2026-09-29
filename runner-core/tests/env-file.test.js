@@ -106,8 +106,8 @@ test('resolveEnvFile: miss returns searched dirs + fallback path', async () => {
 });
 
 test('parseEnv: KEY=VALUE basic', () => {
-  const out = parseEnv('SERVER_URL=http://localhost:3100\nAIUI_SERVER_API_KEY=abc');
-  assert.deepEqual(out, { SERVER_URL: 'http://localhost:3100', AIUI_SERVER_API_KEY: 'abc' });
+  const out = parseEnv('SERVER_URL=http://localhost:3100\nSTEPTIX_SERVER_API_KEY=abc');
+  assert.deepEqual(out, { SERVER_URL: 'http://localhost:3100', STEPTIX_SERVER_API_KEY: 'abc' });
 });
 
 test('parseEnv: comments and blank lines ignored', () => {
@@ -179,12 +179,12 @@ test('readEnvOverlayFile: throws EnvParseError on a malformed overlay line', asy
 });
 
 test('composeEnv: overlay wins on conflicts, base-only keys survive, overlay-only keys appear', () => {
-  const base = { SHARED: 'base', BASE_ONLY: 'b', AIUI_SERVER_API_KEY: 'secret' };
+  const base = { SHARED: 'base', BASE_ONLY: 'b', STEPTIX_SERVER_API_KEY: 'secret' };
   const overlay = { SHARED: 'overlay', OVERLAY_ONLY: 'o' };
   assert.deepEqual(composeEnv(base, overlay), {
     SHARED: 'overlay',
     BASE_ONLY: 'b',
-    AIUI_SERVER_API_KEY: 'secret',
+    STEPTIX_SERVER_API_KEY: 'secret',
     OVERLAY_ONLY: 'o',
   });
 });

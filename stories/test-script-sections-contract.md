@@ -7,8 +7,8 @@ passes, and never by editing a fixture row to make a test go green.
 
 Companions: [test-script-sections.md](test-script-sections.md) (grammar and
 semantics — the *why* for everything below),
-[inline-sections-runtime.md](../testbench-native/stories/specs/inline-sections-runtime.md),
-[inline-sections-authoring.md](../testbench-native/stories/specs/inline-sections-authoring.md).
+[inline-sections-runtime.md](../steptix-vscode/stories/specs/inline-sections-runtime.md),
+[inline-sections-authoring.md](../steptix-vscode/stories/specs/inline-sections-authoring.md).
 
 Where this document and a companion spec disagree, **this one wins** — the
 divergences are called out inline as `Supersedes:` notes.
@@ -153,7 +153,7 @@ An implementation reading `steps[i]` resolves a call that should not exist.
 Assert it **through `parseTestFile`** — calling `expandSkills` with hand-built
 arrays bypasses the transform that causes the bug.
 
-*Supersedes:* [inline-sections-runtime.md](../testbench-native/stories/specs/inline-sections-runtime.md) §9
+*Supersedes:* [inline-sections-runtime.md](../steptix-vscode/stories/specs/inline-sections-runtime.md) §9
 lists "a formatted call site inside a skill body" among the required
 match-table rows. It is deliberately **absent** from `match-table.json` — a
 pure text table structurally cannot express it — and lives in the
@@ -186,7 +186,7 @@ RESERVED.has(name.trim().toLowerCase())   // reads like a second `## Steps`
 ```
 
 Three enforcement points, same list: the **CLI parser** raises a parse error;
-**testbench-native's `runStepBlock` pre-flight** refuses the run before a
+**steptix-vscode's `runStepBlock` pre-flight** refuses the run before a
 request is built; the **authoring diagnostics** mirror each as an Error row.
 
 ## 3. Frozen type shapes
@@ -331,7 +331,7 @@ body** before a request is built.
 
 Wrapped *main-flow* steps have been truncated by `extractSteps` since long
 before sections existed; that is a pre-existing defect, tracked as
-[issues/036](../issues/036-wrapped-main-flow-steps-truncated-on-the-testbench-path.md),
+[issues/036](../issues/036-wrapped-main-flow-steps-truncated-on-the-steptix-path.md),
 and not something this feature's gate is required to fix. `findWrappedStepLines`
 reports those lines too, so widening the gate later needs no new detection.
 
@@ -454,7 +454,7 @@ runtime spec names explicitly.
 ### 3.5 `SectionIndex` (`runner-core/src/section-index.ts`)
 
 Per the plan this lives in runner-core, **not** in the extension host copy as
-[inline-sections-authoring.md](../testbench-native/stories/specs/inline-sections-authoring.md) §3
+[inline-sections-authoring.md](../steptix-vscode/stories/specs/inline-sections-authoring.md) §3
 says — it is built entirely on `extractSections`/`classifyLines`, its consumers
 already import runner-core, and keeping it here removes a file collision
 between the runtime and authoring work.
@@ -516,7 +516,7 @@ export function findWrappedStepLines(text: string): number[];
 // runner-core/src/step-lines.ts
 // What a user's line selection means. `scope` is part of the answer because
 // body lines and main-flow lines execute differently (see
-// testbench-native/stories/specs/sections-run-and-resume.md §4.2).
+// steptix-vscode/stories/specs/sections-run-and-resume.md §4.2).
 // Resolution order is fixed: main-flow matches win over body matches, so a
 // selection spanning both runs the main flow only and never double-runs a
 // body alongside its own invocation.
@@ -600,8 +600,8 @@ Classification order inside `classifyLines`, given the Steps span:
 
 Rule 3 is the one that is easy to skip and expensive to omit: `ANY_HEADING_RE`
 demands a non-space after the hashes, so a bare `###` is invisible to it. Left
-as prose, the CLI throws its empty-name parse error while TestBench happily
-runs the "body" items as main-flow steps — the exact CLI/TestBench divergence
+as prose, the CLI throws its empty-name parse error while Steptix happily
+runs the "body" items as main-flow steps — the exact CLI/Steptix divergence
 this feature exists to eliminate.
 
 **Body attribution.** A hashes-only line at any depth ≥ 3 **both terminates
@@ -638,9 +638,9 @@ still see them, to dim the line and say why it will not run
   `resolveRunSelection` is the only function permitted to choose the scope,
   and it chooses `'section-body'` only for a selection that names body lines
   and no main-flow line. See
-  [sections-run-and-resume.md](../testbench-native/stories/specs/sections-run-and-resume.md).
+  [sections-run-and-resume.md](../steptix-vscode/stories/specs/sections-run-and-resume.md).
 - **main + body** — `extractStepLineIds`, which exists in **three** files: the
-  native host [step-lines.ts](../testbench-native/src/extension/step-lines.ts)
+  native host [step-lines.ts](../steptix-vscode/src/extension/step-lines.ts)
   and both webview `step-lines-inline.js`. runner-core has no such export.
   Already true in all three today (their `findStepsSpan` breaks only on
   depth ≤ headingDepth, so a `###` never ends the span), so this is a
@@ -675,16 +675,16 @@ way before comparing.
 
 Resolve from `import.meta.url`, never `process.cwd()` — follow the
 [tests/cache-dir-parity.test.ts](../tests/cache-dir-parity.test.ts) (since removed) ↔
-[testbench-native/tests/cache-dir-parity.test.js](../testbench-native/tests/cache-dir-parity.test.js) (since removed)
+[steptix-vscode/tests/cache-dir-parity.test.js](../steptix-vscode/tests/cache-dir-parity.test.js) (since removed)
 precedent:
 
 | Consumer | Path from its own directory |
 |---|---|
 | root vitest (`tests/`) | `../fixtures/sections/…` |
 | `runner-core/tests/` | `../../fixtures/sections/…` |
-| `testbench-native/tests/` | `../../fixtures/sections/…` |
+| `steptix-vscode/tests/` | `../../fixtures/sections/…` |
 | `testbench-monaco/tests/` | `../../fixtures/sections/…` |
-| `testbench-native/tests/integration/suite/` | `../../../../fixtures/sections/…` |
+| `steptix-vscode/tests/integration/suite/` | `../../../../fixtures/sections/…` |
 
 ### Three notes on the fixture location
 
@@ -694,8 +694,8 @@ precedent:
    across. `fixtures/` is already the package-neutral home, and the runtime
    spec §9 names `fixtures/sections/match-table.json` explicitly. Keeping it
    here is intentional; don't "fix" it back.
-2. **These files are visible to TestBench.** Discovery globs `**/*.md`
-   ([test-discovery.ts](../testbench-native/src/extension/test-discovery.ts),
+2. **These files are visible to Steptix.** Discovery globs `**/*.md`
+   ([test-discovery.ts](../steptix-vscode/src/extension/test-discovery.ts),
    `DEFAULT_GLOB`), and all three carry a `## Steps` heading, so they appear
    in the test tree like `fixtures/tests/*.md` already do. Two of them are
    *deliberately invalid* and will error if run. That is acceptable and the

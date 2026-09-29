@@ -17,11 +17,11 @@ import {
 } from '../../codebehind/compile.js';
 
 /**
- * `aiui compile <test.md>` — write a test's code-behind
+ * `steptix compile <test.md>` — write a test's code-behind
  * (stories/codebehind-compile.md, "What the author runs").
  *
  * The scriptable half of the feature: it writes the files directly, where
- * TestBench will offer a diff. Exit 0 on green, 1 otherwise, so it drops into
+ * Steptix will offer a diff. Exit 0 on green, 1 otherwise, so it drops into
  * a script or a pre-commit hook without ceremony.
  */
 
@@ -44,7 +44,7 @@ export function registerCompileCommand(program: Command): void {
       'Compile a test\'s steps into its code-behind: record under AI, generate, ' +
         'review, replay as pure code until green, then write the .steps.ts.',
     )
-    .option('-c, --config <path>', 'Path to config file (default: auto-discover aiui.config.json)')
+    .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
     .option('--env <name>', 'Environment name — loads .env.<name> from project root')
     .option('--headless', 'Run the browser headless for the record and replay runs', false)
     .option('--only-stale', 'Only steps a previous run flagged as failed code-behind', false)
@@ -107,7 +107,7 @@ async function compileCommand(target: string, opts: CompileOptions): Promise<voi
 
   console.log(chalk.bold(`\nCompile ${path.basename(testFile)}`));
 
-  // The first data row, as `aiui run` would start its first instance.
+  // The first data row, as `steptix run` would start its first instance.
   const dataRow = await firstDataRow(test, process.cwd());
   if (dataRow) {
     console.log(
@@ -123,7 +123,7 @@ async function compileCommand(target: string, opts: CompileOptions): Promise<voi
       contextContent: context.combined,
       aiClient,
       tokenTracker,
-      // `$VAR` parameters resolve against the same map `aiui run` would use —
+      // `$VAR` parameters resolve against the same map `steptix run` would use —
       // the process env with the project's layers merged in above.
       env: bundle.env,
       ...(dataRow && { dataRow: dataRow.row }),

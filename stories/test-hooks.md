@@ -89,7 +89,7 @@ dismiss (modals, popovers, toasts the test genuinely wants).
 
 ### Project-level defaults — `execution.defaultHooks`
 
-Projects can declare default hooks in `aiui.config.json`:
+Projects can declare default hooks in `steptix.config.json`:
 
 ```json
 {
@@ -226,7 +226,7 @@ A new fixture `fixtures/tests/hooks-demo.md` exercises the new mechanism with:
 
 ## Migration
 
-`dismissObstacles: true/false` in `aiui.config.json` and in existing test
+`dismissObstacles: true/false` in `steptix.config.json` and in existing test
 files is ignored with a warning logged on startup. Authors who relied on
 automatic dismissal can add:
 

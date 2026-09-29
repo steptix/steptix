@@ -2,9 +2,9 @@
 
 **Status:** built, 2026-09-26. The runtime (condition entries decide guards),
 Run & Compile / Compile This Step (generation, the live compiler, the
-recording) — see §"What the live half decided" — and the boxed `aiui compile`
+recording) — see §"What the live half decided" — and the boxed `steptix compile`
 and `POST /codebehind/compile` — see §"What the boxed half decided". The
-TestBench live pass (`testbench-native/tests/integration/live/compile-loops.test.cjs`)
+Steptix live pass (`steptix-vscode/tests/integration/live/compile-loops.test.cjs`)
 passed first time, 2/2: Run & Compile of `control-flow.md` and
 `control-flow-otherwise.md`, apply, replay — every `If` / `Else if` /
 `While` / `Repeat` decided by its condition entry, no condition-judge call in
@@ -18,8 +18,8 @@ A test can loop (`While`, `Repeat … until`, `For each`) and decide (`If`,
 `Else if`, `Otherwise`) since [control-flow.md](control-flow.md). Code-behind
 cannot follow it there. Today:
 
-- **Compiling a file that loops is refused outright.** `aiui compile` refuses
-  the whole file; Run & Compile in TestBench refuses whenever the steps it
+- **Compiling a file that loops is refused outright.** `steptix compile` refuses
+  the whole file; Run & Compile in Steptix refuses whenever the steps it
   would compile touch a loop. The advice is to compile around the loop or
   remove it. Decision 12 of the control-flow story named the missing piece —
   "recording pass 1 and replaying the rest, the way rows record row 1, is its
@@ -58,7 +58,7 @@ After this story, both halves compile:
 12. For each {{account}} in {{accounts}}, Check the account
 ```
 
-**You click** Run & Compile in TestBench.
+**You click** Run & Compile in Steptix.
 **You get:** the run behaves exactly as an ordinary run — the model decides
 each condition and performs each step — and the proposal that comes back has
 an entry for every step that ran, including the loop bodies, plus these:
@@ -130,7 +130,7 @@ paints ⚠ with *"the code said this still held at pass 25; the page says it
 does not"*. (A run with no model available fails at the cap as it does
 today, and says the decision was the code's.)
 
-**You run** `npx aiui compile tests/control-flow.md`.
+**You run** `npx steptix compile tests/control-flow.md`.
 **You get:** the boxed compile records, generates, replays and repairs as it
 does for any file. The replay also checks the compiled conditions against the
 recording: if the recording's `While` ran three passes and the replay's code
@@ -246,7 +246,7 @@ between the two runs.
     **…and every loop's pass count** (review round 2, revised in round 3). A
     `For each` decides nothing, so a list captured with six items where the
     recording had three runs six passes with every condition answering as
-    recorded — measured on a real-model `aiui compile` of `control-flow.md`,
+    recorded — measured on a real-model `steptix compile` of `control-flow.md`,
     which said "22/22 passed" and wrote the file without a word. After each
     replay, every runtime loop entry is compared with the recording's: a `For
     each` by its list's length, a `While` / `Repeat` by the passes it made
@@ -293,7 +293,7 @@ between the two runs.
     counts expanded steps; a guard row records its decision. Compile This
     Step's splice takes the same row, instead of appending one slot per pass.
 
-15. **TestBench paints a guard's code mark and ⚠ from the guard's own
+15. **Steptix paints a guard's code mark and ⚠ from the guard's own
     events**, which now carry `fromCodeBehind` / `codeBehindStale`. The ✓ a
     section tail's `frame:pop` paints on its call line no longer paints over a
     code mark or ⚠ the guard put there in the same run. A guard and a
@@ -491,7 +491,7 @@ The step prompt gains the loop line for a looped step (decision 2).
 The review pass is told condition entries exist: keep them conditions, keep
 them read-only, never turn one into a `run`.
 
-### TestBench — `testbench-native/`
+### Steptix — `steptix-vscode/`
 
 - `frame:pop` repaints the call line with the guard's own mark when the
   guard painted `pass-code-behind` or `pass-stale` on it earlier in this run.
@@ -532,7 +532,7 @@ them read-only, never turn one into a `run`.
   pass; a `For each` that runs a different number of passes warns, naming the
   step that captured its list, and fails nothing; the `/codebehind/compile`
   route with a chain and with a loop.
-- **The fixture:** TestBench live — Run & Compile
+- **The fixture:** Steptix live — Run & Compile
   `templates/init/tests/control-flow.md`, apply, Run: every guard line that
   has a condition paints the code mark, loop counts unchanged, no
   `condition-judge` interaction in the report. `control-flow-otherwise.md`
@@ -596,7 +596,7 @@ sections above leave open.
   beside `skipReasons` into `emitSkippedStep`, consumed on emit); the member
   that held carries no stale flag. When the broken member IS the guard row's
   line — a loop's guard, or a head where nothing held — it rides the row's own
-  event as before. TestBench paints a skipped pass carrying `codeBehindStale`
+  event as before. Steptix paints a skipped pass carrying `codeBehindStale`
   ⚠, not ◌ (`passMarkFor`, guard-mark-core.ts), with a hover that says both
   facts — the skip reason, then what the condition's code threw — and so
   offers "Repair this step" on that line. The detail carries the reason as
@@ -811,7 +811,7 @@ sections above leave open.
     whole file, where an item word in another step's entry (`Click the
     Savings tab`) is legitimate.
 
-  What this cannot do is make a model's selector right. The TestBench live
+  What this cannot do is make a model's selector right. The Steptix live
   test therefore keeps the `While` and `Repeat` pass counts strict and only
   warns — naming step 11's entry — when the `For each` does not run three.
 - **Known limit: `kept` counts per block.** A run split by a block boundary
@@ -821,7 +821,7 @@ sections above leave open.
 
 ## What the boxed half decided
 
-Where building `aiui compile` and `POST /codebehind/compile` had to choose
+Where building `steptix compile` and `POST /codebehind/compile` had to choose
 something the sections above leave open, or departed from them.
 
 - **The outcome keeps rows in execution order too, not only per index.**
@@ -1043,4 +1043,4 @@ something the sections above leave open, or departed from them.
 ## Rollout
 
 Server (build + restart `:3100`), `runner-core` unchanged unless a protocol
-comment moves, `testbench-native` patch bump and install.
+comment moves, `steptix-vscode` patch bump and install.

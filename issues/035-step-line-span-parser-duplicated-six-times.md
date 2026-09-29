@@ -4,17 +4,17 @@
 the inline-sections runtime work (see Sequencing).
 **Area (the copies):**
 [runner-core/src/step-lines.ts:23-25](../runner-core/src/step-lines.ts#L23-L25) (canonical — strict `STEP_LINE_RE`, no indent);
-[testbench-native/src/extension/step-lines.ts:1-13](../testbench-native/src/extension/step-lines.ts#L1-L13) (host copy — mirrors the *webview* copy by its own comment, loose regex);
-[testbench-native/src/webview/lib/step-lines-inline.js:1-16](../testbench-native/src/webview/lib/step-lines-inline.js#L1-L16) (webview copy — Vite CJS-interop workaround, loose regex);
+[steptix-vscode/src/extension/step-lines.ts:1-13](../steptix-vscode/src/extension/step-lines.ts#L1-L13) (host copy — mirrors the *webview* copy by its own comment, loose regex);
+[steptix-vscode/src/webview/lib/step-lines-inline.js:1-16](../steptix-vscode/src/webview/lib/step-lines-inline.js#L1-L16) (webview copy — Vite CJS-interop workaround, loose regex);
 [testbench-monaco/src/webview/lib/step-lines-inline.js](../testbench-monaco/src/webview/lib/step-lines-inline.js) (same, second variant);
-[testbench-native/src/webview/lib/variables-panel.js](../testbench-native/src/webview/lib/variables-panel.js) (private regexes + own `findStepsSpan` + `parseParametersInline`);
+[steptix-vscode/src/webview/lib/variables-panel.js](../steptix-vscode/src/webview/lib/variables-panel.js) (private regexes + own `findStepsSpan` + `parseParametersInline`);
 [testbench-monaco/src/webview/lib/variables-panel.js](../testbench-monaco/src/webview/lib/variables-panel.js) (same).
 **Deliberate mirror (stays, but untested):**
 [src/parser/markdown.ts:462-475](../src/parser/markdown.ts#L462-L475) (`extractStepLinesFromRaw` — server-side; commented "kept here rather than importing runner-core").
 **Related:** [013](013-secret-masking-duplicated-and-divergent.md) (same
 duplicated-and-divergent theme), the inline-sections specs
 ([stories/test-script-sections.md](../stories/test-script-sections.md),
-[runtime spec §3/§9](../testbench-native/stories/specs/inline-sections-runtime.md))
+[runtime spec §3/§9](../steptix-vscode/stories/specs/inline-sections-runtime.md))
 whose change-impact list touches every copy in lockstep.
 **Opened:** 2026-07-22
 
@@ -109,10 +109,10 @@ copies instead of six simple ones.
 Pick up when: (a) the inline-sections feature is scheduled (do this first if
 schedule allows), or (b) any other change needs to touch the line model, or
 (c) a real bug lands in the strict/loose gap (e.g. a user's indented list
-runs in TestBench but not via CLI).
+runs in Steptix but not via CLI).
 
 Update 2026-08-26: the family gained its first **mutating** consumer —
-`testbench-native/src/extension/renumber-core.ts` (Renumber Steps, PR #92)
+`steptix-vscode/src/extension/renumber-core.ts` (Renumber Steps, PR #92)
 re-states the ordinal shape as `/^(\d+)\./` plus a column-0 assumption
 carried by its edit shape. A strict/loose drift there rewrites documents,
 not just decorations, so when this consolidation lands, export the ordinal

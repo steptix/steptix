@@ -66,13 +66,13 @@ import type { AIAction } from '../src/ai/types.js';
 /**
  * The exact source string, pinned.
  *
- * Not tidiness: `testbench-native/src/extension/env-data-completion-core.ts`
+ * Not tidiness: `steptix-vscode/src/extension/env-data-completion-core.ts`
  * and `env-data-definition-core.ts` cannot import `src/` and carry the
  * grammar by hand (phase 3 of §1.3 widens them). This literal is what they
  * must mirror, and a golden is how the two sides get a target that does not
  * move underneath them between phases.
  */
-it('pins the source string the TestBench copies have to mirror', () => {
+it('pins the source string the Steptix copies have to mirror', () => {
   expect(PLACEHOLDER_NAME_SOURCE).toBe('\\w+(?:\\.[A-Za-z_][A-Za-z0-9_]*)?');
   expect(PLACEHOLDER_SOURCE).toBe('\\{\\{(\\w+(?:\\.[A-Za-z_][A-Za-z0-9_]*)?)\\}\\}');
   expect(WIDE_PLACEHOLDER_SOURCE).toBe(
@@ -217,19 +217,19 @@ describe('the MCP pre-flight knows a dotted reference comes from a loop', () => 
   const created: string[] = [];
 
   beforeEach(() => {
-    root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'aiui-dotted-')));
+    root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'steptix-dotted-')));
     created.push(root);
     writeFileSync(
-      path.join(root, 'aiui.config.json'),
+      path.join(root, 'steptix.config.json'),
       JSON.stringify({}),
     );
     writeFileSync(path.join(root, '.env'), 'SERVER_URL=http://127.0.0.1:3100\n');
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
   });
 
   afterEach(() => {
     for (const dir of created.splice(0)) rmSync(dir, { recursive: true, force: true });
-    delete process.env['AIUI_MCP_ROOTS'];
+    delete process.env['STEPTIX_MCP_ROOTS'];
   });
 
   const warningsFor = async (steps: string[]): Promise<string> => {
@@ -257,7 +257,7 @@ describe('the MCP pre-flight knows a dotted reference comes from a loop', () => 
  * A `For each` header's item name is a DEFINITION, so it is not an unresolved
  * reference (`controlLineDefines`, src/parser/control-line.ts).
  *
- * Seen in a live TestBench run: the server logged
+ * Seen in a live Steptix run: the server logged
  * `[warn] Unresolved placeholder: {{payment}}` against the
  * `For each {{payment}} in {{payments}}` line, once per table loop, because
  * the Sessions API and the Electron loop resolve every step's text before the

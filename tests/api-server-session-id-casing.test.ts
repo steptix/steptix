@@ -1,7 +1,7 @@
 /**
  * Session ids that are Windows paths must not split on drive-letter casing.
  *
- * TestBench's session ids ARE file paths (`uri.fsPath`, which lower-cases the
+ * Steptix's session ids ARE file paths (`uri.fsPath`, which lower-cases the
  * drive letter; batch runs append `::run-N`), while a CLI, MCP or test-harness
  * caller spells the same file with an uppercase drive. Observed 2026-08-25: a
  * live-test cleanup's `DELETE /sessions/:id` no-oped on the other spelling and

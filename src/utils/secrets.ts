@@ -113,7 +113,7 @@ export const RECORD_SECRET_MIN_LENGTH = 4;
  *
  * {@link loopBindingsOf} comes with them for the one consumer that is not a
  * rule: `frame:scope` (src/server/session-manager.ts) puts the list on the
- * wire so TestBench can apply {@link isSecretParameterName}'s two-segment
+ * wire so Steptix can apply {@link isSecretParameterName}'s two-segment
  * rule to a pass binding and the author rule to everything else dotted,
  * which without it the client could not tell apart (§7.6).
  */

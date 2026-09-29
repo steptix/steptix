@@ -165,12 +165,12 @@ function testConfig(reports: string): Config {
 }
 
 beforeAll(() => {
-  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-stats-ui-seam-')));
+  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-stats-ui-seam-')));
   userRoot = path.join(tmp, 'user-root');
   fs.mkdirSync(userRoot, { recursive: true });
-  for (const key of ['AIUI_STATS', 'AIUI_STATS_SUITE', 'LOCALAPPDATA', 'XDG_CONFIG_HOME']) savedEnv[key] = process.env[key];
-  delete process.env['AIUI_STATS'];
-  delete process.env['AIUI_STATS_SUITE'];
+  for (const key of ['STEPTIX_STATS', 'STEPTIX_STATS_SUITE', 'LOCALAPPDATA', 'XDG_CONFIG_HOME']) savedEnv[key] = process.env[key];
+  delete process.env['STEPTIX_STATS'];
+  delete process.env['STEPTIX_STATS_SUITE'];
   process.env['LOCALAPPDATA'] = userRoot;
   process.env['XDG_CONFIG_HOME'] = userRoot;
   deps = { env: { LOCALAPPDATA: userRoot, XDG_CONFIG_HOME: userRoot }, platform: process.platform };
@@ -187,10 +187,10 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await flushStatsWrites();
-  fs.rmSync(path.join(userRoot, 'aiui', 'stats'), { recursive: true, force: true });
+  fs.rmSync(path.join(userRoot, 'steptix', 'stats'), { recursive: true, force: true });
   root = path.join(tmp, `proj-${Math.random().toString(16).slice(2)}`);
   fs.mkdirSync(path.join(root, 'tests'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'aiui.config.json'), '{}');
+  fs.writeFileSync(path.join(root, 'steptix.config.json'), '{}');
   loaded.config = testConfig(path.join(root, 'reports'));
   process.chdir(root);
 });
@@ -237,7 +237,7 @@ describe('the Runner UI masks a looped section row\'s secret everywhere it recor
     await flushStatsWrites();
 
     // The month file: the value nowhere, the placeholder of it where it was.
-    const dir = path.join(userRoot, 'aiui', 'stats');
+    const dir = path.join(userRoot, 'steptix', 'stats');
     const onDisk = fs.readdirSync(dir).map((name) => fs.readFileSync(path.join(dir, name), 'utf-8')).join('');
     expect(onDisk).not.toContain(SECRET);
     const { lines } = await readStatsLines({ deps });

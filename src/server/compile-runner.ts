@@ -38,7 +38,7 @@ import { recordingDirFor } from '../codebehind/recording.js';
  * run, and streams the phases out — every inner run's events included, so a
  * client paints a compile the way it paints a run. It writes nothing under the
  * project except the gitignored candidate — `dryRun` is forced on, and the
- * proposed files go back on the wire for TestBench to apply through a diff.
+ * proposed files go back on the wire for Steptix to apply through a diff.
  *
  * Given the caller's session, it records *in* that session — the browser the
  * author watches — and leaves it open where the run ended, as a Run would.
@@ -67,7 +67,7 @@ export interface CompileRequest {
   sections?: Record<string, { name: string; headingLine: number; steps: string[]; stepLines: number[] }>;
   envName?: string;
   /**
-   * The caller's session — the one TestBench runs this test in. Record runs
+   * The caller's session — the one Steptix runs this test in. Record runs
    * in it, not in a throwaway session, and leaves it open where the run ended,
    * as a Run would. Without it, Record runs in a fresh session that is closed
    * afterwards. Every compile records (stories/codebehind-recording-on-disk.md);
@@ -77,7 +77,7 @@ export interface CompileRequest {
   select?: CompileSelect;
   maxRounds?: number;
   /**
-   * Accepted for parity with `aiui compile --dry-run`, and ignored: the server
+   * Accepted for parity with `steptix compile --dry-run`, and ignored: the server
    * always compiles dry because it never writes under the project. A client
    * asking for `dryRun: false` gets the proposed files, not a write.
    */
@@ -246,7 +246,7 @@ export class CodeBehindCompiler {
       tokenTracker,
     );
 
-    // What a Run resolves `$VAR` parameters against. TestBench composes it on
+    // What a Run resolves `$VAR` parameters against. Steptix composes it on
     // the client: the nearest `.env` walking up from the test file, with
     // `.env.<name>` overlaid when an env is active. The server's env bundle
     // reads `<projectRoot>/.env` only — and nothing at all for a nameless
@@ -264,7 +264,7 @@ export class CodeBehindCompiler {
       emit({
         type: 'output',
         kind: 'info',
-        msg: `$VAR parameters resolve from ${dotenv} (not beside the project's aiui.config.json).`,
+        msg: `$VAR parameters resolve from ${dotenv} (not beside the project's steptix.config.json).`,
       });
     }
     const dataRow = bundle.projectRoot ? await firstDataRow(test, bundle.projectRoot) : undefined;
@@ -294,7 +294,7 @@ export class CodeBehindCompiler {
       ...(request.maxRounds !== undefined && { maxRounds: request.maxRounds }),
       // Always. The server writes nothing under the project except the
       // recording and the candidate in the gitignored cache dir; the proposed
-      // files ride back on `compile:result` and TestBench applies them through
+      // files ride back on `compile:result` and Steptix applies them through
       // a diff so the write is undoable and shows up in Source Control.
       dryRun: true,
       onEvent: (event) => emit(toWireEvent(event)),
@@ -463,7 +463,7 @@ export class CodeBehindCompiler {
  * The env map a Run of this test resolves `$VAR` parameters against, composed
  * the way the env bundle composes — process baseline lowest, then the base
  * `.env`, then `.env.<name>` highest — except that the base `.env` is the one
- * TestBench would find: the nearest one walking up from the test file, which
+ * Steptix would find: the nearest one walking up from the test file, which
  * in a normal project is `<projectRoot>/.env` and in a workspace that keeps
  * its `.env` above the project is that one. `.env.<name>` is read from the
  * project root, where the env selector enumerates them.

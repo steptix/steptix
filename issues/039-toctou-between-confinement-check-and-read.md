@@ -82,7 +82,7 @@ all.
 
 Cheaper partial mitigations, if the full fix is not justified:
 
-- **`O_NOFOLLOW` on the leaf** for `.env`, `.env.<name>` and `aiui.config.json`.
+- **`O_NOFOLLOW` on the leaf** for `.env`, `.env.<name>` and `steptix.config.json`.
   Refuses a symlinked leaf entirely, which kills the specific attack above
   while leaving symlinked *directories* (the legitimate "one `.env` shared
   across checkouts" case the As-built note cites) working. POSIX-only —

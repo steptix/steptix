@@ -1655,7 +1655,7 @@ type: skill
 
     it('does not hang on a page whose title never resolves', async () => {
       // `page.title()` carries no timeout of its own — the runner races it for
-      // exactly this reason. Unbounded here, any non-MCP caller (TestBench,
+      // exactly this reason. Unbounded here, any non-MCP caller (Steptix,
       // flick, curl) waits forever.
       wedgeSession('mcp:wedged', { title: true });
 

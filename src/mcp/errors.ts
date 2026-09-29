@@ -34,7 +34,7 @@ export function preflightError(text: string): McpToolError {
 }
 
 const ROOTS_HINT =
-  'Set AIUI_MCP_ROOTS to the directories this server may touch ' +
+  'Set STEPTIX_MCP_ROOTS to the directories this server may touch ' +
   `(${'separated by ' + (process.platform === 'win32' ? '";"' : '":"')}).`;
 
 // ---------------------------------------------------------------------------
@@ -59,11 +59,11 @@ export function pathOutsideProjectRoot(target: string, projectRoot: string): Mcp
   );
 }
 
-/** An `AIUI_MCP_ROOTS` entry that cannot be resolved. Refused rather than
+/** A `STEPTIX_MCP_ROOTS` entry that cannot be resolved. Refused rather than
  *  skipped: dropping it would quietly change the boundary. */
 export function badRootEntry(entry: string, detail: string): McpToolError {
   return preflightError(
-    `AIUI_MCP_ROOTS names a directory that cannot be resolved: "${entry}" (${detail}).\n` +
+    `STEPTIX_MCP_ROOTS names a directory that cannot be resolved: "${entry}" (${detail}).\n` +
       `${ROOTS_HINT}`,
   );
 }
@@ -72,13 +72,13 @@ export function projectRootUnresolvable(candidates: readonly string[]): McpToolE
   return preflightError(
     'Could not decide which project to use.\n' +
       `Candidate roots: ${candidates.join(', ') || '(none)'}\n` +
-      'Pass project_root explicitly, or set AIUI_MCP_ROOTS to a single directory.',
+      'Pass project_root explicitly, or set STEPTIX_MCP_ROOTS to a single directory.',
   );
 }
 
 export function noProjectConfig(searched: readonly string[]): McpToolError {
   return preflightError(
-    'No aiui.config.json found, so there is no project to run against.\n' +
+    'No steptix.config.json found, so there is no project to run against.\n' +
       `${ROOTS_HINT}\n` +
       `Searched: ${searched.join(', ')}`,
   );
@@ -99,7 +99,7 @@ export function testsNeedProject(userRoot: string): McpToolError {
     `Test files belong to a project, and ${userRoot} is the machine-wide user ` +
       'root, not a project — it holds your browsers and machine defaults, ' +
       'never tests.\n' +
-      'Run against a directory whose aiui.config.json defines the tests, or ' +
+      'Run against a directory whose steptix.config.json defines the tests, or ' +
       'pass project_root pointing at one.',
   );
 }
@@ -120,7 +120,7 @@ export function projectlessCodeSteps(
 ): McpToolError {
   const where =
     searched.length > 0
-      ? `No aiui.config.json was found (searched: ${searched.join(', ')}).`
+      ? `No steptix.config.json was found (searched: ${searched.join(', ')}).`
       : 'This call resolved to the machine-wide user root, which never holds skills or tools.';
   return preflightError(
     `${offending.length} step(s) invoke a skill or tool, but no project resolved — ` +
@@ -157,7 +157,7 @@ export function noKeyForRunningServer(
   userRootEnvPath: string,
 ): McpToolError {
   return preflightError(
-    `A Sessions API server is running at ${baseUrl}, but no AIUI_SERVER_API_KEY is ` +
+    `A Sessions API server is running at ${baseUrl}, but no STEPTIX_SERVER_API_KEY is ` +
       'available to authenticate with it — none in the project `.env`, the ' +
       `environment, or ${userRootEnvPath}.\n` +
       'A key cannot be generated for a server that already holds one. Write ' +
@@ -172,8 +172,8 @@ export function badServerUrl(serverUrl: string, reason: string): McpToolError {
 
 export function unrecognizedService(baseUrl: string, detail: string): McpToolError {
   return preflightError(
-    `${baseUrl} answered, but is not an ai-ui-automation server (${quoteForeign(detail)}).\n` +
-      'Refusing to continue: the next request would send AIUI_SERVER_API_KEY and the ' +
+    `${baseUrl} answered, but is not a Steptix server (${quoteForeign(detail)}).\n` +
+      'Refusing to continue: the next request would send STEPTIX_SERVER_API_KEY and the ' +
       "project's whole .env to whatever is listening there.",
   );
 }
@@ -236,7 +236,7 @@ export function autoStartSuppressed(
 
 export function unauthorized(projectEnvFiles: readonly string[], baseUrl: string): McpToolError {
   return preflightError(
-    `${baseUrl} rejected our AIUI_SERVER_API_KEY.\n` +
+    `${baseUrl} rejected our STEPTIX_SERVER_API_KEY.\n` +
       `Ours came from: ${projectEnvFiles.join(', ')} (or the environment).\n` +
       "The server's came from whatever env file it was started with — if it was " +
       'started by hand, that is likely a different file.',
@@ -273,7 +273,7 @@ export function badEnvName(envName: string): McpToolError {
   return preflightError(
     `env_name "${envName}" is not a valid environment name. ` +
       'Use letters, digits, dot, underscore or hyphen only — it names a ' +
-      '.env.<name> file beside aiui.config.json, not a path.',
+      '.env.<name> file beside steptix.config.json, not a path.',
   );
 }
 
@@ -309,9 +309,9 @@ export function badCdpPort(value: string): McpToolError {
  * searches for and what the agent should say out loud when asking for it; the
  * JSON is what they actually have to type.
  *
- * Takes the resolved config path rather than hardcoding "aiui.config.json"
+ * Takes the resolved config path rather than hardcoding "steptix.config.json"
  * because the answer differs by scope: for a project it is the project's own
- * file, and for a project-less call it is `<user root>/aiui.config.json` — a
+ * file, and for a project-less call it is `<user root>/steptix.config.json` — a
  * file that may not exist yet, since nothing machine-writes it. This message
  * is the only discovery path there is for that file
  * (stories/mcp-no-project.md, open question resolved), so it must name the
@@ -365,7 +365,7 @@ export function cdpPortNotOwned(
 export function badCdpProfileName(profile: string): McpToolError {
   return preflightError(
     `Profile name "${profile}" is not usable. It names a directory under ` +
-      '.aiui/cdp-profiles/, so it may contain only letters, digits, dot, underscore and ' +
+      '.steptix/cdp-profiles/, so it may contain only letters, digits, dot, underscore and ' +
       'hyphen — no slashes and no "..".\n' +
       'Use a plain name: admin, uat, signup-test.',
   );

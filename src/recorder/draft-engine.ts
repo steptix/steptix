@@ -13,11 +13,11 @@ import {
 } from './write-steps.js';
 
 /**
- * Live drafting (stories/testbench-record-steps.md, decision 9;
+ * Live drafting (stories/steptix-record-steps.md, decision 9;
  * docs/specs/SPEC-record-steps.md §8, §9.2), with the author's own steps and
- * the locks they make (stories/testbench-record-toolbar.md, "Steps you
+ * the locks they make (stories/steptix-record-toolbar.md, "Steps you
  * write"), and the author's edits and deletes of any step
- * (stories/testbench-record-edit-steps.md).
+ * (stories/steptix-record-edit-steps.md).
  *
  * The recording's steps are written WHILE the author works: each action goes
  * to the model shortly after it happens, with the draft so far, and the model
@@ -244,7 +244,7 @@ const STEP_SAME_MESSAGE = 'The step already reads that way.';
 const STEP_UNKNOWN_MESSAGE = 'The recording has no step with that id.';
 const STEP_PARTLY_BACK_MESSAGE =
   'Some of the actions behind that step were restored on their own since, so it cannot come back as it was. ' +
-  'Restore the rest of its actions from the TestBench panel.';
+  'Restore the rest of its actions from the Steptix panel.';
 
 function cloneItem(i: Item): Item {
   return {
@@ -895,7 +895,7 @@ export class DraftEngine {
    * file still has it there, and the lock's place in the recording (the end
    * of what was drafted when it was typed) says nothing about which steps
    * are around it. Put at the lock instead, it moved below steps it was
-   * typed above, and TestBench's order check took the recording out of the
+   * typed above, and Steptix's order check took the recording out of the
    * file (review, finding 10).
    *
    * A step the author reworded goes to the half its actions are in: the
@@ -1063,7 +1063,7 @@ export class DraftEngine {
   }
 
   /**
-   * The author reworded a step (stories/testbench-record-edit-steps.md, "An
+   * The author reworded a step (stories/steptix-record-edit-steps.md, "An
    * edited step is yours"). `text` is one line, already the recording's to
    * write (a leading number taken off, a secret written as `{{name}}`).
    *
@@ -1349,7 +1349,7 @@ export class DraftEngine {
   // ── The author's own steps ─────────────────────────────────────────────
 
   /**
-   * The author wrote steps (stories/testbench-record-toolbar.md, "Locking in").
+   * The author wrote steps (stories/steptix-record-toolbar.md, "Locking in").
    *
    * - At the END of the draft (the toolbar's box, a new line under the block):
    *   the draft is brought up to date first, in one call, over the actions
@@ -1467,7 +1467,7 @@ export class DraftEngine {
    * step still uses it. The model's answer replaces its list every call; the
    * author's are theirs and stay while their step does. A parameter no step
    * uses any more (the step that typed it deleted, or reworded without it)
-   * leaves the list (stories/testbench-record-edit-steps.md, "Delete").
+   * leaves the list (stories/steptix-record-edit-steps.md, "Delete").
    */
   private allParameters(): Params {
     const out = this.parameters.map((p) => ({ ...p }));
@@ -1564,7 +1564,7 @@ export class DraftEngine {
    * and then past any step of the author's that joined right after it since
    * that draft. Two lines typed under the same step of the same draft, sent
    * one after the other, land in the order they were sent: the second after
-   * the first, not between the step and the first (review, TestBench half).
+   * the first, not between the step and the first (review, Steptix half).
    * `afterId` (the drawer's `+`) names the step directly.
    */
   private mapIndex(afterStep: number, revision: number | undefined, afterId?: string): number {

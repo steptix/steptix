@@ -34,7 +34,7 @@ from the **stale** in-memory bundle, and the user's edit has no effect.
 come from the mtime-gated bundle. Named frontmatter `dataSources`
 (`${<source>.X}`) are loaded **fresh per request** (deliberately not
 bundle-cached), so they are **immune** to this same-tick window — only
-`aiui.config.json`, `.env`, `.env.<name>` and `data/<name>.json` are exposed.
+`steptix.config.json`, `.env`, `.env.<name>` and `data/<name>.json` are exposed.
 
 ## Worked example
 

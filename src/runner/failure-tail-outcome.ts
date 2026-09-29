@@ -48,7 +48,7 @@ export function applyTailOutcome(
     // Structural as well as folded into the explanation, for the reason the
     // docblock on `StepResult.warning` gives: the explanation does not travel on
     // the `step:fail` wire event and the warning has to — it is the first line of
-    // the TestBench hover and the MCP row's reason.
+    // the Steptix hover and the MCP row's reason.
     ...(warning !== undefined && { warning }),
     aiExplanation: warning
       ? `${warning}. The run continued past this step (otherwise continue). What failed: ${original}`

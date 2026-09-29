@@ -33,7 +33,7 @@ let testFile: string;
 const originalEnv = { ...process.env };
 
 beforeAll(() => {
-  tmpRoot = mkdtempSync(path.join(tmpdir(), 'aiui-multienv-'));
+  tmpRoot = mkdtempSync(path.join(tmpdir(), 'steptix-multienv-'));
   mkdirSync(path.join(tmpRoot, 'fixtures', 'data'), { recursive: true });
 
   // Two env files

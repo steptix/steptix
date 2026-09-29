@@ -105,7 +105,7 @@ class FailedMarker extends GutterMarker {
  *  of painting it at all.
  *
  *  `SKIP_GLYPH` (src/ui/step-skip.ts), the same hollow circle every other
- *  surface paints — the TestBench gutter, its run log, its panel and the log
+ *  surface paints — the Steptix gutter, its run log, its panel and the log
  *  line beside this editor. It was a `−` here alone. */
 class SkippedMarker extends GutterMarker {
   toDOM() {

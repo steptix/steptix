@@ -18,11 +18,11 @@
 
 ## Overview
 
-Flick is a lightweight desktop application for sending natural language steps to the ai-ui-automation Sessions API. It presents a chat-style interface where non-technical users can type instructions, submit them, and see results — including screenshots — from browser sessions running locally or on remote machines.
+Flick is a lightweight desktop application for sending natural language steps to the Steptix Sessions API. It presents a chat-style interface where non-technical users can type instructions, submit them, and see results — including screenshots — from browser sessions running locally or on remote machines.
 
 Built with Tauri. Distributed as a single executable with no installer required. Runs on Windows, macOS, and Linux.
 
-The project lives at `flick/` within the ai-ui-automation repository.
+The project lives at `flick/` within the Steptix repository.
 
 ---
 
@@ -338,7 +338,7 @@ All local data is stored in the OS-appropriate app data directory:
 - **Frontend**: HTML/CSS/TypeScript (framework choice TBD during implementation — could be vanilla, Svelte, or React)
 - **Backend**: Rust (Tauri core) — handles file I/O, screenshot storage, settings persistence
 - **Distribution**: single executable per platform, no installer required
-- **Project location**: `flick/` directory within the ai-ui-automation repository
+- **Project location**: `flick/` directory within the Steptix repository
 
 ---
 

@@ -1,9 +1,9 @@
 /**
- * The Runner UI's skip sentence, and its parity with TestBench's.
+ * The Runner UI's skip sentence, and its parity with Steptix's.
  *
  * A step that never ran wears one glyph and one sentence everywhere
- * (stories/control-flow.md §"TestBench paints one skip"). That claim was true
- * of the six TestBench surfaces and false of the fourth client: the Electron
+ * (stories/control-flow.md §"Steptix paints one skip"). That claim was true
+ * of the six Steptix surfaces and false of the fourth client: the Electron
  * Runner UI printed `— Step 5 skipped: Skipped: another branch of this
  * decision was taken` — a different glyph, a different separator, a
  * capitalised "Step", and the word "skipped" twice — because the merge joined
@@ -11,7 +11,7 @@
  * result out loud.
  *
  * `src/ui/step-skip.ts` is a MIRROR of
- * `testbench-native/src/extension/step-skip-core.ts`: the two live in
+ * `steptix-vscode/src/extension/step-skip-core.ts`: the two live in
  * different packages and neither may import the other, which is the same
  * situation `failure-text-inline.js` is in and is pinned by the same kind of
  * test. This is that test for this pair — and it is a real one, reading both
@@ -33,7 +33,7 @@ describe('the Runner UI wears the same skip mark as every other surface', () => 
     // The original, read off disk rather than imported: `step-skip-core.ts`
     // belongs to the extension's package and importing it here would pull
     // that build's module resolution into this suite.
-    const core = read('testbench-native/src/extension/step-skip-core.ts');
+    const core = read('steptix-vscode/src/extension/step-skip-core.ts');
     const declared = /export const SKIP_GLYPH = '(.)'/.exec(core)?.[1];
     expect(declared).toBe(SKIP_GLYPH);
   });
@@ -105,9 +105,9 @@ describe('parity with the module it mirrors', () => {
     // Compared as SOURCE, because the two `because()` helpers are private to
     // their modules and a behavioural comparison would need both packages
     // loaded. The regex is the whole of the shared rule.
-    const core = read('testbench-native/src/extension/step-skip-core.ts');
+    const core = read('steptix-vscode/src/extension/step-skip-core.ts');
     const ui = read('src/ui/step-skip.ts');
-    const inline = read('testbench-native/src/webview/lib/failure-text-inline.js');
+    const inline = read('steptix-vscode/src/webview/lib/failure-text-inline.js');
     const strip = /replace\(\s*\/\^skipped\\b\\s\*:\?\\s\*\/i\s*,\s*['"]{2}\s*\)/;
     for (const [name, text] of [
       ['step-skip-core.ts', core],
@@ -120,8 +120,8 @@ describe('parity with the module it mirrors', () => {
 
   it('treats a blank reason as absent, in all three copies', () => {
     const blank = /reason\?\.trim\(\)/;
-    expect(blank.test(read('testbench-native/src/extension/step-skip-core.ts'))).toBe(true);
+    expect(blank.test(read('steptix-vscode/src/extension/step-skip-core.ts'))).toBe(true);
     expect(blank.test(read('src/ui/step-skip.ts'))).toBe(true);
-    expect(blank.test(read('testbench-native/src/webview/lib/failure-text-inline.js'))).toBe(true);
+    expect(blank.test(read('steptix-vscode/src/webview/lib/failure-text-inline.js'))).toBe(true);
   });
 });

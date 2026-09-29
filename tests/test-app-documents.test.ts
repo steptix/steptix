@@ -125,7 +125,7 @@ beforeAll(async () => {
   });
   await waitForHttp(`${baseUrl}/api/documents`);
 
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-upload-'));
+  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-upload-'));
   BIG_PDF = path.join(tmpDir, 'big.pdf');
   await fs.writeFile(BIG_PDF, Buffer.alloc(1024 * 1024 + 1, 0x20));
 
@@ -225,7 +225,7 @@ describe('/api/documents', () => {
   it('a client-supplied path in the filename is reduced to the bare name', async () => {
     // Hand-built body: browsers never send a path, but the parser must not
     // trust that. Also exercises the parser on a body fetch() did not build.
-    const boundary = 'aiui-test-boundary';
+    const boundary = 'steptix-test-boundary';
     const bytes = await fs.readFile(LOGO);
     const head = Buffer.from(
       `--${boundary}\r\n` +

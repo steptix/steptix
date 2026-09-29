@@ -700,7 +700,7 @@ describe('control lines inside a skill body', () => {
 /**
  * A dangling `Else if` / `Otherwise` on the WIRE path.
  *
- * `parseTestContent` is not on that path — TestBench sends steps it scanned
+ * `parseTestContent` is not on that path — Steptix sends steps it scanned
  * itself, and the server expands them — so the expander is the only parser a
  * wire document meets. Left alone, a dangling `Otherwise` opened a chain of
  * its own, became its own fallback, and ran its tail unconditionally: the
@@ -766,7 +766,7 @@ describe('a dangling chain member is refused here too', () => {
  * The third refusal in this family, and the one an author actually writes: the
  * line above opens `If`, so the plain dangling sentence reads as a parser bug.
  * Refused in the same three places — the CLI parser, here, and runner-core's
- * pre-flight — in one wording, because an author who meets it in TestBench and
+ * pre-flight — in one wording, because an author who meets it in Steptix and
  * then again from the CLI must read the same sentence about the same line.
  */
 describe('a chain member under a flow-control step is refused here too', () => {
@@ -817,8 +817,8 @@ describe('a chain member under a flow-control step is refused here too', () => {
  * The other half of the same rule: a member written BELOW the `Otherwise` that
  * closed the chain.
  *
- * This one was refused by the CLI parser alone, so a file TestBench and the
- * Sessions API ran happily was rejected by `aiui run` — and what they ran was
+ * This one was refused by the CLI parser alone, so a file Steptix and the
+ * Sessions API ran happily was rejected by `steptix run` — and what they ran was
  * not what it looked like: `fallbackOf` takes the FIRST condition-less member,
  * so a second `Otherwise`'s tail is unreachable code that is always skipped,
  * while an `Else if` written under one is still evaluated.
@@ -873,9 +873,9 @@ describe('a chain member below the Otherwise is refused here too', () => {
  * actually resolves it.
  *
  * The parser says this too (`scanStepSpans`, src/parser/markdown.ts), but that
- * scan runs only on `aiui run` and on a server compile: an ordinary
+ * scan runs only on `steptix run` and on a server compile: an ordinary
  * `/sessions/:id/steps` run arrives with `steps` and `sections` already parsed
- * by runner-core inside the extension, so on TestBench and MCP — the surfaces
+ * by runner-core inside the extension, so on Steptix and MCP — the surfaces
  * where sections are actually authored — nothing was ever said (review 4,
  * finding 10). Resolution is unchanged on every path; only the telling is new.
  */

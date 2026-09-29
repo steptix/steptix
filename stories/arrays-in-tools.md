@@ -364,7 +364,7 @@ The `visit-each` tool:
 
 ```ts
 // fixtures/tools/visit-each.ts
-import { defineTool } from 'ai-ui-automation';
+import { defineTool } from 'steptix';
 
 export default defineTool({
   name: 'visit-each',

@@ -22,7 +22,7 @@ import {
  * mid-session is discovered and a deleted one disappears — import-free.
  *
  * Tool files use the realistic shape (`defineTool` + the bare
- * `ai-ui-automation/tools` self-import), so these also guard that a bundled
+ * `steptix/tools` self-import), so these also guard that a bundled
  * temp module still resolves the framework package. That self-reference only
  * resolves from *under the repo root*, so temp tool dirs live below `tests/`
  * (not `os.tmpdir()`), exactly as a real user's tool would resolve from under
@@ -48,7 +48,7 @@ async function freshDir(): Promise<string> {
 
 /** A realistic single-tool file whose `marker` output is `value`. */
 function markerTool(value: string): string {
-  return `import { defineTool } from 'ai-ui-automation/tools';
+  return `import { defineTool } from 'steptix/tools';
 export default defineTool({
   name: 'marker',
   parameters: {},
@@ -145,7 +145,7 @@ describe('tool reload — edited files (issue 033 Part 1)', () => {
     await write(
       dir,
       'marker.ts',
-      `import { defineTool } from 'ai-ui-automation/tools';
+      `import { defineTool } from 'steptix/tools';
 import { value } from './helper.js';
 export default defineTool({
   name: 'marker', parameters: {}, outputs: { marker: { type: 'string' } },
@@ -173,7 +173,7 @@ export default defineTool({
     await write(
       dir,
       'marker.ts',
-      `import { defineTool } from 'ai-ui-automation/tools';
+      `import { defineTool } from 'steptix/tools';
 import { value } from './helper.js';
 export default defineTool({
   name: 'marker',
@@ -289,7 +289,7 @@ describe('refreshIndex — added / removed files (issue 033 Part 2)', () => {
 describe('reload concurrency + import.meta (issue 033 round-2)', () => {
   it('concurrent bundleAndImport of the same file/cacheDir all succeed (no temp-file race)', async () => {
     // Two sessions sharing one toolsDir can bundle the same content into the
-    // same .aiui-tool-cache concurrently. A content-hash-only temp name would
+    // same .steptix-tool-cache concurrently. A content-hash-only temp name would
     // collide and one finisher's delete would strand the others' import().
     const dir = await freshDir();
     await write(dir, 'race.ts', markerTool('RACE'));
@@ -309,12 +309,12 @@ describe('reload concurrency + import.meta (issue 033 round-2)', () => {
 
   it('import.meta.url resolves to the original .ts, not the temp module in the cache dir', async () => {
     // A tool resolving a sibling resource via import.meta.url must see its real
-    // location (CLI parity), not the bundled temp .mjs under .aiui-tool-cache.
+    // location (CLI parity), not the bundled temp .mjs under .steptix-tool-cache.
     const dir = await freshDir();
     await write(
       dir,
       'meta.ts',
-      `import { defineTool } from 'ai-ui-automation/tools';
+      `import { defineTool } from 'steptix/tools';
 export default defineTool({
   name: 'meta', parameters: {}, outputs: { marker: { type: 'string' } },
   async run(_args, { step }) { step.setVar('marker', import.meta.url); },
@@ -347,7 +347,7 @@ describe('reload helpers', () => {
     await write(
       dir,
       'mark.ts',
-      `import { defineTool } from 'ai-ui-automation/tools';
+      `import { defineTool } from 'steptix/tools';
 import { value } from './helper.js';
 export default defineTool({
   name: 'mark', parameters: {}, outputs: { mark: { type: 'string' } },

@@ -40,7 +40,7 @@ Two corrections:
    the CLI runner special-cases is only which teardown *route* it takes.
 2. **The server path had no such special case.**
    `SessionManager.closeSession` calls `session.browserTracker.closeAll()`
-   unconditionally — and that is the path TestBench, flick and the MCP
+   unconditionally — and that is the path Steptix, flick and the MCP
    server all use. So CDP sessions were reaching this code every day.
 
 ## What was actually happening

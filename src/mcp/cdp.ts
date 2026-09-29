@@ -9,7 +9,7 @@
  *   decision to make."
  *
  *   Now — an agent MAY select a browser **this project's framework launched**.
- *   Anything else still needs a human editing `aiui.config.json`.
+ *   Anything else still needs a human editing `steptix.config.json`.
  *
  * The original rationale is preserved rather than dropped. The agent chooses
  * among browsers it owns — ones this project started, into profile directories
@@ -17,7 +17,7 @@
  * What changed is that "a browser we own" became a thing that exists.
  *
  * **The gate is MCP-side, not server-side.** The server cannot tell an agent
- * from a human: TestBench and flick are authenticated clients too, and
+ * from a human: Steptix and flick are authenticated clients too, and
  * constraining them would be wrong. What needs constraining is an *agent*
  * choosing a browser, so the check lives where that choice is made.
  */
@@ -38,7 +38,7 @@ import {
   type CdpTarget,
 } from './types.js';
 
-/** What §6 permits for one project, read from `aiui.config.json`. */
+/** What §6 permits for one project, read from `steptix.config.json`. */
 export interface CdpPermissions {
   allowUnowned: boolean;
   ports: number[] | null;

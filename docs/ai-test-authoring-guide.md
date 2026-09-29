@@ -1,6 +1,6 @@
 # AI guide to writing runnable natural-language tests
 
-Use this document as context for an AI that generates tests for **ai-ui-automation** (`aiui`, also used by TestBench). It describes the implementation in this repository, checked on 2026-09-21. If the framework changes, check the source references at the end before assuming the grammar is unchanged.
+Use this document as context for an AI that generates tests for **Steptix** (the `steptix` CLI and the Steptix VS Code extension). It describes the implementation in this repository, checked on 2026-09-21. If the framework changes, check the source references at the end before assuming the grammar is unchanged.
 
 This is the rule-by-rule reference. For the mental model of how a step is executed and the phrasing that is known to work, read [test-writing-handbook.md](test-writing-handbook.md) first.
 
@@ -8,7 +8,7 @@ The output is a Markdown test file, optionally accompanied by reusable Markdown 
 
 ## Instructions for the test-writing AI
 
-1. Read the target project's `aiui.config.json`, relevant `context/**/*.md`, existing tests, skills, and tools before writing a test. Directory names below are defaults and can be configured.
+1. Read the target project's `steptix.config.json`, relevant `context/**/*.md`, existing tests, skills, and tools before writing a test. Directory names below are defaults and can be configured.
 2. Use observed UI labels, supplied requirements, and existing application context. Do not invent URLs, selectors, API endpoints, accounts, expected values, skill names, or tool signatures.
 3. Write one bounded instruction per numbered step. An action plus its completion condition is a useful single step: `Click Save and wait for the Saved message`.
 4. Make the expected result explicit. A successful click is not evidence that the business requirement passed. Add a `Verify` or `Assert` step with a concrete expected value or state.
@@ -27,10 +27,10 @@ The output is a Markdown test file, optionally accompanied by reusable Markdown 
 | `context/**/*.md` | Application knowledge supplied to the execution AI: terminology, page descriptions, workflows, and constraints. These files do not execute as skills. |
 | `.env`, `.env.<name>` | Environment settings and secret values. |
 | `data/<name>.json` | Structured data selected by the environment name. |
-| `aiui.config.json` | Browser, AI, execution, directory, and reporting settings. |
+| `steptix.config.json` | Browser, AI, execution, directory, and reporting settings. |
 | `reports/` | Generated HTML reports by default. |
 
-Framework skills and tools are project files. They are separate from skills/plugins installed in the authoring AI's host. A host tool such as an email connector is not automatically available inside an `aiui` test.
+Framework skills and tools are project files. They are separate from skills/plugins installed in the authoring AI's host. A host tool such as an email connector is not automatically available inside a `steptix` test.
 
 ## File format
 
@@ -62,7 +62,7 @@ timeout: 90s
 7. Verify the Sign in button is visible
 ```
 
-Use these authoring conventions for consistent CLI and TestBench behaviour:
+Use these authoring conventions for consistent CLI and Steptix behaviour:
 
 - Use one `# Title` and one `## Steps` block. Place configuration, parameters, and hooks before `## Steps`.
 - Write unindented `1. ...`, `2. ...` numbered items. Do not use `1)`, bullet lists, nested steps, Gherkin `Scenario`/`Given` blocks, or code fences as executable test structure.
@@ -144,7 +144,7 @@ Two whole-step directives switch which **surface** the following steps run on. F
 Rules the generated file must respect:
 
 - **The directive is the whole step.** A bare bracket token alone on the line, like `[interactive]`. `[use computer] Click Cancel` is a parse error, not two steps, and so is any argument. The colon is optional (`[use: browser]` is the same directive). A step that is nothing but an unrecognised bracket — `[computer]`, `[use the computer]`, `[computer-use]` — is also a parse error, by design: none of them should reach a model as prose.
-- **The project must opt in.** `desktop.enabled: true` in `aiui.config.json`, which defaults to `false`. Without it, `[use computer]` fails the step. Do not write a computer-mode test for a project whose config you have not read.
+- **The project must opt in.** `desktop.enabled: true` in `steptix.config.json`, which defaults to `false`. Without it, `[use computer]` fails the step. Do not write a computer-mode test for a project whose config you have not read.
 - **Switching surface arranges nothing.** It changes what the model is shown and how its answer is performed, and nothing else — so when a run starts from an editor, the first computer-mode screenshot is of that editor. Write a step that brings the target window forward. Two phrasings are answered from the OS window list rather than from pixels: `Focus the window whose title contains "Save As"`, and `Wait until a window titled "Save As" is open` / `… is gone`.
 - **A test whose first step is `[use computer]` launches no browser at all.** That is how a native application is tested here.
 - **The person at the machine must not touch the mouse or the keyboard** while a computer-mode step runs, and the desktop must be visible and unlocked. Only one computer-mode run per machine — the framework takes a lock and refuses a second. Say this in the test's prose header; do not generate a computer-mode test as if it were an ordinary unattended one.
@@ -290,9 +290,9 @@ dataSources:
 
 Those paths resolve relative to the test file. `env` and `data` are reserved source names. JSON string leaves such as `"$TEST_PASSWORD"` can refer to environment values. A skill may declare its own `dataSources`; those namespaces belong to the skill, and its source paths resolve relative to the skill file. Do not assume a caller's named source is visible inside a skill; pass the needed value as a parameter.
 
-Keep real credentials in the environment, not in generated Markdown or fixtures. Never type `***` as a password: it is a redaction marker. `unmask` is for a deliberately nonsecret value whose name was mistakenly classified as secret, not for exposing credentials. It governs what is shown live — the `## Values` block the model reads and TestBench's Variables surfaces — and never the report, the run log or the console line, which star an unmasked name regardless. So `unmask` cannot put a value into a file that leaves the machine, and it is not a way to make a credential visible in a report. It currently takes effect on the `aiui` CLI and the MCP tools only: a run started from TestBench does not send the list to the server.
+Keep real credentials in the environment, not in generated Markdown or fixtures. Never type `***` as a password: it is a redaction marker. `unmask` is for a deliberately nonsecret value whose name was mistakenly classified as secret, not for exposing credentials. It governs what is shown live — the `## Values` block the model reads and Steptix's Variables surfaces — and never the report, the run log or the console line, which star an unmasked name regardless. So `unmask` cannot put a value into a file that leaves the machine, and it is not a way to make a credential visible in a report. It currently takes effect on the `steptix` CLI and the MCP tools only: a run started from Steptix does not send the list to the server.
 
-Two rules decide what is masked, because a name has two possible authors. A name **you** wrote — a parameter, a `[store as:]` capture, a `${…}` reference — is a secret when `password`, `secret`, `token` or `key` appears anywhere in it, case insensitive. A name the **page** supplied — a table read's column alias, a record key from a tool — is a secret only when it holds `password`, `passwd`, `pwd`, `secret`, `token`, `otp` or `credential`/`credentials` as a whole word, or `key` behind `api`, `access`, `private`, `auth`, `signing` or `encryption` (`api_key`, `apiKey`; a camelCase hump is a word break, so `apikey` is not one). Plain `key`, `keys`, `sort_key` and `keyword` are readable columns: masking a value replaces it everywhere, including in the page snapshot the model plans from, so over-masking a sort key can stop the next step finding its row. A dotted loop binding takes both — `{{user.password}}` by the column, `{{token.payee}}` by the record's own name, `{{payment.sort_key}}` by neither — or by the whole name read as one credential key, so `{{api.key}}` is masked (that last reading uses the column rule, which is why `{{row.keyword}}` is not). A dot alone does not make a binding: a dotted name **you** wrote — a data-file column headed `user.apikey`, a `[store as: api.key]` capture — takes your own rule on the whole key, and the run tells TestBench which dotted names a loop actually bound so its views read them the same way the report does. Masked values are hidden in the report, the run log, the console line, the `## Values` block and TestBench's Variables view and panel; the last two also mask the secret columns *inside* a `{{payments}}` capture or a `{{payment}}` record, which no name rule can catch.
+Two rules decide what is masked, because a name has two possible authors. A name **you** wrote — a parameter, a `[store as:]` capture, a `${…}` reference — is a secret when `password`, `secret`, `token` or `key` appears anywhere in it, case insensitive. A name the **page** supplied — a table read's column alias, a record key from a tool — is a secret only when it holds `password`, `passwd`, `pwd`, `secret`, `token`, `otp` or `credential`/`credentials` as a whole word, or `key` behind `api`, `access`, `private`, `auth`, `signing` or `encryption` (`api_key`, `apiKey`; a camelCase hump is a word break, so `apikey` is not one). Plain `key`, `keys`, `sort_key` and `keyword` are readable columns: masking a value replaces it everywhere, including in the page snapshot the model plans from, so over-masking a sort key can stop the next step finding its row. A dotted loop binding takes both — `{{user.password}}` by the column, `{{token.payee}}` by the record's own name, `{{payment.sort_key}}` by neither — or by the whole name read as one credential key, so `{{api.key}}` is masked (that last reading uses the column rule, which is why `{{row.keyword}}` is not). A dot alone does not make a binding: a dotted name **you** wrote — a data-file column headed `user.apikey`, a `[store as: api.key]` capture — takes your own rule on the whole key, and the run tells Steptix which dotted names a loop actually bound so its views read them the same way the report does. Masked values are hidden in the report, the run log, the console line, the `## Values` block and Steptix's Variables view and panel; the last two also mask the secret columns *inside* a `{{payments}}` capture or a `{{payment}}` record, which no name rule can catch.
 
 ### Data-driven runs and section loops
 
@@ -348,7 +348,7 @@ Alternatively use frontmatter `dataFile: data/cases.json` or a simple CSV. `data
 
 The entire step text `Search each product` calls the section. Matching is trimmed and case-insensitive, but punctuation and Markdown formatting matter: `Search each product.` and `**Search each product**` are not that call. `{{section_name}}` does not dynamically dispatch a section.
 
-All main-flow steps must precede the first `###` section. A section body runs only when called; it shares the caller's variables. Sections can call other sections or skills, but recursion/cycles are rejected. Use unique, descriptive names; reserved headings such as `Steps`, `Config`, and `Parameters` cannot be section names. Use the CLI or TestBench Native for sections; the legacy Monaco client refuses sectioned files.
+All main-flow steps must precede the first `###` section. A section body runs only when called; it shares the caller's variables. Sections can call other sections or skills, but recursion/cycles are rejected. Use unique, descriptive names; reserved headings such as `Steps`, `Config`, and `Parameters` cannot be section names. Use the CLI or Steptix Native for sections; the legacy Monaco client refuses sectioned files.
 
 ## Skills: reuse across tests
 
@@ -423,14 +423,14 @@ export default () => randomUUID();
 
 Call it with `[tool: new_id out.new_id="request_id"]`, then use `{{request_id}}`. A bare function's return value is its single output, named after the tool. `out.request_id` would request a nonexistent declared output; it is not an arbitrary capture-name shortcut.
 
-`tool(...)` from `ai-ui-automation/tools` offers the same single-return-output style with a typed scope argument. Its caller arguments are not automatically coerced to schema types. Use `defineTool` when you need validated numbers, booleans, arrays, defaults, or multiple outputs.
+`tool(...)` from `steptix/tools` offers the same single-return-output style with a typed scope argument. Its caller arguments are not automatically coerced to schema types. Use `defineTool` when you need validated numbers, booleans, arrays, defaults, or multiple outputs.
 
 ### A typed tool with an array and an explicit output
 
 Create `tools/src/sum_amounts.ts`:
 
 ```typescript
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 export default defineTool({
   name: 'sum_amounts',
@@ -551,7 +551,7 @@ The decision and loop forms are six numbered-line kinds, each ending in a **tail
 Rules that decide whether a line parses and what it does:
 
 - An `If` opens a chain that any number of `Else if` lines and at most one final `Otherwise` (or `Else`) may continue, on consecutive step lines. Every condition in the chain is put to the model in one call after the page settles — unless every condition in it is literal, when the chain is decided from the values with no call at all — the first that holds wins, and every other member and every step of its tail is marked skipped. A decision is made once — a false answer is an answer, not something to wait for. With nothing holding and no `Otherwise`, the chain is skipped and the run continues.
-- `While <condition>, <tail>` asks before each pass; `Repeat <tail> until <condition>` asks after each one. Both stop at a cap: the line's own `, up to N times`, or `execution.maxLoopIterations` from `aiui.config.json` (25 by default). Reaching the cap **fails the loop line**; a cap is a bug net, not the way a loop is meant to end.
+- `While <condition>, <tail>` asks before each pass; `Repeat <tail> until <condition>` asks after each one. Both stop at a cap: the line's own `, up to N times`, or `execution.maxLoopIterations` from `steptix.config.json` (25 by default). Reaching the cap **fails the loop line**; a cap is a bug net, not the way a loop is meant to end.
 - `For each {{item}} in {{list}}, <tail>` needs `{{list}}` to hold a JSON array, which is what a plural capture ("every", "all", "each") stores, what a table read stores as row records, or what an array-typed tool returns. A `Set` produces text, and a comma-separated string fails the line rather than being split on a guessed delimiter. Over records, the tail's body also reads `{{item.<alias>}}` and `{{item._row}}` — see "Reading a table into row records" above.
 - Splitting is positional, so reword rather than fight it: the condition of an `If` or `Else if` ends at the first ` then `, a `While` condition ends at the first comma, and a `Repeat` tail ends at the first ` until `.
 - Each evaluation costs one model call — unless every condition in it is literal (see "Conditions in the body are cheap" under "Reading a table into row records" above), when it costs none — so a three-pass `While` costs four, and a plain-instruction tail costs a further call to perform it. `If a cookie banner appears, reject it` is cheaper as a watch.
@@ -565,20 +565,20 @@ For an explicitly attended test, `1. [input: otp] Enter the one-time code` captu
 Run commands from the **test project's root**, with the framework and required browsers installed and the chosen AI backend configured. From this framework's source checkout, `npm run dev -- run ...` invokes the source CLI.
 
 ```bash
-npx aiui list
-npx aiui run tests/login.md
-npx aiui run tests/login.md --env staging --headless
-npx aiui run tests/smoke/ --tag smoke
-npx aiui run tests/login-matrix.md --env staging --row 2
+npx steptix list
+npx steptix run tests/login.md
+npx steptix run tests/login.md --env staging --headless
+npx steptix run tests/smoke/ --tag smoke
+npx steptix run tests/login-matrix.md --env staging --row 2
 ```
 
 `--row` is one-based. Comma-separated `--tag` filters use AND logic. Review the generated report for actual assertions, captured values, failures, skipped branches, and any AI healing of compiled code. A test that requires an input prompt is not unattended merely because it launches headlessly.
 
-For repeated execution, `npx aiui compile tests/login.md --env staging` can record and compile eligible steps to a neighbouring `.steps.ts` file. Compilation runs the flow, including replay, so use repeatable fixture state. It is optional; Markdown remains the authored test. Some steps stay AI-driven. Do not promise a run will be AI-free unless every executed step has a working deterministic path. `--fail-on-healed` on `run` can make CI fail when broken code-behind was repaired through AI fallback.
+For repeated execution, `npx steptix compile tests/login.md --env staging` can record and compile eligible steps to a neighbouring `.steps.ts` file. Compilation runs the flow, including replay, so use repeatable fixture state. It is optional; Markdown remains the authored test. Some steps stay AI-driven. Do not promise a run will be AI-free unless every executed step has a working deterministic path. `--fail-on-healed` on `run` can make CI fail when broken code-behind was repaired through AI fallback.
 
 ### When the authoring AI has the framework MCP server
 
-The framework's `aiui mcp` server exposes tools to an external AI host. Read that host's current tool schemas before calling them; these are host calls, not `[tool: ...]` entries in Markdown.
+The framework's `steptix mcp` server exposes tools to an external AI host. Read that host's current tool schemas before calling them; these are host calls, not `[tool: ...]` entries in Markdown.
 
 | MCP tool | How it helps author tests |
 | --- | --- |
@@ -595,7 +595,7 @@ The framework's `aiui mcp` server exposes tools to an external AI host. Read tha
 
 Only use a real, permitted project root; omit `project_root` when the server already has the correct project. A projectless session has no project skills/tools catalogue. Ad-hoc steps also do not automatically import a saved test's section definitions, tables, and hooks: validate the actual file afterwards.
 
-Current MCP limits matter when assessing a green result: `run_test_file` runs only the **first row** of a top-level inline table and returns a warning; it does not expand external `dataFile` rows or execute file hooks. Use the CLI to validate the full file when those features matter, and the CLI or TestBench Native for all inline-table rows. Explicit `[input:]` and `[interactive]` steps are reported as skipped in unattended execution; other requests for clarification can fail. Read warnings and skipped steps, not just the aggregate status.
+Current MCP limits matter when assessing a green result: `run_test_file` runs only the **first row** of a top-level inline table and returns a warning; it does not expand external `dataFile` rows or execute file hooks. Use the CLI to validate the full file when those features matter, and the CLI or Steptix Native for all inline-table rows. Explicit `[input:]` and `[interactive]` steps are reported as skipped in unattended execution; other requests for clarification can fail. Read warnings and skipped steps, not just the aggregate status.
 
 CDP uses persistent browser state. Configure `cdp` and an appropriate `cdpTab` (`new`, a zero-based index, `url~...`, `title~...`, or `active`) only from known browser details. A login test should start signed out; an already signed-in profile can bypass the behaviour it is supposed to verify.
 

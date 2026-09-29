@@ -9,7 +9,7 @@ reads that file as its last resort. A project that says nothing about
 `SERVER_URL` just finds the machine's server — and if the server came up on a
 different port, the file says so, because the server wrote it after binding.
 
-TestBench then needs exactly one piece of machine setup: **where the
+Steptix then needs exactly one piece of machine setup: **where the
 framework is** (`serverAutoStart.cwd`, e.g. `C:\Projects\vibe\ai-ui-automation`).
 The auto-start command stops being something you write — it ships with the
 default
@@ -26,12 +26,12 @@ machine-key ladder already provides.
 
 Builds **after** [machine-key.md](machine-key.md), on top of its user root.
 
-> **Verification rule for this story.** "Done" means: (1) a bare `aiui serve`
+> **Verification rule for this story.** "Done" means: (1) a bare `steptix serve`
 > writes the bound URL to the user-root pointer file after listen succeeds —
 > never before — and restarting on a different `--port` updates it; (2) a
-> TestBench run against a project whose `.env` has **no** `SERVER_URL`
+> Steptix run against a project whose `.env` has **no** `SERVER_URL`
 > resolves the machine server and passes, in both variants; (3) every MCP
-> tool works against such a project; (4) `aiui stop` with no `--url` and no
+> tool works against such a project; (4) `steptix stop` with no `--url` and no
 > config stops the machine server via the pointer; (5) a project `.env` that
 > sets `SERVER_URL` still wins, so a project-pinned server is untouched; (6)
 > a stale pointer — server killed, file left behind — fails the probe and
@@ -40,7 +40,7 @@ Builds **after** [machine-key.md](machine-key.md), on top of its user root.
 > file, and a hand-edit to `.env` mid-run survives any number of server
 > starts; (8) the auto-start *command* ships with the default above while
 > `cwd` stays empty and user-set, and auto-start still refuses without a
-> `cwd` (TB028) — a workspace can set neither, so a cloned repo still cannot
+> `cwd` (STX028) — a workspace can set neither, so a cloned repo still cannot
 > run code by being opened.
 
 ## Context
@@ -49,9 +49,9 @@ Who resolves `SERVER_URL` today, and where each path dead-ends:
 
 | Reader | Resolution today | Consequence |
 | --- | --- | --- |
-| TestBench (both variants) | walk-up `.env` only | refuses the run without it ([run-controller.ts:1412](../testbench-native/src/extension/run-controller.ts:1412)) |
+| Steptix (both variants) | walk-up `.env` only | refuses the run without it ([run-controller.ts:1412](../steptix-vscode/src/extension/run-controller.ts:1412)) |
 | MCP server | project `.env` → `process.env` | [project.ts:360](../src/mcp/project.ts:360) — no project value means no address at all |
-| `aiui stop` / `status` | `--url` flag → config `server.host/port` | a server on a non-default port is invisible without the flag |
+| `steptix stop` / `status` | `--url` flag → config `server.host/port` | a server on a non-default port is invisible without the flag |
 | Sessions API server | binds config/flags, tells nobody | the port it actually bound exists only in its log |
 
 The server is the one process that *knows* its address with certainty, and it
@@ -86,14 +86,14 @@ clients:  project .env SERVER_URL → process.env → user-root server.json
 serve:    --host/--port/config, exactly as today → then writes the pointer
 ```
 
-Clients means all of them: TestBench (both variants), the MCP server, and
-`aiui stop`/`status` — which closes the last "started it, can't find it"
+Clients means all of them: Steptix (both variants), the MCP server, and
+`steptix stop`/`status` — which closes the last "started it, can't find it"
 gap. A stale pointer is handled the way a stale `DevToolsActivePort` is:
 probe it, and a dead or foreign answer means "not running", never an error
-surfaced to the user. `pid` and `startedAt` are there so `aiui status` can
+surfaced to the user. `pid` and `startedAt` are there so `steptix status` can
 say *why* a pointer was disregarded.
 
-**TestBench ships a default auto-start command.** With the URL and key both
+**Steptix ships a default auto-start command.** With the URL and key both
 machine-resolved, the command has no per-machine content left — so it stops
 being configuration the user writes and becomes a default they can override.
 `serverAutoStart.cwd` stays empty by default, stays machine-scoped, and
@@ -102,7 +102,7 @@ genuinely per-machine fact, and it is also the security gate. The command
 executes relative to a directory only the user can set, so a cloned repo
 gains nothing from the command having a default.
 
-**After a spawn, the address comes from the pointer.** Today TestBench polls
+**After a spawn, the address comes from the pointer.** Today Steptix polls
 `/health` on a URL it already knew. Under this story the spawned server may
 be the first thing that *establishes* the URL, so the auto-start wait
 becomes: poll for the pointer file, then poll its `/health` until it
@@ -126,8 +126,8 @@ identifies as ours — the same two-step CDP launch uses
 
 - Write the pointer atomically (write temp + rename) — a client reading
   mid-write must see the old pointer or the new one, never half a JSON.
-- TestBench changes land in both variants; patch bump and repackage each.
-- `aiui status` should report the pointer and its verdict ("stale — pid 1234
+- Steptix changes land in both variants; patch bump and repackage each.
+- `steptix status` should report the pointer and its verdict ("stale — pid 1234
   gone") rather than silently ignoring it; that is the file's debuggability
   story.
 - The MCP server's auto-start already knows the URL it spawns with; the

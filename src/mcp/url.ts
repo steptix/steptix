@@ -31,13 +31,13 @@ export function isLoopbackHost(hostname: string): boolean {
  * value to `server.listen()`, which resolves it via `dns.lookup` — and on a
  * dual-stack Windows box `localhost` resolves to `::1` first, so the child
  * binds IPv6 loopback *only*. Our own `fetch` still reaches it (happy
- * eyeballs), so nothing looks wrong — but `aiui status` and `aiui stop`
- * derive their target from `aiui.config.json`, typically `127.0.0.1`, and
+ * eyeballs), so nothing looks wrong — but `steptix status` and `steptix stop`
+ * derive their target from `steptix.config.json`, typically `127.0.0.1`, and
  * report "not running" against a server that is running. The result is a
  * server you can neither see nor stop from the CLI.
  *
  * This repo triggers exactly that: `.env` says `SERVER_URL=http://localhost:3100`
- * while `aiui.config.json` says `"host": "127.0.0.1"`.
+ * while `steptix.config.json` says `"host": "127.0.0.1"`.
  */
 export function normalizeSpawnHost(hostname: string): string {
   const bare = bareHost(hostname).toLowerCase();

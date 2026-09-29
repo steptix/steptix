@@ -8,7 +8,7 @@ export type ConsoleLogLevel = 'silent' | 'error' | 'warn' | 'info' | 'debug';
  * Every stdout-bound write in this module goes through `out`, so a single
  * switch can move the lot to stderr.
  *
- * `aiui mcp` speaks JSON-RPC over stdout: one stray log line corrupts the
+ * `steptix mcp` speaks JSON-RPC over stdout: one stray log line corrupts the
  * frame and the host drops the connection. `setLogLevel('silent')` is not
  * enough, because `step`/`assertion`/`testStart`/`testEnd` write
  * unconditionally — they predate `shouldEmit` and are the run's headline
@@ -94,7 +94,7 @@ export function addLogCallback(fn: (level: LogLevel, message: string) => void): 
 /**
  * Register a trace-payload callback. Trace entries carry a label and an
  * arbitrary payload (request body, raw response, captured DOM, etc.) — too
- * large to put on the regular log stream (would flood the testbench output
+ * large to put on the regular log stream (would flood the Steptix output
  * panel) but valuable for post-mortem analysis when written to disk.
  *
  * Trace callbacks fire ONLY for `logger.trace(...)` calls and are independent
@@ -198,7 +198,7 @@ export const logger = {
    * subscribers registered via `addTraceCallback` (typically the per-run log
    * file). Never writes to the console or to regular log callbacks, so it's
    * safe to dump large payloads (full prompts, raw responses) without flooding
-   * the testbench output panel.
+   * the Steptix output panel.
    */
   trace(label: string, payload: unknown): void {
     notifyTrace(label, payload);

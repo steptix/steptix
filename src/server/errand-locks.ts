@@ -102,7 +102,7 @@ export class ErrandLocks {
  *
  * Handed out by `ErrandRunner.begin` and released by the run's `finally`. The
  * two live on one object because they have one lifetime — an errand that has
- * released its tabs but still counts as a run in flight would block `aiui stop`
+ * released its tabs but still counts as a run in flight would block `steptix stop`
  * forever, and one that has released the counter but not its tabs would block
  * every later errand on those tabs.
  */

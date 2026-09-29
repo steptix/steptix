@@ -7,7 +7,7 @@ The shape we shipped in [tools-with-playwright-access.md](tools-with-playwright-
 It is overkill for the truly common case: the test author wants to write two lines of code (a UUID, a hash, a quick API probe, a one-line page assertion) and inline them into a test. Today that costs ~13 lines of frame:
 
 ```ts
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 export default defineTool({
   name: 'uuid',
@@ -42,7 +42,7 @@ export default async ({ baseUrl, context }) => {
 
 // Rung 2 — `tool()` helper (recommended; full IDE autocomplete, no annotation)
 // tools/src/check_health.ts
-import { tool } from 'ai-ui-automation/tools';
+import { tool } from 'steptix/tools';
 
 export default tool(async ({ baseUrl, context }) => {
   const res = await context.request.get(`${baseUrl}/health`);
@@ -50,7 +50,7 @@ export default tool(async ({ baseUrl, context }) => {
 });
 
 // Rung 3 — `defineTool({...})` (full schema; descriptions, multiple outputs)
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 export default defineTool({
   name: 'check_health',
@@ -79,7 +79,7 @@ The registry walks every export of a tool file, not just `default`. A named expo
 
 ```ts
 // tools/src/strings.ts
-import { tool } from 'ai-ui-automation/tools';
+import { tool } from 'steptix/tools';
 
 export const slugify = tool(({ s }: { s: string }) =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
@@ -171,13 +171,13 @@ export default () => crypto.randomUUID();
 
 ```ts
 // tools/src/now.ts               ← rung 2 (tool() helper)
-import { tool } from 'ai-ui-automation/tools';
+import { tool } from 'steptix/tools';
 export default tool(() => new Date().toISOString());
 ```
 
 ```ts
 // tools/src/check_health.ts     ← rung 2 with Playwright + args
-import { tool } from 'ai-ui-automation/tools';
+import { tool } from 'steptix/tools';
 export default tool(async ({ baseUrl, context }) => {
   const res = await context.request.get(`${baseUrl}/health`);
   return res.ok();
@@ -186,7 +186,7 @@ export default tool(async ({ baseUrl, context }) => {
 
 ```ts
 // tools/src/strings.ts          ← multi-tool file (named-export-as-name)
-import { tool } from 'ai-ui-automation/tools';
+import { tool } from 'steptix/tools';
 export const slugify = tool(({ s }: { s: string }) =>
   s.toLowerCase().replace(/\W+/g, '-'));
 export const upper = tool(({ s }: { s: string }) => s.toUpperCase());
@@ -194,7 +194,7 @@ export const upper = tool(({ s }: { s: string }) => s.toUpperCase());
 
 ```ts
 // tools/src/login_via_otp.ts   ← rung 3 (full schema, the existing API)
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 export default defineTool({ /* full spec */ });
 ```
 
@@ -212,7 +212,7 @@ export default defineTool({ /* full spec */ });
 ### Modified code
 
 - **`src/tools/registry.ts`** — `loadOne` walks every export (`Object.entries(mod)`), runs each candidate through `finalise`, registers the result. Filename validation moves earlier so a non-conforming filename fails before any imports are attempted.
-- **`src/tools/index.ts`** — re-export `tool` and the `ToolScope` type so authors `import { tool } from 'ai-ui-automation/tools'`.
+- **`src/tools/index.ts`** — re-export `tool` and the `ToolScope` type so authors `import { tool } from 'steptix/tools'`.
 - **`src/tools/types.ts`** — add `ToolScope` (publicly typed).
 
 The executor (`src/tools/executor.ts`) needs **no change**: by the time it runs, every tool is a fully-formed `ToolDefinition`. `finalise` builds a `run` adapter for rungs 1 and 2 that:

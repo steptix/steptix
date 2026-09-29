@@ -4,7 +4,7 @@
  *
  * These are the MCP server's security boundary, so most of what follows
  * asserts a *refusal*. Every project lives in a fresh tmpdir with
- * `AIUI_MCP_ROOTS` pointed at it: the cwd default would otherwise make the
+ * `STEPTIX_MCP_ROOTS` pointed at it: the cwd default would otherwise make the
  * whole suite depend on where vitest was launched from, and the repo's own
  * `.env` holds real credentials.
  */
@@ -27,10 +27,10 @@ import {
 } from '../src/mcp/project.js';
 import { PreflightFailure } from '../src/mcp/types.js';
 
-const BASE_ENV = { SERVER_URL: 'http://127.0.0.1:3100', AIUI_SERVER_API_KEY: 'project-key' };
+const BASE_ENV = { SERVER_URL: 'http://127.0.0.1:3100', STEPTIX_SERVER_API_KEY: 'project-key' };
 
 interface ProjectSpec {
-  /** `null` writes no aiui.config.json at all. */
+  /** `null` writes no steptix.config.json at all. */
   config?: Record<string, unknown> | null;
   /** `null` writes no .env at all. */
   env?: Record<string, string> | null;
@@ -45,7 +45,7 @@ const created: string[] = [];
  *  on win32 TMP is routinely an 8.3 short name, and confinement compares
  *  canonical paths. */
 function makeTmp(): string {
-  const dir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'aiui-mcp-')));
+  const dir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'steptix-mcp-')));
   created.push(dir);
   return dir;
 }
@@ -58,7 +58,7 @@ function seedProject(root: string, spec: ProjectSpec = {}): string {
   mkdirSync(root, { recursive: true });
   if (spec.config !== null) {
     writeFileSync(
-      path.join(root, 'aiui.config.json'),
+      path.join(root, 'steptix.config.json'),
       JSON.stringify(spec.config ?? { tests: { dir: './tests' } }, null, 2),
     );
   }
@@ -90,7 +90,7 @@ async function refusalText(fn: () => Promise<unknown>): Promise<string> {
  *  LOCALAPPDATA (win32) and XDG_CONFIG_HOME (elsewhere) at one tmp, so the
  *  answer is the same join on every platform. */
 function testUserRoot(): string {
-  return path.join((process.env['LOCALAPPDATA'] ?? process.env['XDG_CONFIG_HOME'])!, 'aiui');
+  return path.join((process.env['LOCALAPPDATA'] ?? process.env['XDG_CONFIG_HOME'])!, 'steptix');
 }
 
 /** Seed the user root itself — config and/or `.env` — without the project
@@ -99,7 +99,7 @@ function seedUserRoot(spec: { config?: Record<string, unknown>; env?: Record<str
   const root = testUserRoot();
   mkdirSync(root, { recursive: true });
   if (spec.config !== undefined) {
-    writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify(spec.config, null, 2));
+    writeFileSync(path.join(root, 'steptix.config.json'), JSON.stringify(spec.config, null, 2));
   }
   if (spec.env !== undefined) writeEnvFile(path.join(root, '.env'), spec.env);
   return root;
@@ -122,7 +122,7 @@ beforeEach(() => {
   // A developer shell with SERVER_URL set would silently satisfy the
   // discovery-fallback tests that are meant to fail.
   delete process.env['SERVER_URL'];
-  delete process.env['AIUI_SERVER_API_KEY'];
+  delete process.env['STEPTIX_SERVER_API_KEY'];
   // The key chain ends at the machine key file — redirect the user root into
   // an empty per-test dir so this machine's real key never leaks in. The
   // generic afterEach env restore puts both variables back.
@@ -141,9 +141,9 @@ afterEach(() => {
 });
 
 describe('allowed roots (§4a)', () => {
-  it('defaults to the process cwd when AIUI_MCP_ROOTS is unset', async () => {
+  it('defaults to the process cwd when STEPTIX_MCP_ROOTS is unset', async () => {
     const root = seedProject(makeTmp());
-    delete process.env['AIUI_MCP_ROOTS'];
+    delete process.env['STEPTIX_MCP_ROOTS'];
     vi.spyOn(process, 'cwd').mockReturnValue(root);
 
     // The user root rides along implicitly (stories/mcp-no-project.md): it is
@@ -155,10 +155,10 @@ describe('allowed roots (§4a)', () => {
     });
   });
 
-  it('splits AIUI_MCP_ROOTS on path.delimiter and honours every entry', async () => {
+  it('splits STEPTIX_MCP_ROOTS on path.delimiter and honours every entry', async () => {
     const first = seedProject(makeTmp());
     const second = seedProject(makeTmp());
-    process.env['AIUI_MCP_ROOTS'] = [first, second].join(path.delimiter);
+    process.env['STEPTIX_MCP_ROOTS'] = [first, second].join(path.delimiter);
 
     expect(allowedRoots()).toEqual([first, second, testUserRoot()]);
     await expect(resolveProject({ projectRoot: second })).resolves.toMatchObject({
@@ -170,21 +170,21 @@ describe('allowed roots (§4a)', () => {
   it('refuses a path outside every root, naming the roots and the env var', async () => {
     const root = seedProject(makeTmp());
     const outside = seedProject(makeTmp(), { files: { 'x.md': '# x\n' } });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const text = await refusalText(() =>
       resolveProject({ testFilePath: path.join(outside, 'x.md') }),
     );
     expect(text).toContain('outside every allowed root');
     expect(text).toContain(root);
-    expect(text).toContain('AIUI_MCP_ROOTS');
+    expect(text).toContain('STEPTIX_MCP_ROOTS');
   });
 
   it('refuses a `..` escape even though it lexically starts inside the root', async () => {
     const parent = makeTmp();
     const root = seedProject(path.join(parent, 'proj'));
     seedProject(path.join(parent, 'other'), { files: { 'x.md': '# x\n' } });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const text = await refusalText(() =>
       resolveProject({ testFilePath: path.join(root, '..', 'other', 'x.md') }),
@@ -196,7 +196,7 @@ describe('allowed roots (§4a)', () => {
     const parent = makeTmp();
     const root = seedProject(path.join(parent, 'proj'));
     const evil = seedProject(path.join(parent, 'proj-evil'), { files: { 'x.md': '# x\n' } });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const text = await refusalText(() =>
       resolveProject({ testFilePath: path.join(evil, 'x.md') }),
@@ -208,7 +208,7 @@ describe('allowed roots (§4a)', () => {
     const parent = makeTmp();
     const root = seedProject(path.join(parent, 'proj'));
     const secrets = seedProject(path.join(parent, 'secrets'), { files: { 'x.md': '# x\n' } });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
     if (!trySymlink(secrets, path.join(root, 'link'), 'dir')) return;
 
     const text = await refusalText(() =>
@@ -221,7 +221,7 @@ describe('allowed roots (§4a)', () => {
     'accepts a differently-cased root on win32',
     async () => {
       const root = seedProject(makeTmp(), { files: { 'x.md': '# x\n' } });
-      process.env['AIUI_MCP_ROOTS'] = root.toUpperCase();
+      process.env['STEPTIX_MCP_ROOTS'] = root.toUpperCase();
 
       await expect(
         resolveProject({ testFilePath: path.join(root, 'x.md') }),
@@ -229,27 +229,27 @@ describe('allowed roots (§4a)', () => {
     },
   );
 
-  it('refuses an AIUI_MCP_ROOTS entry that does not exist', async () => {
-    process.env['AIUI_MCP_ROOTS'] = path.join(makeTmp(), 'nope');
+  it('refuses a STEPTIX_MCP_ROOTS entry that does not exist', async () => {
+    process.env['STEPTIX_MCP_ROOTS'] = path.join(makeTmp(), 'nope');
     const text = await refusalText(async () => resolveProject({}));
-    expect(text).toContain('AIUI_MCP_ROOTS names a directory that cannot be resolved');
+    expect(text).toContain('STEPTIX_MCP_ROOTS names a directory that cannot be resolved');
   });
 });
 
 describe('project_root selection (§4a)', () => {
   it('branch 1: walks up from the test file', async () => {
     const root = seedProject(makeTmp(), { files: { 'tests/deep/x.md': '# x\n' } });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const project = await resolveProject({ testFilePath: path.join(root, 'tests/deep/x.md') });
     expect(project.projectRoot).toBe(root);
-    expect(project.configPath).toBe(path.join(root, 'aiui.config.json'));
+    expect(project.configPath).toBe(path.join(root, 'steptix.config.json'));
   });
 
   it('branch 2: uses the supplied project_root', async () => {
     const outer = makeTmp();
     const inner = seedProject(path.join(outer, 'inner'));
-    process.env['AIUI_MCP_ROOTS'] = outer;
+    process.env['STEPTIX_MCP_ROOTS'] = outer;
 
     await expect(resolveProject({ projectRoot: inner })).resolves.toMatchObject({
       projectRoot: inner,
@@ -260,7 +260,7 @@ describe('project_root selection (§4a)', () => {
     const root = seedProject(makeTmp());
     const sub = path.join(root, 'tests');
     mkdirSync(sub, { recursive: true });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
     vi.spyOn(process, 'cwd').mockReturnValue(sub);
 
     await expect(resolveProject({})).resolves.toMatchObject({ projectRoot: root });
@@ -269,7 +269,7 @@ describe('project_root selection (§4a)', () => {
   it('branch 4: falls back to the single configured root', async () => {
     const root = seedProject(makeTmp());
     const elsewhere = makeTmp();
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
     vi.spyOn(process, 'cwd').mockReturnValue(elsewhere);
 
     await expect(resolveProject({})).resolves.toMatchObject({ projectRoot: root });
@@ -278,7 +278,7 @@ describe('project_root selection (§4a)', () => {
   it('branch 5: several roots, cwd in none — falls back to the user root, reported via scope', async () => {
     const first = seedProject(makeTmp());
     const second = seedProject(makeTmp());
-    process.env['AIUI_MCP_ROOTS'] = [first, second].join(path.delimiter);
+    process.env['STEPTIX_MCP_ROOTS'] = [first, second].join(path.delimiter);
     vi.spyOn(process, 'cwd').mockReturnValue(makeTmp());
 
     // The caller was not talking about either configured project, which is
@@ -293,7 +293,7 @@ describe('project_root selection (§4a)', () => {
   it('branch 5 with requireProject keeps the refusal for the project-shaped tools', async () => {
     const first = seedProject(makeTmp());
     const second = seedProject(makeTmp());
-    process.env['AIUI_MCP_ROOTS'] = [first, second].join(path.delimiter);
+    process.env['STEPTIX_MCP_ROOTS'] = [first, second].join(path.delimiter);
     vi.spyOn(process, 'cwd').mockReturnValue(makeTmp());
 
     const text = await refusalText(() => resolveProject({ requireProject: true }));
@@ -306,7 +306,7 @@ describe('project_root selection (§4a)', () => {
     const outer = makeTmp();
     const a = seedProject(path.join(outer, 'a'));
     const b = seedProject(path.join(outer, 'b'), { files: { 'x.md': '# x\n' } });
-    process.env['AIUI_MCP_ROOTS'] = outer;
+    process.env['STEPTIX_MCP_ROOTS'] = outer;
 
     const text = await refusalText(() =>
       resolveProject({ projectRoot: a, testFilePath: path.join(b, 'x.md') }),
@@ -314,30 +314,30 @@ describe('project_root selection (§4a)', () => {
     expect(text).toContain('is not inside project_root');
   });
 
-  it('stops the aiui.config.json walk at the allowed root', async () => {
+  it('stops the steptix.config.json walk at the allowed root', async () => {
     // The config lives one level ABOVE the allowed root: an unbounded walk
     // would find it and pull skillsDir/toolsDir/.env from outside confinement.
     const outer = seedProject(makeTmp());
     const root = path.join(outer, 'child');
     mkdirSync(path.join(root, 'tests'), { recursive: true });
     writeFileSync(path.join(root, 'tests', 'x.md'), '# x\n');
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     // requireProject keeps the walk's refusal observable; the message still
     // names what was searched and must not have reached `outer`.
     const text = await refusalText(() =>
       resolveProject({ testFilePath: path.join(root, 'tests', 'x.md'), requireProject: true }),
     );
-    expect(text).toContain('No aiui.config.json found');
+    expect(text).toContain('No steptix.config.json found');
     expect(text).toContain(path.join(root, 'tests'));
-    expect(text).not.toContain(`${outer}${path.sep}aiui.config.json`);
+    expect(text).not.toContain(`${outer}${path.sep}steptix.config.json`);
   });
 
   it('the user-scope fallback keeps the walk bound too — the outer config is never adopted', async () => {
     const outer = seedProject(makeTmp());
     const root = path.join(outer, 'child');
     mkdirSync(path.join(root, 'tests'), { recursive: true });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
     vi.spyOn(process, 'cwd').mockReturnValue(path.join(root, 'tests'));
 
     const project = await resolveProject({});
@@ -350,14 +350,14 @@ describe('project_root selection (§4a)', () => {
   });
 
   it('refuses a relative path before touching the filesystem', async () => {
-    process.env['AIUI_MCP_ROOTS'] = seedProject(makeTmp());
+    process.env['STEPTIX_MCP_ROOTS'] = seedProject(makeTmp());
     const text = await refusalText(() => resolveProject({ testFilePath: 'tests/x.md' }));
     expect(text).toContain('must be an absolute path');
   });
 
   it('reports a missing test file as a missing file, not as a confinement failure', async () => {
     const root = seedProject(makeTmp());
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
     const text = await refusalText(() =>
       resolveProject({ testFilePath: path.join(root, 'nope.md') }),
     );
@@ -365,13 +365,13 @@ describe('project_root selection (§4a)', () => {
   });
 });
 
-describe('aiui.config.json', () => {
+describe('steptix.config.json', () => {
   it('resolves declared skillsDir/toolsDir absolute, and omits ones that are absent', async () => {
     const root = seedProject(makeTmp(), {
       config: { tests: { skillsDir: './macros', toolsDir: './code/tools' } },
       dirs: ['macros'],
     });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const project = await resolveProject({ projectRoot: root });
     expect(project.skillsDir).toBe(path.join(root, 'macros'));
@@ -386,7 +386,7 @@ describe('aiui.config.json', () => {
       config: { tests: { dir: './tests' } },
       dirs: ['skills', 'tools/src'],
     });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const project = await resolveProject({ projectRoot: root });
     expect(project.skillsDir).toBe(path.join(root, 'skills'));
@@ -397,7 +397,7 @@ describe('aiui.config.json', () => {
     const root = seedProject(makeTmp(), {
       config: { tests: { toolsDir: '../../../evil' } },
     });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const text = await refusalText(() => resolveProject({ projectRoot: root }));
     expect(text).toContain('outside every allowed root');
@@ -410,7 +410,7 @@ describe('aiui.config.json', () => {
     const on = seedProject(makeTmp(), { config: { desktop: { reportScreenshots: true } } });
     const off = seedProject(makeTmp(), { config: { desktop: { reportScreenshots: false } } });
     const garbled = seedProject(makeTmp(), { config: { desktop: { reportScreenshots: 'true' } } });
-    process.env['AIUI_MCP_ROOTS'] = [absent, on, off, garbled].join(path.delimiter);
+    process.env['STEPTIX_MCP_ROOTS'] = [absent, on, off, garbled].join(path.delimiter);
 
     expect((await resolveProject({ projectRoot: absent })).desktopScreenshots).toBe(true);
     expect((await resolveProject({ projectRoot: on })).desktopScreenshots).toBe(true);
@@ -421,8 +421,8 @@ describe('aiui.config.json', () => {
   it('refuses a config that is not readable JSON', async () => {
     const root = makeTmp();
     seedProject(root);
-    writeFileSync(path.join(root, 'aiui.config.json'), '{ not json');
-    process.env['AIUI_MCP_ROOTS'] = root;
+    writeFileSync(path.join(root, 'steptix.config.json'), '{ not json');
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const text = await refusalText(() => resolveProject({ projectRoot: root }));
     expect(text).toContain('could not be read as JSON');
@@ -434,7 +434,7 @@ describe('aiui.config.json', () => {
     });
     const bare = seedProject(makeTmp(), { config: {} });
     const escaping = seedProject(makeTmp(), { config: { tests: { dir: '../../elsewhere' } } });
-    process.env['AIUI_MCP_ROOTS'] = [declared, bare, escaping].join(path.delimiter);
+    process.env['STEPTIX_MCP_ROOTS'] = [declared, bare, escaping].join(path.delimiter);
 
     expect(resolveTestsGlob(await resolveProject({ projectRoot: declared }))).toEqual({
       dir: path.join(declared, 'suite'),
@@ -455,7 +455,7 @@ describe('environment composition (§4)', () => {
       env: { ...BASE_ENV, BASE_URL: 'https://base.example.com' },
       envFiles: { uat: { BASE_URL: 'https://uat.example.com' } },
     });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const project = await resolveProject({ projectRoot: root });
     expect(project.envName).toBeNull();
@@ -470,7 +470,7 @@ describe('environment composition (§4)', () => {
         uat: { BASE_URL: 'https://uat.example.com', SERVER_URL: 'http://127.0.0.1:3999' },
       },
     });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const project = await resolveProject({ projectRoot: root, envName: 'uat' });
     expect(project.envName).toBe('uat');
@@ -485,18 +485,18 @@ describe('environment composition (§4)', () => {
 
   it('never seeds the map from process.env', async () => {
     const root = seedProject(makeTmp());
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
     process.env['HOST_ONLY_SECRET'] = 'do-not-egress';
 
     const project = await resolveProject({ projectRoot: root });
     expect(project.env['HOST_ONLY_SECRET']).toBeUndefined();
   });
 
-  it('falls back to process.env for SERVER_URL/AIUI_SERVER_API_KEY without putting them in the map', async () => {
+  it('falls back to process.env for SERVER_URL/STEPTIX_SERVER_API_KEY without putting them in the map', async () => {
     const root = seedProject(makeTmp(), { env: { OTHER: 'x' } });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
     process.env['SERVER_URL'] = 'http://127.0.0.1:4100';
-    process.env['AIUI_SERVER_API_KEY'] = 'host-key';
+    process.env['STEPTIX_SERVER_API_KEY'] = 'host-key';
 
     const project = await resolveProject({ projectRoot: root });
     expect(project.serverUrl).toBe('http://127.0.0.1:4100');
@@ -506,7 +506,7 @@ describe('environment composition (§4)', () => {
 
   it('prefers the project files over process.env', async () => {
     const root = seedProject(makeTmp());
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
     process.env['SERVER_URL'] = 'http://127.0.0.1:9999';
 
     await expect(resolveProject({ projectRoot: root })).resolves.toMatchObject({
@@ -516,10 +516,10 @@ describe('environment composition (§4)', () => {
 
   it('names both env files and the variable when SERVER_URL is nowhere', async () => {
     const root = seedProject(makeTmp(), {
-      env: { AIUI_SERVER_API_KEY: 'k' },
+      env: { STEPTIX_SERVER_API_KEY: 'k' },
       envFiles: { uat: { X: '1' } },
     });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const text = await refusalText(() => resolveProject({ projectRoot: root, envName: 'uat' }));
     expect(text).toContain('No SERVER_URL');
@@ -528,11 +528,11 @@ describe('environment composition (§4)', () => {
     expect(text).toContain('SERVER_URL environment variable');
   });
 
-  it('defers a missing AIUI_SERVER_API_KEY as null rather than refusing', async () => {
+  it('defers a missing STEPTIX_SERVER_API_KEY as null rather than refusing', async () => {
     // stories/machine-key.md: only server-start.ts can decide what a missing
     // key means — down + loopback generates one, a running server refuses.
     const root = seedProject(makeTmp(), { env: { SERVER_URL: 'http://127.0.0.1:3100' } });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const project = await resolveProject({ projectRoot: root });
     expect(project.apiKey).toBe(null);
@@ -540,25 +540,25 @@ describe('environment composition (§4)', () => {
 
   it('falls back to the machine key file when project and process.env have none', async () => {
     const root = seedProject(makeTmp(), { env: { SERVER_URL: 'http://127.0.0.1:3100' } });
-    process.env['AIUI_MCP_ROOTS'] = root;
-    const aiuiDir = path.join(process.env['LOCALAPPDATA']!, 'aiui');
-    mkdirSync(aiuiDir, { recursive: true });
-    writeFileSync(path.join(aiuiDir, '.env'), 'AIUI_SERVER_API_KEY=machine-key\n');
+    process.env['STEPTIX_MCP_ROOTS'] = root;
+    const steptixDir = path.join(process.env['LOCALAPPDATA']!, 'steptix');
+    mkdirSync(steptixDir, { recursive: true });
+    writeFileSync(path.join(steptixDir, '.env'), 'STEPTIX_SERVER_API_KEY=machine-key\n');
 
     const project = await resolveProject({ projectRoot: root });
     expect(project.apiKey).toBe('machine-key');
     // The machine key rides the discovery fallback, never the project map —
     // same rule as the process.env fallback above it.
-    expect(project.env['AIUI_SERVER_API_KEY']).toBeUndefined();
+    expect(project.env['STEPTIX_SERVER_API_KEY']).toBeUndefined();
   });
 
   it('prefers the project .env and process.env over the machine key', async () => {
-    const aiuiDir = path.join(process.env['LOCALAPPDATA']!, 'aiui');
-    mkdirSync(aiuiDir, { recursive: true });
-    writeFileSync(path.join(aiuiDir, '.env'), 'AIUI_SERVER_API_KEY=machine-key\n');
+    const steptixDir = path.join(process.env['LOCALAPPDATA']!, 'steptix');
+    mkdirSync(steptixDir, { recursive: true });
+    writeFileSync(path.join(steptixDir, '.env'), 'STEPTIX_SERVER_API_KEY=machine-key\n');
 
     const withProjectKey = seedProject(makeTmp());
-    process.env['AIUI_MCP_ROOTS'] = withProjectKey;
+    process.env['STEPTIX_MCP_ROOTS'] = withProjectKey;
     await expect(resolveProject({ projectRoot: withProjectKey })).resolves.toMatchObject({
       apiKey: 'project-key',
     });
@@ -566,8 +566,8 @@ describe('environment composition (§4)', () => {
     const withoutProjectKey = seedProject(makeTmp(), {
       env: { SERVER_URL: 'http://127.0.0.1:3100' },
     });
-    process.env['AIUI_MCP_ROOTS'] = withoutProjectKey;
-    process.env['AIUI_SERVER_API_KEY'] = 'host-key';
+    process.env['STEPTIX_MCP_ROOTS'] = withoutProjectKey;
+    process.env['STEPTIX_SERVER_API_KEY'] = 'host-key';
     await expect(resolveProject({ projectRoot: withoutProjectKey })).resolves.toMatchObject({
       apiKey: 'host-key',
     });
@@ -575,7 +575,7 @@ describe('environment composition (§4)', () => {
 
   it('refuses an env_name containing a separator or a traversal (rule 6)', async () => {
     const root = seedProject(makeTmp());
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     // `..` alone is deliberately NOT in this list: it satisfies the charset,
     // and it is harmless because the name is concatenated after `.env.` — the
@@ -589,7 +589,7 @@ describe('environment composition (§4)', () => {
 
   it('reports a missing .env.<name> in the loader\'s own words', async () => {
     const root = seedProject(makeTmp());
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const text = await refusalText(() => resolveProject({ projectRoot: root, envName: 'uat' }));
     expect(text).toBe(`Environment file not found: ${path.join(root, '.env.uat')}`);
@@ -600,7 +600,7 @@ describe('environment composition (§4)', () => {
     const root = seedProject(path.join(parent, 'proj'));
     const secrets = path.join(parent, 'secrets.env');
     writeFileSync(secrets, 'STOLEN=1\n');
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
     if (!trySymlink(secrets, path.join(root, '.env.uat'), 'file')) return;
 
     const text = await refusalText(() => resolveProject({ projectRoot: root, envName: 'uat' }));
@@ -609,7 +609,7 @@ describe('environment composition (§4)', () => {
 
   it('applyEnvName validates a frontmatter-derived name identically', async () => {
     const root = seedProject(makeTmp());
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
     const project = await resolveProject({ projectRoot: root });
 
     const text = await refusalText(() => applyEnvName(project, '../../etc/passwd'));
@@ -618,11 +618,11 @@ describe('environment composition (§4)', () => {
 });
 
 describe('user scope (stories/mcp-no-project.md)', () => {
-  /** A configured root with no aiui.config.json anywhere in it, adopted as
+  /** A configured root with no steptix.config.json anywhere in it, adopted as
    *  the cwd — the canonical "no project" starting position. */
   function noProjectCwd(): string {
     const root = makeTmp();
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
     vi.spyOn(process, 'cwd').mockReturnValue(root);
     return root;
   }
@@ -633,7 +633,7 @@ describe('user scope (stories/mcp-no-project.md)', () => {
     const project = await resolveProject({});
     expect(project.scope).toBe('user');
     expect(project.projectRoot).toBe(testUserRoot());
-    expect(project.configPath).toBe(path.join(testUserRoot(), 'aiui.config.json'));
+    expect(project.configPath).toBe(path.join(testUserRoot(), 'steptix.config.json'));
     // Rule 7's raw material: the walk that found nothing is on the result.
     expect(project.configSearch).toContain(root);
     // Rule 6's floor: never a skills or tools directory.
@@ -669,7 +669,7 @@ describe('user scope (stories/mcp-no-project.md)', () => {
     expect(project.envFilesConsulted).toEqual([path.join(testUserRoot(), '.env')]);
   });
 
-  it('honours the user root aiui.config.json when present, defaults when absent', async () => {
+  it('honours the user root steptix.config.json when present, defaults when absent', async () => {
     noProjectCwd();
     expect((await resolveProject({})).cdpPermissions.allowUnowned).toBe(false);
 
@@ -685,14 +685,14 @@ describe('user scope (stories/mcp-no-project.md)', () => {
     const widened = seedProject(makeTmp(), {
       config: { mcp: { cdp: { allowUnowned: true } } },
     });
-    process.env['AIUI_MCP_ROOTS'] = widened;
+    process.env['STEPTIX_MCP_ROOTS'] = widened;
     expect((await resolveProject({ projectRoot: widened })).cdpPermissions.allowUnowned).toBe(
       true,
     );
 
     // …grants nothing to a project-less call on the same machine…
     vi.spyOn(process, 'cwd').mockReturnValue(makeTmp());
-    process.env['AIUI_MCP_ROOTS'] = makeTmp();
+    process.env['STEPTIX_MCP_ROOTS'] = makeTmp();
     expect((await resolveProject({})).cdpPermissions.allowUnowned).toBe(false);
 
     // …and the reverse: a user root that widened project-less reach grants
@@ -700,7 +700,7 @@ describe('user scope (stories/mcp-no-project.md)', () => {
     seedUserRoot({ config: { mcp: { cdp: { allowUnowned: true } } } });
     expect((await resolveProject({})).cdpPermissions.allowUnowned).toBe(true);
     const plain = seedProject(makeTmp());
-    process.env['AIUI_MCP_ROOTS'] = plain;
+    process.env['STEPTIX_MCP_ROOTS'] = plain;
     expect((await resolveProject({ projectRoot: plain })).cdpPermissions.allowUnowned).toBe(
       false,
     );
@@ -712,7 +712,7 @@ describe('user scope (stories/mcp-no-project.md)', () => {
       env: { SERVER_URL: 'http://127.0.0.1:4444' },
     });
     mkdirSync(path.join(userRoot, 'skills'), { recursive: true });
-    process.env['AIUI_MCP_ROOTS'] = seedProject(makeTmp());
+    process.env['STEPTIX_MCP_ROOTS'] = seedProject(makeTmp());
 
     const project = await resolveProject({ projectRoot: userRoot });
     expect(project.scope).toBe('user');
@@ -725,7 +725,7 @@ describe('user scope (stories/mcp-no-project.md)', () => {
 
   it('requireProject refuses the user root by name, and the fallback path with the walk', async () => {
     const userRoot = seedUserRoot({ config: {} });
-    process.env['AIUI_MCP_ROOTS'] = seedProject(makeTmp());
+    process.env['STEPTIX_MCP_ROOTS'] = seedProject(makeTmp());
 
     const explicit = await refusalText(() =>
       resolveProject({ projectRoot: userRoot, requireProject: true }),
@@ -735,7 +735,7 @@ describe('user scope (stories/mcp-no-project.md)', () => {
 
     const root = noProjectCwd();
     const fallback = await refusalText(() => resolveProject({ requireProject: true }));
-    expect(fallback).toContain('No aiui.config.json found');
+    expect(fallback).toContain('No steptix.config.json found');
     expect(fallback).toContain(root);
   });
 
@@ -755,11 +755,11 @@ describe('user scope (stories/mcp-no-project.md)', () => {
   });
 
   it('keeps the single-configured-root implication for machine-global hosts', async () => {
-    // The Codex/Copilot CLI shape: one AIUI_MCP_ROOTS entry, cwd nowhere near
+    // The Codex/Copilot CLI shape: one STEPTIX_MCP_ROOTS entry, cwd nowhere near
     // it. The user root joining the allow-list must NOT break "that one entry
     // is the project".
     const only = seedProject(makeTmp());
-    process.env['AIUI_MCP_ROOTS'] = only;
+    process.env['STEPTIX_MCP_ROOTS'] = only;
     vi.spyOn(process, 'cwd').mockReturnValue(makeTmp());
 
     await expect(resolveProject({})).resolves.toMatchObject({
@@ -772,7 +772,7 @@ describe('user scope (stories/mcp-no-project.md)', () => {
     noProjectCwd();
     expect((await resolveProject({})).apiKey).toBeNull();
 
-    seedUserRoot({ env: { AIUI_SERVER_API_KEY: 'machine-key' } });
+    seedUserRoot({ env: { STEPTIX_SERVER_API_KEY: 'machine-key' } });
     expect((await resolveProject({})).apiKey).toBe('machine-key');
   });
 });
@@ -787,7 +787,7 @@ describe('user root joins the allow-list for ADDRESSING only, never project file
   it('a project tests.dir pointing into the user root is refused', async () => {
     const root = seedProject(makeTmp(), { config: { tests: { dir: testUserRoot() } } });
     mkdirSync(testUserRoot(), { recursive: true });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const project = await resolveProject({ projectRoot: root });
     expect(() => resolveTestsGlob(project)).toThrow(PreflightFailure);
@@ -799,11 +799,11 @@ describe('user root joins the allow-list for ADDRESSING only, never project file
     // gets no skills directory rather than one that executes user-root code.
     const parent = makeTmp();
     const root = seedProject(path.join(parent, 'proj'), {
-      config: { tests: { skillsDir: '../../aiui-evil-skills' } },
+      config: { tests: { skillsDir: '../../steptix-evil-skills' } },
     });
     // Even if such a directory exists, it is outside the configured root.
-    mkdirSync(path.join(parent, 'aiui-evil-skills'), { recursive: true });
-    process.env['AIUI_MCP_ROOTS'] = root;
+    mkdirSync(path.join(parent, 'steptix-evil-skills'), { recursive: true });
+    process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const text = await refusalText(() => resolveProject({ projectRoot: root }));
     expect(text).toContain('outside every allowed root');
@@ -812,8 +812,8 @@ describe('user root joins the allow-list for ADDRESSING only, never project file
   it('a base .env symlinked into the user root is refused (machine-key exfil channel)', async () => {
     const root = seedProject(makeTmp(), { env: null });
     mkdirSync(testUserRoot(), { recursive: true });
-    writeFileSync(path.join(testUserRoot(), '.env'), 'AIUI_SERVER_API_KEY=machine-secret\n');
-    process.env['AIUI_MCP_ROOTS'] = root;
+    writeFileSync(path.join(testUserRoot(), '.env'), 'STEPTIX_SERVER_API_KEY=machine-secret\n');
+    process.env['STEPTIX_MCP_ROOTS'] = root;
     if (!trySymlink(path.join(testUserRoot(), '.env'), path.join(root, '.env'), 'file')) return;
 
     const text = await refusalText(() => resolveProject({ projectRoot: root }));
@@ -823,15 +823,15 @@ describe('user root joins the allow-list for ADDRESSING only, never project file
   it('a planted config in a user-root SUBDIRECTORY does not load as a project', async () => {
     // The ===userRoot guard catches the root itself; this covers a child of
     // it, named explicitly. It must not become a real project loading code
-    // from under %LOCALAPPDATA%\aiui.
+    // from under %LOCALAPPDATA%\steptix.
     const sub = path.join(testUserRoot(), 'planted');
     mkdirSync(path.join(sub, 'skills'), { recursive: true });
     writeFileSync(
-      path.join(sub, 'aiui.config.json'),
+      path.join(sub, 'steptix.config.json'),
       JSON.stringify({ tests: { skillsDir: './skills' } }),
     );
     writeEnvFile(path.join(sub, '.env'), { SERVER_URL: 'http://127.0.0.1:3100' });
-    process.env['AIUI_MCP_ROOTS'] = seedProject(makeTmp());
+    process.env['STEPTIX_MCP_ROOTS'] = seedProject(makeTmp());
 
     const text = await refusalText(() => resolveProject({ projectRoot: sub }));
     expect(text).toContain('outside every allowed root');
@@ -841,7 +841,7 @@ describe('user root joins the allow-list for ADDRESSING only, never project file
     // The addressing path the wide allow-list exists to serve — unaffected by
     // the loading-boundary tightening.
     seedUserRoot({ env: { SERVER_URL: 'http://127.0.0.1:4444' } });
-    process.env['AIUI_MCP_ROOTS'] = seedProject(makeTmp());
+    process.env['STEPTIX_MCP_ROOTS'] = seedProject(makeTmp());
 
     await expect(resolveProject({ projectRoot: testUserRoot() })).resolves.toMatchObject({
       scope: 'user',

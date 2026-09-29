@@ -1,6 +1,6 @@
 /**
  * Record Steps — the wire and the recorder's own records
- * (stories/testbench-record-steps.md, "On the wire").
+ * (stories/steptix-record-steps.md, "On the wire").
  *
  * The frames below are the server's copy of the contract runner-core's
  * `protocol.ts` mirrors on the client side; the story's "On the wire" section is
@@ -68,7 +68,7 @@ export type RecordEvent =
    * by one per draft; `through` is the id of the last action it covers.
    * `locked` leading steps are final — the model cannot rewrite them — and
    * `authored` are the indices of the steps the author wrote by hand, with
-   * their ids beside them in `authoredIds` (stories/testbench-record-toolbar.md,
+   * their ids beside them in `authoredIds` (stories/steptix-record-toolbar.md,
    * "The wire, exactly").
    */
   | {
@@ -82,7 +82,7 @@ export type RecordEvent =
       authored: number[];
       authoredIds?: string[];
       /**
-       * One stable id per step (stories/testbench-record-edit-steps.md, "The
+       * One stable id per step (stories/steptix-record-edit-steps.md, "The
        * wire, exactly"): kept while the step is unchanged in place, new when
        * the model writes or rewrites it; an author step keeps its `s` id.
        * Never an action's id or another step's.
@@ -136,13 +136,13 @@ export type RecordEvent =
       source: RecordStepSource;
       actions?: string[];
     }
-  /** The toolbar was moved or minimised: TestBench keeps it for the next start body. */
+  /** The toolbar was moved or minimised: Steptix keeps it for the next start body. */
   | { type: 'record:toolbar'; dock: ToolbarDock; minimised: boolean }
   | {
       type: 'done';
       status: 'passed' | 'error' | 'aborted';
       error?: string;
-      /** Cancel was pressed in the browser: TestBench takes the drafts out
+      /** Cancel was pressed in the browser: Steptix takes the drafts out
        *  quietly, with no error. */
       cancelledBy?: 'browser';
     };
@@ -190,7 +190,7 @@ export interface RecordStepsRequest {
     cursorLine?: number;
   };
   /**
-   * The browser toolbar (stories/testbench-record-toolbar.md). Absent means
+   * The browser toolbar (stories/steptix-record-toolbar.md). Absent means
    * `{ enabled: true, dock: 'bc', minimised: false }`; `enabled: false` puts
    * no toolbar in the page — the rest of the recording is unchanged.
    */
@@ -203,7 +203,7 @@ export type RecordControl =
   /**
    * Leave this action — or author step — out, and redraft now (decision 9).
    * A step of the draft (a `record:draft.ids` id) is deleted at once, with the
-   * recorded actions behind it (stories/testbench-record-edit-steps.md).
+   * recorded actions behind it (stories/steptix-record-edit-steps.md).
    * `source` is not in that story's wire: optional, and only echoed in the
    * `record:dropped` a step's delete sends ('panel' when absent).
    */

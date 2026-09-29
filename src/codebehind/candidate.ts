@@ -18,7 +18,7 @@ import {
  * generation path needs around them.
  *
  * Extracted from `compile.ts` so the boxed pipeline (`compileTest`, the CLI's
- * `aiui compile`) and the live one (`live-compile.ts`, driven by a Run &
+ * `steptix compile`) and the live one (`live-compile.ts`, driven by a Run &
  * Compile or a Compile This Step — stories/compile-as-you-go.md) splice
  * entries through **one** implementation. Two copies of "how an entry becomes
  * a file" would only have to disagree once for the diff to propose something
@@ -155,7 +155,7 @@ export class Candidate {
    * Write the candidates somewhere the loader can import them, and return the
    * override map. `.ts` because esbuild picks its loader by extension; inside
    * the gitignored cache dir beside the real file, because a `node_modules`
-   * path segment would break the `ai-ui-automation/codebehind` self-reference.
+   * path segment would break the `steptix/codebehind` self-reference.
    */
   async materialise(): Promise<Record<string, string>> {
     const overrides: Record<string, string> = {};

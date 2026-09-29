@@ -14,8 +14,8 @@ describe('normalizeSpawnHost', () => {
   it('collapses localhost onto 127.0.0.1', () => {
     // Not cosmetic: `server.listen('localhost')` resolves through dns.lookup,
     // which prefers ::1 on a dual-stack Windows box. The child would bind IPv6
-    // loopback only, and `aiui status` — which reads 127.0.0.1 from
-    // aiui.config.json — would report "not running" against a live server.
+    // loopback only, and `steptix status` — which reads 127.0.0.1 from
+    // steptix.config.json — would report "not running" against a live server.
     expect(normalizeSpawnHost('localhost')).toBe('127.0.0.1');
     expect(normalizeSpawnHost('LOCALHOST')).toBe('127.0.0.1');
     expect(normalizeSpawnHost('127.0.0.1')).toBe('127.0.0.1');

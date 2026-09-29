@@ -524,7 +524,7 @@ describe('compile — a step the recording tolerated', () => {
     const record = outcome('passed', [passed(1, CB), tolerated(2), passed(3, CB)]);
     const { result, events, prompts } = await runCompile({
       md: TOLERATED_MD,
-      existing: `import { defineSteps } from 'ai-ui-automation/codebehind';
+      existing: `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: 'Enter the booking code', async run({ page }) { await page.locator('#code').waitFor(); } },
   { source: 'Confirm the booking', async run({ page }) { await page.locator('#confirmed').waitFor(); } },
@@ -681,7 +681,7 @@ describe('compile — a step the recording failed deliberately', () => {
     // past the end, and never attempted.
     const record = outcome('failed', [passed(1, CB), deliberate(2, FAIL_MESSAGE)]);
     const { result, events, prompts } = await compileFail({
-      existing: `import { defineSteps } from 'ai-ui-automation/codebehind';
+      existing: `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: 'Enter the booking code', async run({ page }) { await page.locator('#code').waitFor(); } },
   { source: ${JSON.stringify(FAIL_STEP)}, async run({ page, step }) { ${FAIL_ENTRY_BODY} } },

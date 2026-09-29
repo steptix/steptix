@@ -505,7 +505,7 @@ export const createApiClient = (opts: ApiClientOptions): ApiClient => {
       const params = new URLSearchParams({ projectRoot: args.projectRoot });
       if (args.includeForeign) params.set('includeForeign', 'true');
       // Only sent when §6 permits. The server honours whatever it is asked —
-      // it cannot tell an agent from a human, and constraining TestBench or
+      // it cannot tell an agent from a human, and constraining Steptix or
       // flick would be wrong — so NOT asking is the withholding.
       if (args.includeForeignTabs) params.set('includeForeignTabs', 'true');
       const res = await doFetch(`${base}/cdp/browsers?${params.toString()}`, {

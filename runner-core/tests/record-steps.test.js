@@ -1,5 +1,5 @@
 /**
- * Record Steps, runner-core half (stories/testbench-record-steps.md §On the
+ * Record Steps, runner-core half (stories/steptix-record-steps.md §On the
  * wire): the frame types and their guard, the host/webview messages the
  * panel's Recording block rides on, and the two client calls — the SSE start
  * and the JSON control.
@@ -57,7 +57,7 @@ test('isRecordStepsEvent: accepts every frame the record stream carries', () => 
   }
 });
 
-test('isRecordStepsEvent: accepts the browser toolbar\'s frames (stories/testbench-record-toolbar.md)', () => {
+test('isRecordStepsEvent: accepts the browser toolbar\'s frames (stories/steptix-record-toolbar.md)', () => {
   // The run controller drops whatever this guard rejects, so a frame missing
   // here would never reach the panel: no pause marker, no ✎ row, no strike.
   for (const type of ['record:paused', 'record:step', 'record:dropped', 'record:toolbar']) {
@@ -65,7 +65,7 @@ test('isRecordStepsEvent: accepts the browser toolbar\'s frames (stories/testben
   }
 });
 
-test('isRecordStepsEvent: accepts record:edited (stories/testbench-record-edit-steps.md)', () => {
+test('isRecordStepsEvent: accepts record:edited (stories/steptix-record-edit-steps.md)', () => {
   // Dropped by the guard, a step reworded in the browser's drawer would never
   // reach the panel's row, nor the file line that follows it.
   assert.equal(isRecordStepsEvent({ type: 'record:edited', id: 'd4', text: 'Open Payments from the side menu', source: 'toolbar' }), true);

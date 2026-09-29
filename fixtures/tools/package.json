@@ -1,14 +1,15 @@
 {
-  "name": "ai-ui-automation-fixture-tools",
+  "name": "steptix-fixture-tools",
   "version": "0.0.0",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
-  "description": "Example tool definitions used by the framework's integration tests. Demonstrates the project layout an end-user would adopt under their own tools/ directory — including consuming `ai-ui-automation/tools` as a real package via the bare import specifier.",
+  "description": "Example tool definitions used by the framework's integration tests. Demonstrates the project layout an end-user would adopt under their own tools/ directory — including consuming `steptix/tools` as a real package via the bare import specifier.",
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "ai-ui-automation": "file:../..",
+    "steptix": "file:../..",
     "playwright": "^1.59.1",
     "typescript": "^5.5.0"
   }

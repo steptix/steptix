@@ -6,7 +6,7 @@
  * a call that must not happen: a session whose first step is `[use computer]`
  * opens no browser. The desktop seams are injected — `FakeDesktopAdapter` and
  * a lock file in this test's own temp directory — so nothing here can load
- * nut.js or touch the machine's real `aiui-computer.lock`.
+ * nut.js or touch the machine's real `steptix-computer.lock`.
  *
  * The mock wall is `session-lazy-launch.test.ts`'s, with two changes it names:
  * the step-executor and computer-step modules are spread from the REAL ones
@@ -301,8 +301,8 @@ beforeEach(() => {
   // `clearAllMocks` keeps implementations, and a test below installs its own.
   executeComputerStepMock.mockImplementation(passComputerStep);
   evaluateConditionsMock.mockImplementation(judgeHolds);
-  lockDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-test-'));
-  lockPath = path.join(lockDir, 'aiui-computer.lock');
+  lockDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-computer-test-'));
+  lockPath = path.join(lockDir, 'steptix-computer.lock');
   adapter = new FakeDesktopAdapter({ width: 200, height: 150 });
   loadDesktopAdapter = vi.fn(async () => adapter);
   probeComputerCapture = vi.fn(async () => {});
@@ -447,7 +447,7 @@ describe('§5.1 item 1b — the vision route (§15.4)', () => {
   }
 
   const REFUSAL =
-    'Computer mode needs the model to see the screen, but the TestBench Copilot bridge drops ' +
+    'Computer mode needs the model to see the screen, but the Steptix Copilot bridge drops ' +
     'images on this VS Code (it has no image support for language models). Update VS Code, or ' +
     'run computer-mode steps with a model that is not routed through the bridge.';
 
@@ -630,7 +630,7 @@ describe('the surface survives a batch boundary (§4.5)', () => {
 // §5.9 — the lock is held only while a run executes
 //
 // Measured defect: an MCP `run_test_file` of a test that ended in computer
-// mode passed, and afterwards `aiui-computer.lock` was still held by that
+// mode passed, and afterwards `steptix-computer.lock` was still held by that
 // session — MCP keeps a session open between calls — so every other
 // computer-mode session on the machine would have been refused until
 // something closed it. The surface outlives a batch; the lock must not.
@@ -1006,7 +1006,7 @@ describe('closeSession resets the surface and releases the lock (acceptance 6)',
 // ---------------------------------------------------------------------------
 // The PROJECT decides, not the server (§5.1 item 1, §5.10)
 //
-// Measured defect: a server started from a checkout whose `aiui.config.json`
+// Measured defect: a server started from a checkout whose `steptix.config.json`
 // has no `desktop` key refused `[use computer]` for a test file whose project
 // config said `"desktop": {"enabled": true}` — the server read its own startup
 // config, because `resolveRunSettings` rebuilds `runConfig` by spreading it.
@@ -1017,14 +1017,14 @@ describe('closeSession resets the surface and releases the lock (acceptance 6)',
 let projectDir: string;
 
 /**
- * A project on disk: `aiui.config.json` with the given sections, and a test
+ * A project on disk: `steptix.config.json` with the given sections, and a test
  * file under it for `testFilePath` to point at. The file's content is never
  * read for the steps (those come from the request), but it exists so the
  * code-behind lookup sees a real path.
  */
 function writeProject(config: Record<string, unknown>): string {
   const root = mkdtempSync(path.join(projectDir, 'proj-'));
-  writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify(config));
+  writeFileSync(path.join(root, 'steptix.config.json'), JSON.stringify(config));
   mkdirSync(path.join(root, 'tests'), { recursive: true });
   const testFile = path.join(root, 'tests', 'print.md');
   writeFileSync(testFile, '# Print\n\n1. [use computer]\n');
@@ -1042,7 +1042,7 @@ function launchConfig(call = 0): any {
 }
 
 beforeEach(() => {
-  projectDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-project-'));
+  projectDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-computer-project-'));
 });
 
 afterEach(() => {
@@ -1219,7 +1219,7 @@ describe('an undispatched [tool:] / [skill:] line fails on the computer surface 
 
   let toolsDir: string;
   beforeEach(() => {
-    toolsDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-tools-'));
+    toolsDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-computer-tools-'));
     // A catalogue with something in it, and nothing named `open_calculator`.
     writeFileSync(
       path.join(toolsDir, 'echo.ts'),
@@ -1533,7 +1533,7 @@ describe('a pause inside a batch gives the lock back (§5.9)', () => {
   describe('the tool debugger', () => {
     let toolsDir: string;
     beforeEach(() => {
-      toolsDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-tool-debugger-'));
+      toolsDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-computer-tool-debugger-'));
       // A tool that REGISTERS — `defineTool`, by absolute path — because this
       // one has to run, not merely sit in the catalogue.
       const toolsIndex = path.resolve(__dirname, '..', 'src', 'tools', 'index.ts').replace(/\\/g, '/');
@@ -1591,7 +1591,7 @@ describe('switching desktop.enabled off stops a session already on the computer 
   /** Rewrite a project's config in place and move its mtime on, so the
    *  mtime-cached bundle re-reads it on the next batch. */
   function setDesktopEnabled(testFilePath: string, enabled: boolean): void {
-    const configPath = path.join(path.dirname(path.dirname(testFilePath)), 'aiui.config.json');
+    const configPath = path.join(path.dirname(path.dirname(testFilePath)), 'steptix.config.json');
     writeFileSync(configPath, JSON.stringify({ desktop: { enabled } }));
     const later = new Date(Date.now() + (enabled ? 10_000 : 5_000));
     utimesSync(configPath, later, later);
@@ -1721,7 +1721,7 @@ describe('a [tool:] line on the computer surface takes the lock (§5.9)', () => 
   /** What the tool saw of the lock file when it ran; absent if it never ran. */
   let markerPath: string;
   beforeEach(() => {
-    toolsDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-tool-lock-'));
+    toolsDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-computer-tool-lock-'));
     markerPath = path.join(toolsDir, 'ran.txt');
     const toolsIndex = path.resolve(__dirname, '..', 'src', 'tools', 'index.ts').replace(/\\/g, '/');
     writeFileSync(
@@ -1815,7 +1815,7 @@ describe('a [tool:] line on the computer surface takes the lock (§5.9)', () => 
 describe('a skill that leaves computer mode hands the caller back its computer surface (§4.5)', () => {
   let skillsDir: string;
   beforeEach(() => {
-    skillsDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-skills-'));
+    skillsDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-computer-skills-'));
     writeFileSync(
       path.join(skillsDir, 'check-page.md'),
       ['---', 'type: skill', '---', '# check-page', '', '## Steps', '1. [use browser]', '2. Click the heading', ''].join('\n'),

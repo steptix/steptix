@@ -237,9 +237,9 @@ function testFile(name: string, stepsTs?: string): string {
 }
 
 beforeAll(async () => {
-  projectRoot = mkdtempSync(path.join(tmpdir(), 'aiui-use-ai-api-'));
+  projectRoot = mkdtempSync(path.join(tmpdir(), 'steptix-use-ai-api-'));
   mkdirSync(path.join(projectRoot, 'tests'), { recursive: true });
-  writeFileSync(path.join(projectRoot, 'aiui.config.json'), JSON.stringify({}));
+  writeFileSync(path.join(projectRoot, 'steptix.config.json'), JSON.stringify({}));
   const { app } = createApiServer(testConfig());
   ({ server, baseUrl } = await listenOnRandomPort(app));
 });

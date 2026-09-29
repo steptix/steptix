@@ -70,12 +70,12 @@ that showed every frame would sit quiet for the length of each model call —
 and Review, the longest single call, says nothing until it is done.
 
 **The extension shows the frames to the wrong surface.** The run controller
-([run-controller.ts](../testbench-native/src/extension/run-controller.ts))
+([run-controller.ts](../steptix-vscode/src/extension/run-controller.ts))
 formats one log line per compile event via `compileLogLine` — and sends it to
 the VS Code Output *channel* only. The panel webview is posted exactly one
 compile message: the final `compile:result` line. The webview even has a
 `compiling` state and a "Compiling…" button label wired up
-([testbench-runner.jsx](../testbench-native/src/webview/testbench-runner.jsx))
+([steptix-runner.jsx](../steptix-vscode/src/webview/steptix-runner.jsx))
 that nothing in the extension host ever sets — dead listeners
 (`compileState`, `compileStep`) left from an earlier flow.
 
@@ -193,8 +193,8 @@ until done. That is fine, because the notification is not the persistent half:
 **One status bar item, owned by a workbench-level aggregator** — not by any
 single controller, because controllers are per-document and this item is the
 one piece of UI that must see across them. While exactly one compile tail is
-running: `$(sync~spin) TestBench: compiling securebank.md 5/8`. While
-several: `$(sync~spin) TestBench: compiling 2`. Click: with one, reveal the
+running: `$(sync~spin) Steptix: compiling securebank.md 5/8`. While
+several: `$(sync~spin) Steptix: compiling 2`. Click: with one, reveal the
 file and the panel; with several, a quick-pick of the running compiles
 (file, k of n, phase) that jumps to the chosen one. The item hides when no
 tail is running.

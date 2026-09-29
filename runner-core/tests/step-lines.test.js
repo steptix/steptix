@@ -509,7 +509,7 @@ test('danglingChainMemberError: an `Else if` BELOW the `Otherwise` is refused', 
   // one is never the branch the decision picks — at run time the planner takes
   // the FIRST condition-less member, so a second `Otherwise` is unreachable
   // and an `Else if` below one is still evaluated. Refused by the CLI parser
-  // since stage 1; refused here so a file TestBench runs is a file the CLI
+  // since stage 1; refused here so a file Steptix runs is a file the CLI
   // runs.
   const text = [
     '# T',

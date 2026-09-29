@@ -8,7 +8,7 @@
  * second one is refused, by name, before it moves anything.
  *
  * A FILE rather than an in-process flag, because the sessions that collide are
- * usually not in one process: a TestBench window and a CLI run, or two servers
+ * usually not in one process: a Steptix window and a CLI run, or two servers
  * on two ports from two worktrees. The same reason makes a stale file the
  * normal failure: a killed server never releases, so a lock whose pid is dead
  * is taken over with a WARN rather than becoming a machine that can no longer
@@ -40,9 +40,9 @@ export interface ComputerLockOptions {
   isAlive?: (pid: number) => boolean;
 }
 
-/** §5.9 — `os.tmpdir()/aiui-computer.lock`. */
+/** §5.9 — `os.tmpdir()/steptix-computer.lock`. */
 export function computerLockPath(): string {
-  return path.join(os.tmpdir(), 'aiui-computer.lock');
+  return path.join(os.tmpdir(), 'steptix-computer.lock');
 }
 
 /**

@@ -9,7 +9,7 @@ Demonstrates **inline sections**: a reusable block of steps defined by a
 step text. `Sign in` is defined once and called twice, so its body runs at
 both call sites without repeating it.
 
-Open this file in TestBench (Native) and run it: the section-body lines paint
+Open this file in Steptix and run it: the section-body lines paint
 their own status, you can set a breakpoint inside a body, and F11 steps into a
 section. Go-to-definition on a `Sign in` step jumps to the `### Sign in`
 heading; a typo like `Sing in` gets a "did you mean?" squiggle.

@@ -288,7 +288,7 @@ const testConfig: Config = {
 
 let server: Server;
 let baseUrl: string;
-/** A real project on disk: `aiui.config.json` at the top, a `tests/` folder
+/** A real project on disk: `steptix.config.json` at the top, a `tests/` folder
  *  under it. The project root is not something a request can state — the
  *  server walks up to it — so it has to exist to be found. */
 let projectRoot: string;
@@ -349,9 +349,9 @@ function uploadPlan(filePath: string): string {
 
 beforeAll(async () => {
   setLogLevel('silent');
-  projectRoot = mkdtempSync(path.join(tmpdir(), 'aiui-upload-'));
+  projectRoot = mkdtempSync(path.join(tmpdir(), 'steptix-upload-'));
   mkdirSync(path.join(projectRoot, 'tests'), { recursive: true });
-  writeFileSync(path.join(projectRoot, 'aiui.config.json'), JSON.stringify({}));
+  writeFileSync(path.join(projectRoot, 'steptix.config.json'), JSON.stringify({}));
   testFilePath = path.join(projectRoot, 'tests', 'expenses.md');
   writeFileSync(testFilePath, '# Expenses\n\n## Steps\n\n1. Upload the receipt\n');
 
@@ -382,7 +382,7 @@ describe('a batch carrying testFilePath', () => {
       // portability promise: move the .md with its attachments/ folder and the
       // same step still finds the same file.
       baseDir: path.dirname(testFilePath),
-      // Found by walking up to the aiui.config.json rather than sent by the
+      // Found by walking up to the steptix.config.json rather than sent by the
       // client — it is what fences a stray `..` out of somebody's home folder.
       projectRoot,
     });
@@ -406,7 +406,7 @@ describe('a batch carrying testFilePath', () => {
   });
 
   it("does not leak one session's base directory into another's", async () => {
-    // One server serves TestBench and every agent at once. A base directory
+    // One server serves Steptix and every agent at once. A base directory
     // that leaked would resolve a relative upload path against somebody else's
     // test folder, which is a wrong file rather than a missing one.
     await run('up-iso-a', { testFilePath });

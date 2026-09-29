@@ -278,7 +278,7 @@ beforeAll(async () => {
 
   // The ${data.username} variant: a project root (marker + env + data file)
   // and a test whose skill ARGUMENT is an env-data reference.
-  await fs.writeFile(path.join(tmpDir, 'aiui.config.json'), '{}\n');
+  await fs.writeFile(path.join(tmpDir, 'steptix.config.json'), '{}\n');
   await fs.writeFile(path.join(tmpDir, '.env.dev'), '# empty\n');
   await fs.mkdir(path.join(tmpDir, 'data'), { recursive: true });
   await fs.writeFile(
@@ -329,8 +329,8 @@ beforeEach(async () => {
   aiPrompts.length = 0;
   forcedEntryBody = null;
   await fs.rm(skillStepsPath, { force: true });
-  await fs.rm(path.join(skillsDir, '.aiui-codebehind-cache'), { recursive: true, force: true });
-  await fs.rm(path.join(tmpDir, '.aiui-codebehind-cache'), { recursive: true, force: true });
+  await fs.rm(path.join(skillsDir, '.steptix-codebehind-cache'), { recursive: true, force: true });
+  await fs.rm(path.join(tmpDir, '.steptix-codebehind-cache'), { recursive: true, force: true });
 });
 
 async function compileRun(

@@ -1,4 +1,4 @@
-# ai-ui-automation — Runner UI Technical Specification v1.0
+# Steptix — Runner UI Technical Specification v1.0
 
 **Author:** Paul Kent
 **Date:** 2026-03-30
@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-The Runner UI is an Electron-based desktop application that provides a visual interface for authoring, running, and debugging Markdown test files. It mirrors the capabilities of the existing `aiui run` CLI while adding a real-time execution view, breakpoints, an edit-and-continue pointer, and an inline steering REPL.
+The Runner UI is an Electron-based desktop application that provides a visual interface for authoring, running, and debugging Markdown test files. It mirrors the capabilities of the existing `steptix run` CLI while adding a real-time execution view, breakpoints, an edit-and-continue pointer, and an inline steering REPL.
 
 The UI is launched via a new CLI command and does not modify or interfere with existing commands.
 
@@ -21,10 +21,10 @@ The Electron renderer process is built as a pure web application (React + standa
 ## 2. New CLI Command
 
 ```
-aiui ui [directory]
+steptix ui [directory]
 ```
 
-- `directory` — optional path to the tests root directory. Defaults to `tests/` in the current working directory (same as `aiui.config.json` → `tests.dir`).
+- `directory` — optional path to the tests root directory. Defaults to `tests/` in the current working directory (same as `steptix.config.json` → `tests.dir`).
 - Launches the Electron window and loads the specified directory into the Explorer.
 - Accepts the same `--config` and `--env` options as the `run` command.
 

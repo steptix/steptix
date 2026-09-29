@@ -6,6 +6,54 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Changed — the product is now Steptix
+
+AI UI Automation and its VS Code extension, TestBench, are one product now,
+called Steptix. Every name a user types or a file carries changed with it, in
+one go and with no fallback to the old names:
+
+| Was | Now |
+|---|---|
+| package `ai-ui-automation`, CLI `aiui` | package `steptix`, CLI `steptix` |
+| `aiui.config.json`, `.aiui/`, `.aiui-codebehind-cache/` | `steptix.config.json`, `.steptix/`, `.steptix-codebehind-cache/` |
+| `AIUI_*` environment variables | `STEPTIX_*` |
+| `%LOCALAPPDATA%\aiui\` | `%LOCALAPPDATA%\steptix\` |
+| MCP server `aiui` | MCP server `steptix` |
+| extension `pkent.testbench-native`, "TestBench (Native)" | extension `pkent.steptix-vscode`, "Steptix" |
+| settings and commands `testbench-native.*` / `testbench.*` | `steptix.*` |
+| error codes `TB001`–`TB032` | `STX001`–`STX032`, same numbers |
+| folder `testbench-native/` | `steptix-vscode/` |
+
+The new extension ID is a different extension to VS Code: uninstall the old
+one, and move settings across. `scripts/migrate-to-steptix.ps1` does that and
+the rest of one machine's state (the user-root folder and its `.env`, user
+environment variables, VS Code settings, and each checkout's `.env` files,
+config file and `.aiui/` folders); run it with `-WhatIf` first. The Copilot
+bridge token lives in the old extension's secret storage, so run "Steptix: Use
+Copilot for AI" once more.
+
+Entries below this one, and resolved issues, keep the names they were written
+with.
+
+### Added — an Apache-2.0 licence
+
+Steptix is licensed under the Apache License, Version 2.0, as Playwright is.
+`LICENSE` and `NOTICE` sit at the repo root, both extensions carry a copy of
+`LICENSE` so it ships inside each `.vsix`, and every `package.json` declares
+`"license": "Apache-2.0"`.
+
+The Steptix extension's bundles carry copies of third-party code (today
+React, React DOM, scheduler and jsonc-parser, all MIT), and their licences
+require the notices to travel with it. `npm run build` now ends by writing
+`dist/THIRD-PARTY-NOTICES.txt`, which ships in the `.vsix`. The list is read
+from the bundles' source maps, so it is exactly what was bundled. The build
+stops on a bundled package with no licence file, on a licence outside MIT,
+ISC, BSD, 0BSD and Apache-2.0 (an `OR` with one of those passes), and on any
+file in `dist/` no source map accounts for, such as a font or stylesheet
+copied from a package; an `OVERRIDES` table in the script settles the rare
+package the rules cannot. Vite's modulepreload polyfill is switched off: it
+is injected from a virtual module, so no map names it.
+
 ### Added — a first-try scoreboard: `aiui stats`
 
 Every run now keeps a short record, on this machine only, of each AI action

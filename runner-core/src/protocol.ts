@@ -654,7 +654,7 @@ export interface CompileSummary {
   /** Selected steps the prefix never reached; nothing was generated for them. */
   notAttempted: number[];
   /** Where the recording, the candidate and any replay failure were written —
-   *  the test's `.aiui-codebehind-cache/<name>.recording/`
+   *  the test's `.steptix-codebehind-cache/<name>.recording/`
    *  (stories/codebehind-recording-on-disk.md). */
   recordingDir: string;
   /**
@@ -724,7 +724,7 @@ export interface CompileRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Record Steps stream (stories/testbench-record-steps.md §On the wire)
+// Record Steps stream (stories/steptix-record-steps.md §On the wire)
 // ---------------------------------------------------------------------------
 
 /**
@@ -788,7 +788,7 @@ export interface RecordPickEvent {
 
 /**
  * A draft call started (`busy: true`) or finished (`busy: false`) — the
- * panel's "updating…" marker (stories/testbench-record-steps.md, decision 9:
+ * panel's "updating…" marker (stories/steptix-record-steps.md, decision 9:
  * the steps are drafted live, as the author works).
  */
 export interface RecordDraftingEvent {
@@ -816,7 +816,7 @@ export interface RecordDraftEvent {
   through?: string;
   /**
    * How many leading steps are LOCKED: the model can no longer rewrite them
-   * (stories/testbench-record-toolbar.md §"Locking in"). Everything up to and
+   * (stories/steptix-record-toolbar.md §"Locking in"). Everything up to and
    * including the author's last step. A client reads an absent value as 0 —
    * a server that predates locking.
    */
@@ -827,7 +827,7 @@ export interface RecordDraftEvent {
   /** Their ids (the `record:step` id), parallel to `authored`. */
   authoredIds?: string[];
   /**
-   * One stable id per step, parallel to `steps` (stories/testbench-record-edit-steps.md
+   * One stable id per step, parallel to `steps` (stories/steptix-record-edit-steps.md
    * §"The wire, exactly"): kept while the step is unchanged in place, new when
    * the model writes or rewrites it; an author step keeps its `s` id. Never
    * collides with an action id. What `edit-step`, `drop` and `restore` name a
@@ -841,7 +841,7 @@ export interface RecordDraftEvent {
 }
 
 /**
- * A step's text was changed by the author (stories/testbench-record-edit-steps.md):
+ * A step's text was changed by the author (stories/steptix-record-edit-steps.md):
  * in the browser toolbar's drawer, in the test file, or in the panel. `id` is
  * the step that now holds `text` — the one named in `edit-step`, or, when the
  * model rewrote that one meanwhile, whichever step now stands for the same
@@ -856,7 +856,7 @@ export interface RecordEditedEvent {
 
 /**
  * Pause or Resume — from the toolbar or the panel. While paused nothing is
- * recorded and no draft call starts (stories/testbench-record-toolbar.md
+ * recorded and no draft call starts (stories/steptix-record-toolbar.md
  * §"Pause and resume, in detail").
  */
 export interface RecordPausedEvent {
@@ -898,7 +898,7 @@ export interface RecordDroppedEvent {
   source: 'toolbar' | 'panel' | 'editor';
   /**
    * A step deleted (or restored): the actions it stood for, dropped (or
-   * restored) with it (stories/testbench-record-edit-steps.md, decision 2).
+   * restored) with it (stories/steptix-record-edit-steps.md, decision 2).
    * Absent for an action, and from a server that predates step deletes.
    */
   actions?: string[];
@@ -907,7 +907,7 @@ export interface RecordDroppedEvent {
 /** Where the browser toolbar docks: top or bottom, left, centre or right. */
 export type RecordToolbarDock = 'tl' | 'tc' | 'tr' | 'bl' | 'bc' | 'br';
 
-/** The toolbar was moved or minimised — TestBench remembers it for the next
+/** The toolbar was moved or minimised — Steptix remembers it for the next
  *  recording and sends it back in the start body's `toolbar`. */
 export interface RecordToolbarEvent {
   type: 'record:toolbar';
@@ -947,7 +947,7 @@ export interface RecordDoneEvent {
   error?: string;
   /**
    * `aborted` by Cancel pressed in the browser's toolbar: no error text, and
-   * TestBench takes the drafts out quietly, as for its own Cancel.
+   * Steptix takes the drafts out quietly, as for its own Cancel.
    */
   cancelledBy?: 'browser';
 }
@@ -979,12 +979,12 @@ export function isRecordStepsEvent(value: unknown): value is RecordStepsEvent {
     // drops what it rejects, so a frame missing here never reaches the panel.
     t === 'record:drafting' ||
     t === 'record:draft' ||
-    // The browser toolbar (stories/testbench-record-toolbar.md §"The wire,
+    // The browser toolbar (stories/steptix-record-toolbar.md §"The wire,
     // exactly"): pause markers, the author's steps, drops made in the page,
     // and where the toolbar sits.
     t === 'record:paused' ||
     t === 'record:step' ||
-    // Edits of recorded steps (stories/testbench-record-edit-steps.md).
+    // Edits of recorded steps (stories/steptix-record-edit-steps.md).
     t === 'record:edited' ||
     t === 'record:dropped' ||
     t === 'record:toolbar' ||
@@ -1015,15 +1015,15 @@ export interface RecordStepsRequest {
    * The project's `.env` as the client resolved it — the same map, and the
    * same reason, as `StreamStepsRequest.env`: a recording can be the request
    * that CREATES the session, and a session's model client is built from it.
-   * Beyond the story's wire block; see its "What the TestBench half decided".
+   * Beyond the story's wire block; see its "What the Steptix half decided".
    */
   env?: Record<string, string>;
   /** The selected environment, as `StreamStepsRequest.envName`. */
   envName?: string;
   /**
-   * The browser toolbar (stories/testbench-record-toolbar.md). Absent means
-   * `{ enabled: true, dock: 'bc', minimised: false }`. TestBench sends the
-   * `testbench-native.recordSteps.browserToolbar` setting as `enabled`, and
+   * The browser toolbar (stories/steptix-record-toolbar.md). Absent means
+   * `{ enabled: true, dock: 'bc', minimised: false }`. Steptix sends the
+   * `steptix.recordSteps.browserToolbar` setting as `enabled`, and
    * the dock and minimised state the last recording's `record:toolbar` left.
    */
   toolbar?: {
@@ -1044,7 +1044,7 @@ export type RecordControlRequest =
   | { action: 'cancel' }
   /** Leave this action — or step — out, and redraft now (decision 9). A step
    *  (`record:draft.ids`) is deleted, and the actions it stood for are
-   *  dropped with it (stories/testbench-record-edit-steps.md). The server also
+   *  dropped with it (stories/steptix-record-edit-steps.md). The server also
    *  unions `stop`'s `dropped` with these. `source`: where a step's delete was
    *  made, echoed in its `record:dropped` (`panel` when absent); a server that
    *  predates it ignores it. */
@@ -1052,7 +1052,7 @@ export type RecordControlRequest =
   /** Put a dropped action or step back (a step with its actions). */
   | { action: 'restore'; id: string; source?: 'editor' | 'panel' }
   /**
-   * The author reworded a step (stories/testbench-record-edit-steps.md): in
+   * The author reworded a step (stories/steptix-record-edit-steps.md): in
    * the test file (`editor`) or the panel. `text` is one line, kept exactly;
    * the model neither rewords it nor writes another step for its actions.
    * `revision` is the `record:draft` the author was looking at. An empty text
@@ -1192,7 +1192,7 @@ export type RecordingEntryKind = RecordActionKind | 'pause' | 'resume' | 'step' 
  *
  * Both error strings are CLIPPED at capture (`clipFailureText`), not at
  * render: this struct is held per line for the session, persisted into
- * `.testbench/run-state.json`, and re-posted to the webview on every snapshot
+ * `.steptix/run-state.json`, and re-posted to the webview on every snapshot
  * — including the ones a bare cursor move emits. A Playwright call log runs to
  * kilobytes, and no surface shows more than the clip. The untruncated text
  * stays in the run log, the report, and the server's own logs.
@@ -1316,7 +1316,7 @@ export function stepFailureDetail(event: {
 }
 
 /**
- * Mirror of the active TextEditor's TestBench state: file text, breakpoints,
+ * Mirror of the active TextEditor's Steptix state: file text, breakpoints,
  * statuses, paused-at marker. The webview renders against this; the host is
  * the source of truth.
  */
@@ -1531,7 +1531,7 @@ export interface HostBreakpointStopMsg {
    * Its absence on a body line is meaningful, not a default: it marks a
    * marker we cannot resume — one left behind by a dropped stream or a
    * restarted server — which Continue must refuse rather than guess at. See
-   * testbench-native/stories/specs/sections-run-and-resume.md §5.1.
+   * steptix-vscode/stories/specs/sections-run-and-resume.md §5.1.
    *
    * The webview ignores this field; only the tracker reads it.
    */
@@ -1542,7 +1542,7 @@ export interface HostBreakpointStopMsg {
  * Surface multi-test batch run progress in the sidebar webview. The webview
  * renders a banner at the top while `state` is non-null and clears it on
  * `null`. The Test Explorer's progress UI is still the primary surface;
- * this banner exists so users staring at the TestBench sidebar know a
+ * this banner exists so users staring at the Steptix sidebar know a
  * batch is in flight and don't try to drive runs from this panel.
  */
 export interface HostBatchBannerMsg {
@@ -1636,7 +1636,7 @@ export interface HostCompileRunEventMsg {
 }
 
 /**
- * The Recording block (stories/testbench-record-steps.md, decision 13). One
+ * The Recording block (stories/steptix-record-steps.md, decision 13). One
  * recording at a time per window, so the state is window-wide rather than
  * per file: the panel shows it whichever editor is active, because the author
  * is clicking in a browser, not reading the editor. `null` takes it down.
@@ -1752,7 +1752,7 @@ export interface WebviewFocusTestResultsMsg {
 /**
  * User picked "Clear status here" on a step's context menu. Drops the
  * pass/fail status and any error attached to that single line — the
- * file-wide `testbench.clearStatuses` command remains for clearing all.
+ * file-wide `steptix.clearStatuses` command remains for clearing all.
  */
 export interface WebviewClearStatusMsg {
   type: 'clearStatus';
@@ -1878,7 +1878,7 @@ export interface WebviewRecordDropMsg {
 }
 
 /**
- * The Recording block's Pause / Resume (stories/testbench-record-toolbar.md
+ * The Recording block's Pause / Resume (stories/steptix-record-toolbar.md
  * §"VS Code alongside"). Carries the state wanted, like `recordDrop`: the
  * button shows what `record:paused` said, and a double click that crosses a
  * re-post cannot flip it back.
@@ -1979,7 +1979,7 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'webviewState' ||
     t === 'rerunSkillStep' ||
     t === 'compile' ||
-    // Record Steps (stories/testbench-record-steps.md). `runner-view.ts` drops
+    // Record Steps (stories/steptix-record-steps.md). `runner-view.ts` drops
     // anything this guard rejects, so a panel button whose type is missing
     // here does nothing at all — silently.
     t === 'recordSteps' ||
@@ -1988,7 +1988,7 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'recordCancel' ||
     t === 'recordCheck' ||
     t === 'recordDrop' ||
-    // The browser toolbar's panel parity (stories/testbench-record-toolbar.md).
+    // The browser toolbar's panel parity (stories/steptix-record-toolbar.md).
     t === 'recordPause' ||
     t === 'recordAddStep'
   );

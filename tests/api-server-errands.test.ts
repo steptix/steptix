@@ -489,7 +489,7 @@ const requestShutdown = vi.fn<(force: boolean) => void>();
 /** Absolute synthetic test file — the only thing the project root resolves
  *  from, exactly as `run_steps` already does it. */
 function errandFilePath(): string {
-  return path.join(projectRoot, '.aiui-errand.md');
+  return path.join(projectRoot, '.steptix-errand.md');
 }
 
 /** A minimal errand body; every test overrides what it cares about. */
@@ -653,12 +653,12 @@ describe('POST /errands', () => {
   });
 
   beforeEach(() => {
-    projectRoot = mkdtempSync(path.join(tmpdir(), 'aiui-errand-'));
+    projectRoot = mkdtempSync(path.join(tmpdir(), 'steptix-errand-'));
     // `fullPageScreenshots` is the opposite of the server's, so the receipt's
     // `effectiveSettings` can only report it correctly by actually resolving
     // this file — which is the whole reason the errand carries a testFilePath.
     writeFileSync(
-      path.join(projectRoot, 'aiui.config.json'),
+      path.join(projectRoot, 'steptix.config.json'),
       JSON.stringify({ tests: { dataDir: 'data' }, browser: { fullPageScreenshots: true } }),
     );
 
@@ -734,7 +734,7 @@ describe('POST /errands', () => {
   it('hands every step the errand\'s scoreboard run: ad hoc (no test), the resolved project, one run id', async () => {
     // docs/specs/SPEC-scoreboard.md §7: an errand is a run like any other, and
     // its steps record under one run id with `test: null`. (The suite runs with
-    // AIUI_STATS=off, so the context arrives switched off — the wiring is what
+    // STEPTIX_STATS=off, so the context arrives switched off — the wiring is what
     // this pins; tests/stats-api-seam.test.ts pins what gets written.)
     const seen: Array<Record<string, unknown> | undefined> = [];
     vi.mocked(executeStepMock).mockImplementation(async (idx: number, _total, instruction, opts) => {
@@ -785,7 +785,7 @@ describe('POST /errands', () => {
     });
     expect(body.captures).toEqual({ token: 'abc-123' });
     // Server base → project bundle, with no session layer to hold overrides.
-    // `fullPage` came from the project's own aiui.config.json; nothing here can
+    // `fullPage` came from the project's own steptix.config.json; nothing here can
     // ever read 'session'.
     expect(body.effectiveSettings).toMatchObject({
       model: 'server-model',
@@ -2410,7 +2410,7 @@ describe('POST /errands', () => {
   });
 
   it('masks a secret on the console step line (the MCP host keeps stderr) while the step runs with it', async () => {
-    // stories/secret-redaction.md. Under `aiui mcp` this line goes to
+    // stories/secret-redaction.md. Under `steptix mcp` this line goes to
     // stderr, which the host keeps; an errand has no report, so the line is
     // its one framework-written output.
     writeFileSync(path.join(projectRoot, '.env.uat'), ['ERRAND_USER=zoe', 'ERRAND_PASSWORD=hunter2!x', ''].join('\n'));

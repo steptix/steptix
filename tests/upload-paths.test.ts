@@ -24,12 +24,12 @@ let testDir: string;
 let ctx: { baseDir: string; projectRoot: string };
 
 beforeAll(async () => {
-  // A miniature project: <root>/aiui.config.json, <root>/tests/attachments/logo.png
-  root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-upload-paths-'));
+  // A miniature project: <root>/steptix.config.json, <root>/tests/attachments/logo.png
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-upload-paths-'));
   testDir = path.join(root, 'tests');
   await fs.mkdir(path.join(testDir, 'attachments'), { recursive: true });
   await fs.mkdir(path.join(testDir, '..cache'), { recursive: true });
-  await fs.writeFile(path.join(root, 'aiui.config.json'), '{}');
+  await fs.writeFile(path.join(root, 'steptix.config.json'), '{}');
   await fs.writeFile(path.join(testDir, 'attachments', 'logo.png'), 'png-bytes');
   await fs.writeFile(path.join(testDir, '..cache', 'kept.png'), 'png-bytes');
   await fs.writeFile(path.join(root, 'shared.png'), 'png-bytes');

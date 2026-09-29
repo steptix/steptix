@@ -194,7 +194,7 @@ function keptBodySteps(
  *
  * A LIST rather than a `{ self, tail }` pair, because two is not the ceiling:
  * a control line whose tail is itself a control line (`If a is shown, then
- * While b is shown, Click Next`) emits three, and nothing on the TestBench
+ * While b is shown, Click Next`) emits three, and nothing on the Steptix
  * path refuses that shape — the parser's nested-tail refusal lives in
  * src/parser/markdown.ts (the CLI), and runner-core's `parseControlLine`
  * deliberately does not mirror it. A pair silently gave the innermost step
@@ -981,7 +981,7 @@ async function expandRecursive(
           // the raw body line with the list marker stripped and trimmed,
           // `[no-hooks]` included (parser `scan.entries[i].raw`) — for both
           // producers that exist: runner-core's `extractSections`, which is
-          // what TestBench ships, and `sectionsPayload` in src/mcp/assemble.ts,
+          // what Steptix ships, and `sectionsPayload` in src/mcp/assemble.ts,
           // which used to ship the parser's marked reading instead and so bound
           // a looped body's entries to text nothing else writes. Those two are
           // byte-identical to `rawSteps`; the one shape where no wire producer
@@ -1223,7 +1223,7 @@ async function expandRecursive(
           case 'else': {
             // `Else if` / `Otherwise` continue the chain the previous step
             // opened. A dangling one is REFUSED here, in the parser's own
-            // wording — this is the wire path's only parser (TestBench never
+            // wording — this is the wire path's only parser (Steptix never
             // calls `parseTestContent`), and an `Otherwise` that opened a chain
             // of its own would be selected by its own fallback and run its tail
             // unconditionally. Refusing costs a failed run; not refusing runs
@@ -1353,7 +1353,7 @@ async function expandRecursive(
     if (ctx.skillsDir === undefined) {
       throw new Error(
         `Step "${step}" invokes a skill, but no skills directory is ` +
-          `configured. Set \`tests.skillsDir\` in aiui.config.json (or pass ` +
+          `configured. Set \`tests.skillsDir\` in steptix.config.json (or pass ` +
           `\`skillsDir\`) so \`[skill: ...]\` references can be resolved.`,
       );
     }
@@ -1524,9 +1524,9 @@ function loopLabel(ctx: ExpandContext, authoredTail: string, executableTail: str
  * only thing that says so out loud.
  *
  * The parser warns too (`src/parser/markdown.ts`, `scanStepSpans`), but that
- * scan runs only on `aiui run` and on a server compile: an ordinary
+ * scan runs only on `steptix run` and on a server compile: an ordinary
  * `/sessions/:id/steps` run arrives with `steps` and `sections` already parsed
- * by runner-core in the extension, so on the TestBench and MCP paths — the
+ * by runner-core in the extension, so on the Steptix and MCP paths — the
  * surfaces where sections are actually authored — the parser's warning is
  * never reached (review 4, finding 10). Here it is, at the moment the call
  * resolves, on every path.

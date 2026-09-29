@@ -1423,7 +1423,7 @@ describe('the review envelope', () => {
   });
 
   it('reads the revised file out of the {"file": ...} envelope', () => {
-    const file = `import { defineSteps } from 'ai-ui-automation/codebehind';\nexport default defineSteps([]);`;
+    const file = `import { defineSteps } from 'steptix/codebehind';\nexport default defineSteps([]);`;
     expect(parseFileRevision(JSON.stringify({ file }))).toBe(`${file}\n`);
   });
 

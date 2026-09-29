@@ -12,7 +12,7 @@ import type { StepStatus } from '../shared/protocol';
 
 /**
  * The glyph beside a step. ✓ / ✗ / ⚠ as before; ◌ for a step a return left
- * unrun, which is TestBench's skip glyph — the two clients paint the same run
+ * unrun, which is Steptix's skip glyph — the two clients paint the same run
  * and disagreeing about the mark for it helps nobody.
  *
  * Neutral on purpose. A skipped step is not a lesser failure: the author wrote

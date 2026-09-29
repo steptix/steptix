@@ -85,7 +85,7 @@ export const LOOKUP_TIMEOUT_MS = 10_000;
  */
 const LOOKUP_SCRIPT = `
 $ErrorActionPreference = 'Stop'
-$target = [int]$env:AIUI_BW_PARENT_PID
+$target = [int]$env:STEPTIX_BW_PARENT_PID
 $self = Get-CimInstance Win32_Process -Filter "ProcessId=$target"
 if ($null -eq $self) { exit 3 }
 [Console]::Out.WriteLine('SELF|' + $self.ProcessId + '|' + $self.CreationDate.ToUniversalTime().Ticks)
@@ -152,7 +152,7 @@ export function findBwProcess(spawnedPid: number, timeoutMs = LOOKUP_TIMEOUT_MS)
         {
           shell: false,
           windowsHide: true,
-          env: { ...process.env, AIUI_BW_PARENT_PID: String(spawnedPid) },
+          env: { ...process.env, STEPTIX_BW_PARENT_PID: String(spawnedPid) },
           stdio: ['ignore', 'pipe', 'ignore'],
         },
       );

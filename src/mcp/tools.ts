@@ -107,7 +107,7 @@ const CONFIG_REJECTED = 'Config can only be provided on the first request';
 const LIST_SESSIONS_TIMEOUT_MS = 5_000;
 
 /** Report generation happens *after* the server notices a disconnect, so the
- *  first read is routinely `{finalized:false}`. TestBench backs off to about
+ *  first read is routinely `{finalized:false}`. Steptix backs off to about
  *  this long before giving up. */
 const LAST_RUN_POLL_BUDGET_MS = 12_000;
 
@@ -234,7 +234,7 @@ function httpErrorToToolError(
       return unauthorized(envFiles, baseUrl);
     case 503:
       return preflightError(
-        `${baseUrl} is shutting down (someone ran \`aiui stop\`). Try again once it has restarted.`,
+        `${baseUrl} is shutting down (someone ran \`steptix stop\`). Try again once it has restarted.`,
       );
     case 500:
       // The error middleware hardcodes 500 and ignores `err.status`, so
@@ -736,12 +736,12 @@ async function screenshotResult(
  * Exists so the non-run tools report failures as well as the run tools do:
  * with `project` scoped inside each handler's own `try`, a 401 was caught
  * with no `envFilesConsulted` and no base URL — rendering §7's row as
- * " rejected our AIUI_SERVER_API_KEY. Ours came from:  (or the environment)",
+ * " rejected our STEPTIX_SERVER_API_KEY. Ours came from:  (or the environment)",
  * which names neither of the two things it exists to name.
  *
  * **`autoStart` defaults to ON** — every tool that reaches through this helper
  * starts the Sessions API server if it is down and loopback, then proceeds.
- * That is what the user expects: whichever aiui tool an agent reaches for first
+ * That is what the user expects: whichever steptix tool an agent reaches for first
  * — `list_cdp_browsers`, `list_sessions`, a run — should bring the server up
  * rather than fail on a bare ECONNREFUSED. A caller passes `autoStart: false`
  * only for a genuine "is it there?" probe that must be able to answer "no", and
@@ -984,14 +984,14 @@ function outcomeToResult(outcome: RunOutcome): ToolResult {
 // ---------------------------------------------------------------------------
 
 /**
- * `run_steps` has `.aiui-mcp-steps.md`; an errand has this.
+ * `run_steps` has `.steptix-mcp-steps.md`; an errand has this.
  *
  * Load-bearing rather than cosmetic: the server resolves the project root, the
  * env/data bundle entirely from `testFilePath`,
  * so without one the project layer of `effectiveSettings` falls back to server
  * defaults with nothing saying so. It is never read from disk and never exists.
  */
-const SYNTHETIC_ERRAND_BASENAME = '.aiui-errand.md';
+const SYNTHETIC_ERRAND_BASENAME = '.steptix-errand.md';
 
 /** `start_cdp_browser`'s own default, spelled here rather than imported: the
  *  MCP process is deliberately browser-free (tests/mcp-entry-graph.test.ts
@@ -1205,7 +1205,7 @@ async function runErrand(
 // ---------------------------------------------------------------------------
 
 /**
- * `run_errand` has `.aiui-errand.md`; a peek has this.
+ * `run_errand` has `.steptix-errand.md`; a peek has this.
  *
  * Load-bearing rather than cosmetic, and for a peek it is the whole of
  * verification item (2): the server resolves the project root — and with it
@@ -1215,7 +1215,7 @@ async function runErrand(
  * `get_page_content` would disagree about the same page with nothing saying
  * why. It is never read from disk and never exists.
  */
-const SYNTHETIC_PEEK_BASENAME = '.aiui-peek.md';
+const SYNTHETIC_PEEK_BASENAME = '.steptix-peek.md';
 
 /** What `peek_tab` reads off its own call. */
 interface PeekArgs {
@@ -1364,7 +1364,7 @@ async function peekTab(
     returnedChars: peeked.returnedChars ?? 0,
     availableChars: peeked.availableChars ?? 0,
     // The server's own claim about which root its capture settings came from.
-    // Null means no `aiui.config.json` stood above the synthetic path and it
+    // Null means no `steptix.config.json` stood above the synthetic path and it
     // used its defaults — the root this call addressed is then the honest
     // thing to report, since that is the root the path was built from.
     root: peeked.root ?? project.projectRoot,
@@ -1388,10 +1388,10 @@ async function peekTab(
 // Navigate (stories/navigate-tab.md)
 // ---------------------------------------------------------------------------
 
-/** `run_errand` has `.aiui-errand.md` and a peek has `.aiui-peek.md`; this has
+/** `run_errand` has `.steptix-errand.md` and a peek has `.steptix-peek.md`; this has
  *  its own, for the same reason: it is the only thing the server resolves a
  *  project from, and it is never read from disk and never exists. */
-const SYNTHETIC_NAVIGATE_BASENAME = '.aiui-navigate.md';
+const SYNTHETIC_NAVIGATE_BASENAME = '.steptix-navigate.md';
 
 /** What `navigate_tab` reads off its own call. */
 interface NavigateArgs {
@@ -2064,7 +2064,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'Run natural-language steps in a real browser session and return per-step results.\n' +
         'Reuses one browser per project unless you pass a session_id, so successive calls ' +
         'share page state and captured variables. Calls on one session run one at a time.\n' +
-        'Works without a project too: from a directory with no aiui.config.json, steps run ' +
+        'Works without a project too: from a directory with no steptix.config.json, steps run ' +
         'against the machine-wide user root (the result says scope: "user") — but ' +
         '[skill:]/[tool:] steps are refused there, since skills and tools belong to a ' +
         'project.\n\n' +
@@ -2236,7 +2236,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         });
         const { dir, pattern } = resolveTestsGlob(project);
         // `tests.dir` is confined, but the pattern is not and glob honours
-        // `../` inside it — so a hostile or simply wrong `aiui.config.json`
+        // `../` inside it — so a hostile or simply wrong `steptix.config.json`
         // could enumerate .md paths outside every allowed root. Filtering the
         // results also covers a symlinked tests directory. Against the
         // CONFIGURED roots, not `allowedRoots()`: this tool requires a project,
@@ -2328,7 +2328,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     async (args) =>
       withProject(deps, args.project_root, async (client) => {
         // `list_sessions` hands out ids labelled `owner: 'other'`, so without
-        // this an agent can close a developer's live TestBench browser mid-run
+        // this an agent can close a developer's live Steptix browser mid-run
         // — while the same id would be refused by run_steps. Closing is not
         // less destructive than running; it is more.
         checkSessionOwnership(args.session_id, args.allow_foreign_session === true);
@@ -2434,7 +2434,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             const olderServer =
               `${baseUrl} has no GET /config, so it predates per-session run ` +
               'settings. The server runs compiled dist/ — rebuild and restart it ' +
-              '(`aiui stop`, then start it again).';
+              '(`steptix stop`, then start it again).';
             return errorResult(
               preflightError(
                 args.session_id === undefined
@@ -2887,11 +2887,11 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'restarting this agent — that is the point of the feature.\n\n' +
         'Some sites refuse a browser that reports itself as automated ' +
         '(`navigator.webdriver`), which a remote-debuggable Chrome does by ' +
-        'default. `browser.cdp.hideAutomation: true` in `aiui.config.json` ' +
+        'default. `browser.cdp.hideAutomation: true` in `steptix.config.json` ' +
         'launches it without that signal. The file is the one for the root ' +
         'this browser lands in: for `scope: "user"` (the user\'s own browser) ' +
-        'that is the user-level `aiui.config.json` (`%LOCALAPPDATA%\\aiui\\` on ' +
-        'Windows, `~/.aiui/` elsewhere); for a project browser it is the ' +
+        'that is the user-level `steptix.config.json` (`%LOCALAPPDATA%\\steptix\\` on ' +
+        'Windows, `~/.steptix/` elsewhere); for a project browser it is the ' +
         'project\'s. It is deliberately a config setting and not an argument ' +
         'here — a human holds it, an agent cannot set it. If a site turns the ' +
         'browser away, tell the user to add that setting (naming the file ' +

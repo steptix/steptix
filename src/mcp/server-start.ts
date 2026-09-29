@@ -10,15 +10,15 @@
  *  3. down, and the host is not loopback      → refuse; it is not our machine
  *  4. down and loopback                       → spawn, then poll until healthy
  *
- * Arm 2 is the one that looks wrong and is not. TestBench's equivalent treats
- * an unrecognized answer as "probably an older aiui server" and proceeds — it
- * only ever sends a step payload. We would send `AIUI_SERVER_API_KEY` *and the
+ * Arm 2 is the one that looks wrong and is not. Steptix's equivalent treats
+ * an unrecognized answer as "probably an older Steptix server" and proceeds — it
+ * only ever sends a step payload. We would send `STEPTIX_SERVER_API_KEY` *and the
  * project's entire composed `.env`* as the request's `env` field, which for
  * this repo means AI, banking and GitHub credentials handed to whatever
- * process happens to hold the port. `aiui stop` already refuses on the same
+ * process happens to hold the port. `steptix stop` already refuses on the same
  * check before sending merely the key.
  *
- * Ported from `testbench-native/src/extension/server-manager.ts` (a separate
+ * Ported from `steptix-vscode/src/extension/server-manager.ts` (a separate
  * bundle, so genuinely a port, not an import). `describeHealth` and
  * `decideServerAction` were deliberately NOT ported: both map "unrecognized"
  * onto the legacy proceed path, which is exactly what arm 2 reverses.
@@ -67,7 +67,7 @@ import { canonicalServerKey, isLoopbackHost, normalizeSpawnHost } from './url.js
 /**
  * Budget for the single probe that decides the arm.
  *
- * Two seconds, matching `aiui status`/`aiui stop`, rather than the one second
+ * Two seconds, matching `steptix status`/`steptix stop`, rather than the one second
  * the poll uses: this probe's failure mode is expensive in a way the poll's is
  * not. A server busy with a long run can be slow to answer, and reading that
  * as "down" makes us spawn a second server which dies of EADDRINUSE and costs
@@ -95,7 +95,7 @@ const AUTO_START_BACKOFF_MS = 60_000;
  * `serve --idle-timeout` is in MINUTES, and 60 is a product decision rather
  * than a technical one: long enough that an agent coming back from a break
  * still has its session and browser, at the cost of holding that browser for
- * an hour after someone walks away. It also decides whether TestBench finds a
+ * an hour after someone walks away. It also decides whether Steptix finds a
  * live server later on.
  */
 const IDLE_TIMEOUT_MINUTES = 60;
@@ -104,8 +104,8 @@ const IDLE_TIMEOUT_MINUTES = 60;
 // Log file
 // ---------------------------------------------------------------------------
 
-/** Relative to the project root. `.aiui/` is gitignored. */
-const LOG_RELATIVE_PATH = path.join('.aiui', 'mcp-server.log');
+/** Relative to the project root. `.steptix/` is gitignored. */
+const LOG_RELATIVE_PATH = path.join('.steptix', 'mcp-server.log');
 
 /** Truncate the rolling log once it passes this, at open time. */
 const LOG_MAX_BYTES = 5 * 1024 * 1024;
@@ -197,14 +197,14 @@ export const ensureServerReady: EnsureServerReady = (project, signal) =>
  *
  * Used only by the two tools whose contract is to report server state and be
  * able to answer "nothing is running": `server_status` and `get_run_settings`.
- * They still send `AIUI_SERVER_API_KEY` once a healthy server answers, and
+ * They still send `STEPTIX_SERVER_API_KEY` once a healthy server answers, and
  * without this check they would send it to any process that happens to hold the
- * port — the same hazard §5 arm 2 exists for, and the same one `aiui stop`
+ * port — the same hazard §5 arm 2 exists for, and the same one `steptix stop`
  * guards before sending merely the key. A `down` server is allowed through so
  * the caller can report `running: false` rather than starting one.
  *
  * Every OTHER tool now auto-starts: `withProject` defaults to `ensureServerReady`
- * (stories/mcp-no-project.md — whichever aiui tool an agent reaches for first
+ * (stories/mcp-no-project.md — whichever steptix tool an agent reaches for first
  * should bring the server up, not fail on ECONNREFUSED). `ensureServerReady`'s
  * `unrecognized` arm throws the same refusal this does, so auto-starting never
  * hands the key to a squatter; it only starts a *down* loopback server. Keep
@@ -284,7 +284,7 @@ export async function ensureServerReadyWith(
       // Fail closed on an arm added to `HealthProbeResult` later. The spec
       // records what the open version of this mistake costs elsewhere: the CLI
       // tests `kind === 'unrecognized'` with an `if`, so a new arm silently
-      // falls past `aiui stop`'s refusal and posts AIUI_SERVER_API_KEY to a foreign
+      // falls past `steptix stop`'s refusal and posts STEPTIX_SERVER_API_KEY to a foreign
       // process. This is the one place that can refuse instead.
       const unreachable: never = health;
       void unreachable;
@@ -361,8 +361,8 @@ function parseServerUrl(serverUrl: string): URL {
  * Checks that apply only once we are about to spawn.
  *
  * Deliberately not folded into {@link parseServerUrl}: a server that is
- * already answering must keep working. `aiui` behind an HTTPS reverse proxy is
- * a configuration TestBench allows today, and refusing it up front would break
+ * already answering must keep working. `steptix` behind an HTTPS reverse proxy is
+ * a configuration Steptix allows today, and refusing it up front would break
  * a setup that works — but *starting* a child for it cannot work, because
  * `serve` speaks plain HTTP only.
  */
@@ -371,7 +371,7 @@ function assertSpawnable(url: URL, serverUrl: string): void {
     throw new PreflightFailure(
       badServerUrl(
         serverUrl,
-        `nothing is listening there and \`aiui serve\` speaks plain HTTP, so a ` +
+        `nothing is listening there and \`steptix serve\` speaks plain HTTP, so a ` +
           `"${url.protocol}" URL cannot be started automatically. Start the server ` +
           'yourself behind your proxy, or point SERVER_URL at the http:// origin.',
       ),
@@ -413,7 +413,7 @@ async function startAndWait(
   const logPath = path.join(project.projectRoot, LOG_RELATIVE_PATH);
   const args = [
     // Both clients share one server, so whoever starts it decides whether
-    // TestBench's tool step-into can attach — `/health` reporting
+    // Steptix's tool step-into can attach — `/health` reporting
     // `inspector: null` makes the extension refuse.
     '--inspect=0',
     deps.distEntry,
@@ -491,7 +491,7 @@ async function spawnAndPoll(opts: {
     // anything to quote.
     child.on('error', (err) => {
       try {
-        appendFileSync(logPath, `\n[aiui mcp] failed to start ${command}: ${err.message}\n`);
+        appendFileSync(logPath, `\n[steptix mcp] failed to start ${command}: ${err.message}\n`);
       } catch {
         // The log is best-effort; never let logging a failure become one.
       }
@@ -564,7 +564,7 @@ const attemptLogOffsets = new Map<string, number>();
  * layered on top.
  *
  * Inheritance alone is not enough, in two different ways. `serve` hard-exits
- * before binding when `AIUI_SERVER_API_KEY` is unset, so a host started without one
+ * before binding when `STEPTIX_SERVER_API_KEY` is unset, so a host started without one
  * yields an instantly-dead child and a 20 s wait for nothing. And
  * `loadDefaultEnvFileSync` reads only the base `.env` — never the
  * `.env.<name>` overlay — and does not override keys already in `process.env`,
@@ -610,23 +610,23 @@ function childEnv(project: ProjectContext): NodeJS.ProcessEnv {
     throw new Error('childEnv: apiKey must be resolved before spawning (machine-key arm-4 fill)');
   }
   // `project.apiKey` is pinned explicitly because it may not be in
-  // `project.env` at all: §4's discovery fallback lets AIUI_SERVER_API_KEY come
+  // `project.env` at all: §4's discovery fallback lets STEPTIX_SERVER_API_KEY come
   // from `process.env`, and that value is deliberately kept out of the map we
   // send to the server. The child and the client must agree on it regardless.
-  const overlay: Record<string, string> = { AIUI_SERVER_API_KEY: project.apiKey };
+  const overlay: Record<string, string> = { STEPTIX_SERVER_API_KEY: project.apiKey };
   for (const [key, value] of Object.entries(project.env)) {
     if (UNSAFE_CHILD_ENV_KEYS.has(key.toLowerCase())) continue;
     overlay[key] = value;
   }
   // Re-pin after the loop, so a project `.env` cannot shadow it.
-  overlay['AIUI_SERVER_API_KEY'] = project.apiKey;
+  overlay['STEPTIX_SERVER_API_KEY'] = project.apiKey;
   const merged: NodeJS.ProcessEnv = { ...process.env };
 
   if (process.platform !== 'win32') return Object.assign(merged, overlay);
 
   // Windows environment lookups are case-insensitive, but spreading
   // `process.env` preserves the parent's casing — so a parent
-  // `Aiui_Server_Api_Key` and an overlay `AIUI_SERVER_API_KEY` would both
+  // `Steptix_Server_Api_Key` and an overlay `STEPTIX_SERVER_API_KEY` would both
   // survive into the child's block and Windows would pick a winner for us.
   // Replace the colliding key instead.
   const canonical = new Map<string, string>();
@@ -652,7 +652,7 @@ function formatCommand(exe: string, args: readonly string[]): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Open `<project_root>/.aiui/mcp-server.log` for append, rolling it over when
+ * Open `<project_root>/.steptix/mcp-server.log` for append, rolling it over when
  * oversized.
  *
  * `0o600` is correct and free on POSIX, but it is INERT on win32 — measured,

@@ -69,7 +69,7 @@ via a path or `npm install`):
 
 ```
 my-test-project/
-├── aiui.config.json
+├── steptix.config.json
 ├── tests/
 │   └── login-with-otp.md
 ├── skills/
@@ -82,7 +82,7 @@ my-test-project/
         └── drag_to_reorder.ts
 ```
 
-`tools/package.json` declares `ai-ui-automation` and `@playwright/test` as
+`tools/package.json` declares `steptix` and `@playwright/test` as
 devDependencies for type access. The directory is *not* required to be inside
 the test repo:
 
@@ -101,11 +101,11 @@ package (`node_modules/@org/test-tools/dist`).
 ### Defining a tool — `defineTool`
 
 The framework exports a single helper, `defineTool`, from
-`ai-ui-automation/tools`. A tool file default-exports the result.
+`steptix/tools`. A tool file default-exports the result.
 
 ```ts
 // tools/src/fetch_otp.ts
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 export default defineTool({
   name: 'fetch_otp',
@@ -322,7 +322,7 @@ tags: [smoke, login]
 
 ```ts
 // tools/src/drag_to_reorder.ts
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 export default defineTool({
   name: 'drag_to_reorder',
@@ -391,7 +391,7 @@ A test that uses this skill is a one-liner:
 ### New code
 
 - `src/tools/define-tool.ts` — `defineTool` helper, the public entry point
-  re-exported from a new `ai-ui-automation/tools` subpath in the published package.
+  re-exported from a new `steptix/tools` subpath in the published package.
   Captures `name`, `description`, `parameters`, `outputs`, `run`. Generic
   over the schemas so `args` and `step.setVar` are typed.
 - `src/tools/registry.ts` — `loadToolCatalogue(dir: string)` walks the
@@ -444,7 +444,7 @@ A test that uses this skill is a one-liner:
 }
 ```
 
-So tool authors do `import { defineTool } from 'ai-ui-automation/tools'`.
+So tool authors do `import { defineTool } from 'steptix/tools'`.
 
 ## Tests
 
@@ -470,7 +470,7 @@ So tool authors do `import { defineTool } from 'ai-ui-automation/tools'`.
 Purely additive. Existing tests, skills, and hooks are unaffected. Projects
 that don't configure `tests.toolsDir` get an empty catalogue; any `[tool: ...]`
 reference in such a project fails parse-time with "no tools registered;
-configure `tests.toolsDir` in `aiui.config.json`."
+configure `tests.toolsDir` in `steptix.config.json`."
 
 The skill mechanism is unchanged — tools are a sibling layer, not a
 replacement.

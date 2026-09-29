@@ -62,7 +62,7 @@ type NutModule = typeof import('@nut-tree-fork/nut-js');
  *
  * Walked up from THIS module rather than read off `process.cwd()`, because the
  * two differ exactly when it matters: a server started from a worktree, or by
- * TestBench's auto-start from whatever directory `serverAutoStart.cwd` names,
+ * Steptix's auto-start from whatever directory `serverAutoStart.cwd` names,
  * resolves its imports from where its own `dist/` lives, not from its cwd. The
  * first directory with a `package.json` is the answer from `src/desktop/` and
  * from `dist/desktop/` alike.

@@ -78,7 +78,7 @@ export function isSkippableStep(instruction: string): boolean {
  * the errand runner, because it is now on the WIRE as well as in the report
  * (`step:pass` + `output: 'skipped'` carries it as `reason`), and two copies
  * of a sentence a client prints is exactly the drift
- * `stories/control-flow.md` §"TestBench paints one skip" describes.
+ * `stories/control-flow.md` §"Steptix paints one skip" describes.
  */
 export const UNATTENDED_SKIP_REASON =
   'Skipped: [input] and [interactive] steps are not supported in API mode';
@@ -90,7 +90,7 @@ export const UNATTENDED_SKIP_REASON =
  * this is the ONLY place they land on the server path: the loader's
  * `withEnvDefaults` reads the server's own process env, which is not where a
  * client's `.env` arrives. A var added there and not here works in every
- * loader unit test and does nothing at all through TestBench.
+ * loader unit test and does nothing at all through Steptix.
  *
  * Always pass the server base config (`this.config.ai`) as `baseConfig`, never
  * a session's current config: overrides apply only on non-empty values, so
@@ -116,7 +116,7 @@ export function applyEnvToAiConfig(
   if (!envOverrides) return next;
   // Present-but-empty is a VALUE, not an absence. A blank `AI_API_KEY=` line is
   // how a project pins itself keyless — it blocks the machine-wide key from
-  // `%LOCALAPPDATA%\aiui\.env` (keyless-replay-and-gateway-env.md), and it is
+  // `%LOCALAPPDATA%\steptix\.env` (keyless-replay-and-gateway-env.md), and it is
   // what the Bedrock SigV4 setup depends on, since an explicit key outranks
   // every AWS credential source in the client's precedence. Skipping the empty
   // string here made this path disagree with the CLI, where `withEnvDefaults`

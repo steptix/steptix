@@ -13,7 +13,7 @@ opened by hand in your own signed-in Chrome has no session, so there is nothing
 to name, and the agent either fails or reaches for some other tool entirely.
 
 That happened in practice: asked to screenshot a page, an agent used a
-different MCP server's screen-region grabber, because aiui had nothing to offer
+different MCP server's screen-region grabber, because Steptix had nothing to offer
 for a tab it could plainly see in `list_cdp_browsers`.
 
 This story adds no tool. It answers the question
@@ -159,7 +159,7 @@ Addressing, ownership, project resolution and every refusal are **`peek_tab`'s,
 unchanged** — `resolveCdpTarget` for profile/engine/scope, `matchTabsByName`
 over the page-type-filtered listing so an `iframe` or `browser_ui` id can never
 be photographed, the zero/several candidate refusals, the synthetic
-`.aiui-peek.md` that resolves the project, the `activate: false` attach, the
+`.steptix-peek.md` that resolves the project, the `activate: false` attach, the
 disconnect-not-kill detach, and the JSON-envelope-versus-bare 404 split.
 
 The result carries the image the way `get_page_content` already does — an image

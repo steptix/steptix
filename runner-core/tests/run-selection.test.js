@@ -1,7 +1,7 @@
 /**
  * What a user's line selection means, once section bodies became runnable.
  *
- * Spec: testbench-native/stories/specs/sections-run-and-resume.md §4.1.
+ * Spec: steptix-vscode/stories/specs/sections-run-and-resume.md §4.1.
  * Contract: stories/test-script-sections-contract.md §4 (signature) and §5
  * (consumer split).
  *
@@ -92,7 +92,7 @@ test('an inert line resolves to nothing — it is not addressable', () => {
   // Line 29 sits under `#### Notes with heading text` (contract §5 rule 4a).
   // It looks like a step and is not one, so it names no step in either scope
   // and no main-flow step sits below it. The empty resolution is what the
-  // extension's TB025 guard turns into a refusal, which is why "Run Step Here"
+  // extension's STX025 guard turns into a refusal, which is why "Run Step Here"
   // on it sends nothing to the server.
   assert.deepEqual(resolveRunSelection(text, [29]), { scope: 'main-flow', lines: [] });
 });
@@ -116,7 +116,7 @@ test('rung 5: prose inside a body resolves to nothing at all', () => {
   // Line 22 is prose inside `### Login`. It is not a body STEP, so rung 3
   // does not fire, and no main-flow step sits below it — bodies are defined
   // under the main flow. The honest answer is "nothing", which the caller
-  // turns into TB025 rather than into a whole-file run.
+  // turns into STX025 rather than into a whole-file run.
   assert.deepEqual(resolveRunSelection(text, [22]), {
     scope: 'main-flow',
     lines: [],

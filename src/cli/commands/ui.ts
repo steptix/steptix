@@ -15,7 +15,7 @@ export function registerUiCommand(program: Command): void {
   program
     .command('ui [directory]')
     .description('Launch the Runner UI. Optionally specify a tests directory.')
-    .option('-c, --config <path>', 'Path to config file (default: auto-discover aiui.config.json)')
+    .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
     .option('--env <name>', 'Environment name — loads .env.<name> from project root')
     .action(async (directory: string | undefined, opts: UiOptions) => {
       await uiCommand(directory, opts);
@@ -47,7 +47,7 @@ async function uiCommand(
 
   // Resolve the target tests directory
   const testsDir = path.resolve(directory ?? config.tests.dir);
-  const configPath = path.resolve(opts.config ?? 'aiui.config.json');
+  const configPath = path.resolve(opts.config ?? 'steptix.config.json');
 
   // Locate the electron binary from the installed electron package
   const require = createRequire(import.meta.url);
@@ -81,7 +81,7 @@ async function uiCommand(
   // `.env.<name>` into this process's environment, which the child inherits,
   // but the runner also has to know which environment was selected — to load
   // `data/<name>.json` and to resolve `${env.X}` / `${data.x}` in step text
-  // (issues/resolved/052). Same variable `aiui run` reads when it is given no
+  // (issues/resolved/052). Same variable `steptix run` reads when it is given no
   // `--env` flag.
   if (opts.env) spawnEnv['AUTOMATION_ENV'] = opts.env;
 

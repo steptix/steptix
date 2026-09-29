@@ -213,10 +213,10 @@ async function api(method: string, route: string, body?: unknown): Promise<{ sta
 }
 
 beforeAll(async () => {
-  projectRoot = mkdtempSync(path.join(tmpdir(), 'aiui-values-block-'));
+  projectRoot = mkdtempSync(path.join(tmpdir(), 'steptix-values-block-'));
   mkdirSync(path.join(projectRoot, 'data'), { recursive: true });
   mkdirSync(path.join(projectRoot, 'tests'), { recursive: true });
-  writeFileSync(path.join(projectRoot, 'aiui.config.json'), JSON.stringify({}));
+  writeFileSync(path.join(projectRoot, 'steptix.config.json'), JSON.stringify({}));
   writeFileSync(
     path.join(projectRoot, '.env.uat'),
     'BASE_URL=https://uat.app.test\nLOGIN_PASSWORD=hunter2-ENV-SECRET\n',

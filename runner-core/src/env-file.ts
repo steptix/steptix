@@ -4,7 +4,7 @@
  * Resolution rule: walk up from the test file to the nearest ancestor
  * containing `.env`, stopping at (and including) the workspace root. If none
  * found, fall back to a workspace-level `defaultEnvFile` setting. If still
- * none, return a miss with the search path so the caller can render TB001.
+ * none, return a miss with the search path so the caller can render STX001.
  *
  * Parser is a small subset of the canonical `.env` format: KEY=VALUE per line,
  * `#` comments, optional surrounding single or double quotes (stripped), no
@@ -115,7 +115,7 @@ export class EnvParseError extends Error {
 /**
  * Parse a `.env` file's contents into a flat map.
  * Throws `EnvParseError` on a malformed line, with line number + raw text
- * suitable for TB005.
+ * suitable for STX005.
  */
 export function parseEnv(text: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -186,7 +186,7 @@ export interface ServerEnvAssignment {
  *  - surrounding quotes are stripped only when both ends match.
  *
  * `parseEnv` stays as it is: it backs the client-side `$VAR` parameter pass
- * and its TB005 diagnostics, which want the strict, throwing reading.
+ * and its STX005 diagnostics, which want the strict, throwing reading.
  *
  * Returning positions alongside values lets one scan answer both "what would
  * a run see" and "where is this written", so the two cannot drift.
@@ -249,7 +249,7 @@ export async function readEnvFile(absPath: string): Promise<Record<string, strin
  *
  * Returns `null` when the overlay file does not exist; the caller decides
  * whether a missing overlay is an error (the extension treats an explicit env
- * selection with no matching file as a hard failure — TB006). Throws
+ * selection with no matching file as a hard failure — STX006). Throws
  * `EnvParseError` on a malformed line, exactly like `readEnvFile`.
  *
  * `envName` is trimmed before forming the filename, so a name with stray

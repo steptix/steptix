@@ -1,6 +1,6 @@
 /**
  * Record Steps through the real HTTP entry, with a REAL browser
- * (stories/testbench-record-steps.md §Tests, "End to end on the server";
+ * (stories/steptix-record-steps.md §Tests, "End to end on the server";
  * live drafting, decision 9 and docs/specs/SPEC-record-steps.md §8, §9).
  *
  * The app is `createApiServer` on a real `node:http` listener, the session
@@ -217,7 +217,7 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => pageServer.listen(0, '127.0.0.1', () => resolve()));
   const addr = pageServer.address();
   origin = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
-  projectRoot = mkdtempSync(path.join(tmpdir(), 'aiui-record-steps-'));
+  projectRoot = mkdtempSync(path.join(tmpdir(), 'steptix-record-steps-'));
   mkdirSync(path.join(projectRoot, 'tests'), { recursive: true });
   testFilePath = path.join(projectRoot, 'tests', 'pay-by-cash.md');
 });
@@ -1056,7 +1056,7 @@ describe('POST /sessions/:id/record-steps/control', () => {
   it('404 when no recording is running; 400 on an unknown action, a bad dropped list, or a drop with no id', async () => {
     expect((await control('nobody', { action: 'stop' })).status).toBe(404);
     expect((await control('nobody', { action: 'rewind' })).status).toBe(400);
-    // Pause is an action now (stories/testbench-record-toolbar.md): no recording, 404.
+    // Pause is an action now (stories/steptix-record-toolbar.md): no recording, 404.
     expect((await control('nobody', { action: 'pause' })).status).toBe(404);
     expect((await control('nobody', { action: 'stop', dropped: [1, 2] })).status).toBe(400);
     expect((await control('nobody', { action: 'drop' })).status).toBe(400);
@@ -1242,7 +1242,7 @@ describe('the log lines a recording writes (review 2, finding 10)', () => {
   }, 60_000);
 });
 
-// ── Controls in the browser (stories/testbench-record-toolbar.md) ─────────
+// ── Controls in the browser (stories/steptix-record-toolbar.md) ─────────
 
 async function toolbarShows(page: Page, words: string, timeoutMs = 8_000): Promise<string> {
   const seen = await until(
@@ -1261,12 +1261,12 @@ describe('the browser toolbar — on the wire', () => {
     const bar = await until(() => readToolbar(page), (t) => t !== null && t.minimised, 'the pill');
     expect(bar!.shadowType).toBe('closed');
     const box = await page.evaluate(() => {
-      const r = document.querySelector('aiui-recorder')!.getBoundingClientRect();
+      const r = document.querySelector('steptix-recorder')!.getBoundingClientRect();
       return { x: r.x, y: r.y };
     });
     expect(box.x).toBeLessThan(40);
     expect(box.y).toBeLessThan(40);
-    // Opening it from the pill: TestBench is told, so it can remember.
+    // Opening it from the pill: Steptix is told, so it can remember.
     await clickToolbar(page, 'expand');
     const moved = await s.waitFor((f) => f.event === 'record:toolbar', 'record:toolbar');
     expect(moved.data).toEqual({ type: 'record:toolbar', dock: 'tl', minimised: false });
@@ -1276,7 +1276,7 @@ describe('the browser toolbar — on the wire', () => {
     const off = await started('tb-off', recordBody({ toolbar: { enabled: false } }));
     await pageOf(1).goto(`${origin}/other.html`);
     await sleep(400);
-    expect(await pageOf(1).evaluate(() => document.querySelector('aiui-recorder') === null)).toBe(true);
+    expect(await pageOf(1).evaluate(() => document.querySelector('steptix-recorder') === null)).toBe(true);
     await pageOf(1).click('h1');
     await off.waitForCount('record:action', 1);
     await control('tb-off', { action: 'cancel' });
@@ -1376,7 +1376,7 @@ describe('the browser toolbar — on the wire', () => {
     // record:step arrives before the draft that holds it.
     const at = (pred: (f: Frame) => boolean): number => s.frames.findIndex(pred);
     expect(at((f) => f.event === 'record:step')).toBeLessThan(at((f) => f === withStep));
-    // Nothing is locked against the author (stories/testbench-record-edit-steps.md): no "locked" on the bar.
+    // Nothing is locked against the author (stories/steptix-record-edit-steps.md): no "locked" on the bar.
     await toolbarShows(page, 'Added as step 3');
     expect((await readToolbar(page))!.all).not.toContain('locked');
 
@@ -1827,13 +1827,13 @@ describe('a run after the recording (finding 6)', () => {
     const run = post(`/sessions/${id}/steps`, { steps: ['Click the Sign in button'], testFilePath });
     await callInFlight();
     expect(Date.now() - doneAt).toBeLessThan(5_000); // not the bar's own six seconds
-    expect(await page.evaluate(() => document.querySelector('aiui-recorder') === null)).toBe(true);
+    expect(await page.evaluate(() => document.querySelector('steptix-recorder') === null)).toBe(true);
     open();
     await run;
   }, 60_000);
 });
 
-// ── Editing and deleting steps (stories/testbench-record-edit-steps.md) ────
+// ── Editing and deleting steps (stories/steptix-record-edit-steps.md) ────
 
 /** The model, saying which actions each step stands for: one step per
  *  ACTION, the events before it riding along, `stepActions` beside them. */

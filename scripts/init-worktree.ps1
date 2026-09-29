@@ -8,18 +8,18 @@
 # A fresh worktree contains only tracked files, so it is missing:
 #
 #   .env, templates/.env       API keys, SERVER_URL, site credentials
-#   node_modules x5            root, flick-vscode, testbench-native, runner-core,
+#   node_modules x5            root, flick-vscode, steptix-vscode, runner-core,
 #                              fixtures/tools
 #   dist/                      the compiled server, and the target of the package
-#                              self-import `ai-ui-automation/tools`
-#   testbench-native/dist/     the built extension
+#                              self-import `steptix/tools`
+#   steptix-vscode/dist/     the built extension
 #
 # Everything is COPIED rather than symlinked, so the worktree is fully
 # independent — safe when package.json diverges between branches. The trade-off
 # is disk: a full seed is ~1.1 GB of node_modules.
 #
 # THE JUNCTION
-# `testbench-native/node_modules/ai-ui-automation-runner-core` is the
+# `steptix-vscode/node_modules/steptix-runner-core` is the
 # `file:../runner-core` dep, which npm materialises as a junction holding an
 # ABSOLUTE path to whichever checkout ran `npm install`. robocopy follows that
 # junction and writes a real directory, so a naively-seeded worktree ends up
@@ -29,29 +29,29 @@
 # `../runner-core` — a different place. This script re-points the junction at
 # the worktree's own runner-core after copying.
 #
-# `fixtures/tools/node_modules/ai-ui-automation` is the second such junction —
+# `fixtures/tools/node_modules/steptix` is the second such junction —
 # the `file:../..` dep — but its target is the WHOLE repo root, whose tree
 # contains this very node_modules. Letting robocopy follow it would recurse
 # the entire source checkout into the copy, so unlike runner-core's it is
 # EXCLUDED from the copy (/XD by name) and created fresh, pointed at the
 # worktree. Without this tree, every fixture tool's
-# `import 'ai-ui-automation/tools'` fails to resolve (fixtures/tools has its
+# `import 'steptix/tools'` fails to resolve (fixtures/tools has its
 # own package.json, so the package self-reference resolves against THAT
 # package and falls through to a node_modules lookup) and 22 root tests fail.
 #
 # THE PORT
-# `aiui.config.json` pins 127.0.0.1:3100 and is tracked, so two checkouts cannot
+# `steptix.config.json` pins 127.0.0.1:3100 and is tracked, so two checkouts cannot
 # both serve on the default port; the second dies on EADDRINUSE (deliberately
 # fatal — see src/server/api-server.ts). You only need a second server if you
 # changed `src/`. A running server resolves each request's project bundle from
 # the test file's path (src/server/project-bundle.ts), so it already honours a
-# worktree's own aiui.config.json and .env — but it executes whatever `src/`
+# worktree's own steptix.config.json and .env — but it executes whatever `src/`
 # build it booted from. Pass -Port to move the worktree's clients onto their own
 # server: it rewrites SERVER_URL in the worktree's .env files (gitignored, so no
 # diff noise) and prints the matching `serve` command.
 #
 # Don't try to junction node_modules back to the source checkout to "save time":
-# it has no effect on the package self-import `ai-ui-automation/tools` (resolved
+# it has no effect on the package self-import `steptix/tools` (resolved
 # by path, not via node_modules), and a shared node_modules means a worktree
 # `npm install` writes through to the source. Copy + a worktree-local install is
 # both correct and fast (the install is incremental on top of the copied tree).
@@ -80,7 +80,7 @@ param(
     # source checkout's.
     [switch]$Install,
 
-    # Also copy the cached VS Code build used by the testbench-native
+    # Also copy the cached VS Code build used by the steptix-vscode
     # integration tests (~390 MB). Without it the first
     # `npm run test:integration` in the worktree re-downloads it.
     [switch]$SeedVSCodeTest
@@ -276,7 +276,7 @@ $previousPort = Get-EnvPort -EnvPath (Join-Path $dest '.env')
 # --- 1. env files and local settings ---------------------------------------
 
 # Small files, copied individually. `templates/.env` is load-bearing: the
-# testbench-native live harness (tests/integration/runLiveTest.cjs) opens
+# steptix-vscode live harness (tests/integration/runLiveTest.cjs) opens
 # templates/ as its workspace and hard-throws when that file is absent.
 $files = @(
     '.env',
@@ -284,7 +284,7 @@ $files = @(
     '.env.uat',
     'templates/.env',
     '.claude/settings.local.json',
-    'testbench-native/tests/integration/fixtures/.env'
+    'steptix-vscode/tests/integration/fixtures/.env'
 )
 
 $copied = 0
@@ -313,7 +313,7 @@ foreach ($rel in $files) {
 $dirs = @(
     'node_modules',
     'flick-vscode/node_modules',
-    'testbench-native/node_modules',
+    'steptix-vscode/node_modules',
     'runner-core/node_modules'
 )
 
@@ -338,7 +338,7 @@ if ($SkipBuilds) {
 
     # --- 3. re-point the runner-core junction (see THE JUNCTION above) ------
 
-    $linkPath = Join-Path $dest 'testbench-native\node_modules\ai-ui-automation-runner-core'
+    $linkPath = Join-Path $dest 'steptix-vscode\node_modules\steptix-runner-core'
     $linkTarget = Join-Path $dest 'runner-core'
     if (Test-Path $linkTarget) {
         Write-Host ""
@@ -349,7 +349,7 @@ if ($SkipBuilds) {
             New-Item -ItemType Directory -Path $linkParent -Force | Out-Null
         }
         New-Item -ItemType Junction -Path $linkPath -Target $linkTarget | Out-Null
-        Write-Host "  link  testbench-native/node_modules/ai-ui-automation-runner-core -> $linkTarget"
+        Write-Host "  link  steptix-vscode/node_modules/steptix-runner-core -> $linkTarget"
     }
 
     # --- 3b. fixture tools tree (see THE JUNCTION above: this one is
@@ -365,16 +365,16 @@ if ($SkipBuilds) {
         # /XD by bare name so the junction is skipped in the source AND left
         # alone in the destination on a /MIR re-run.
         $roboArgs = @($ftSrc, $ftDst, '/MIR', '/MT:16', '/NFL', '/NDL', '/NJH', '/NJS', '/NP',
-            '/XD', 'ai-ui-automation')
+            '/XD', 'steptix')
         $null = & robocopy @roboArgs
         if ($LASTEXITCODE -ge 8) {
             throw "robocopy failed for $ftSrc -> $ftDst (exit $LASTEXITCODE)"
         }
         $copied++
-        $ftLink = Join-Path $ftDst 'ai-ui-automation'
+        $ftLink = Join-Path $ftDst 'steptix'
         Remove-DirOrLink -Path $ftLink
         New-Item -ItemType Junction -Path $ftLink -Target $dest | Out-Null
-        Write-Host "  link  fixtures/tools/node_modules/ai-ui-automation -> $dest"
+        Write-Host "  link  fixtures/tools/node_modules/steptix -> $dest"
     } else {
         Write-Host "  skip  fixtures/tools/node_modules/ (not in source — run npm install in fixtures/tools first)"
         $skipped++
@@ -385,7 +385,7 @@ if ($SkipBuilds) {
     if ($SeedVSCodeTest) {
         Write-Host ""
         Write-Host "VS Code test cache:"
-        $cacheRoot = Join-Path $source 'testbench-native\.vscode-test'
+        $cacheRoot = Join-Path $source 'steptix-vscode\.vscode-test'
         if (-not (Test-Path $cacheRoot)) {
             Write-Host "  skip  .vscode-test/ (not in source — it downloads on first test run)"
             $skipped++
@@ -393,7 +393,7 @@ if ($SkipBuilds) {
             # Copy only the version the harness actually asks for; the cache can
             # hold stale ones. `user-data*` and `extensions*` are per-run state
             # and are deliberately left behind.
-            $runTest = Join-Path $source 'testbench-native\tests\integration\runTest.cjs'
+            $runTest = Join-Path $source 'steptix-vscode\tests\integration\runTest.cjs'
             $wanted = @()
             if (Test-Path $runTest) {
                 $m = Select-String -Path $runTest -Pattern "VERSION\s*=\s*'([^']+)'" |
@@ -414,7 +414,7 @@ if ($SkipBuilds) {
             foreach ($a in $archives) {
                 Write-Host "  copy  .vscode-test/$($a.Name)/ ..."
                 Copy-Tree -From $a.FullName `
-                    -To (Join-Path $dest "testbench-native\.vscode-test\$($a.Name)")
+                    -To (Join-Path $dest "steptix-vscode\.vscode-test\$($a.Name)")
                 $copied++
             }
         }
@@ -426,19 +426,19 @@ if ($SkipBuilds) {
         Write-Host ""
         Write-Host "Refreshing dependencies (-Install):"
         Invoke-Npm -Dir $dest -Arguments @('install')
-        Invoke-Npm -Dir (Join-Path $dest 'testbench-native') -Arguments @('install')
+        Invoke-Npm -Dir (Join-Path $dest 'steptix-vscode') -Arguments @('install')
     }
 
     # --- 6. build -----------------------------------------------------------
 
     # dist/ must exist before the worktree's fixtures can resolve the package
-    # self-import `ai-ui-automation/tools` — that resolves via the `exports`
+    # self-import `steptix/tools` — that resolves via the `exports`
     # field plus the NEAREST package.json, so it lands in the worktree's own
     # dist/tools/index.js, and only once it has been built.
     Write-Host ""
     Write-Host "Building:"
     Invoke-Npm -Dir $dest -Arguments @('run', 'build')
-    Invoke-Npm -Dir (Join-Path $dest 'testbench-native') -Arguments @('run', 'build')
+    Invoke-Npm -Dir (Join-Path $dest 'steptix-vscode') -Arguments @('run', 'build')
     Invoke-Npm -Dir (Join-Path $dest 'flick-vscode') -Arguments @('run', 'build')
 }
 
@@ -461,7 +461,7 @@ if ($Port -gt 0) {
     Write-Host ""
     Write-Host "Pointing this worktree's clients at ${serverUrl}:"
     foreach ($rel in @('.env', 'templates/.env')) {
-        # Deliberately NOT testbench-native/tests/integration/fixtures/.env —
+        # Deliberately NOT steptix-vscode/tests/integration/fixtures/.env —
         # its SERVER_URL is a dead port for the FakeApiClient, not a real server.
         $p = Join-Path $dest $rel
         if (Set-ServerUrl -Path $p -Url $serverUrl) {
@@ -496,21 +496,21 @@ if ($serverUrl) {
     Write-Host "-Port <n> to give the worktree its own server."
 }
 Write-Host ""
-Write-Host "TestBench: 'testbench-native.serverAutoStart.cwd' is machine-scoped (User"
+Write-Host "Steptix: 'steptix.serverAutoStart.cwd' is machine-scoped (User"
 Write-Host "settings only, by design), so a worktree window auto-starts the server from"
 Write-Host "whichever checkout that setting names — not from this one. Start the server"
-Write-Host "yourself with the command above and TestBench will use it."
+Write-Host "yourself with the command above and Steptix will use it."
 
 if ($serverUrl) {
     Write-Host ""
     Write-Host "That matters more on a non-default port: the auto-start command carries no"
-    Write-Host "-p flag, so if nothing is listening on $Port TestBench starts a server from"
-    Write-Host "the OTHER checkout on 3100, keeps polling $Port, and fails with TB028 —"
+    Write-Host "-p flag, so if nothing is listening on $Port Steptix starts a server from"
+    Write-Host "the OTHER checkout on 3100, keeps polling $Port, and fails with STX028 —"
     Write-Host "leaving a stray server behind. Start this worktree's server first."
     Write-Host ""
     Write-Host "Live integration tests read LIVE_SERVER_URL and fall back to :3100 in every"
     Write-Host "suite, so point them at this worktree's server explicitly:"
     Write-Host ""
-    Write-Host "    cd `"$dest\testbench-native`""
+    Write-Host "    cd `"$dest\steptix-vscode`""
     Write-Host "    `$env:LIVE_SERVER_URL = `"$serverUrl`"; npm run test:live"
 }

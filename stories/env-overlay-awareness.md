@@ -2,7 +2,7 @@
 
 Status: draft — reviewed once, revised
 Builds on: [copilot-lm-bridge.md](copilot-lm-bridge.md) (the setup command and the
-bridge's 401), the env picker (`testbench-native/src/extension/env-selector.ts`), and the
+bridge's 401), the env picker (`steptix-vscode/src/extension/env-selector.ts`), and the
 overlay rule in [project-scoped-data-dir-and-env.md](project-scoped-data-dir-and-env.md).
 
 ## What we're building
@@ -11,13 +11,13 @@ Two small changes that between them remove a class of "it should work but
 doesn't", found the hard way the first time anyone pointed the Copilot bridge at
 a real project.
 
-**Today.** A user runs **TestBench: Use Copilot for AI**. It writes `AI_MODEL`,
+**Today.** A user runs **Steptix: Use Copilot for AI**. It writes `AI_MODEL`,
 `AI_GATEWAY_URL` and `AI_API_KEY` into the project's `.env`, correctly, and says
 so. They run a test. Every AI call fails:
 
 ```
-401 The TestBench Copilot bridge needs "Authorization: Bearer <token>" with the
-token from AI_API_KEY, written by "TestBench: Use Copilot for AI". If that line
+401 The Steptix Copilot bridge needs "Authorization: Bearer <token>" with the
+token from AI_API_KEY, written by "Steptix: Use Copilot for AI". If that line
 came from another machine it will not work here …
 ```
 
@@ -36,7 +36,7 @@ candidate cause; and the run output names which keys the overlay overrode.
 
 ### What it looks like in practice
 
-**You run** *TestBench: Use Copilot for AI* in a workspace whose active env is `uat`,
+**You run** *Steptix: Use Copilot for AI* in a workspace whose active env is `uat`,
 where `.env.uat` sets `AI_API_KEY`.
 **You get** a choice, before anything is planned or written:
 
@@ -47,7 +47,7 @@ where `.env.uat` sets `AI_API_KEY`.
 **You run** a test where a stale overlay still shadows the token.
 **You get** a 401 that lists the actual suspect:
 
-> … or this workspace has an active environment (`testbench-native.activeEnv`)
+> … or this workspace has an active environment (`steptix.activeEnv`)
 > whose `.env.<name>` sets its own AI_API_KEY over `.env`.
 
 **You look at the run output** for any run with an active env.
@@ -74,19 +74,19 @@ explain, with the user reasonably concluding the bridge was broken.
 The one rule shared everywhere is **`.env.<name>` beats `.env`**. Beyond that,
 the paths compose differently, and "Continue anyway" behaves differently on each:
 
-- **TestBench run path.** The extension composes `{ ...base, ...overlay }`
+- **Steptix run path.** The extension composes `{ ...base, ...overlay }`
   (`composeEnv`, no `process.env` layer) and ships the result as
   `request.env`; the server applies each of the trio over its own AI config,
   a present key winning unconditionally (`applyEnvToAiConfig`). This is the
   path the incident was on.
 - **Server-composed paths** (standalone compile, `resolveEnvBundle`). Baseline
   is the *server's own* `process.env`; base `.env` fills only keys absent from
-  it; `.env.<name>` overrides all. Since `aiui serve` runs
+  it; `.env.<name>` overrides all. Since `steptix serve` runs
   `loadDefaultEnvFileSync()`, a server started from a checkout carries that
   checkout's `.env` in `process.env`, and a project's base `.env` **loses** to
   it — base `.env` is the weakest layer there. With **no** env named, this path
   reads no project `.env` for AI at all.
-- **CLI (`aiui run`).** Knows nothing of `testbench-native.activeEnv`; takes its
+- **CLI (`steptix run`).** Knows nothing of `steptix.activeEnv`; takes its
   env from `--env` / `AUTOMATION_ENV` only, and reads `.env` plus the machine
   floor otherwise.
 
@@ -103,7 +103,7 @@ case:
    editor's folder in a multi-root workspace. Absent → today's behaviour.
 3. Present → read it with **both** readers and take the union of their keys.
    `scanServerEnv` is what `planEnvUpdate` writes with and shares the server's
-   grammar; but the path the incident was on — the TestBench run — reads the
+   grammar; but the path the incident was on — the Steptix run — reads the
    overlay with `readEnvOverlayFile` → `parseEnv`, which strips a leading
    `export `. Measured: `export AI_API_KEY=k` is key `export AI_API_KEY` to the
    scanner and `AI_API_KEY` to the parser, so a scanner-only check reports no
@@ -128,12 +128,12 @@ was, so there is one copy of the token and one source of truth. Clearing the
 env later yields whatever `.env` produced before setup — a different provider,
 or the plain "AI is not configured" — both self-explaining, never a bridge 401.
 
-**The CLI trade, stated rather than papered over.** `aiui run` knows nothing of
-`testbench-native.activeEnv`, so after *Write the overlay* a plain `aiui run`
+**The CLI trade, stated rather than papered over.** `steptix run` knows nothing of
+`steptix.activeEnv`, so after *Write the overlay* a plain `steptix run`
 does not reach the bridge — it composes `.env` plus the machine floor and runs
 on whatever that names. That is not a misleading failure (a different model, or
 "AI is not configured"), and the fix is the one the CLI already has:
-`aiui run --env uat`. A "write both files" option was considered and dropped:
+`steptix run --env uat`. A "write both files" option was considered and dropped:
 it would make the two commands agree at the cost of two copies of the token,
 with a later setup rerun updating the overlay only while that env is still
 active — the staleness that produces exactly the 401 this story exists to
@@ -172,7 +172,7 @@ So: no state, no hint. Two changes, each correct by construction:
 
 1. **`unauthorizedError()` gains one unconditional sentence** naming the overlay
    as a candidate: "…or this workspace has an active environment
-   (`testbench-native.activeEnv`) whose `.env.<name>` sets its own AI_API_KEY over
+   (`steptix.activeEnv`) whose `.env.<name>` sets its own AI_API_KEY over
    `.env`." The core module stays free of `vscode` imports and testable under
    `node --test`; the message names a mechanism, never a value, so the
    leak-guard test is unchanged.
@@ -189,9 +189,9 @@ The env picker's visibility. Showing it whenever an environment is *selectable*
 is the right idea and the wrong size for this story: `refresh()` is synchronous
 and fires on every tab change, while `discoverEnvs` is two async `readdir`s, so
 the rule needs a cached scan and a file watcher. And the discovery regex matches
-`.env.local` / `.env.development` / `.env.production`, so without gating on an
-`aiui.config.json` at the root it would plant a permanent `env: (none)` item in
-every Vite or Next repo that happens to have TestBench installed. The bare
+`.env.local` / `.env.development` / `.env.production`, so without gating on a
+`steptix.config.json` at the root it would plant a permanent `env: (none)` item in
+every Vite or Next repo that happens to have Steptix installed. The bare
 minimum — logging the active env in run output — is Part B item 2 above.
 
 Also out of scope: changing the overlay precedence, or making `activeEnv`
@@ -216,14 +216,14 @@ anything other than a workspace setting.
 
 ## Rollout
 
-`testbench-native` only. Patch bump, package and install per the repo loop. No
+`steptix-vscode` only. Patch bump, package and install per the repo loop. No
 server rebuild, no framework change, no library change.
 
 ## Open questions
 
 1. **RESOLVED — *Write both* is dropped.** One file, one truth; the CLI uses
    `--env`. Reasoning in Part A.
-2. **Should the overlay check also flag `SERVER_URL` / `AIUI_SERVER_API_KEY`?**
+2. **Should the overlay check also flag `SERVER_URL` / `STEPTIX_SERVER_API_KEY`?**
    Not bridge-related, but an overlay that redirects the server is the other
    silent-override that reads as "the bridge is broken". Probably a separate
    change.

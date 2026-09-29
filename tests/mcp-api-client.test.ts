@@ -612,7 +612,7 @@ describe('createApiClient other routes', () => {
     await client.peekCdpTab({
       port: 51000,
       targetId: 'A/B',
-      testFilePath: 'C:\\proj\\.aiui-peek.md',
+      testFilePath: 'C:\\proj\\.steptix-peek.md',
     });
 
     // A read: GET, no body (page-content.md §Locked's reasoning, verbatim).
@@ -631,7 +631,7 @@ describe('createApiClient other routes', () => {
     await client.peekCdpTab({
       port: 51000,
       targetId: 'A/B',
-      testFilePath: 'C:\\proj\\.aiui-peek.md',
+      testFilePath: 'C:\\proj\\.steptix-peek.md',
       format: 'dom',
       selector: '#total',
       maxChars: 500,
@@ -648,7 +648,7 @@ describe('createApiClient other routes', () => {
     await client.peekCdpTab({
       port: 51000,
       targetId: 'A/B',
-      testFilePath: 'C:\\proj\\.aiui-peek.md',
+      testFilePath: 'C:\\proj\\.steptix-peek.md',
       format: 'screenshot',
       fullPage: true,
     });
@@ -658,7 +658,7 @@ describe('createApiClient other routes', () => {
     await client.peekCdpTab({
       port: 51000,
       targetId: 'A/B',
-      testFilePath: 'C:\\proj\\.aiui-peek.md',
+      testFilePath: 'C:\\proj\\.steptix-peek.md',
       format: 'screenshot',
       fullPage: false,
     });
@@ -675,7 +675,7 @@ describe('createApiClient other routes', () => {
       res.end(JSON.stringify({ error: 'No tab with target id GONE is open' }));
     });
     const tabGone = await createApiClient({ baseUrl: ours, apiKey: 'k' })
-      .peekCdpTab({ port: 51000, targetId: 'GONE', testFilePath: 'C:\\proj\\.aiui-peek.md' })
+      .peekCdpTab({ port: 51000, targetId: 'GONE', testFilePath: 'C:\\proj\\.steptix-peek.md' })
       .catch((e: unknown) => e);
     expect(tabGone).toBeInstanceOf(ApiHttpError);
     expect(tabGone).not.toBeInstanceOf(ApiRouteNotFoundError);
@@ -693,7 +693,7 @@ describe('createApiClient other routes', () => {
       );
     });
     const routeGone = await createApiClient({ baseUrl: older, apiKey: 'k' })
-      .peekCdpTab({ port: 51000, targetId: 'T1', testFilePath: 'C:\\proj\\.aiui-peek.md' })
+      .peekCdpTab({ port: 51000, targetId: 'T1', testFilePath: 'C:\\proj\\.steptix-peek.md' })
       .catch((e: unknown) => e);
     expect(routeGone).toBeInstanceOf(ApiRouteNotFoundError);
   });
@@ -708,7 +708,7 @@ describe('createApiClient other routes', () => {
         res.end(JSON.stringify({ error: 'the page navigated during the read' }));
       });
       const err = await createApiClient({ baseUrl: srv, apiKey: 'k' })
-        .peekCdpTab({ port: 51000, targetId: 'T1', testFilePath: 'C:\\proj\\.aiui-peek.md' })
+        .peekCdpTab({ port: 51000, targetId: 'T1', testFilePath: 'C:\\proj\\.steptix-peek.md' })
         .catch((e: unknown) => e);
 
       expect(err, String(status)).toBeInstanceOf(ApiHttpError);

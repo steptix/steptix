@@ -17,17 +17,17 @@
       // The preLaunchTask matters for the same reason the version bump does:
       // without it F5 loads whatever `dist/` happens to be on disk, which is
       // the stale-build trap in a different costume.
-      "name": "Run TestBench Extension",
+      "name": "Run Steptix Extension",
       "type": "extensionHost",
       "request": "launch",
-      "preLaunchTask": "Build TestBench extension",
+      "preLaunchTask": "Build Steptix extension",
       // The fixture workspace, so the host opens somewhere useful rather than
       // on an empty window you then have to open a folder in.
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}/testbench-native",
+        "--extensionDevelopmentPath=${workspaceFolder}/steptix-vscode",
         "${workspaceFolder}/templates"
       ],
-      "outFiles": ["${workspaceFolder}/testbench-native/dist/**/*.js"]
+      "outFiles": ["${workspaceFolder}/steptix-vscode/dist/**/*.js"]
     },
     {
       "name": "Debug Test File",

@@ -20,7 +20,7 @@ import { resolve as pathResolve } from 'node:path';
  * The lock key for a test file.
  *
  * `path.resolve` alone is not enough on Windows, where it preserves the
- * drive-letter case it was handed: TestBench's paths come from `uri.fsPath`,
+ * drive-letter case it was handed: Steptix's paths come from `uri.fsPath`,
  * which lower-cases the drive, while a CLI or MCP caller's usually does not.
  * Two spellings of one file would then take two locks and compile the same
  * test twice, concurrently, each proposing a whole `.steps.ts` for it.
