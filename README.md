@@ -340,8 +340,8 @@ is a separate *profile*.
 ```toml
 [mcp_servers.steptix]
 command = "node"
-args = ["c:/Projects/vibe/ai-ui-automation/dist/index.js", "mcp"]
-env = { STEPTIX_MCP_ROOTS = "c:/Projects/vibe/ai-ui-automation" }
+args = ["c:/Projects/vibe/steptix/dist/index.js", "mcp"]
+env = { STEPTIX_MCP_ROOTS = "c:/Projects/vibe/steptix" }
 ```
 
 **Copilot CLI**, in `~/.copilot/mcp-config.json`:
@@ -352,8 +352,8 @@ env = { STEPTIX_MCP_ROOTS = "c:/Projects/vibe/ai-ui-automation" }
     "steptix": {
       "type": "stdio",
       "command": "node",
-      "args": ["c:/Projects/vibe/ai-ui-automation/dist/index.js", "mcp"],
-      "env": { "STEPTIX_MCP_ROOTS": "c:/Projects/vibe/ai-ui-automation" }
+      "args": ["c:/Projects/vibe/steptix/dist/index.js", "mcp"],
+      "env": { "STEPTIX_MCP_ROOTS": "c:/Projects/vibe/steptix" }
     }
   }
 }

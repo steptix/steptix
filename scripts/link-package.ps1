@@ -8,7 +8,7 @@
 # --- Configure these ---------------------------------------------------------
 
 # Change this path to point to the Steptix directory.
-$PackagePath = "C:\Projects\vibe\ai-ui-automation"
+$PackagePath = "C:\Projects\vibe\steptix"
 
 # Change this path to be the root folder where the test project is in.
 # This is the folder where the symbolic/junction link should be created.
