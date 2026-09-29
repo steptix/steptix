@@ -46,9 +46,13 @@ The Steptix extension's bundles carry copies of third-party code (today
 React, React DOM, scheduler and jsonc-parser, all MIT), and their licences
 require the notices to travel with it. `npm run build` now ends by writing
 `dist/THIRD-PARTY-NOTICES.txt`, which ships in the `.vsix`. The list is read
-from the bundles' source maps, so it is exactly what was bundled, and the
-build stops on a bundled package with no licence file or with a licence
-outside MIT, ISC, BSD, 0BSD and Apache-2.0.
+from the bundles' source maps, so it is exactly what was bundled. The build
+stops on a bundled package with no licence file, on a licence outside MIT,
+ISC, BSD, 0BSD and Apache-2.0 (an `OR` with one of those passes), and on any
+file in `dist/` no source map accounts for, such as a font or stylesheet
+copied from a package; an `OVERRIDES` table in the script settles the rare
+package the rules cannot. Vite's modulepreload polyfill is switched off: it
+is injected from a virtual module, so no map names it.
 
 ### Added — a first-try scoreboard: `aiui stats`
 

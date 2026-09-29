@@ -23,6 +23,19 @@ const ALLOWED_LICENSES = new Set([
   '0BSD', 'Apache-2.0', 'BSD-2-Clause', 'BSD-3-Clause', 'ISC', 'MIT',
 ]);
 
+/**
+ * Decisions for packages the rules above cannot settle on their own — a
+ * "SEE LICENSE IN" field, or licence text that lives only in the README.
+ * Keyed by name@version, so an upgrade is looked at again:
+ *   'some-pkg@1.2.3': { license: 'MIT', textFile: 'README.md' }
+ */
+const OVERRIDES = {};
+
+/** Files in dist/ that are ours or are covered by a source map. Anything else
+ *  (a stylesheet, a font, an icon copied from a package) stops the build until
+ *  it is accounted for here or in OVERRIDES. */
+const OWN_DIST_FILE = /\.(js|map|html)$|^THIRD-PARTY-NOTICES\.txt$/;
+
 const LICENSE_FILE = /^(licen[cs]e|copying|notice)([.-].*)?$/i;
 
 /**
@@ -58,6 +71,14 @@ function licenseOf(pkg) {
   return 'UNKNOWN';
 }
 
+/** An SPDX expression is acceptable when it is one allowed licence, or an OR
+ *  of alternatives any one of which is allowed (we pick that one). */
+export function isAllowedLicense(expr) {
+  const trimmed = expr.trim().replace(/^\((.*)\)$/, '$1');
+  if (/\sAND\s|\sWITH\s/i.test(trimmed)) return false;
+  return trimmed.split(/\s+OR\s+/i).some((alt) => ALLOWED_LICENSES.has(alt.trim()));
+}
+
 /**
  * Name, version, licence and licence files of each package, sorted by name.
  * Throws — naming every offender — when a package is missing its licence
@@ -71,13 +92,16 @@ export function describePackages(roots) {
     if (OWN_PACKAGES.has(pkg.name)) continue;
     const id = `${pkg.name}@${pkg.version}`;
     if (byId.has(id)) continue;
-    const license = licenseOf(pkg);
+    const override = OVERRIDES[id];
+    const license = override?.license ?? licenseOf(pkg);
     // LICENSE before NOTICE, so a reader meets the terms first.
-    const files = fs.readdirSync(root)
-      .filter((f) => LICENSE_FILE.test(f) && fs.statSync(path.join(root, f)).isFile())
-      .sort((a, b) => Number(/^notice/i.test(a)) - Number(/^notice/i.test(b)) || a.localeCompare(b));
-    if (files.length === 0) problems.push(`${id} has no LICENSE file in ${root}`);
-    if (!ALLOWED_LICENSES.has(license)) {
+    const files = override?.textFile
+      ? [override.textFile]
+      : fs.readdirSync(root)
+          .filter((f) => LICENSE_FILE.test(f) && fs.statSync(path.join(root, f)).isFile())
+          .sort((a, b) => Number(/^notice/i.test(a)) - Number(/^notice/i.test(b)) || a.localeCompare(b));
+    if (files.length === 0) problems.push(`${id} has no LICENSE file in ${root} (add it to OVERRIDES if the text is elsewhere)`);
+    if (!isAllowedLicense(license)) {
       problems.push(`${id} is licensed "${license}", which is not on the allowed list — decide before shipping it`);
     }
     byId.set(id, {
@@ -111,22 +135,52 @@ export function renderNotices(packages) {
   return lines.join('\n') + '\n';
 }
 
-function mapFilesUnder(dir) {
+function filesUnder(dir) {
   return fs.readdirSync(dir, { withFileTypes: true, recursive: true })
-    .filter((e) => e.isFile() && e.name.endsWith('.js.map'))
+    .filter((e) => e.isFile())
     .map((e) => path.join(e.parentPath ?? e.path, e.name));
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const dist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist');
-  const maps = mapFilesUnder(dist);
-  if (maps.length === 0) {
-    console.error(`third-party-notices: no source maps under ${dist} — build first`);
-    process.exit(1);
+/** Writes <dist>/THIRD-PARTY-NOTICES.txt and returns the packages listed. */
+export function writeNotices(dist) {
+  const files = filesUnder(dist);
+  const unaccounted = files.filter((f) => !OWN_DIST_FILE.test(path.basename(f)));
+  if (unaccounted.length > 0) {
+    throw new Error(
+      'Third-party notices: dist holds files no source map accounts for — say where each ' +
+        `came from before shipping it:\n  ${unaccounted.join('\n  ')}`,
+    );
   }
+  const maps = files.filter((f) => f.endsWith('.js.map'));
+  if (maps.length === 0) throw new Error(`Third-party notices: no source maps under ${dist} — build first`);
+  const packages = describePackages(bundledPackageRoots(maps));
+  fs.writeFileSync(path.join(dist, 'THIRD-PARTY-NOTICES.txt'), renderNotices(packages));
+  return packages;
+}
+
+/** True when this file is the script node was started with. Both sides are
+ *  realpathed: the ESM loader resolves junctions and symlinks for
+ *  import.meta.url but argv keeps the path as typed, and a mismatch here would
+ *  skip the write and exit 0, shipping a stale file. */
+function isMain() {
+  if (!process.argv[1]) return false;
+  const norm = (p) => {
+    const real = fs.realpathSync(p);
+    return process.platform === 'win32' ? real.toLowerCase() : real;
+  };
   try {
-    const packages = describePackages(bundledPackageRoots(maps));
-    fs.writeFileSync(path.join(dist, 'THIRD-PARTY-NOTICES.txt'), renderNotices(packages));
+    return norm(path.resolve(process.argv[1])) === norm(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) {
+  const dist = process.argv[2]
+    ? path.resolve(process.argv[2])
+    : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+  try {
+    const packages = writeNotices(dist);
     console.log(
       `third-party-notices: ${packages.length} package(s) — ` +
         packages.map((p) => `${p.name}@${p.version} (${p.license})`).join(', '),
