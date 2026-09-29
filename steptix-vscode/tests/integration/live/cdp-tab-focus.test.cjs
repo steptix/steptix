@@ -1,7 +1,7 @@
 /**
  * Live end-to-end CDP tab focus (stories/cdp-tab-focus.md).
  *
- * Drives a REAL Chrome over CDP through the REAL steptix Sessions API
+ * Drives a REAL Chrome over CDP through the REAL Steptix Sessions API
  * server ($LIVE_SERVER_URL, default http://localhost:3100). Most of it needs no
  * AI and no session; the last scenario runs real steps to prove focusing does
  * not disturb them.

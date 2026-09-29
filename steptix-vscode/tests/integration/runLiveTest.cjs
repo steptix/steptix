@@ -21,7 +21,7 @@
 //   STEPTIX_LIVE_GREP='verify steps' npm run test:live
 //                                        # mocha --grep, as before
 //
-// Prereq: with --shards=1 or --server=<url>, a steptix Sessions API
+// Prereq: with --shards=1 or --server=<url>, a Steptix Sessions API
 // server must already be running (e.g. `node dist/index.js serve -p 3100`).
 // Otherwise each shard starts its own from this checkout's dist/.
 const path = require('node:path');

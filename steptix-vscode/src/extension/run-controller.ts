@@ -1478,7 +1478,7 @@ export class RunController {
    * Runs after env resolution has produced SERVER_URL and before any session
    * is created. The run's AbortController already exists, so Stop cancels a
    * wedged health wait or spawn poll — and an abort during this phase is an
-   * `aborted` run, never a STX028.
+   * `aborted` run, never an STX028.
    *
    * The full decision tree, in order:
    *   2. healthy + service matches ⇒ proceed, remember `inspector`.
@@ -5324,12 +5324,12 @@ export class RunController {
         this.postOutput(action.msg, action.level);
       } else if (action.kind === 'resume') {
         this.postOutput(
-          '/resume is not yet supported in the steptix — use /continue or /exit, or run from the CLI for resume support.',
+          '/resume is not yet supported in the Steptix extension — use /continue or /exit, or run from the CLI for resume support.',
           'warn',
         );
       } else if (action.kind === 'screenshot') {
         this.postOutput(
-          '/screenshot is not yet wired in the steptix — run from the CLI for on-demand captures.',
+          '/screenshot is not yet wired in the Steptix extension — run from the CLI for on-demand captures.',
           'warn',
         );
       } else if (action.kind === 'send-step') {

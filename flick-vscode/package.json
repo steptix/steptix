@@ -4,7 +4,7 @@
   "publisher": "pkent",
   "version": "0.4.14",
   "license": "Apache-2.0",
-  "description": "Send natural-language UI steps to the steptix Sessions API from a chat panel inside VS Code.",
+  "description": "Send natural-language UI steps to the Steptix Sessions API from a chat panel inside VS Code.",
   "private": true,
   "repository": {
     "type": "git",
@@ -67,7 +67,7 @@
         "flick.apiUrl": {
           "type": "string",
           "default": "http://127.0.0.1:3100",
-          "description": "Full URL of the steptix Sessions API server."
+          "description": "Full URL of the Steptix Sessions API server."
         },
         "flick.apiKey": {
           "type": "string",

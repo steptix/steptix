@@ -130,9 +130,9 @@ for the canonical surface.
 | `/continue`   | End the interactive block, run continues               |
 | `/exit`       | End the run entirely (same as Stop; alias `/quit`)     |
 
-Deferred in the steptix: `/screenshot` (needs a server endpoint),
+Deferred in the Steptix extension: `/screenshot` (needs a server endpoint),
 `/resume` (run-controller currently can't jump). Both surface a
-"not yet supported in the steptix" warning when typed; the CLI runner
+"not yet supported in the Steptix extension" warning when typed; the CLI runner
 honours both. Bare-word `done` / `exit` and the previous-design `:`-prefix
 inputs print a one-line deprecation hint pointing at the new command.
 

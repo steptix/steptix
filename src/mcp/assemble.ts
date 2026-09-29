@@ -266,7 +266,7 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
       `This test has ${parsed.dataRows!.length} data rows; only row 1 is run ` +
         `here (${Object.entries(firstRow)
           .map(([k, v]) => `${k}=${v}`)
-          .join(', ')}). Run it from the CLI or Steptix to run every row.`,
+          .join(', ')}). Run it from the CLI or the Steptix extension to run every row.`,
     );
   }
 

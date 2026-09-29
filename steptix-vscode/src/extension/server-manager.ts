@@ -546,7 +546,7 @@ export async function startServerAndWait(args: {
   };
 }
 
-/** How much of the log tail to quote in a STX028 diagnostic. */
+/** How much of the log tail to quote in an STX028 diagnostic. */
 const LOG_TAIL_BYTES = 2_000;
 const LOG_TAIL_LINES = 5;
 

@@ -120,7 +120,7 @@ export function ensureMachineKey(deps?: UserRootDeps): {
   fs.mkdirSync(path.dirname(envPath), { recursive: true });
 
   const line =
-    `# Machine key for the steptix Sessions API server.\n` +
+    `# Machine key for the Steptix Sessions API server.\n` +
     `# Generated ${new Date().toISOString()} — see stories/machine-key.md.\n` +
     `${MACHINE_KEY_VAR}=${key}\n`;
 

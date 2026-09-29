@@ -1,7 +1,7 @@
 /**
  * Live end-to-end pause/resume/pause test.
  *
- * Drives securebank.md against the REAL steptix Sessions API server
+ * Drives securebank.md against the REAL Steptix Sessions API server
  * (SERVER_URL from templates/.env, expected to be running on
  * http://localhost:3100). A real browser actually opens, real AI calls
  * happen, real network requests fly. Validates the spec promise that the

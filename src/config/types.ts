@@ -429,7 +429,7 @@ export interface TablesConfig {
  */
 export interface LoggingConfig {
   /**
-   * Threshold for the console + steptix SSE output stream. Levels are
+   * Threshold for the console + Steptix SSE output stream. Levels are
    * suppressed below this threshold:
    *   - 'silent': nothing
    *   - 'error':  errors only

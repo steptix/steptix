@@ -1,5 +1,5 @@
 /**
- * HTTP+SSE client for the steptix API server.
+ * HTTP+SSE client for the Steptix API server.
  *
  * Transport-only: no error formatting, no .env parsing. Callers map the
  * `ApiClientError` codes below into the user-facing STXxxx catalogue.

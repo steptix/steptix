@@ -1,6 +1,6 @@
 # AI guide to writing runnable natural-language tests
 
-Use this document as context for an AI that generates tests for **steptix** (`steptix`, also used by Steptix). It describes the implementation in this repository, checked on 2026-09-21. If the framework changes, check the source references at the end before assuming the grammar is unchanged.
+Use this document as context for an AI that generates tests for **Steptix** (the `steptix` CLI and the Steptix VS Code extension). It describes the implementation in this repository, checked on 2026-09-21. If the framework changes, check the source references at the end before assuming the grammar is unchanged.
 
 This is the rule-by-rule reference. For the mental model of how a step is executed and the phrasing that is known to work, read [test-writing-handbook.md](test-writing-handbook.md) first.
 

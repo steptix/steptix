@@ -1,7 +1,7 @@
 /**
  * Live end-to-end STOP → report test (issue 021).
  *
- * Drives securebank.md against the REAL steptix Sessions API server
+ * Drives securebank.md against the REAL Steptix Sessions API server
  * (SERVER_URL from templates/.env, expected on http://localhost:3100). A real
  * browser opens, real AI calls happen. Validates that after a user STOP:
  *   - the run halts promptly (ties to issue 020's fast-stop),

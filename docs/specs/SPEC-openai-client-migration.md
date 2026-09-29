@@ -188,7 +188,7 @@ variant `{ ok: false, body: <error message> }`. Keep the `logger.debug` POST lin
   (note `runner-core/` has its own `sse-parser.ts`; the api-server's own SSE may
   also use it). Remove from deps only if the grep comes back empty in `src/`.
 
-`AiClient` is server-side and **not** bundled into the steptix VSIXes (verified:
+`AiClient` is server-side and **not** bundled into the Steptix VSIXes (verified:
 no `ai/client` import under `runner-core/` or `steptix-*/`), so the `openai` dep
 does not affect extension size. It is pulled into the CLI/server and the Tauri
 (Flick) Node side.

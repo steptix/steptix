@@ -416,7 +416,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('Stop during the health poll: the run is aborted, not a STX028', async () => {
+  it('Stop during the health poll: the run is aborted, not an STX028', async () => {
     probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
     await setAutoStart({ command: 'node dist/index.js serve', cwd: FIXTURES_DIR, readyTimeoutSeconds: 30 });
 

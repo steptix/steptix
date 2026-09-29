@@ -60,7 +60,7 @@ export const SCAFFOLD_CONFIG = `{
 export async function initCommand(targetDir: string, force: boolean): Promise<void> {
   const absTarget = path.resolve(targetDir);
 
-  console.log(chalk.bold(`\nInitialising steptix project in: ${chalk.cyan(absTarget)}\n`));
+  console.log(chalk.bold(`\nInitialising Steptix project in: ${chalk.cyan(absTarget)}\n`));
 
   // Resolve templates directory relative to this module
   // In source: src/cli/commands/ -> ../../.. -> project root -> templates/init

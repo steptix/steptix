@@ -285,7 +285,7 @@ describe('steptix stop', () => {
     expect(text).toMatch(/3 session\(s\) open/);
     expect(text).toMatch(/--force/);
     // The distinction that makes the 409 rule comprehensible.
-    expect(text).toMatch(/Open Steptix sessions alone never block a stop/);
+    expect(text).toMatch(/Open Steptix extension sessions alone never block a stop/);
   });
 
   it('refuses to send the key to a port that is not a Steptix server', async () => {

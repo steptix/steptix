@@ -2,7 +2,7 @@
 //
 // Spins up everything end-to-end with real tokens:
 //   1. fixtures/test-app/server.ts on http://localhost:8787 (the target site)
-//   2. steptix Sessions API server on http://localhost:3100
+//   2. Steptix Sessions API server on http://localhost:3100
 //      (real `serve` subcommand, loading templates/.env for AI_API_KEY etc.)
 //   3. VS Code with the flick-vscode extension under @vscode/test-electron
 //   4. A Mocha suite that drives Flick to submit a real step batch and

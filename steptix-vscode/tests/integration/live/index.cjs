@@ -2,7 +2,7 @@
 // @vscode/test-electron when runLiveTest.cjs launches VS Code.
 //
 // Unlike tests/integration/suite/, this entry runs against the real
-// steptix Sessions API server (assumed running at the
+// Steptix Sessions API server (assumed running at the
 // SERVER_URL in templates/.env). The single test exercises the
 // pause / resume / pause sequence end-to-end including a real browser.
 const path = require('node:path');

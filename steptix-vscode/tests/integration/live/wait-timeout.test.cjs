@@ -1,7 +1,7 @@
 /**
  * Live end-to-end WAIT timeout-hint + abort-aware-wait test (issue 022).
  *
- * Drives generated fixtures against the REAL steptix Sessions API
+ * Drives generated fixtures against the REAL Steptix Sessions API
  * server (SERVER_URL from templates/.env, expected on http://localhost:3100) —
  * real browser, real AI calls. A small local HTTP server provides a page whose
  * "Ready now" element appears only after ~12s, so a wait that beats the old 10s

@@ -268,7 +268,7 @@ Here steps 1 and 4 both call `### Login`, and step 3 calls `### Checkout`. Each 
 
 **Names** may contain spaces (`### Log in as admin`). Refused at parse time: a reserved H2 keyword (`Steps`, `Config`, `Parameters`, `Outputs`, `Hooks`), a name beginning with `[`, a name containing `{{`, an empty name, and a duplicate (case-insensitively) within one file.
 
-**Editor support.** Steptix runs sectioned files with full debug parity — gutter status on body lines, breakpoints inside a body, step-into a section, and a call stack that names it — plus go-to-definition, links, completion, and the diagnostics above. TestBench (Monaco), the legacy variant, has no sections support and refuses to run a sectioned file (STX026) rather than mis-run it; use Steptix or the CLI.
+**Editor support.** Steptix runs sectioned files with full debug parity — gutter status on body lines, breakpoints inside a body, step-into a section, and a call stack that names it — plus go-to-definition, links, completion, and the diagnostics above.
 
 Hooks never resolve to sections: a `## Hooks` entry or a project `defaultHooks` entry equal to a section name stays an ordinary AI step.
 

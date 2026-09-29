@@ -18,7 +18,7 @@
 
 ## Overview
 
-Flick is a lightweight desktop application for sending natural language steps to the steptix Sessions API. It presents a chat-style interface where non-technical users can type instructions, submit them, and see results — including screenshots — from browser sessions running locally or on remote machines.
+Flick is a lightweight desktop application for sending natural language steps to the Steptix Sessions API. It presents a chat-style interface where non-technical users can type instructions, submit them, and see results — including screenshots — from browser sessions running locally or on remote machines.
 
 Built with Tauri. Distributed as a single executable with no installer required. Runs on Windows, macOS, and Linux.
 

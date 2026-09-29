@@ -2,7 +2,7 @@
   "name": "steptix-runner-core",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "description": "Shared client runtime for steptix runners (VS Code extension, Electron app)",
+  "description": "Shared client runtime for Steptix runners (VS Code extension, Electron app)",
   "private": true,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

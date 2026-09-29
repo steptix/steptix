@@ -49,7 +49,7 @@ Plus: a **Variables panel** that shows the current frame's variable scope
    reuses an existing one) and pauses inside the tool's `.ts` file at the
    first executable line of `run()`. The standard VS Code debug toolbar
    drives execution inside the tool. When the tool returns, the steptix
-   run resumes and the steptix UI takes over the arrow again.
+   run resumes and the Steptix UI takes over the arrow again.
 4. **Tool step-into without `--inspect`.** Author hits F11 on a `[tool: ...]`
    line but the server wasn't launched with `--inspect`. A
    `vscode.window.showErrorMessage` surfaces a one-line cause + a "How to
@@ -520,7 +520,7 @@ The work is large enough to benefit from horizontal slices.
   extension tests.
 - **Manual (tool step-into):** run a fixture that calls a real tool
   with the server launched `--inspect`. Verify F11 attaches, pauses,
-  stepping works, resume returns control to the steptix run.
+  stepping works, resume returns control to the Steptix run.
 - **Manual (degraded modes):** remote `SERVER_URL` → tool step-into
   errors gracefully; server without `--inspect` → tool step-into
   errors gracefully; older server without frame events → skill step-

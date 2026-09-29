@@ -15,7 +15,7 @@ Three differences:
 2. FSD has `:screenshot` (capture into report on demand).
 3. FSD is failure-triggered + gated; interactive is marker-triggered + unconditional.
 
-Everything else — typing a line and routing it through `executeStep`, conversation-history tracking, live-page targeting, exit-aborts-the-run — is duplicated. The runner-core REPL ([`runner-core/src/repl.ts`](../runner-core/src/repl.ts)) used by the steptix is a third copy with yet another command vocabulary.
+Everything else — typing a line and routing it through `executeStep`, conversation-history tracking, live-page targeting, exit-aborts-the-run — is duplicated. The runner-core REPL ([`runner-core/src/repl.ts`](../runner-core/src/repl.ts)) used by the Steptix extension is a third copy with yet another command vocabulary.
 
 ## Goal
 

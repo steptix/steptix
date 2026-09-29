@@ -245,7 +245,7 @@ Preserve: never leak the key value; keep the delete-vs-assign for `exactOptional
 - **`package.json`**: add `@pkent/aigateway` (`^1.2.0`); **remove `openai`** (no
   longer imported directly — it becomes transitive via `@pkent/aigateway`).
 - **Types:** `@pkent/aigateway` ships **no TypeScript types** (plain JS). Add a
-  local ambient declaration in steptix (e.g.
+  local ambient declaration in Steptix (e.g.
   `src/types/aigateway.d.ts`) for the surface used: the `AIGateway` class
   (`constructor(model, key, options?)`, `chat(messages, opts?): Promise<V2Response>`,
   `stream(messages, opts?): AsyncIterable<{type:'text_delta',text}> & { final: Promise<V2Response> }`)

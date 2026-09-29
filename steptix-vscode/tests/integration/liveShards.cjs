@@ -26,7 +26,6 @@ const WORKSPACE_COPY_SKIP = new Set([
   '.steptix',
   '.steptix-codebehind-cache',
   '.steptix-tool-cache',
-  '.steptix',
 ]);
 
 /**

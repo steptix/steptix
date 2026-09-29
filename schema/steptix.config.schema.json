@@ -495,7 +495,7 @@
             "info",
             "debug"
           ],
-          "description": "Threshold for the console + steptix SSE output stream. Levels are suppressed below this threshold:   - 'silent': nothing   - 'error':  errors only   - 'warn':   errors + warnings   - 'info':   errors + warnings + info (no debug noise)   - 'debug':  everything, including BEGIN/END traceOp markers The run log file always captures every level regardless of this setting."
+          "description": "Threshold for the console + Steptix SSE output stream. Levels are suppressed below this threshold:   - 'silent': nothing   - 'error':  errors only   - 'warn':   errors + warnings   - 'info':   errors + warnings + info (no debug noise)   - 'debug':  everything, including BEGIN/END traceOp markers The run log file always captures every level regardless of this setting."
         },
         "serverFileLogLevel": {
           "type": "string",

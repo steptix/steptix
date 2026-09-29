@@ -327,7 +327,7 @@ test('start: a never-healthy server times out and quotes the log tail', async ()
 });
 
 test('start: an abort during the poll reports aborted, not a failure', async () => {
-  // Stop during the wait must yield an aborted run, never a STX028.
+  // Stop during the wait must yield an aborted run, never an STX028.
   const ac = new AbortController();
   const result = await startServerAndWait({
     serverUrl: 'http://127.0.0.1:3100',

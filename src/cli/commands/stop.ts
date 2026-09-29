@@ -114,7 +114,7 @@ export async function stopCommand(opts: StopOptions): Promise<number> {
     );
     console.error(
       chalk.dim(
-        'Open Steptix sessions alone never block a stop — they are closed as part of it. ' +
+        'Open Steptix extension sessions alone never block a stop — they are closed as part of it. ' +
           'Only a run that is actually executing does.',
       ),
     );
