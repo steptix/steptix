@@ -1,6 +1,7 @@
 {
   "name": "steptix",
   "version": "1.0.0",
+  "license": "Apache-2.0",
   "description": "AI-powered UI test automation using natural language Markdown test files",
   "type": "module",
   "bin": {

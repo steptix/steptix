@@ -1245,3 +1245,7 @@ To avoid that:
 
 - headed mode uses `windowSize`
 - headless mode uses `viewport`
+
+## License
+
+Steptix is licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2026 Paul Kent; see [NOTICE](NOTICE).

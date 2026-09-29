@@ -35,6 +35,13 @@ Copilot for AI" once more.
 Entries below this one, and resolved issues, keep the names they were written
 with.
 
+### Added — an Apache-2.0 licence
+
+Steptix is licensed under the Apache License, Version 2.0, as Playwright is.
+`LICENSE` and `NOTICE` sit at the repo root, both extensions carry a copy of
+`LICENSE` so it ships inside each `.vsix`, and every `package.json` declares
+`"license": "Apache-2.0"`.
+
 ### Added — a first-try scoreboard: `aiui stats`
 
 Every run now keeps a short record, on this machine only, of each AI action

@@ -3,6 +3,7 @@
   "displayName": "Steptix",
   "publisher": "pkent",
   "version": "0.5.160",
+  "license": "Apache-2.0",
   "description": "Write, run and debug Steptix natural-language tests in VS Code",
   "private": true,
   "engines": {
