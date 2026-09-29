@@ -9,11 +9,15 @@ top CHANGELOG entry for the full map. Resolved issues and older CHANGELOG
 entries keep the old names on purpose; read `aiui` there as `steptix` and
 `TB028` as `STX028`.
 
-Two old names are still live: the checkout folder
-`c:\Projects\vibe\ai-ui-automation` and the GitHub repo
-`pkent/ai-ui-automation`. Renaming those moves every worktree and the Claude
-memory folder keyed on the path, so it is a separate step, done with no
+One old name is still live: the checkout folder
+`c:\Projects\vibe\ai-ui-automation`. Renaming it moves every worktree and the
+Claude memory folder keyed on the path, so it is a separate step, done with no
 worktrees open.
+
+The GitHub repo is `pkent/steptix` (renamed from `pkent/ai-ui-automation` on
+2026-09-30). GitHub redirects the old URL, so the links to it in resolved
+issues, stories and older CHANGELOG entries keep working and were left as
+written.
 
 ## Flick: one client
 
