@@ -14,6 +14,8 @@
  * tests/server-manager.test.js.
  */
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const vscode = require('vscode');
 const { FakeApiClient } = require('../fakes/fake-api-client.cjs');
@@ -61,6 +63,9 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
   let probeResult;
   /** When set, a spawn flips `probeResult` to healthy — the server coming up. */
   let spawnBringsServerUp;
+  /** Extra work a spawn does before the server comes up, e.g. writing the
+   *  machine key the way a real `steptix serve` does. */
+  let onSpawn;
 
   before(async () => {
     const ext = vscode.extensions.getExtension(EXT_ID);
@@ -91,6 +96,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
     spawns = [];
     probeResult = HEALTHY();
     spawnBringsServerUp = false;
+    onSpawn = null;
     fake = new FakeApiClient();
     // lastRunError is registry-wide and sticky — without this, "no error was
     // reported" assertions read the PREVIOUS test's STX027/STX028.
@@ -101,6 +107,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
       healthProbe: async () => probeResult,
       spawnServer: (args) => {
         spawns.push(args);
+        if (onSpawn) onSpawn(args);
         if (spawnBringsServerUp) probeResult = HEALTHY();
       },
       // Real cadence is 5 minutes; shrink it so the PING is observable, not
@@ -232,6 +239,111 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
     assert.equal(spawns.length, 1);
     assert.equal(fake.streamCallCount, 0, 'the run must not reach the server');
     assert.ok(Date.now() - started < 15_000, 'gave up around the configured budget');
+  });
+
+  // -------------------------------------------------------------------------
+  // stories/machine-key.md — a machine with no key anywhere
+  // -------------------------------------------------------------------------
+
+  describe('no API key anywhere', () => {
+    const PROJECT_DIR = path.join(FIXTURES_DIR, 'no-key-project');
+    const TEST_MD = path.join(PROJECT_DIR, 'no-key.md');
+    const GENERATED_KEY = 'steptix_generated-by-the-spawned-serve';
+    /** Stands in for %LOCALAPPDATA% (or $XDG_CONFIG_HOME) — the machine key
+     *  lives at `<this>/steptix/.env` either way. */
+    let userRootBase;
+    /** Every key a client was built with. */
+    let keys;
+    const saved = {};
+    const ENV_VARS = ['LOCALAPPDATA', 'XDG_CONFIG_HOME', 'STEPTIX_SERVER_API_KEY'];
+
+    beforeEach(async () => {
+      // The suite's own fixture .env carries a key; this project's does not.
+      const serverUrlLine = fs
+        .readFileSync(path.join(FIXTURES_DIR, '.env'), 'utf-8')
+        .split(/\r?\n/)
+        .find((l) => l.startsWith('SERVER_URL='));
+      assert.ok(serverUrlLine, 'fixtures/.env must carry SERVER_URL');
+      fs.mkdirSync(PROJECT_DIR, { recursive: true });
+      fs.writeFileSync(path.join(PROJECT_DIR, '.env'), `${serverUrlLine}\n`);
+      fs.copyFileSync(path.join(FIXTURES_DIR, 'test-with-steps.md'), TEST_MD);
+
+      // The extension host is this process, so the machine-key lookup reads
+      // these very variables.
+      userRootBase = fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-nokey-'));
+      for (const name of ENV_VARS) saved[name] = process.env[name];
+      process.env.LOCALAPPDATA = userRootBase;
+      process.env.XDG_CONFIG_HOME = userRootBase;
+      delete process.env.STEPTIX_SERVER_API_KEY;
+
+      keys = [];
+      hooks.setApiClientFactory((config) => {
+        keys.push(config.apiKey);
+        return fake;
+      });
+
+      const uri = vscode.Uri.file(TEST_MD);
+      await vscode.commands.executeCommand('vscode.open', uri);
+      await waitFor('no-key fixture active', () => {
+        const editor = vscode.window.activeTextEditor;
+        return editor && editor.document.uri.toString() === uri.toString();
+      });
+      await waitFor('active file detected', () => hooks.tracker.snapshot().isTestFile);
+    });
+
+    afterEach(async () => {
+      for (const name of ENV_VARS) {
+        if (saved[name] === undefined) delete process.env[name];
+        else process.env[name] = saved[name];
+      }
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      fs.rmSync(PROJECT_DIR, { recursive: true, force: true });
+      fs.rmSync(userRootBase, { recursive: true, force: true });
+    });
+
+    it('down + configured: auto-starts, then runs with the key the server wrote', async () => {
+      // The bug this pins: the key used to be required BEFORE the server
+      // check, so the run refused with STX003 and the auto-start — whose
+      // `steptix serve` is what generates the machine key — never ran.
+      probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
+      spawnBringsServerUp = true;
+      onSpawn = () => {
+        fs.mkdirSync(path.join(userRootBase, 'steptix'), { recursive: true });
+        fs.writeFileSync(
+          path.join(userRootBase, 'steptix', '.env'),
+          `STEPTIX_SERVER_API_KEY=${GENERATED_KEY}\n`,
+        );
+      };
+      await setAutoStart({ command: 'node dist/index.js serve', cwd: FIXTURES_DIR, readyTimeoutSeconds: 10 });
+
+      void vscode.commands.executeCommand('steptix.runAll');
+      await waitFor('stream active', () => fake.hasActiveStream);
+
+      assert.equal(spawns.length, 1, 'the missing key must not stop the auto-start');
+      assert.equal(hooks.lastRunError(), null);
+      assert.ok(keys.length > 0, 'a client was built');
+      assert.deepEqual([...new Set(keys)], [GENERATED_KEY], 'every client sends the generated key');
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('healthy server, no key: STX003 naming the machine key file, no session', async () => {
+      // A server we did not start holds a key we cannot learn, so refusing is
+      // still the honest answer — only now it comes after the server check.
+      probeResult = HEALTHY();
+
+      await vscode.commands.executeCommand('steptix.runAll');
+      await waitFor('STX003 reported', () => hooks.lastRunError()?.code === 'STX003');
+
+      assert.deepEqual(spawns, [], 'a healthy server is never spawned over');
+      assert.equal(fake.streamCallCount, 0, 'no session should be created');
+      assert.ok(
+        hooks.lastRunError().diagnosis.includes(path.join(userRootBase, 'steptix', '.env')),
+        'the diagnosis names the machine key file it looked in',
+      );
+      assert.equal(hooks.isRunning(), false);
+    });
   });
 
   it('a failed start is not retried by the next run — no per-test spawn storm', async () => {

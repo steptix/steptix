@@ -21,6 +21,7 @@ tests/integration/fixtures/sub/
 tests/integration/fixtures/snc-project/
 tests/integration/fixtures/dc-project/
 tests/integration/fixtures/sac-project/
+tests/integration/fixtures/no-key-project/
 
 # Remembered wall-clock per live test file, used to start the slow ones first.
 # A local timing hint, not a fact about the code — machine-specific, and stale

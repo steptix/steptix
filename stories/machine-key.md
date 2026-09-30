@@ -51,7 +51,11 @@ a full user root. Nothing here depends on that story; it depends on this one.
 > `AI_API_KEY` and `AI_MODEL` when the project sets neither; (9) a project's
 > own `AI_MODEL` beats the user root's whether it is set in the project
 > `.env` **or** in the project's `steptix.config.json` — the machine value is a
-> floor, never an override.
+> floor, never an override; (10) on a machine with no key anywhere and no
+> server running, a Steptix Run with auto-start configured starts the server
+> and passes, sending the key that server generated. With a server already
+> running and no key anywhere, the same Run refuses with STX003 and spawns
+> nothing.
 
 ## Context
 
@@ -109,6 +113,23 @@ absent (by the second write it may carry values the user added by hand):
   *it* was given), so the honest answer there stays a refusal naming the
   file to write. Bare `serve` binds the port itself, so the conflict cannot
   arise on its path.
+
+Steptix is on neither list and never generates: a key it invented would be
+one no running server holds. But its auto-start (server-lifecycle §5.6)
+spawns exactly the bare `serve` above, so on a machine with no key yet,
+**Steptix reads the key after the server check, not before.** Server down,
+on this machine and auto-start configured: spawn, wait for `/health`, then
+read the chain below; the spawned `serve` has written the machine key by
+then. Server already up, or not ours to start, and still no key: refuse
+with STX003, naming the file, which is the same answer the MCP server gives
+for the same case.
+
+*Amended 2026-10-01.* As first built, Steptix required the key before the
+server check. A fresh machine whose only client was Steptix therefore
+refused every run with STX003, and the auto-start that would have created
+the key never ran. Verification rule (2) did not catch it, because it ran
+Steptix against a server `serve` had already started. Rule (10) covers
+the case.
 
 **One resolution order, explicit beating generated:**
 
