@@ -70,7 +70,7 @@ spec.
 ## Develop
 
 ```powershell
-cd c:\Projects\vibe\ai-ui-automation\flick-vscode
+cd flick-vscode        # from the repo root
 npm install
 npm run build          # or: npm run watch
 npm run dev            # build + launch an Extension Development Host

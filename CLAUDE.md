@@ -9,10 +9,16 @@ top CHANGELOG entry for the full map. Resolved issues and older CHANGELOG
 entries keep the old names on purpose; read `aiui` there as `steptix` and
 `TB028` as `STX028`.
 
-One old name is still live: the checkout folder
-`c:\Projects\vibe\ai-ui-automation`. Renaming it moves every worktree and the
-Claude memory folder keyed on the path, so it is a separate step, done with no
-worktrees open.
+The checkout folder was renamed from `ai-ui-automation` to `steptix` as well.
+Anything that stored the old absolute path went stale with the rename rather
+than failing loudly — notably the two `node_modules` junctions in the main
+checkout, see [Why the junction repair matters](#why-the-junction-repair-matters).
+So commands here don't hardcode where the checkout lives: they write it as
+`<main-checkout>`, and git can tell you from inside any worktree:
+
+```powershell
+(git worktree list --porcelain)[0] -replace '^worktree ', ''
+```
 
 The GitHub repo is `pkent/steptix` (renamed from `pkent/ai-ui-automation` on
 2026-09-30). GitHub redirects the old URL, so the links to it in resolved
@@ -57,7 +63,7 @@ extension (anything under `steptix-vscode/`, **and** anything under
 The install/verify loop is then:
 
 ```powershell
-cd c:\Projects\vibe\ai-ui-automation\steptix-vscode
+cd <main-checkout>\steptix-vscode
 npm run build
 npm run package
 & "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd" `
@@ -154,12 +160,13 @@ them, nothing works and `npm install` × 5 costs several minutes.
 Run this script once, right after the worktree is created:
 
 ```powershell
-c:\Projects\vibe\ai-ui-automation\scripts\init-worktree.ps1 `
+<main-checkout>\scripts\init-worktree.ps1 `
     -Destination <full-path-to-new-worktree> -AutoPort
 ```
 
-It copies (not symlinks/junctions) env files and build dirs from the main
-checkout at `c:\Projects\vibe\ai-ui-automation`, so the worktree is
+It copies (not symlinks/junctions) env files and build dirs from the checkout
+the script itself sits in — which is why it's the main checkout's copy you
+run, not the new worktree's — so the worktree is
 independent and safe if `package.json` diverges between branches. It then
 re-points the runner-core junction, builds `dist/` in all three projects, and
 rewrites `SERVER_URL` in the worktree's `.env` files to the port it allocated.
@@ -497,6 +504,23 @@ also fixes it.
 during a copy would recurse the entire checkout into itself — so the script
 excludes it from the robocopy outright and creates it fresh, pointed at the
 worktree.
+
+The script repairs the *worktree's* junctions, not the source's. Because they
+hold absolute paths, moving or renaming the main checkout leaves its own two
+junctions dangling, and seeding then dies copying `steptix-vscode/node_modules/`
+with `robocopy failed ... (exit 8)` or `(exit 9)`. Measured 2026-09-30, after
+the `ai-ui-automation` → `steptix` folder rename. Fix it in the main checkout:
+`npm install` in `steptix-vscode/` and `fixtures/tools/`, or re-point the two
+junctions by hand. `Remove-Item` on a junction can delete what it points to, so
+remove only the link:
+
+```powershell
+$m = (git worktree list --porcelain)[0] -replace '^worktree ', ''
+[System.IO.Directory]::Delete("$m\steptix-vscode\node_modules\steptix-runner-core", $false)
+New-Item -ItemType Junction -Path "$m\steptix-vscode\node_modules\steptix-runner-core" -Target "$m\runner-core"
+[System.IO.Directory]::Delete("$m\fixtures\tools\node_modules\steptix", $false)
+New-Item -ItemType Junction -Path "$m\fixtures\tools\node_modules\steptix" -Target $m
+```
 
 ### Why `dist/` has to be built in the worktree
 

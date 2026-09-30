@@ -335,13 +335,16 @@ is a separate *profile*.
 
 **Copilot in VS Code** — [.vscode/mcp.json](.vscode/mcp.json) is checked in.
 
+These two are machine-global, so their paths must be absolute: replace
+`C:/path/to/steptix` with where you cloned this repo.
+
 **Codex CLI** (and the Codex VS Code extension), in `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.steptix]
 command = "node"
-args = ["c:/Projects/vibe/ai-ui-automation/dist/index.js", "mcp"]
-env = { STEPTIX_MCP_ROOTS = "c:/Projects/vibe/ai-ui-automation" }
+args = ["C:/path/to/steptix/dist/index.js", "mcp"]
+env = { STEPTIX_MCP_ROOTS = "C:/path/to/steptix" }
 ```
 
 **Copilot CLI**, in `~/.copilot/mcp-config.json`:
@@ -352,8 +355,8 @@ env = { STEPTIX_MCP_ROOTS = "c:/Projects/vibe/ai-ui-automation" }
     "steptix": {
       "type": "stdio",
       "command": "node",
-      "args": ["c:/Projects/vibe/ai-ui-automation/dist/index.js", "mcp"],
-      "env": { "STEPTIX_MCP_ROOTS": "c:/Projects/vibe/ai-ui-automation" }
+      "args": ["C:/path/to/steptix/dist/index.js", "mcp"],
+      "env": { "STEPTIX_MCP_ROOTS": "C:/path/to/steptix" }
     }
   }
 }

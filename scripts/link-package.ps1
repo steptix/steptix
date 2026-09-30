@@ -7,8 +7,8 @@
 
 # --- Configure these ---------------------------------------------------------
 
-# Change this path to point to the Steptix directory.
-$PackagePath = "C:\Projects\vibe\ai-ui-automation"
+# The Steptix checkout this script sits in. Change it only to link a different one.
+$PackagePath = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
 # Change this path to be the root folder where the test project is in.
 # This is the folder where the symbolic/junction link should be created.
@@ -23,8 +23,10 @@ if (-not (Test-Path $PackagePath -PathType Container)) {
     throw "PackagePath does not exist (or is not a directory): $PackagePath"
 }
 
-# Use the package folder's own name as the link name (e.g. "steptix").
-$linkName = Split-Path $PackagePath -Leaf
+# Name the link after the package, not its folder: consumers import it by
+# package name, and a checkout's folder (e.g. a worktree's) can be called
+# anything.
+$linkName = (Get-Content (Join-Path $PackagePath 'package.json') -Raw | ConvertFrom-Json).name
 $linkPath = Join-Path $NodeModulesPath $linkName
 
 if (-not (Test-Path $NodeModulesPath)) {
