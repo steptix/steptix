@@ -117,7 +117,7 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   }),
   STX003: (ctx) => ({
     diagnosis: `STEPTIX_SERVER_API_KEY is nowhere: not in ${ctx.envPath}, not in the VS Code process environment, and no machine key at ${ctx.machineEnvPath}`,
-    fix: 'Start the server once (`steptix serve` generates the machine key and writes it there), or add STEPTIX_SERVER_API_KEY=<key> to the machine key file or this project\'s .env.',
+    fix: 'Start the server once and it writes the machine key there — set "steptix.serverAutoStart.command" and "steptix.serverAutoStart.cwd" and Run does it for you, or run `steptix serve`. If a server is already running, it was started with a key this machine does not have: add STEPTIX_SERVER_API_KEY=<that key> to the machine key file or this project\'s .env.',
     actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
   STX004: (ctx) => ({

@@ -35,6 +35,19 @@ Copilot for AI" once more.
 Entries below this one, and resolved issues, keep the names they were written
 with.
 
+### Fixed — a Run on a machine with no key starts the server instead of refusing
+
+On a machine with no `STEPTIX_SERVER_API_KEY` anywhere (not in the project's
+`.env`, not in the environment, and no `%LOCALAPPDATA%\steptix\.env`), Steptix
+refused every Run with STX003. It asked for the key before the server check.
+So the auto-start, whose `steptix serve` is what generates the machine key,
+never got to run. Steptix now reads the key once the server is ready: a
+configured auto-start brings the server up, the server writes the key, and
+the Run goes ahead with it. With a server already running and still no key,
+STX003 stands, because Steptix cannot learn that server's key, and its fix
+text now says so. Record Steps behaves the same way.
+stories/machine-key.md records the case as verification rule (10).
+
 ### Added — an Apache-2.0 licence
 
 Steptix is licensed under the Apache License, Version 2.0, as Playwright is.

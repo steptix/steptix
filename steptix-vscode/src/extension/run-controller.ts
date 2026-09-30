@@ -2106,8 +2106,10 @@ export class RunController {
   /**
    * Everything a request to the server needs from the project's env: the
    * resolved `.env` (with the selected environment's `.env.<name>` laid over
-   * it), SERVER_URL, and the API key by the machine-key chain. Refusals are
-   * the STXxxx payloads a run has always failed with; the caller reports them.
+   * it) and SERVER_URL. Refusals are the STXxxx payloads a run has always
+   * failed with; the caller reports them.
+   *
+   * NOT the API key: that is `resolveApiKey`'s, after the server is ready.
    *
    * Lifted out of `runLinesInner` unchanged so Record Steps resolves the same
    * server, the same env map and the same errors a Run does.
@@ -2122,7 +2124,6 @@ export class RunController {
         envPath: string;
         envName: string | null;
         serverUrl: string;
-        apiKey: string;
       }
     | { ok: false; payload: ErrorPayload }
   > {
@@ -2241,21 +2242,38 @@ export class RunController {
       const payload = reportError('STX004', { envPath: envResolution.path, value: serverUrl });
       return { ok: false, payload };
     }
-    // The client chain of stories/machine-key.md: the project's walk-up .env,
-    // then the extension host's environment, then the machine key. Most
-    // machines only ever have the last one — `steptix serve` generates it.
-    const projectKey = env['STEPTIX_SERVER_API_KEY']?.trim();
-    const processKey = process.env['STEPTIX_SERVER_API_KEY']?.trim();
-    const apiKey = projectKey || processKey || readMachineKey() || '';
+    return { ok: true, env, envPath: envResolution.path, envName: effectiveEnvName, serverUrl };
+  }
+
+  /**
+   * The API key by the client chain of stories/machine-key.md: the project's
+   * walk-up .env, then the extension host's environment, then the machine
+   * key. Most machines only ever have the last one — `steptix serve`
+   * generates it.
+   *
+   * Called once the server is ready, never before: on a machine with no key
+   * yet, the `steptix serve` that auto-start spawns is what writes the machine
+   * key. Asking first refused the very run whose auto-start would have
+   * created it. A key still missing now means the server is up (or is not
+   * ours to start) and this machine holds no key for it — STX003.
+   */
+  private resolveApiKey(target: {
+    env: Record<string, string>;
+    envPath: string;
+  }): { kind: 'proceed'; apiKey: string } | { kind: 'fail'; payload: ErrorPayload } {
+    const apiKey =
+      target.env['STEPTIX_SERVER_API_KEY']?.trim() ||
+      process.env['STEPTIX_SERVER_API_KEY']?.trim() ||
+      readMachineKey() ||
+      '';
     if (apiKey === '') {
       const payload = reportError('STX003', {
-        envPath: envResolution.path,
+        envPath: target.envPath,
         machineEnvPath: userRootEnvPath(),
       });
-      return { ok: false, payload };
+      return { kind: 'fail', payload };
     }
-
-    return { ok: true, env, envPath: envResolution.path, envName: effectiveEnvName, serverUrl, apiKey };
+    return { kind: 'proceed', apiKey };
   }
 
   /**
@@ -2777,11 +2795,12 @@ export class RunController {
     log(`run requested for ${filePath}: lines=[${lines.join(',')}]`);
 
     const settings = vscode.workspace.getConfiguration('steptix');
-    // .env, the selected environment, SERVER_URL and the API key — shared with
-    // Record Steps, which needs the same server and the same env map.
+    // .env, the selected environment and SERVER_URL — shared with Record
+    // Steps, which needs the same server and the same env map. The API key
+    // comes later, once the server is ready (resolveApiKey).
     const target = await this.resolveServerTarget(options.envOverride, log);
     if (!target.ok) return this.fail(target.payload, log);
-    const { env, serverUrl, apiKey } = target;
+    const { env, serverUrl } = target;
     const envResolution = { path: target.envPath };
     const effectiveEnvName = target.envName;
 
@@ -2893,10 +2912,14 @@ export class RunController {
         // needs it, since a run that sends nothing generates no traffic at
         // all. The session being kept alive belongs to a PREVIOUS run
         // (`this.currentClient` isn't built yet), so hand one in explicitly.
-        this.startKeepAlive({
-          client: this.clientFactory({ serverUrl, apiKey }),
-          sessionId: filePath,
-        });
+        // With no key there was no previous run on this server to keep alive.
+        const keyed = this.resolveApiKey(target);
+        if (keyed.kind === 'proceed') {
+          this.startKeepAlive({
+            client: this.clientFactory({ serverUrl, apiKey: keyed.apiKey }),
+            sessionId: filePath,
+          });
+        }
       }
       this.emitRunEvent({ type: 'done', status: 'aborted' });
       return { ok: true };
@@ -2962,7 +2985,9 @@ export class RunController {
     const ac = new AbortController();
     this.active = ac;
 
-    const serverReady = await this.ensureServerReady({ serverUrl, signal: ac.signal, log });
+    const ready = await this.ensureServerReady({ serverUrl, signal: ac.signal, log });
+    // Only now the key: an auto-started `serve` may just have generated it.
+    const serverReady = ready.kind === 'proceed' ? this.resolveApiKey(target) : ready;
     if (serverReady.kind !== 'proceed') {
       // Same per-run cleanup the main body's `finally` does. This return
       // happens before that try block, so the state it sets up — notably the
@@ -2980,6 +3005,7 @@ export class RunController {
       this.emitRunEvent({ type: 'done', status: 'error' });
       return this.fail(serverReady.payload, log);
     }
+    const { apiKey } = serverReady;
 
     // Server is up and the probe's inspector answer is fresh — let the
     // injected hook attach a debugger BEFORE any step (or code-behind module
@@ -5502,7 +5528,7 @@ export class RunController {
         return { status: 'error', error: `${target.payload.diagnosis}. ${target.payload.fix}` };
       }
       if (ac.signal.aborted) return { status: 'cancelled' };
-      const { env, serverUrl, apiKey } = target;
+      const { env, serverUrl } = target;
 
       // The same first-use close a Run makes: a session keyed on this path may
       // be left over from another window, and `config` sent to it would be
@@ -5518,6 +5544,13 @@ export class RunController {
         this.fail(ready.payload, log);
         return { status: 'error', error: `${ready.payload.diagnosis}. ${ready.payload.fix}` };
       }
+      // After the server is ready, as a Run does (resolveApiKey).
+      const keyed = this.resolveApiKey(target);
+      if (keyed.kind === 'fail') {
+        this.fail(keyed.payload, log);
+        return { status: 'error', error: `${keyed.payload.diagnosis}. ${keyed.payload.fix}` };
+      }
+      const { apiKey } = keyed;
 
       const client = this.clientFactory({ serverUrl, apiKey });
       if (typeof client.streamRecordSteps !== 'function') {
