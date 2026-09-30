@@ -17,6 +17,7 @@ export type ErrorCode =
   | 'STX004'
   | 'STX005'
   | 'STX006'
+  | 'STX007'
   | 'STX010'
   | 'STX011'
   | 'STX012'
@@ -63,6 +64,10 @@ export interface ErrorContextMap {
   STX004: { envPath: string; value: string };
   STX005: { envPath: string; lineNumber: number; line: string };
   STX006: { envName: string; expectedPath: string; baseEnvPath: string };
+  /** The machine key file exists but could not be read. Distinct from STX003
+   *  ("nowhere"): the key may well be in there. `reason` is the read error's
+   *  message, which names the errno (EACCES, EISDIR, EBUSY…). */
+  STX007: { machineEnvPath: string; reason: string };
   STX010: { serverUrl: string; reason: string };
   STX011: { envPath: string; serverUrl: string };
   STX012: { serverUrl: string };
@@ -134,6 +139,10 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
     diagnosis: `Active environment "${ctx.envName}" is selected, but no .env.${ctx.envName} was found at ${ctx.expectedPath}`,
     fix: `Create .env.${ctx.envName} next to ${ctx.baseEnvPath}, or clear the env selection in the status bar (globe → env).`,
     actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
+  }),
+  STX007: (ctx) => ({
+    diagnosis: `Could not read the machine key file ${ctx.machineEnvPath}: ${ctx.reason}`,
+    fix: 'Make sure it is a file your account can read and that no other program holds it locked, then run again.',
   }),
   STX010: (ctx) => ({
     diagnosis: `Cannot reach the Steptix server at ${ctx.serverUrl} (${ctx.reason})`,

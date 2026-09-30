@@ -48,6 +48,16 @@ STX003 stands, because Steptix cannot learn that server's key, and its fix
 text now says so. Record Steps behaves the same way.
 stories/machine-key.md records the case as verification rule (10).
 
+### Fixed — an unreadable machine key file no longer leaves a test stuck "running"
+
+Moving the key lookup after the server check (above) also moved it after the
+Run is marked active. So a `%LOCALAPPDATA%\steptix\.env` that exists but
+cannot be read (permission denied, a folder by that name, a lock held by
+another program) threw past the cleanup that clears that. The file stayed
+"running" with no message, Run did nothing, Stop could not clear it, and
+only a window reload did. That read now fails the Run with the new
+**STX007**, which names the file and the read error.
+
 ### Added — an Apache-2.0 licence
 
 Steptix is licensed under the Apache License, Version 2.0, as Playwright is.
