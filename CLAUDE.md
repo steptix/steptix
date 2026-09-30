@@ -340,9 +340,12 @@ fall back to `:3100` regardless. Set only one and the tests assert against a
 different server than the extension is driving. The parallel path writes both
 from the same value, so it cannot drift.
 
-`serve` needs no `--env-file`: `%LOCALAPPDATA%\steptix\.env` carries
-`STEPTIX_SERVER_API_KEY`, `AI_API_KEY` and `AI_MODEL` machine-wide, and its key
-matches the one in `.env` and `templates/.env`.
+`serve` needs no `--env-file`: it reads `STEPTIX_SERVER_API_KEY` from
+`%LOCALAPPDATA%\steptix\.env`, the one key on the machine, and generates it
+there if it is missing. `.env` and `templates/.env` carry no key of their own,
+so every client finds the same one. They do set `AI_API_KEY` and `AI_MODEL`,
+which a request sends with it; `%LOCALAPPDATA%\steptix\.env` would only
+supply those as a fallback for a project that sets neither.
 
 The rest is already handled: `runLiveTest.cjs` boots the `fixtures/test-app`
 site the browser-driving suites point at — one app for every shard, since the
