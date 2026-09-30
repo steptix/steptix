@@ -257,7 +257,10 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
     const saved = {};
     const ENV_VARS = ['LOCALAPPDATA', 'XDG_CONFIG_HOME', 'STEPTIX_SERVER_API_KEY'];
 
-    beforeEach(async () => {
+    // Created once and removed once, not per test: the folder sits inside the
+    // test workspace, where the extension's `**/*.md` discovery watcher can
+    // hold it past any retry window, and a rmdir between tests failed EBUSY.
+    before(() => {
       // The suite's own fixture .env carries a key; this project's does not.
       const serverUrlLine = fs
         .readFileSync(path.join(FIXTURES_DIR, '.env'), 'utf-8')
@@ -267,7 +270,23 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
       fs.mkdirSync(PROJECT_DIR, { recursive: true });
       fs.writeFileSync(path.join(PROJECT_DIR, '.env'), `${serverUrlLine}\n`);
       fs.copyFileSync(path.join(FIXTURES_DIR, 'test-with-steps.md'), TEST_MD);
+    });
 
+    after(() => {
+      // The files go unconditionally — a held folder does not stop that — so
+      // a later suite's discovery cannot find a stray test here. The folder
+      // itself is best-effort, as env-overlay's `sub/` is: gitignored, and
+      // `before` recreates it.
+      fs.rmSync(TEST_MD, { force: true });
+      fs.rmSync(path.join(PROJECT_DIR, '.env'), { force: true });
+      try {
+        fs.rmSync(PROJECT_DIR, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+      } catch (err) {
+        console.warn(`[server-lifecycle] could not remove ${PROJECT_DIR}: ${err.message}`);
+      }
+    });
+
+    beforeEach(async () => {
       // The extension host is this process, so the machine-key lookup reads
       // these very variables.
       userRootBase = fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-nokey-'));
@@ -297,8 +316,8 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
         else process.env[name] = saved[name];
       }
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-      fs.rmSync(PROJECT_DIR, { recursive: true, force: true });
-      fs.rmSync(userRootBase, { recursive: true, force: true });
+      // Outside the workspace, so no watcher holds it.
+      fs.rmSync(userRootBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     });
 
     it('down + configured: auto-starts, then runs with the key the server wrote', async () => {
@@ -343,6 +362,25 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
         'the diagnosis names the machine key file it looked in',
       );
       assert.equal(hooks.isRunning(), false);
+    });
+
+    it('unreadable machine key file: STX007, and the file is not left "running"', async () => {
+      // A read error other than "no such file" used to throw out of the run
+      // after it was marked active and before the cleanup that clears that,
+      // so the file stayed "running" and every later Run was a silent no-op.
+      // A folder where the file should be is a portable EISDIR.
+      fs.mkdirSync(path.join(userRootBase, 'steptix', '.env'), { recursive: true });
+      probeResult = HEALTHY();
+
+      for (const attempt of ['first', 'second']) {
+        hooks.clearRunError();
+        await vscode.commands.executeCommand('steptix.runAll');
+        await waitFor(`STX007 on the ${attempt} run`, () => hooks.lastRunError()?.code === 'STX007');
+        await waitFor(`idle after the ${attempt} run`, () => !hooks.isRunning());
+      }
+
+      assert.match(hooks.lastRunError().diagnosis, /EISDIR/, 'names the read error');
+      assert.equal(fake.streamCallCount, 0, 'no session should be created');
     });
   });
 

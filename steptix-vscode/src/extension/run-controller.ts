@@ -2256,16 +2256,34 @@ export class RunController {
    * key. Asking first refused the very run whose auto-start would have
    * created it. A key still missing now means the server is up (or is not
    * ours to start) and this machine holds no key for it — STX003.
+   *
+   * Never throws. The run is already marked active when this is called, and
+   * the cleanup that clears that sits in a `finally` further on, so a throw
+   * here left the file "running" until a window reload, with Run a silent
+   * no-op and Stop unable to clear it. `readMachineKey` answers a missing
+   * file with null but throws on anything else (EACCES, EISDIR, an EBUSY
+   * lock), so that read is the one guarded: STX007.
    */
   private resolveApiKey(target: {
     env: Record<string, string>;
     envPath: string;
   }): { kind: 'proceed'; apiKey: string } | { kind: 'fail'; payload: ErrorPayload } {
-    const apiKey =
+    const pinned =
       target.env['STEPTIX_SERVER_API_KEY']?.trim() ||
-      process.env['STEPTIX_SERVER_API_KEY']?.trim() ||
-      readMachineKey() ||
-      '';
+      process.env['STEPTIX_SERVER_API_KEY']?.trim();
+    if (pinned) return { kind: 'proceed', apiKey: pinned };
+
+    let machineKey: string | null;
+    try {
+      machineKey = readMachineKey();
+    } catch (err) {
+      const payload = reportError('STX007', {
+        machineEnvPath: userRootEnvPath(),
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return { kind: 'fail', payload };
+    }
+    const apiKey = machineKey ?? '';
     if (apiKey === '') {
       const payload = reportError('STX003', {
         envPath: target.envPath,

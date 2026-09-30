@@ -9,6 +9,10 @@ const SAMPLE_CONTEXTS = {
   STX004: { envPath: '/ws/.env', value: 'not-a-url' },
   STX005: { envPath: '/ws/.env', lineNumber: 4, line: 'bad line' },
   STX006: { envName: 't2', expectedPath: '/ws/.env.t2', baseEnvPath: '/ws/base/.env' },
+  STX007: {
+    machineEnvPath: '/home/x/.steptix/.env',
+    reason: "EACCES: permission denied, open '/home/x/.steptix/.env'",
+  },
   STX010: { serverUrl: 'http://localhost:3100', reason: 'ECONNREFUSED' },
   STX011: { envPath: '/ws/.env', serverUrl: 'http://localhost:3100' },
   STX012: { serverUrl: 'http://localhost:3100' },
@@ -68,6 +72,7 @@ test('errors involving a file path mention the path verbatim', () => {
     ['STX004', '/ws/.env'],
     ['STX005', '/ws/.env'],
     ['STX006', '/ws/.env.t2'],
+    ['STX007', '/home/x/.steptix/.env'],
     ['STX011', '/ws/.env'],
     ['STX020', '/ws/foo.md'],
   ];
@@ -108,6 +113,11 @@ test('STX006 names the selected env and the expected .env.<name> path', () => {
   // Distinct from expectedPath so this proves baseEnvPath is actually surfaced
   // (not trivially satisfied as a substring of /ws/.env.t2).
   assert.ok(payload.message.includes('/ws/base/.env'), 'mentions the base .env path');
+});
+
+test('STX007 carries the read error, so the cause is not a guess', () => {
+  const payload = reportError('STX007', SAMPLE_CONTEXTS.STX007);
+  assert.ok(payload.message.includes('EACCES'), 'surfaces the errno');
 });
 
 test('STX010 points at the auto-start settings (the §5.5 hint)', () => {
