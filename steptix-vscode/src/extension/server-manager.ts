@@ -30,6 +30,11 @@ export const HEALTH_SERVICE_ID = 'steptix';
 export interface ServerHealth {
   service: string;
   version?: string;
+  /** Short commit the server's `dist/` was built from; null when unknown,
+   *  absent on a server predating it. */
+  commit?: string | null;
+  /** Whether that build held uncommitted changes; null when unknown. */
+  dirty?: boolean | null;
   pid?: number;
   openSessions?: number;
   runsInFlight?: number;
@@ -242,6 +247,17 @@ export const defaultServerSpawner: ServerSpawner = ({ command, cwd, logPath }) =
 };
 
 /**
+ * The server's version as a person reads it: `1.0.0-beta.1 (b700473)`, with
+ * `-dirty` after the commit for a build with uncommitted changes, and the
+ * version alone when the commit is unknown. Mirrors `describeVersion` in the
+ * framework's src/utils/version.ts, which this bundle cannot import.
+ */
+export function describeServerVersion(h: ServerHealth): string | undefined {
+  if (!h.version) return undefined;
+  return h.commit ? `${h.version} (${h.commit}${h.dirty ? '-dirty' : ''})` : h.version;
+}
+
+/**
  * One-line summary of a probe result, plus the detail line beneath it.
  *
  * Shared by the status-bar tooltip and the Server Status toast: they were two
@@ -256,8 +272,9 @@ export function describeHealth(
   switch (result.kind) {
     case 'healthy': {
       const h = result.health;
+      const version = describeServerVersion(h);
       return {
-        headline: `Steptix server on ${serverUrl}${h.version ? ` (v${h.version})` : ''}`,
+        headline: `Steptix server on ${serverUrl}${version ? ` — v${version}` : ''}`,
         detail:
           `pid ${h.pid ?? '?'} · ${h.openSessions ?? '?'} session(s) open · ` +
           `${h.runsInFlight ?? '?'} run(s) in flight\n` +

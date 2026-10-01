@@ -65,7 +65,7 @@ import { matchText } from '../parser/section-match.js';
 // same function, moved.
 import { validateSectionEntry } from './section-entry.js';
 import { logger } from '../utils/logger.js';
-import { getPackageVersion } from '../utils/version.js';
+import { getBuildInfo, getPackageVersion } from '../utils/version.js';
 
 /**
  * Default cap on characters returned by `GET /sessions/:id/content`.
@@ -439,6 +439,7 @@ export function createApiServer(
   // duration (stories/codebehind-compile.md §Server).
   const compiler = new CodeBehindCompiler(config, sessionManager, projectBundles);
   const version = getPackageVersion();
+  const build = getBuildInfo();
   const startedAt = new Date().toISOString();
   let shuttingDown = false;
 
@@ -473,6 +474,8 @@ export function createApiServer(
       ok: true,
       service: HEALTH_SERVICE_ID,
       version,
+      commit: build.commit,
+      dirty: build.dirty,
       pid: process.pid,
       startedAt,
       openSessions: sessionManager.countOpenSessions(),

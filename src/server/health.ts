@@ -19,6 +19,11 @@ export interface HealthResponse {
   ok: true;
   service: typeof HEALTH_SERVICE_ID;
   version: string;
+  /** Short commit `dist/` was built from (`getBuildInfo`); null when unknown.
+   *  Absent on a server predating it, so clients read it with `??`. */
+  commit: string | null;
+  /** True when that build held uncommitted changes; null when unknown. */
+  dirty: boolean | null;
   pid: number;
   startedAt: string;
   openSessions: number;

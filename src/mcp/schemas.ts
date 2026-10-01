@@ -1405,6 +1405,8 @@ export const serverStatusOutput = toolSchema({
   running: z.boolean(),
   detail: z.string().nullable(),
   version: z.string().nullable(),
+  commit: z.string().nullable(),
+  dirty: z.boolean().nullable(),
   pid: z.number().nullable(),
   startedAt: z.string().nullable(),
   openSessions: z.number().nullable(),

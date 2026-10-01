@@ -19,6 +19,7 @@ import {
   decideServerAction,
   defaultHealthProbe,
   describeHealth,
+  describeServerVersion,
   isLoopbackUrl,
   readAutoStartSettings,
   readLogTail,
@@ -554,4 +555,22 @@ test('log tail: does not include the whole file when it is short', () => {
   const tail = readLogTail(logPath);
   assert.equal(tail, 'c | d | e | f | g'); // last 5 lines
   assert.equal(readFileSync(logPath, 'utf8').includes('a'), true);
+});
+
+test('describeServerVersion: the commit after the version, -dirty for uncommitted changes', () => {
+  const h = { service: HEALTH_SERVICE_ID, version: '1.0.0-beta.1' };
+  assert.equal(describeServerVersion({ ...h, commit: 'b700473', dirty: false }), '1.0.0-beta.1 (b700473)');
+  assert.equal(describeServerVersion({ ...h, commit: 'b700473', dirty: true }), '1.0.0-beta.1 (b700473-dirty)');
+  // Unknown commit, and a server predating the fields: the version alone.
+  assert.equal(describeServerVersion({ ...h, commit: null, dirty: null }), '1.0.0-beta.1');
+  assert.equal(describeServerVersion(h), '1.0.0-beta.1');
+  assert.equal(describeServerVersion({ service: HEALTH_SERVICE_ID }), undefined);
+});
+
+test('describeHealth: the headline names the build', () => {
+  const { headline } = describeHealth(LOCAL, {
+    kind: 'healthy',
+    health: { service: HEALTH_SERVICE_ID, version: '1.0.0-beta.1', commit: 'b700473', dirty: true },
+  });
+  assert.equal(headline, `Steptix server on ${LOCAL} — v1.0.0-beta.1 (b700473-dirty)`);
 });

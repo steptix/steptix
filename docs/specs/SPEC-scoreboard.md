@@ -270,9 +270,11 @@ rules text is already identical on every call (it is kept stable so providers
 can cache it; `src/ai/prompts.ts`), so computing it once per process and
 option set is enough.
 
-`fw` is the framework's package version, plus the short commit when the server
-runs from a git checkout (read once at start-up). It's absent, not guessed,
-when unknown.
+`fw` is the framework's package version, plus the short commit `dist/` was
+built from when it was built in a git checkout (stamped by `npm run build`
+into `dist/build-info.json`, read once at start-up). It's absent, not guessed,
+when unknown. A build with uncommitted changes carries the same form; `GET
+/health` reports `dirty` alongside.
 
 Which lines carry no fingerprint, and why:
 

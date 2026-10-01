@@ -26,7 +26,7 @@
     }
   },
   "scripts": {
-    "build": "npm run build:schema && tsc && node -e \"require('fs').cpSync('src/browser/scripts','dist/browser/scripts',{recursive:true})\"",
+    "build": "npm run build:schema && tsc && node -e \"require('fs').cpSync('src/browser/scripts','dist/browser/scripts',{recursive:true})\" && node scripts/build-info.mjs",
     "build:schema": "node scripts/build-schema.mjs",
     "build:watch": "tsc --watch",
     "build:ui": "vite build --config src/ui/renderer/vite.config.ts",

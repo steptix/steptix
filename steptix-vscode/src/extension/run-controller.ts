@@ -102,6 +102,7 @@ import {
   decideServerAction,
   defaultHealthProbe,
   defaultServerSpawner,
+  describeServerVersion,
   isLoopbackUrl,
   readAutoStartSettings,
   startServerAndWait,
@@ -1521,7 +1522,7 @@ export class RunController {
         this.server.autoStartGuard?.clear(serverUrl);
         log(
           `server healthy at ${serverUrl}` +
-            (action.health.version ? ` (v${action.health.version})` : '') +
+            (action.health.version ? ` — v${describeServerVersion(action.health)}` : '') +
             `, inspector=${action.health.inspector ?? 'none'}`,
         );
         return { kind: 'proceed' };
