@@ -9,7 +9,7 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
-### Added — the version names the build: commit, and whether it was dirty
+### Added — the version names the build: commit, and whether it was modified
 
 Between betas every build reports the same version, so the version alone no
 longer says which code is answering. `npm run build` now stamps
@@ -18,8 +18,8 @@ working tree had uncommitted changes (tracked or untracked), and that is
 reported beside the version:
 
 - `steptix --version` and `steptix status`: `1.0.0-beta.1 (b700473)`, or
-  `1.0.0-beta.1 (b700473-dirty)`.
-- `GET /health` and the MCP `server_status` tool: new `commit` and `dirty`
+  `1.0.0-beta.1 (b700473, modified)`.
+- `GET /health` and the MCP `server_status` tool: new `commit` and `modified`
   fields; `version` is unchanged.
 - The Steptix status bar keeps the short version; its tooltip, the "server
   started" message and the run log show the commit.

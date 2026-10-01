@@ -34,7 +34,7 @@ export interface ServerHealth {
    *  absent on a server predating it. */
   commit?: string | null;
   /** Whether that build held uncommitted changes; null when unknown. */
-  dirty?: boolean | null;
+  modified?: boolean | null;
   pid?: number;
   openSessions?: number;
   runsInFlight?: number;
@@ -248,13 +248,13 @@ export const defaultServerSpawner: ServerSpawner = ({ command, cwd, logPath }) =
 
 /**
  * The server's version as a person reads it: `1.0.0-beta.1 (b700473)`, with
- * `-dirty` after the commit for a build with uncommitted changes, and the
+ * `, modified` after the commit for a build with uncommitted changes, and the
  * version alone when the commit is unknown. Mirrors `describeVersion` in the
  * framework's src/utils/version.ts, which this bundle cannot import.
  */
 export function describeServerVersion(h: ServerHealth): string | undefined {
   if (!h.version) return undefined;
-  return h.commit ? `${h.version} (${h.commit}${h.dirty ? '-dirty' : ''})` : h.version;
+  return h.commit ? `${h.version} (${h.commit}${h.modified ? ', modified' : ''})` : h.version;
 }
 
 /**

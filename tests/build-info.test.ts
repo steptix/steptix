@@ -1,6 +1,6 @@
 /**
  * The build stamp: `scripts/build-info.mjs` writes which commit `dist/` was
- * built from and whether the tree was dirty; `src/utils/version.ts` reads it
+ * built from and whether the tree was modified; `src/utils/version.ts` reads it
  * back and words it for people.
  *
  * The script is run for real against throwaway git repositories, since what it
@@ -18,19 +18,19 @@ const SCRIPT = fileURLToPath(new URL('../scripts/build-info.mjs', import.meta.ur
 
 describe('describeVersion', () => {
   it('the version, then the commit in brackets', () => {
-    expect(describeVersion({ version: '1.0.0-beta.1', commit: 'b700473', dirty: false })).toBe(
+    expect(describeVersion({ version: '1.0.0-beta.1', commit: 'b700473', modified: false })).toBe(
       '1.0.0-beta.1 (b700473)',
     );
   });
 
-  it('-dirty after the commit when the build held uncommitted changes', () => {
-    expect(describeVersion({ version: '1.0.0-beta.1', commit: 'b700473', dirty: true })).toBe(
-      '1.0.0-beta.1 (b700473-dirty)',
+  it('modified after the commit when the build held uncommitted changes', () => {
+    expect(describeVersion({ version: '1.0.0-beta.1', commit: 'b700473', modified: true })).toBe(
+      '1.0.0-beta.1 (b700473, modified)',
     );
   });
 
   it('the version alone when the commit is unknown or not reported', () => {
-    expect(describeVersion({ version: '1.0.0-beta.1', commit: null, dirty: null })).toBe('1.0.0-beta.1');
+    expect(describeVersion({ version: '1.0.0-beta.1', commit: null, modified: null })).toBe('1.0.0-beta.1');
     // A /health body from a server predating the fields.
     expect(describeVersion({ version: '1.0.0-beta.1' })).toBe('1.0.0-beta.1');
   });
@@ -38,18 +38,18 @@ describe('describeVersion', () => {
 
 describe('parseBuildInfo', () => {
   it('passes a well-formed stamp through', () => {
-    expect(parseBuildInfo({ commit: 'b700473', dirty: true })).toEqual({ commit: 'b700473', dirty: true });
+    expect(parseBuildInfo({ commit: 'b700473', modified: true })).toEqual({ commit: 'b700473', modified: true });
   });
 
   it('anything malformed is unknown, never a guess', () => {
-    expect(parseBuildInfo(null)).toEqual({ commit: null, dirty: null });
-    expect(parseBuildInfo('b700473')).toEqual({ commit: null, dirty: null });
-    expect(parseBuildInfo({ commit: 'not-a-sha', dirty: false })).toEqual({ commit: null, dirty: null });
-    expect(parseBuildInfo({ commit: 'b700473', dirty: 'yes' })).toEqual({ commit: 'b700473', dirty: null });
+    expect(parseBuildInfo(null)).toEqual({ commit: null, modified: null });
+    expect(parseBuildInfo('b700473')).toEqual({ commit: null, modified: null });
+    expect(parseBuildInfo({ commit: 'not-a-sha', modified: false })).toEqual({ commit: null, modified: null });
+    expect(parseBuildInfo({ commit: 'b700473', modified: 'yes' })).toEqual({ commit: 'b700473', modified: null });
   });
 
-  it('dirty without a commit says nothing', () => {
-    expect(parseBuildInfo({ commit: null, dirty: true })).toEqual({ commit: null, dirty: null });
+  it('modified without a commit says nothing', () => {
+    expect(parseBuildInfo({ commit: null, modified: true })).toEqual({ commit: null, modified: null });
   });
 });
 
@@ -98,22 +98,22 @@ describe.runIf(hasGit)('scripts/build-info.mjs', () => {
     return git(root, 'rev-parse', 'HEAD').slice(0, 7);
   }
 
-  it('a clean checkout: its commit, not dirty — and dist/ itself does not count', () => {
+  it('a clean checkout: its commit, not modified — and dist/ itself does not count', () => {
     const head = committedRepo(tmp);
     stamp(tmp); // dist/ now exists; gitignored, as in the real repo
-    expect(stamp(tmp)).toEqual({ commit: head, dirty: false });
+    expect(stamp(tmp)).toEqual({ commit: head, modified: false });
   });
 
-  it('a changed tracked file makes it dirty', () => {
+  it('a changed tracked file marks it modified', () => {
     const head = committedRepo(tmp);
     fs.appendFileSync(path.join(tmp, '.gitignore'), 'reports/\n');
-    expect(stamp(tmp)).toEqual({ commit: head, dirty: true });
+    expect(stamp(tmp)).toEqual({ commit: head, modified: true });
   });
 
-  it('an untracked file makes it dirty: a new source file is in what was compiled', () => {
+  it('an untracked file marks it modified: a new source file is in what was compiled', () => {
     const head = committedRepo(tmp);
     fs.writeFileSync(path.join(tmp, 'new.ts'), 'export {};\n');
-    expect(stamp(tmp)).toEqual({ commit: head, dirty: true });
+    expect(stamp(tmp)).toEqual({ commit: head, modified: true });
   });
 
   it("unknown inside someone else's repository: never THEIR commit", () => {
@@ -123,7 +123,7 @@ describe.runIf(hasGit)('scripts/build-info.mjs', () => {
     git(tmp, 'commit', '-q', '-m', 'theirs');
     const pkg = path.join(tmp, 'node_modules', 'steptix');
     packageAt(pkg);
-    expect(stamp(pkg)).toEqual({ commit: null, dirty: null });
+    expect(stamp(pkg)).toEqual({ commit: null, modified: null });
   });
 
   it('unknown outside any checkout', () => {
@@ -136,7 +136,7 @@ describe.runIf(hasGit)('scripts/build-info.mjs', () => {
     });
     expect(JSON.parse(fs.readFileSync(path.join(tmp, 'dist', 'build-info.json'), 'utf-8'))).toEqual({
       commit: null,
-      dirty: null,
+      modified: null,
     });
   });
 });

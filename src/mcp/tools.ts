@@ -3356,7 +3356,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
                 // `??`: a server predating these fields omits them, and a
                 // missing required key is fatal to the output schema.
                 commit: probe.health.commit ?? null,
-                dirty: probe.health.dirty ?? null,
+                modified: probe.health.modified ?? null,
                 pid: probe.health.pid,
                 startedAt: probe.health.startedAt,
                 openSessions: probe.health.openSessions,
@@ -3370,7 +3370,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
                 detail: probe.detail,
                 version: null,
                 commit: null,
-                dirty: null,
+                modified: null,
                 pid: null,
                 startedAt: null,
                 openSessions: null,

@@ -43,7 +43,7 @@ export interface BuildInfo {
   /** Short (7-digit) commit, or null when unknown. */
   commit: string | null;
   /** True when the build held uncommitted changes; null when unknown. */
-  dirty: boolean | null;
+  modified: boolean | null;
 }
 
 let cachedBuild: BuildInfo | undefined;
@@ -58,21 +58,21 @@ export function getBuildInfo(): BuildInfo {
   try {
     cachedBuild = parseBuildInfo(JSON.parse(readFileSync(join(PACKAGE_ROOT, 'dist', 'build-info.json'), 'utf-8')));
   } catch {
-    cachedBuild = { commit: null, dirty: null }; // no stamp: unknown
+    cachedBuild = { commit: null, modified: null }; // no stamp: unknown
   }
   return cachedBuild;
 }
 
-/** A stamp as read from disk. Anything malformed is unknown, and `dirty`
+/** A stamp as read from disk. Anything malformed is unknown, and `modified`
  *  without a commit says nothing, so it is unknown too. */
 export function parseBuildInfo(raw: unknown): BuildInfo {
   const stamp = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
   const commit = typeof stamp.commit === 'string' && /^[0-9a-f]{7}$/.test(stamp.commit) ? stamp.commit : null;
-  return { commit, dirty: commit !== null && typeof stamp.dirty === 'boolean' ? stamp.dirty : null };
+  return { commit, modified: commit !== null && typeof stamp.modified === 'boolean' ? stamp.modified : null };
 }
 
 /**
- * The version as a person reads it: `1.0.0-beta.1 (b700473)`, with `-dirty`
+ * The version as a person reads it: `1.0.0-beta.1 (b700473)`, with `, modified`
  * after the commit when the build held uncommitted changes, and the version
  * alone when the commit is unknown. Fields are optional so a client can pass
  * a `/health` body from a server that predates them.
@@ -80,9 +80,9 @@ export function parseBuildInfo(raw: unknown): BuildInfo {
 export function describeVersion(build: {
   version?: string | undefined;
   commit?: string | null | undefined;
-  dirty?: boolean | null | undefined;
+  modified?: boolean | null | undefined;
 }): string {
   const version = build.version ?? 'unknown';
   if (!build.commit) return version;
-  return `${version} (${build.commit}${build.dirty ? '-dirty' : ''})`;
+  return `${version} (${build.commit}${build.modified ? ', modified' : ''})`;
 }

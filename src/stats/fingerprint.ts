@@ -46,8 +46,8 @@ let version: { value: string | undefined } | undefined;
  * git checkout: `1.0.0+b700473`. Read once per process.
  *
  * The commit is the one stamped at build time (`getBuildInfo`), so it names
- * the code that ran, not whatever the checkout had moved on to since. A dirty
- * build carries the same form; `/health` is where `dirty` shows.
+ * the code that ran, not whatever the checkout had moved on to since. A modified
+ * build carries the same form; `/health` is where `modified` shows.
  *
  * `undefined` when the version is unknown — absent, never guessed (§5.5). A
  * build from outside a checkout reports the version alone.

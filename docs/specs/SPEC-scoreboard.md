@@ -274,7 +274,7 @@ option set is enough.
 built from when it was built in a git checkout (stamped by `npm run build`
 into `dist/build-info.json`, read once at start-up). It's absent, not guessed,
 when unknown. A build with uncommitted changes carries the same form; `GET
-/health` reports `dirty` alongside.
+/health` reports `modified` alongside.
 
 Which lines carry no fingerprint, and why:
 

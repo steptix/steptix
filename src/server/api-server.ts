@@ -475,7 +475,7 @@ export function createApiServer(
       service: HEALTH_SERVICE_ID,
       version,
       commit: build.commit,
-      dirty: build.dirty,
+      modified: build.modified,
       pid: process.pid,
       startedAt,
       openSessions: sessionManager.countOpenSessions(),

@@ -118,15 +118,15 @@ describe('steptix status', () => {
     expect(text).toMatch(/1m \d+s/); // uptime
   });
 
-  it('names the build after the version: commit, and -dirty for uncommitted changes', async () => {
-    const url = await startStub((_req, res) => json(res, 200, healthBody({ commit: 'b700473', dirty: true })));
+  it('names the build after the version: commit, and modified for uncommitted changes', async () => {
+    const url = await startStub((_req, res) => json(res, 200, healthBody({ commit: 'b700473', modified: true })));
 
     expect(await statusCommand({ url })).toBe(0);
-    expect(out.join('\n')).toMatch(/version\s+1\.2\.3 \(b700473-dirty\)/);
+    expect(out.join('\n')).toMatch(/version\s+1\.2\.3 \(b700473, modified\)/);
   });
 
   it('prints the version alone for a server that does not report its commit', async () => {
-    // healthBody() has no commit/dirty: a server predating them.
+    // healthBody() has no commit/modified: a server predating them.
     const url = await startStub((_req, res) => json(res, 200, healthBody()));
 
     expect(await statusCommand({ url })).toBe(0);

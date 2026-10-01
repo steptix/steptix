@@ -3,7 +3,7 @@
 //
 // Stamped at build time, not read from `.git` when the server starts: the
 // server runs `dist/`, so the commit checked out at start-up says nothing
-// about a `dist/` built before a pull, a branch switch, or an edit. `dirty`
+// about a `dist/` built before a pull, a branch switch, or an edit. `modified`
 // covers the edit — tracked changes and untracked files alike, since either
 // can be in what tsc just compiled.
 //
@@ -11,7 +11,7 @@
 // null, which every reader shows as "unknown", never as a guess.
 //
 // Run last in `npm run build`, so anything earlier steps regenerate into
-// tracked files counts toward `dirty`.
+// tracked files counts toward `modified`.
 
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -30,7 +30,7 @@ function git(...args) {
 }
 
 let commit = null;
-let dirty = null;
+let modified = null;
 try {
   // `--show-toplevel` first: inside someone else's repository (an npm install
   // under their checkout) git would happily answer with THEIR commit.
@@ -39,12 +39,12 @@ try {
   const toplevel = fs.realpathSync.native(git('rev-parse', '--show-toplevel'));
   if (toplevel === fs.realpathSync.native(projectRoot)) {
     commit = git('rev-parse', 'HEAD').slice(0, 7);
-    dirty = git('status', '--porcelain') !== '';
+    modified = git('status', '--porcelain') !== '';
   }
 } catch {
   // No git, not a checkout, or an unborn branch: unknown.
 }
 
 fs.mkdirSync(path.dirname(outPath), { recursive: true });
-fs.writeFileSync(outPath, JSON.stringify({ commit, dirty }, null, 2) + '\n');
-console.log(`build-info: ${commit === null ? 'commit unknown' : `${commit}${dirty ? ' (dirty)' : ''}`}`);
+fs.writeFileSync(outPath, JSON.stringify({ commit, modified }, null, 2) + '\n');
+console.log(`build-info: ${commit === null ? 'commit unknown' : `${commit}${modified ? ' (modified)' : ''}`}`);

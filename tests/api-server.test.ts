@@ -976,7 +976,7 @@ describe('server lifecycle', () => {
       // this checkout, so the commit is known here.
       expect(body).toMatchObject(getBuildInfo());
       expect(body.commit).toMatch(/^[0-9a-f]{7}$/);
-      expect(typeof body.dirty).toBe('boolean');
+      expect(typeof body.modified).toBe('boolean');
       expect(new Date(body.startedAt).toString()).not.toBe('Invalid Date');
       expect(typeof body.openSessions).toBe('number');
       expect(typeof body.runsInFlight).toBe('number');

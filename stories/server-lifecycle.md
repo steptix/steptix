@@ -86,7 +86,7 @@ sensitive). Response:
   "service": "steptix",
   "version": "<package.json version>",
   "commit": "b700473",
-  "dirty": false,
+  "modified": false,
   "pid": 12345,
   "startedAt": "2026-07-23T10:00:00.000Z",
   "openSessions": 1,
@@ -106,7 +106,7 @@ sensitive). Response:
   from inside the process. `null` means step-into cannot work (started
   without `--inspect`, or the requested port was taken).
 - `idleTimeoutMinutes` is `null` when no timeout is armed.
-- `commit` and `dirty` name the build: the short commit `dist/` was built
+- `commit` and `modified` name the build: the short commit `dist/` was built
   from, and whether the tree held uncommitted changes then. `npm run build`
   stamps them into `dist/build-info.json` (`scripts/build-info.mjs`), so they
   describe the code running, not the checkout's current state. Both are

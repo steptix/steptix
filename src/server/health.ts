@@ -23,7 +23,7 @@ export interface HealthResponse {
    *  Absent on a server predating it, so clients read it with `??`. */
   commit: string | null;
   /** True when that build held uncommitted changes; null when unknown. */
-  dirty: boolean | null;
+  modified: boolean | null;
   pid: number;
   startedAt: string;
   openSessions: number;
