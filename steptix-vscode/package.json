@@ -2,7 +2,7 @@
   "name": "steptix-vscode",
   "displayName": "Steptix",
   "publisher": "pkent",
-  "version": "0.5.162",
+  "version": "0.5.163",
   "license": "Apache-2.0",
   "description": "Write, run and debug Steptix natural-language tests in VS Code",
   "private": true,
@@ -681,6 +681,7 @@
     "watch": "concurrently -n webview,extension -c blue,green \"npm:watch:webview\" \"npm:watch:extension\"",
     "dev": "npm run build && code --extensionDevelopmentPath=.",
     "package": "npm run build:notices && vsce package --no-dependencies",
+    "pretest": "npm run build --prefix ..",
     "test": "node --test tests/*.test.js",
     "test:integration": "npm run build && node tests/integration/runTest.cjs",
     "test:live": "npm run build && node tests/integration/runLiveTest.cjs"

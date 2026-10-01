@@ -120,7 +120,9 @@ const { userRootDir } = await import('../src/env/user-root.js');
 // ---------------------------------------------------------------------------
 
 const API_KEY = 'test-api-key-cdp';
-const PROJECT = path.join('C:', 'proj');
+// Absolute on every platform: `C:/proj` is a relative name on Linux, and the
+// routes refuse a relative project root before any of this suite's mocks run.
+const PROJECT = path.resolve(path.sep, 'proj');
 
 const testConfig = {
   ai: {
@@ -982,7 +984,7 @@ describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
       return closedTab();
     });
 
-    const other = path.join('C:', 'other-project');
+    const other = path.resolve(path.sep, 'other-project');
     await Promise.all([
       del(9222, 'T1'),
       fetch(
