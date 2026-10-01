@@ -6,13 +6,12 @@
  * fingerprint is taken from the REAL rules text and the tests can still see
  * how, and how often, it was asked.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 vi.mock('../src/ai/prompts.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/ai/prompts.js')>();
@@ -20,7 +19,7 @@ vi.mock('../src/ai/prompts.js', async (importOriginal) => {
 });
 
 import { buildSystemPrompt, contentBlocksToText } from '../src/ai/prompts.js';
-import { frameworkVersion, gitCommitAt, rulesFingerprint } from '../src/stats/fingerprint.js';
+import { frameworkVersion, rulesFingerprint } from '../src/stats/fingerprint.js';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -90,105 +89,25 @@ describe('rulesFingerprint', () => {
   });
 });
 
-describe('gitCommitAt', () => {
-  const SHA = 'b7004731f2e0c1d9a8b7c6d5e4f3a2b1c0d9e8f7';
-  const OTHER = '0123456789abcdef0123456789abcdef01234567';
-  let tmp: string;
-
-  beforeEach(() => {
-    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-stats-git-')));
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmp, { recursive: true, force: true });
-  });
-
-  function write(rel: string, content: string): void {
-    const file = path.join(tmp, rel);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, content);
-  }
-
-  it('an ordinary checkout: HEAD names a branch with a loose ref', () => {
-    write('repo/.git/HEAD', 'ref: refs/heads/main\n');
-    write('repo/.git/refs/heads/main', `${SHA}\n`);
-    expect(gitCommitAt(path.join(tmp, 'repo'))).toBe('b700473');
-  });
-
-  it('a branch that lives only in packed-refs', () => {
-    write('repo/.git/HEAD', 'ref: refs/heads/feature/x\n');
-    write(
-      'repo/.git/packed-refs',
-      `# pack-refs with: peeled fully-peeled sorted\n${OTHER} refs/heads/main\n${SHA} refs/heads/feature/x\n^${OTHER}\n`,
-    );
-    expect(gitCommitAt(path.join(tmp, 'repo'))).toBe('b700473');
-  });
-
-  it('a detached HEAD', () => {
-    write('repo/.git/HEAD', `${SHA}\n`);
-    expect(gitCommitAt(path.join(tmp, 'repo'))).toBe('b700473');
-  });
-
-  it('a worktree: .git is a file, HEAD is its own, the branch is shared through commondir', () => {
-    // The main checkout is on another commit; the worktree must not report it.
-    write('main/.git/HEAD', 'ref: refs/heads/main\n');
-    write('main/.git/refs/heads/main', `${OTHER}\n`);
-    write('main/.git/refs/heads/claude/scoreboard', `${SHA}\n`);
-    write('main/.git/worktrees/wt/HEAD', 'ref: refs/heads/claude/scoreboard\n');
-    write('main/.git/worktrees/wt/commondir', '../..\n');
-    // Git writes the gitdir with forward slashes on Windows too.
-    write('wt/.git', `gitdir: ${path.join(tmp, 'main/.git/worktrees/wt').replaceAll('\\', '/')}\n`);
-    expect(gitCommitAt(path.join(tmp, 'wt'))).toBe('b700473');
-    expect(gitCommitAt(path.join(tmp, 'main'))).toBe('0123456');
-  });
-
-  it('a relative gitdir resolves against the folder holding the .git file', () => {
-    write('main/.git/refs/heads/topic', `${SHA}\n`);
-    write('main/.git/worktrees/wt/HEAD', 'ref: refs/heads/topic\n');
-    write('main/.git/worktrees/wt/commondir', '../..\n');
-    write('wt/.git', 'gitdir: ../main/.git/worktrees/wt\n');
-    expect(gitCommitAt(path.join(tmp, 'wt'))).toBe('b700473');
-  });
-
-  it('a SHA-256 repository', () => {
-    write('repo/.git/HEAD', `${'ab'.repeat(32)}\n`);
-    expect(gitCommitAt(path.join(tmp, 'repo'))).toBe('abababa');
-  });
-
-  it('undefined — never a guess — when there is nothing to read', () => {
-    fs.mkdirSync(path.join(tmp, 'plain'));
-    expect(gitCommitAt(path.join(tmp, 'plain'))).toBeUndefined();
-    expect(gitCommitAt(path.join(tmp, 'missing'))).toBeUndefined();
-
-    // An unborn branch: HEAD names a ref nobody has written.
-    write('unborn/.git/HEAD', 'ref: refs/heads/main\n');
-    expect(gitCommitAt(path.join(tmp, 'unborn'))).toBeUndefined();
-
-    write('garbage/.git/HEAD', 'not a ref\n');
-    expect(gitCommitAt(path.join(tmp, 'garbage'))).toBeUndefined();
-
-    write('nofile/.git', 'this is not a gitdir line\n');
-    expect(gitCommitAt(path.join(tmp, 'nofile'))).toBeUndefined();
-  });
-
-  it('asks the folder it is given, never a parent', () => {
-    write('repo/.git/HEAD', `${SHA}\n`);
-    fs.mkdirSync(path.join(tmp, 'repo/node_modules/steptix'), { recursive: true });
-    expect(gitCommitAt(path.join(tmp, 'repo/node_modules/steptix'))).toBeUndefined();
-  });
-});
-
 describe('frameworkVersion', () => {
-  it('is the package version plus the checked-out commit of this checkout', () => {
-    const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8')) as { version: string };
+  const pkg = () =>
+    (JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8')) as { version: string }).version;
+
+  it('from src/ (as here, under vitest) is the version alone: no build to name', () => {
+    expect(frameworkVersion()).toBe(pkg());
+    expect(frameworkVersion()).toBe(pkg());
+  });
+
+  it('from dist/ is the version plus the commit it was built from (pretest builds at HEAD)', async () => {
     let head: string | undefined;
     try {
       head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf-8' }).trim();
     } catch {
       head = undefined; // no git on this machine: the version alone is right
     }
-    const expected = head ? `${pkg.version}+${head.slice(0, 7)}` : pkg.version;
-    expect(frameworkVersion()).toBe(expected);
-    expect(frameworkVersion()).toBe(expected);
+    const built = (await import(
+      pathToFileURL(path.join(REPO_ROOT, 'dist', 'stats', 'fingerprint.js')).href
+    )) as typeof import('../src/stats/fingerprint.js');
+    expect(built.frameworkVersion()).toBe(head ? `${pkg()}+${head.slice(0, 7)}` : pkg());
   });
 });

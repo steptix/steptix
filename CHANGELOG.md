@@ -9,6 +9,31 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Added — the version names the build: commit, and whether it was modified
+
+Between betas every build reports the same version, so the version alone no
+longer says which code is answering. `npm run build` now stamps
+`dist/build-info.json` with the commit it was built from and whether the
+working tree had uncommitted changes (tracked or untracked), and that is
+reported beside the version:
+
+- `steptix --version` and `steptix status`: `1.0.0-beta.1 (b700473)`, or
+  `1.0.0-beta.1 (b700473, modified)`.
+- `GET /health` and the MCP `server_status` tool: new `commit` and `modified`
+  fields; `version` is unchanged.
+- The Steptix status bar keeps the short version; its tooltip, the "server
+  started" message and the run log show the commit.
+- The scoreboard's `fw` takes its commit from the stamp, so it names the code
+  that ran rather than whatever the checkout had moved on to since start-up.
+- `npm pack` and `npm publish` build first (`prepack`), so a package carries
+  a stamp of the commit it was packed from, not whatever `dist/` was last
+  built. Commit before packing and the stamp names exactly that commit.
+
+Both are `null` (and the version is shown alone) when unknown: built without
+git, outside a checkout, or running from `src/` (`npm run dev`), where the
+stamp would describe some other build. A server predating the fields omits
+them, and every client reads that as unknown.
+
 ### Changed — Steptix is beta software: version `1.0.0-beta.1`
 
 The framework claimed `1.0.0`, which under semver promises a stable surface.

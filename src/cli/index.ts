@@ -3,7 +3,7 @@ loadDefaultEnvFileSync();
 warnIfDeprecatedDataDirEnv();
 
 import { Command } from 'commander';
-import { getPackageVersion } from '../utils/version.js';
+import { describeVersion, getBuildInfo, getPackageVersion } from '../utils/version.js';
 import { registerRunCommand } from './commands/run.js';
 import { registerCompileCommand } from './commands/compile.js';
 import { registerInitCommand } from './commands/init.js';
@@ -21,7 +21,7 @@ export function createCli(): Command {
   program
     .name('steptix')
     .description('AI-powered UI test automation using natural language Markdown test files')
-    .version(getPackageVersion());
+    .version(describeVersion({ version: getPackageVersion(), ...getBuildInfo() }));
 
   registerRunCommand(program);
   registerCompileCommand(program);

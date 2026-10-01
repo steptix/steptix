@@ -26,7 +26,7 @@
     }
   },
   "scripts": {
-    "build": "npm run build:schema && tsc && node -e \"require('fs').cpSync('src/browser/scripts','dist/browser/scripts',{recursive:true})\"",
+    "build": "npm run build:schema && tsc && node -e \"require('fs').cpSync('src/browser/scripts','dist/browser/scripts',{recursive:true})\" && node scripts/build-info.mjs",
     "build:schema": "node scripts/build-schema.mjs",
     "build:watch": "tsc --watch",
     "build:ui": "vite build --config src/ui/renderer/vite.config.ts",
@@ -36,6 +36,7 @@
     "dev:ui": "concurrently \"vite --config src/ui/renderer/vite.config.ts\" \"sleep 2 && VITE_DEV_SERVER_URL=http://localhost:5173 electron dist/ui/main/index.js\"",
     "ui": "npm run build:all && env -u ELECTRON_RUN_AS_NODE electron --no-sandbox --ozone-platform-hint=auto dist/ui/main/index.cjs",
     "pretest": "npm run build",
+    "prepack": "npm run build",
     "test": "vitest run --config vitest.config.ts",
     "test:watch": "vitest --config vitest.config.ts",
     "pretest:coverage": "npm run build",

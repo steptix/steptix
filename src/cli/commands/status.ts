@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import type { Command } from 'commander';
 import { probeHealth } from '../../server/health.js';
+import { describeVersion } from '../../utils/version.js';
 import { resolveServerUrl, type ServerTargetOptions } from '../server-target.js';
 
 export interface StatusOptions extends ServerTargetOptions {
@@ -69,7 +70,7 @@ export async function statusCommand(opts: StatusOptions): Promise<number> {
   // worse, `undefinedm`).
   const unknown = chalk.dim('unknown');
   console.log(`${chalk.green('running')} — ${baseUrl}`);
-  console.log(`  version          ${h.version ?? unknown}`);
+  console.log(`  version          ${h.version == null ? unknown : describeVersion(h)}`);
   console.log(`  pid              ${h.pid ?? unknown}`);
   console.log(`  uptime           ${formatUptime(Date.now() - Date.parse(h.startedAt))}`);
   console.log(`  open sessions    ${h.openSessions ?? unknown}`);

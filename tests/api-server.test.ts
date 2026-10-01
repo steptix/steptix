@@ -167,6 +167,7 @@ vi.mock('../src/utils/logger.js', () => ({
 // ---------------------------------------------------------------------------
 
 import { createApiServer } from '../src/server/api-server.js';
+import { getBuildInfo } from '../src/utils/version.js';
 import { IdleMonitor } from '../src/server/idle-monitor.js';
 import { executeStep as executeStepMock } from '../src/runner/step-executor.js';
 
@@ -971,6 +972,11 @@ describe('server lifecycle', () => {
       });
       expect(typeof body.version).toBe('string');
       expect(body.version).not.toBe('');
+      // The build, passed through as `getBuildInfo` reports it. Vitest runs
+      // src/, where that is unknown by design (tests/build-info.test.ts covers
+      // the dist/ side), so both keys are present and null.
+      expect(body).toMatchObject(getBuildInfo());
+      expect(body).toMatchObject({ commit: null, modified: null });
       expect(new Date(body.startedAt).toString()).not.toBe('Invalid Date');
       expect(typeof body.openSessions).toBe('number');
       expect(typeof body.runsInFlight).toBe('number');

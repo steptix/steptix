@@ -6,6 +6,7 @@ import {
   defaultHealthProbe,
   defaultServerSpawner,
   describeHealth,
+  describeServerVersion,
   normalizeBaseUrl,
   readAutoStartSettings,
   startServerAndWait,
@@ -104,7 +105,7 @@ export function registerServerCommands(args: {
         statusBar.apply(target.serverUrl, { kind: 'healthy', health: started.health });
         void vscode.window.showInformationMessage(
           `Steptix: server started on ${target.serverUrl}` +
-            (started.health.version ? ` (v${started.health.version})` : ''),
+            (started.health.version ? ` — v${describeServerVersion(started.health)}` : ''),
         );
         return;
       case 'refused':

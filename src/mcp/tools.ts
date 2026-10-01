@@ -74,6 +74,7 @@ import {
 import { withSession } from './registry.js';
 import * as schemas from './schemas.js';
 import { probeHealth, normalizeBaseUrl } from '../server/health.js';
+import { describeVersion } from '../utils/version.js';
 import {
   ApiHttpError,
   ApiRouteNotFoundError,
@@ -3352,6 +3353,10 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
                 running: true,
                 detail: null,
                 version: probe.health.version,
+                // `??`: a server predating these fields omits them, and a
+                // missing required key is fatal to the output schema.
+                commit: probe.health.commit ?? null,
+                modified: probe.health.modified ?? null,
                 pid: probe.health.pid,
                 startedAt: probe.health.startedAt,
                 openSessions: probe.health.openSessions,
@@ -3364,6 +3369,8 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
                 running: false,
                 detail: probe.detail,
                 version: null,
+                commit: null,
+                modified: null,
                 pid: null,
                 startedAt: null,
                 openSessions: null,
@@ -3375,7 +3382,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           schemas.serverStatusOutput,
           value,
           probe.kind === 'ok'
-            ? `Running at ${baseUrl} (v${probe.health.version}, ${probe.health.openSessions} session(s))`
+            ? `Running at ${baseUrl} (v${describeVersion(probe.health)}, ${probe.health.openSessions} session(s))`
             : `Not usable at ${baseUrl}: ${probe.detail}`,
         );
       } catch (err) {
