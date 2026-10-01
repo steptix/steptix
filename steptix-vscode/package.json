@@ -2,7 +2,7 @@
   "name": "steptix-vscode",
   "displayName": "Steptix (Beta)",
   "publisher": "pkent",
-  "version": "0.5.167",
+  "version": "0.5.168",
   "license": "Apache-2.0",
   "description": "Write, run and debug Steptix natural-language tests in VS Code",
   "private": true,
@@ -140,7 +140,7 @@
         },
         "steptix.serverAutoStart.readyTimeoutSeconds": {
           "type": "number",
-          "default": 20,
+          "default": 60,
           "scope": "machine",
           "description": "How long to poll /health after starting the server before giving up with STX028. Machine-scoped like the other serverAutoStart settings: a workspace-settable value would let a cloned repo stretch a failed start into a very long wait."
         },

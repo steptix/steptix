@@ -14,7 +14,7 @@ suffix; a beta extension is a pre-release build instead.
 Running a test used to need two things set up by hand: a `.env` in the
 project naming `SERVER_URL`, and the `steptix.serverAutoStart.command` and
 `.cwd` User settings pointing at a server to start. Neither is needed now
-(extension 0.5.167).
+(extension 0.5.168).
 
 - **The server address has a machine-level home.** `SERVER_URL` comes from
   the project's `.env` (and the active `.env.<name>`) as before, then the
@@ -40,10 +40,16 @@ project naming `SERVER_URL`, and the `steptix.serverAutoStart.command` and
 - STX003, STX010 and STX028 name the installed runtime in their fixes. STX028
   for a runtime that would not start names its folder and says it needs
   Node.js.
+- **A started server gets 60 seconds to come up, not 20.** The
+  `steptix.serverAutoStart.readyTimeoutSeconds` default rises to 60. A first
+  start is the slow one, and on a busy machine it could exceed 20 seconds and
+  fail with STX028. A server that comes up sooner is used as soon as it
+  answers; only one that never does waits out the full 60 seconds.
 
 The runtime installer's end-to-end test now proves this: a fresh profile with
-no Steptix settings and a project with no `.env` runs a test, and the server
-is started from the installed runtime on the port the machine `.env` names.
+no Steptix settings at all and a project with no `.env` runs a test, and the
+server is started from the installed runtime on the port the machine `.env`
+names.
 
 ### Added — the version names the build: commit, and whether it was modified
 

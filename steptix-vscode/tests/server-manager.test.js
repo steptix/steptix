@@ -624,7 +624,7 @@ const cfg = (values) => ({
   get: (key, fallback) => (key in values ? values[key] : fallback),
 });
 
-test('settings: values are trimmed and a bad timeout falls back to 20s', () => {
+test('settings: values are trimmed and a bad timeout falls back to 60s', () => {
   assert.deepEqual(
     readAutoStartSettings(
       cfg({
@@ -633,7 +633,7 @@ test('settings: values are trimmed and a bad timeout falls back to 20s', () => {
         'serverAutoStart.readyTimeoutSeconds': -1,
       }),
     ),
-    { command: 'node x.js', cwd: '/repo', readyTimeoutSeconds: 20, useInstalledRuntime: true },
+    { command: 'node x.js', cwd: '/repo', readyTimeoutSeconds: 60, useInstalledRuntime: true },
   );
 });
 
@@ -641,7 +641,7 @@ test('settings: everything unset means no command, and the installed runtime is 
   const settings = readAutoStartSettings(cfg({}));
   assert.equal(settings.command, '');
   assert.equal(settings.cwd, '');
-  assert.equal(settings.readyTimeoutSeconds, 20);
+  assert.equal(settings.readyTimeoutSeconds, 60);
   assert.equal(settings.useInstalledRuntime, true);
   assert.equal(
     readAutoStartSettings(cfg({ 'serverAutoStart.useInstalledRuntime': false })).useInstalledRuntime,

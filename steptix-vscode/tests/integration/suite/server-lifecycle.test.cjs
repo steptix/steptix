@@ -124,7 +124,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
       // just the timer's existence.
       keepAliveIntervalMs: 60,
     });
-    await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 20 });
+    await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 60 });
 
     const uri = fixtureUri('test-with-steps.md');
     await vscode.commands.executeCommand('vscode.open', uri);
@@ -142,7 +142,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
   // (Consolidating this into a single `after` hook looks like a saving and is
   // not: it only holds when every test in this suite completes normally.)
   afterEach(async () => {
-    await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 20 });
+    await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 60 });
     // The probe and cadence are registry-wide too, and this suite does not run
     // last. Leaving a closure that answers `foreign` (or a 60ms keep-alive)
     // behind would break every later suite with no clue pointing back here.

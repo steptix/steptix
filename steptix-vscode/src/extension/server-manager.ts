@@ -338,7 +338,7 @@ export interface AutoStartSettings extends AutoStartConfig {
 }
 
 /** Default ready-timeout when the setting is absent or nonsense. */
-const DEFAULT_READY_TIMEOUT_SECONDS = 20;
+const DEFAULT_READY_TIMEOUT_SECONDS = 60;
 
 /**
  * Read the §5 settings.

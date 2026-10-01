@@ -223,7 +223,7 @@ New settings (all under `steptix-vscode.`):
 | --- | --- | --- | --- |
 | `serverAutoStart.command` | string | `""` | Full shell command to launch the server. Empty ⇒ auto-start disabled. |
 | `serverAutoStart.cwd` | string | `""` | Working directory for the command. **Required when `command` is set** — spawn is refused otherwise (see below). |
-| `serverAutoStart.readyTimeoutSeconds` | number | `20` | How long to poll `/health` after spawning before giving up. |
+| `serverAutoStart.readyTimeoutSeconds` | number | `60` | How long to poll `/health` after spawning before giving up. |
 
 `command` and `cwd` are declared with `"scope": "machine"` in
 `contributes.configuration` — they can only be set in **user** settings,

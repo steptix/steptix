@@ -127,16 +127,19 @@ describe('Installed runtime, auto-started by the extension through steptix.cmd',
       'installed where the installer puts it by default, which is where the extension looks',
     );
     const cfg = vscode.workspace.getConfiguration('steptix');
-    for (const key of ['serverAutoStart.command', 'serverAutoStart.cwd', 'serverAutoStart.useInstalledRuntime']) {
+    // Including readyTimeoutSeconds: the first start is the slow one (a cold
+    // tsx start on a loaded machine has come close to the old 20 s default),
+    // and it is the default a first-time user waits out that must cover it.
+    for (const key of [
+      'serverAutoStart.command',
+      'serverAutoStart.cwd',
+      'serverAutoStart.useInstalledRuntime',
+      'serverAutoStart.readyTimeoutSeconds',
+    ]) {
       const set = cfg.inspect(key);
       assert.equal(set?.globalValue, undefined, `steptix.${key} must not be set: a first-time user has not`);
     }
     assert.equal(await health(serverUrl), null, `nothing may be listening on ${serverUrl} before Run`);
-
-    // The one setting changed. readyTimeoutSeconds is raised from 20 because
-    // a cold start through tsx on a loaded machine has come close to it; it
-    // does not change what is started.
-    await cfg.update('serverAutoStart.readyTimeoutSeconds', 90, vscode.ConfigurationTarget.Global);
 
     const uri = vscode.Uri.file(testFile);
     await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), { preview: false });
