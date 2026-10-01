@@ -2,7 +2,7 @@
   "name": "steptix-vscode",
   "displayName": "Steptix (Beta)",
   "publisher": "pkent",
-  "version": "0.5.165",
+  "version": "0.5.166",
   "license": "Apache-2.0",
   "description": "Write, run and debug Steptix natural-language tests in VS Code",
   "private": true,
