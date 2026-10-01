@@ -16,7 +16,7 @@ import { createServer, type Server } from 'node:http';
 import Jimp from 'jimp';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { PageTracker, type BrowserSession } from '../src/browser/manager.js';
-import { StepRecorder, classifyHistoryMove, type KnownSecret } from '../src/recorder/step-recorder.js';
+import { StepRecorder, classifyHistoryMove, historyBehind, type KnownSecret } from '../src/recorder/step-recorder.js';
 import type { Box, RecordedAction } from '../src/recorder/types.js';
 import { addLogCallback } from '../src/utils/logger.js';
 
@@ -593,6 +593,55 @@ describe('the browser\'s Back, Forward and Refresh (Chromium: read off the tab\'
     expect(actions[3]).toMatchObject({ url: `${origin}/other.html`, summary: `Reloaded the page — ${origin}/other.html` });
   }, 30_000);
 
+  /**
+   * `Page.frameNavigated` can arrive before the browser has put the
+   * navigation in the history the recorder reads. Seen under load: a link
+   * click's first read still showed the page it left, and the Back after it
+   * was recorded as a Reload. Here every commit's first read is made to lag
+   * that way, on purpose — the recorder must read again until it catches up.
+   */
+  it('a history read that lags its commit is read again: link, Back, Forward, Reload and the same address again stay what they were', async () => {
+    const realSession = context.newCDPSession.bind(context);
+    context.newCDPSession = (async (target: Page) => {
+      const cdp = await realSession(target);
+      const send = cdp.send.bind(cdp) as (method: string, params?: object) => Promise<unknown>;
+      let lastRead: unknown = null;
+      let lagNext = false;
+      cdp.on('Page.frameNavigated', (e: { frame: { parentId?: string } }) => {
+        if (!e.frame.parentId) lagNext = true;
+      });
+      cdp.on('Page.navigatedWithinDocument', () => (lagNext = true));
+      (cdp as { send: unknown }).send = async (method: string, params?: object) => {
+        if (method !== 'Page.getNavigationHistory') return send(method, params);
+        if (lagNext && lastRead) {
+          lagNext = false;
+          return lastRead;
+        }
+        lastRead = await send(method, params);
+        return lastRead;
+      };
+      return cdp;
+    }) as typeof context.newCDPSession;
+
+    recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
+    await recorder.start();
+    await page.click('#to-other'); // a link: the page's own navigation
+    await page.waitForURL(/other\.html$/);
+    await new Promise((r) => setTimeout(r, 250));
+    await page.goBack();
+    await actionsReach(2);
+    await new Promise((r) => setTimeout(r, 250));
+    await page.goForward();
+    await actionsReach(3);
+    await new Promise((r) => setTimeout(r, 250));
+    await page.reload();
+    await actionsReach(4);
+    await new Promise((r) => setTimeout(r, 250));
+    await page.goto(`${origin}/other.html`); // the address it is already at
+    await new Promise((r) => setTimeout(r, 500));
+    expect(actions.map((a) => a.kind)).toEqual(['click', 'back', 'forward', 'reload']);
+  }, 30_000);
+
   it('a same-document Back (a pushState entry) is a back too', async () => {
     await page.goto(`${origin}/spa.html`);
     recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
@@ -631,6 +680,36 @@ describe('classifyHistoryMove', () => {
     // The newest entry reached by a new navigation is not "forward".
     expect(classifyHistoryMove(at(1, [1, 2]), at(2, [1, 2, 3]))).toBe('new');
     expect(classifyHistoryMove(null, at(0, [1]))).toBe('new');
+  });
+});
+
+describe('historyBehind', () => {
+  const h = (index: number, ids: number[], urls: string[]) => ({ index, ids, urls });
+  const before = h(1, [1, 2], ['https://a.test/form', 'https://a.test/other']);
+
+  it('a read identical to the history before is behind — unless the navigation was a Reload', () => {
+    const same = h(1, [1, 2], ['https://a.test/form', 'https://a.test/other']);
+    for (const type of ['differentDocument', 'historyDifferentDocument', 'historySameDocument']) {
+      expect(historyBehind(before, same, 'https://a.test/other', type)).toBe(true);
+    }
+    expect(historyBehind(before, same, 'https://a.test/other', 'reload')).toBe(false);
+    expect(historyBehind(before, same, 'https://a.test/other', 'reloadBypassingCache')).toBe(false);
+  });
+
+  it('without the browser\'s word for it: behind only when the address moved and the history did not', () => {
+    const same = h(1, [1, 2], ['https://a.test/form', 'https://a.test/other']);
+    expect(historyBehind(before, same, 'https://a.test/elsewhere', undefined)).toBe(true);
+    expect(historyBehind(before, same, 'https://a.test/other', undefined)).toBe(false);
+  });
+
+  it('a read that moved at all has caught up', () => {
+    // A new entry; the same address loaded again (a new id); Back.
+    expect(historyBehind(before, h(2, [1, 2, 3], ['', '', 'https://a.test/x']), 'https://a.test/x', 'differentDocument')).toBe(false);
+    expect(historyBehind(before, h(1, [1, 5], ['https://a.test/form', 'https://a.test/other']), 'https://a.test/other', 'differentDocument')).toBe(false);
+    expect(historyBehind(before, h(0, [1, 2], ['https://a.test/form', 'https://a.test/other']), 'https://a.test/form', 'historyDifferentDocument')).toBe(false);
+    // replaceState: same entry, new address.
+    expect(historyBehind(before, h(1, [1, 2], ['https://a.test/form', 'https://a.test/other?x']), 'https://a.test/other?x', undefined)).toBe(false);
+    expect(historyBehind(null, before, 'https://a.test/other', 'differentDocument')).toBe(false);
   });
 });
 
