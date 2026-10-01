@@ -356,13 +356,15 @@ beforeEach(async () => {
   await startApp();
 });
 
+// Closing a session closes its Chromium, which takes seconds — tens of them
+// when the whole suite is starting at once — not the default hook budget.
 afterEach(async () => {
   ai.openGate?.();
   ai.openGate = null;
   await sessionManager?.closeAll().catch(() => {});
   for (const close of launches.closers) await close().catch(() => {});
   await new Promise<void>((resolve) => server?.close(() => resolve()));
-});
+}, 60_000);
 
 interface Frame {
   event: string;
