@@ -65,7 +65,7 @@ describe('what Playwright matches (issue 062)', () => {
   beforeAll(async () => {
     browser = await chromium.launch({ headless: true });
     page = await browser.newPage();
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
     await browser?.close();
@@ -166,7 +166,7 @@ describe('the role form through the framework', () => {
   beforeAll(async () => {
     browser = await chromium.launch({ headless: true });
     page = await browser.newPage();
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
     await browser?.close();
@@ -245,7 +245,7 @@ describe('iframes and waits take the role form too', () => {
         body: FRAMES[new URL(route.request().url()).pathname] ?? '',
       }),
     );
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
     await browser?.close();

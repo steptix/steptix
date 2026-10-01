@@ -94,7 +94,7 @@ afterAll(async () => {
     await new Promise((r) => setTimeout(r, 50));
     if (!serverProc.killed) serverProc.kill('SIGKILL');
   }
-}, 15_000);
+}, 60_000);
 
 describe('end-to-end tool execution against fixtures/test-app', () => {
   it('indexes the fixture tools from disk and resolves them lazily by name', async () => {

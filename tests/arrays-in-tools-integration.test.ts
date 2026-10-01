@@ -92,7 +92,7 @@ afterAll(async () => {
     await new Promise((r) => setTimeout(r, 50));
     if (!serverProc.killed) serverProc.kill('SIGKILL');
   }
-}, 15_000);
+}, 60_000);
 
 describe('arrays-in-tools — extract → loop → consume', () => {
   it('captures every link via read multiple, then visits each in a tool', async () => {

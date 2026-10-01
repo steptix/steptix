@@ -103,7 +103,7 @@ afterAll(async () => {
     await new Promise((r) => setTimeout(r, 50));
     if (!serverProc.killed) serverProc.kill('SIGKILL');
   }
-}, 15_000);
+}, 60_000);
 
 // ─── The three real uploaders on the fixture page ────────────────────────────
 

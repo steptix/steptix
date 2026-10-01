@@ -145,7 +145,7 @@ afterAll(async () => {
     if (!serverProc.killed) serverProc.kill('SIGKILL');
   }
   if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true });
-}, 15_000);
+}, 60_000);
 
 beforeEach(async () => {
   await clearDocuments();

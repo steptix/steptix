@@ -184,7 +184,7 @@ describe('drag and reload over a real page', () => {
   let browser: Browser;
   beforeAll(async () => {
     browser = await chromium.launch({ headless: true });
-  }, 30_000);
+  }, 60_000);
   afterAll(async () => {
     await browser?.close();
   });

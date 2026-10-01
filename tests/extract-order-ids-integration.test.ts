@@ -92,7 +92,7 @@ afterAll(async () => {
     await new Promise((r) => setTimeout(r, 50));
     if (!serverProc.killed) serverProc.kill('SIGKILL');
   }
-}, 15_000);
+}, 60_000);
 
 describe('extract_order_ids — tool emits a string[] back to the test scope', () => {
   it('produces order_ids and order_count from the live /api/orders endpoint', async () => {

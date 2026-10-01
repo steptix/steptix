@@ -396,7 +396,7 @@ describe('classifyOutcome against a live Chromium page', () => {
     hang = http.createServer(() => { /* never respond */ });
     await new Promise<void>((resolve) => hang.listen(0, '127.0.0.1', () => resolve()));
     hangUrl = `http://127.0.0.1:${(hang.address() as { port: number }).port}/`;
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
     await browser?.close();

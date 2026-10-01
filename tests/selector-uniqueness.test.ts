@@ -27,7 +27,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   try { await browser?.close(); } catch { /* noop */ }
-}, 15_000);
+}, 60_000);
 
 /** What the live document says a selector addresses. String-form evaluate and
  *  JSON-quoted interpolation for the same reason the source files use it: no

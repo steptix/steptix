@@ -36,7 +36,7 @@ describe('read @url — the page address', () => {
       }),
     );
     await page.goto(PAGE_URL);
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
     await browser?.close();

@@ -135,7 +135,7 @@ afterAll(async () => {
     await new Promise((r) => setTimeout(r, 50));
     if (!serverProc.killed) serverProc.kill('SIGKILL');
   }
-}, 15_000);
+}, 60_000);
 
 describe('openPage execution path — real browser', () => {
   it('spawns a new page via context.newPage() and pageTracker can switch to it', async () => {

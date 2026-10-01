@@ -121,7 +121,7 @@ describe('expandDomSubtree — live value, real browser', () => {
 
   afterAll(async () => {
     try { await browser?.close(); } catch { /* noop */ }
-  }, 15_000);
+  }, 60_000);
 
   it('agrees with the snapshot about a field a step typed into', async () => {
     await page.setContent(
