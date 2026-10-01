@@ -337,13 +337,13 @@ beforeAll(async () => {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const addr = server.address();
   if (typeof addr === 'object' && addr !== null) baseUrl = `http://127.0.0.1:${addr.port}`;
-  await fs.rm(tmpDir, { recursive: true, force: true });
+  await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   await fs.mkdir(tmpDir, { recursive: true });
 });
 
 afterAll(async () => {
   await new Promise<void>((r, e) => server.close((err) => (err ? e(err) : r())));
-  await fs.rm(tmpDir, { recursive: true, force: true });
+  await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 beforeEach(() => {

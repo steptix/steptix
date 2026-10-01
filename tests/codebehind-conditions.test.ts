@@ -52,7 +52,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true });
+  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 async function write(rel: string, contents: string): Promise<string> {

@@ -41,7 +41,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true });
+  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 async function write(rel: string, contents: string): Promise<string> {
@@ -294,7 +294,7 @@ describe('the MCP pre-flight knows what a [use ai] step will name', () => {
   });
 
   afterEach(() => {
-    for (const d of created.splice(0)) rmSync(d, { recursive: true, force: true });
+    for (const d of created.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     delete process.env['STEPTIX_MCP_ROOTS'];
   });
 
