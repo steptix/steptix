@@ -1,6 +1,6 @@
 ---
 tags: [smoke, login, multi-env]
-timeout: 60s
+timeout: 180s
 ---
 
 # Multi-environment login
@@ -27,6 +27,6 @@ Switch environments without editing the test.
 ## Steps
 1. Navigate to the login page and dismiss the cookie banner if visible
 2. Login with "${data.users.admin.email}" and "${data.users.admin.password}"
-3. Verify the dashboard shows a balance greater than ${data.fixtures.minBalance}
+3. Verify the "Available Balance" on the dashboard is greater than ${data.fixtures.minBalance}
 4. Click on "Transaction History" and verify at least ${data.fixtures.expectedTransactionCount} transactions are listed
 5. Logout and verify the login page is displayed

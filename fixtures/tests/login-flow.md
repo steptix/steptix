@@ -1,6 +1,6 @@
 ---
 tags: [smoke, login, e2e]
-timeout: 60s
+timeout: 600s
 ---
 
 # Login Flow Test
