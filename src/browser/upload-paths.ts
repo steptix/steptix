@@ -59,21 +59,25 @@ export type UploadPathResult =
 const DRIVE_LETTER = /^[A-Za-z]:\//;
 
 /**
- * The form a path takes inside an action: forward slashes, no leading
- * separator, trimmed.
+ * The form a path takes inside an action: forward slashes, repeats collapsed,
+ * trimmed. A leading separator is KEPT.
  *
  * Runs in three places, and has to, because each sees a path the others do not:
  * the parser (what the model emitted), the executor (what a `{{param}}`
  * interpolated to, which the parser never saw) and `step.filePath` (what
  * compiled code passed in).
  *
- * A leading separator is stripped, so the `\attachments\logo.png` spelling a
- * Windows author naturally writes means "relative to the test file". The
- * consequence, accepted deliberately: a genuine POSIX absolute path
- * (`/srv/files/x.png`) is indistinguishable from that spelling and is treated
- * as relative too. Absolute paths that survive as absolute are drive-letter,
- * UNC (`//server/share`) and `file://` URLs. The E3 message names the path it
- * actually tried, so the mistake is visible rather than mysterious.
+ * The leading separator used to be stripped, so that the `\attachments\logo.png`
+ * spelling a Windows author naturally writes meant "relative to the test file".
+ * That made a genuine POSIX absolute path (`/srv/files/x.png`) unreachable on
+ * Linux and macOS. Keeping it leaves the decision to {@link locate}, which still
+ * reads it test-relative first on every platform — so the Windows spelling
+ * means what it always did, everywhere — and only on POSIX falls back to the
+ * path as written. Drive-letter, UNC (`//server/share`) and `file://` paths are
+ * absolute everywhere.
+ *
+ * The output is the same on every platform on purpose: it is what the cache and
+ * compiled code-behind store, and a test compiled on one OS replays on another.
  */
 export function normaliseUploadPath(raw: string): string {
   const trimmed = raw.trim();
@@ -86,17 +90,78 @@ export function normaliseUploadPath(raw: string): string {
 
   const slashed = trimmed.replace(/\\/g, '/');
   if (slashed.startsWith('//') || DRIVE_LETTER.test(slashed)) return slashed;
-  // Collapse repeated separators, then drop one leading separator.
-  return slashed.replace(/\/{2,}/g, '/').replace(/^\//, '');
+  return slashed.replace(/\/{2,}/g, '/');
 }
 
-/** Is this path absolute in a way we must not re-base?
+/** Where a path points, before the fence and the existence check judge it.
+ *  `alsoTried` is the POSIX absolute reading of a rooted path that was passed
+ *  over, so a not-found message can name both places it looked. */
+type Located =
+  | { ok: true; abs: string; wasRelative: boolean; alsoTried?: string | undefined }
+  | { ok: false; error: string };
+
+/**
+ * Classify one normalised path.
  *
- *  The `path.isAbsolute` arm is unreachable for a normalised path — that is
- *  the point of stripping the leading separator — and is kept as a guard for
- *  any future caller that reaches here without normalising first. */
-function isAbsoluteUploadPath(p: string): boolean {
-  return p.startsWith('//') || DRIVE_LETTER.test(p) || path.isAbsolute(p);
+ * A rooted path (`/attachments/logo.png`) is the one ambiguous shape: on
+ * Windows it can only be the test-relative spelling, while on POSIX it is ALSO
+ * how an absolute path is written. Both platforms try the test file's folder
+ * first, which keeps every Windows-authored test working unchanged on Linux.
+ * Only POSIX then falls back to the path as written. When neither place has
+ * anything, the test-relative one is reported — it is what an author most
+ * likely meant, and it sits inside the fence, so the message is "not found"
+ * rather than a misleading "outside the project".
+ */
+function locate(rel: string, baseDir: string | undefined): Located {
+  if (/^file:\/\//i.test(rel)) {
+    // Node drops a fragment silently, which would name a DIFFERENT file than
+    // the one written — refuse rather than upload the wrong thing.
+    if (rel.includes('#') || rel.includes('?')) {
+      return {
+        ok: false,
+        error: `Upload path "${rel}" is a file URL the server cannot read: `
+          + `a "?" or "#" in a file URL is dropped, so it would name a different file. Use a plain path`,
+      };
+    }
+    try {
+      return { ok: true, abs: fileURLToPath(rel), wasRelative: false };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Upload path "${rel}" is a file URL the server cannot read: `
+          + `${err instanceof Error ? err.message : String(err)}. Use a plain path`,
+      };
+    }
+  }
+  if (rel.startsWith('//') || DRIVE_LETTER.test(rel)) {
+    return { ok: true, abs: path.resolve(rel), wasRelative: false };
+  }
+
+  const rooted = rel.startsWith('/');
+  const underTest = baseDir === undefined ? undefined : path.resolve(baseDir, rooted ? rel.slice(1) : rel);
+  // On Windows a rooted path is drive-relative, which names nothing an author means.
+  const asWritten = rooted && path.sep === '/' ? rel : undefined;
+
+  if (underTest !== undefined && (asWritten === undefined || fsSync.existsSync(underTest))) {
+    return { ok: true, abs: underTest, wasRelative: true };
+  }
+  if (asWritten !== undefined && (underTest === undefined || fsSync.existsSync(asWritten))) {
+    return { ok: true, abs: asWritten, wasRelative: false };
+  }
+  if (underTest !== undefined) {
+    return { ok: true, abs: underTest, wasRelative: true, alsoTried: asWritten };
+  }
+  return {
+    ok: false,
+    error: `Upload path "${rel}" is relative but this run has no test file to resolve it against. `
+      + `Run the step from a test file, or use an absolute path`,
+  };
+}
+
+/** The not-found message, naming the second place a rooted POSIX path was looked for. */
+function notFound(abs: string, from: string, alsoTried: string | undefined): string {
+  const nor = alsoTried === undefined ? '' : `, nor at ${alsoTried}`;
+  return `Upload file not found: ${abs}${from}${nor}. Put the file there or correct the step's path`;
 }
 
 /**
@@ -124,39 +189,11 @@ export async function resolveUploadPaths(
 
   for (const input of paths) {
     const rel = normaliseUploadPath(input);
-    let abs: string;
-    let wasRelative = false;
 
     // ── Classify ────────────────────────────────────────────────────────────
-    if (/^file:\/\//i.test(rel)) {
-      // Node drops a fragment silently, which would name a DIFFERENT file than
-      // the one written — refuse rather than upload the wrong thing.
-      if (rel.includes('#') || rel.includes('?')) {
-        return fail(
-          `Upload path "${rel}" is a file URL the server cannot read: `
-          + `a "?" or "#" in a file URL is dropped, so it would name a different file. Use a plain path`,
-        );
-      }
-      try {
-        abs = fileURLToPath(rel);
-      } catch (err) {
-        return fail(
-          `Upload path "${rel}" is a file URL the server cannot read: `
-          + `${err instanceof Error ? err.message : String(err)}. Use a plain path`,
-        );
-      }
-    } else if (isAbsoluteUploadPath(rel)) {
-      abs = path.resolve(rel);
-    } else {
-      wasRelative = true;
-      if (ctx.baseDir === undefined) {
-        return fail(
-          `Upload path "${rel}" is relative but this run has no test file to resolve it against. `
-          + `Run the step from a test file, or use an absolute path`,
-        );
-      }
-      abs = path.resolve(ctx.baseDir, rel);
-    }
+    const located = locate(rel, ctx.baseDir);
+    if (!located.ok) return fail(located.error);
+    const { abs, wasRelative, alsoTried } = located;
 
     /** The " (resolved from …)" clause, which only makes sense for a path we re-based. */
     const from =
@@ -192,9 +229,7 @@ export async function resolveUploadPaths(
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT' || code === 'ENOTDIR') {
-        return fail(
-          `Upload file not found: ${abs}${from}. Put the file there or correct the step's path`,
-        );
+        return fail(notFound(abs, from, alsoTried));
       }
       return fail(
         `Upload file ${abs} cannot be read: ${err instanceof Error ? err.message : String(err)}. `
@@ -220,36 +255,9 @@ export async function resolveUploadPaths(
 export function resolveUploadPathSync(input: string, ctx: UploadPathContext): string {
   const rel = normaliseUploadPath(input);
   const fence = ctx.projectRoot ?? ctx.baseDir;
-  let abs: string;
-  let wasRelative = false;
-
-  if (/^file:\/\//i.test(rel)) {
-    if (rel.includes('#') || rel.includes('?')) {
-      throw nonRetryable(
-        `Upload path "${rel}" is a file URL the server cannot read: `
-        + `a "?" or "#" in a file URL is dropped, so it would name a different file. Use a plain path`,
-      );
-    }
-    try {
-      abs = fileURLToPath(rel);
-    } catch (err) {
-      throw nonRetryable(
-        `Upload path "${rel}" is a file URL the server cannot read: `
-        + `${err instanceof Error ? err.message : String(err)}. Use a plain path`,
-      );
-    }
-  } else if (isAbsoluteUploadPath(rel)) {
-    abs = path.resolve(rel);
-  } else {
-    wasRelative = true;
-    if (ctx.baseDir === undefined) {
-      throw nonRetryable(
-        `Upload path "${rel}" is relative but this run has no test file to resolve it against. `
-        + `Run the step from a test file, or use an absolute path`,
-      );
-    }
-    abs = path.resolve(ctx.baseDir, rel);
-  }
+  const located = locate(rel, ctx.baseDir);
+  if (!located.ok) throw nonRetryable(located.error);
+  const { abs, wasRelative, alsoTried } = located;
 
   const from =
     wasRelative && ctx.baseDir !== undefined
@@ -274,9 +282,7 @@ export function resolveUploadPathSync(input: string, ctx: UploadPathContext): st
     if (isNonRetryable(err)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ENOTDIR') {
-      throw nonRetryable(
-        `Upload file not found: ${abs}${from}. Put the file there or correct the step's path`,
-      );
+      throw nonRetryable(notFound(abs, from, alsoTried));
     }
     throw nonRetryable(
       `Upload file ${abs} cannot be read: ${err instanceof Error ? err.message : String(err)}. `

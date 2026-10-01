@@ -5,6 +5,7 @@
  * line in the shape the recorder writes.
  */
 import { describe, it, expect } from 'vitest';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   defaultStatsQuery,
@@ -24,9 +25,11 @@ import type { StatsActionLine, StatsLine, StatsRunLine, StatsStepLine } from '..
 
 const NOW = new Date('2026-09-29T10:00:00.000Z');
 // A space in the path, as under "C:\Users\Paul Kent": the link must survive it.
-const PROJECT = 'C:\\work\\my templates\\init';
-const REPORT = 'C:\\work\\my templates\\init\\reports\\2026-09-28_07-12-50-recording.html';
-const ROWS_REPORT = 'C:\\work\\my templates\\init\\reports\\2026-09-27_08-00-00-signup-rows.html';
+// Native to the platform, because `pathToFileURL` is: on Linux a `C:\…` string
+// is a relative name full of backslashes, not a path.
+const PROJECT = process.platform === 'win32' ? 'C:\\work\\my templates\\init' : '/work/my templates/init';
+const REPORT = path.join(PROJECT, 'reports', '2026-09-28_07-12-50-recording.html');
+const ROWS_REPORT = path.join(PROJECT, 'reports', '2026-09-27_08-00-00-signup-rows.html');
 
 /** The link a terminal or editor can open: the report's file: URL and the anchor. */
 function url(file: string, anchor: string): string {
@@ -204,7 +207,7 @@ describe('filters', () => {
       'TESTS\\Recording.md',
       './tests/recording.md',
       'templates/init/tests/recording.md',
-      'C:\\work\\my templates\\init\\tests\\recording.md',
+      path.join(PROJECT, 'tests', 'recording.md'),
     ]) {
       const selection = select(lines, { test });
       expect(texts(selection.actions), test).toEqual(['A', 'B']);

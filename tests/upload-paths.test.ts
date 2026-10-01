@@ -44,12 +44,16 @@ const err = (r: unknown): string => (r as { error?: string }).error ?? '';
 const abs = (r: unknown): string[] => (r as { absolute?: string[] }).absolute ?? [];
 
 describe('normaliseUploadPath', () => {
-  it('folds a Windows-style step path into a relative, forward-slashed one', () => {
-    expect(normaliseUploadPath(`${BS}attachments${BS}logo.png`)).toBe('attachments/logo.png');
+  it('folds a Windows-style step path into a forward-slashed one', () => {
+    expect(normaliseUploadPath(`${BS}attachments${BS}logo.png`)).toBe('/attachments/logo.png');
+    expect(normaliseUploadPath(`attachments${BS}logo.png`)).toBe('attachments/logo.png');
   });
 
-  it('strips one leading separator and collapses repeats', () => {
-    expect(normaliseUploadPath('/attachments/logo.png')).toBe('attachments/logo.png');
+  // The leading separator is kept so a POSIX absolute path survives to the
+  // resolver; it still reads test-relative first (see "a rooted path" below).
+  it('keeps one leading separator and collapses repeats', () => {
+    expect(normaliseUploadPath('/attachments/logo.png')).toBe('/attachments/logo.png');
+    expect(normaliseUploadPath('/a//b.png')).toBe('/a/b.png');
     expect(normaliseUploadPath('a//b.png')).toBe('a/b.png');
   });
 
@@ -200,6 +204,62 @@ describe('resolveUploadPaths', () => {
       expect(result.ok, err(result)).toBe(true);
     },
   );
+});
+
+// A rooted path is the one ambiguous shape: the test-relative spelling a
+// Windows author writes, and — on Linux and macOS — how an absolute path is
+// written. Test-relative wins on every platform; only POSIX falls back.
+describe('a rooted path', () => {
+  const posix = path.sep === '/';
+
+  it('finds the file beside the test, on every platform', async () => {
+    const result = await resolveUploadPaths(['/attachments/logo.png'], ctx);
+    expect(abs(result)).toEqual([path.join(testDir, 'attachments', 'logo.png')]);
+    expect(resolveUploadPathSync('/attachments/logo.png', ctx)).toBe(path.join(testDir, 'attachments', 'logo.png'));
+  });
+
+  it.runIf(posix)('on POSIX, falls back to the absolute path when nothing is beside the test', async () => {
+    const shared = path.join(root, 'shared.png');
+    const result = await resolveUploadPaths([shared], ctx);
+    expect(result.ok, err(result)).toBe(true);
+    expect(abs(result)).toEqual([shared]);
+    expect(resolveUploadPathSync(shared, ctx)).toBe(shared);
+  });
+
+  it.runIf(posix)('on POSIX, prefers the file beside the test when both exist', async () => {
+    const shared = path.join(root, 'shared.png');
+    const beside = path.join(testDir, shared);
+    await fs.mkdir(path.dirname(beside), { recursive: true });
+    await fs.writeFile(beside, 'png-bytes');
+    try {
+      expect(abs(await resolveUploadPaths([shared], ctx))).toEqual([beside]);
+    } finally {
+      await fs.rm(path.join(testDir, shared.split('/')[1]!), { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(posix)('on POSIX, names both places when neither has the file', async () => {
+    const result = await resolveUploadPaths(['/attachments/nope.png'], ctx);
+    expect(err(result)).toContain(`Upload file not found: ${path.join(testDir, 'attachments', 'nope.png')}`);
+    expect(err(result)).toContain('nor at /attachments/nope.png');
+  });
+
+  it.runIf(posix)('on POSIX, still fences an absolute path outside the project', async () => {
+    const outside = path.join(os.tmpdir(), 'steptix-upload-outside.png');
+    await fs.writeFile(outside, 'png-bytes');
+    try {
+      const result = await resolveUploadPaths([outside], ctx);
+      expect(err(result)).toContain('outside the project folder');
+    } finally {
+      await fs.rm(outside, { force: true });
+    }
+  });
+
+  it.runIf(!posix)('on Windows, is test-relative only', async () => {
+    const result = await resolveUploadPaths(['/attachments/nope.png'], ctx);
+    expect(err(result)).toContain(`Upload file not found: ${path.join(testDir, 'attachments', 'nope.png')}`);
+    expect(err(result)).not.toContain('nor at');
+  });
 });
 
 describe('resolveUploadPathSync (the code-behind half)', () => {

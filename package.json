@@ -35,8 +35,10 @@
     "dev:debug": "node --inspect --import tsx src/index.ts serve",
     "dev:ui": "concurrently \"vite --config src/ui/renderer/vite.config.ts\" \"sleep 2 && VITE_DEV_SERVER_URL=http://localhost:5173 electron dist/ui/main/index.js\"",
     "ui": "npm run build:all && env -u ELECTRON_RUN_AS_NODE electron --no-sandbox --ozone-platform-hint=auto dist/ui/main/index.cjs",
+    "pretest": "npm run build",
     "test": "vitest run --config vitest.config.ts",
     "test:watch": "vitest --config vitest.config.ts",
+    "pretest:coverage": "npm run build",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
     "lint": "tsc --noEmit && tsc --noEmit -p src/ui/renderer/tsconfig.json",
     "clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('dist-ui',{recursive:true,force:true})\""

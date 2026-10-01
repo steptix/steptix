@@ -393,7 +393,7 @@ describe('parseAIResponse — upload action (stories/upload-action.md §2)', () 
     const raw = '{"actions":[{"action":"upload","selector":"#f","filePath":"'
       + '\\attachments\\logo.png","description":"d"}]}';
     const result = parseAIResponse(raw);
-    expect(result.actions[0]!.filePath).toBe('attachments/logo.png');
+    expect(result.actions[0]!.filePath).toBe('/attachments/logo.png');
   });
 
   // The repair is TRIED scoped-first on purpose: when only the path is broken,
@@ -402,7 +402,7 @@ describe('parseAIResponse — upload action (stories/upload-action.md §2)', () 
     const raw = '{"actions":[{"action":"upload","selector":"#f","filePath":"'
       + '\\attachments\\logo.png","pattern":"(\\\\d{4})","description":"d"}]}';
     const action = parseAIResponse(raw).actions[0]!;
-    expect(action.filePath).toBe('attachments/logo.png');
+    expect(action.filePath).toBe('/attachments/logo.png');
     // The regex survived: the scoped repair rewrote only the path value.
     expect(action.pattern).toBe('(\\d{4})');
   });
@@ -415,7 +415,7 @@ describe('parseAIResponse — upload action (stories/upload-action.md §2)', () 
     const raw = '{"actions":[{"action":"upload","selector":"#f","filePath":"'
       + '\\attachments\\logo.png","description":"Upload \\attachments\\logo.png"}]}';
     const action = parseAIResponse(raw).actions[0]!;
-    expect(action.filePath).toBe('attachments/logo.png');
+    expect(action.filePath).toBe('/attachments/logo.png');
     expect(action.description).toBe('Upload /attachments/logo.png');
   });
   it('still refuses JSON that no escape repair can rescue', () => {
@@ -427,11 +427,11 @@ describe('parseAIResponse — upload action (stories/upload-action.md §2)', () 
     expect(parseAIResponse(raw).actions[0]!.pattern).toBe('(\\d{4})');
   });
 
-  it('normalises a path to relative, forward-slashed form', () => {
+  it('keeps a rooted path rooted, for the resolver to read test-relative first', () => {
     const result = parseAIResponse(
       '{"actions":[{"action":"upload","selector":"#f","filePath":"/attachments/logo.png","description":"d"}]}',
     );
-    expect(result.actions[0]!.filePath).toBe('attachments/logo.png');
+    expect(result.actions[0]!.filePath).toBe('/attachments/logo.png');
   });
 
   it('parses filePaths as an array, dropping blanks and non-strings', () => {

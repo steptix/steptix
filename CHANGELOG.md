@@ -35,6 +35,27 @@ Copilot for AI" once more.
 Entries below this one, and resolved issues, keep the names they were written
 with.
 
+### Fixed — an upload step can name an absolute path on Linux and macOS
+
+A leading `/` in an upload path was always read as "relative to the test
+file", because that is how a Windows author writes `\attachments\logo.png`.
+On Linux and macOS that made a real absolute path such as
+`/srv/files/x.png` impossible to upload from, where on Windows a
+`C:\files\x.png` always worked. A rooted path is now looked for beside the
+test file first, on every platform, so existing tests behave exactly as
+before. On Linux and macOS, if nothing is there, the path is used as
+written. When neither place has the file, the error names both. The
+project fence applies as before.
+
+### Fixed — the unit tests build first, and pass on Linux
+
+`npm test` (root and `steptix-vscode/`) now runs `npm run build` first.
+Several suites run the compiled `dist/` on purpose, and a stale one made
+them test old code with no warning. On one Linux checkout that accounted
+for 67 failures. Two test fixtures hard-coded Windows paths
+(`api-server-cdp`, 77 failures; `stats-aggregate`, 1) and now use paths
+native to the platform.
+
 ### Fixed — a Run on a machine with no key starts the server instead of refusing
 
 On a machine with no `STEPTIX_SERVER_API_KEY` anywhere (not in the project's

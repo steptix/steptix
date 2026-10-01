@@ -179,6 +179,16 @@ Steptix machine. That is the rule to document.
    the parser, **normalisation also runs at every point of use** — the
    executor and `step.filePath` (§3, §8). The step text itself is untouched:
    authors keep writing backslashes if they like.
+
+   **Amended 2026-10-01 — a leading separator is kept.** Stripping it made a
+   genuine POSIX absolute path (`/srv/files/x.png`) unreachable on Linux and
+   macOS, which is not parity with Windows, where a drive-letter path always
+   worked. Normalisation now keeps one leading `/` (on every platform, so
+   compiled code is the same wherever it was compiled), and the resolver
+   reads a rooted path against the test file's folder first everywhere — so
+   `\attachments\logo.png` still means what it did, on any OS — then, on
+   POSIX only, falls back to the path as written. The prompt rule changed to
+   match: keep a leading slash only when the step has one.
 3. **Resolution happens in the executor, once, into a local, before any
    selector is evaluated.** The action object is never written to. The
    precedent to avoid is `action.apiMode = 'browser'`

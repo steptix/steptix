@@ -1127,8 +1127,11 @@ export function guardedValues(
   // Path-shaped only. `findInlinedParameterValue` is a bare substring test, so
   // widening an ordinary parameter like `route: "/logs"` into the token `logs`
   // would start reporting any entry containing that word as a leak.
+  // The leading separator is dropped HERE although normalisation keeps it: the
+  // model may write `attachments/march.pdf` for a rooted value, and the
+  // unrooted form is a substring of the rooted one, so it catches both.
   const normalised = base
-    .map((g) => ({ name: g.name, value: normaliseUploadPath(g.value) }))
+    .map((g) => ({ name: g.name, value: normaliseUploadPath(g.value).replace(/^\//, '') }))
     .filter((g, i) => g.value !== base[i]!.value && g.value.includes('/'));
   const all = [...base, ...normalised];
   if (authoredSource === undefined) return all;
