@@ -9,6 +9,29 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Security — no high or critical `npm audit` findings, dev tooling included
+
+`npm audit` is clean of high and critical findings in all five projects.
+Every fix is a patch or minor release inside the existing ranges, except
+`vitest` and `@vitest/coverage-v8`, whose floor moves from `^4.1.4` to
+`^4.1.11` (GHSA-82fw-gwwq-j7x9).
+
+- **Framework runtime:** `electron` 41.10.7 (three sandbox and cross-origin
+  advisories), `undici` 7.30.0 (via `openai` and `@electron/get`), `qs`
+  6.16.0 (via `express`), and `hono` 4.13.12, `fast-uri` 3.1.8 and
+  `ip-address` 10.7.2 (via `@modelcontextprotocol/sdk`). Also `js-yaml`
+  3.15.2 (via `gray-matter`) and `brace-expansion` 5.0.12 (via `glob`).
+- **Dev tooling:** `electron-builder`'s `@xmldom/xmldom`, `js-yaml`,
+  `brace-expansion` and `node-gyp`'s `undici`; in `steptix-vscode` and
+  `flick-vscode`, the `@vscode/vsce`, `mocha` and `@vscode/test-electron`
+  trees. Neither extension's bundle changes: their production audit was
+  already clean.
+- **Still open, moderate:** `file-type` 16 (GHSA-5v7r-6r5c-r473, an infinite
+  loop on malformed ASF input), reached through `jimp` 0.22 and
+  `@nut-tree-fork/nut-js`, which pins `jimp` exactly. Steptix only hands
+  `jimp` PNGs it captured itself, so the ASF parser never sees outside input.
+  Clearing it needs `jimp` 1.x and a `nut-js` release that drops 0.22.
+
 ### Changed — Steptix runs a test with nothing configured
 
 Running a test used to need two things set up by hand: a `.env` in the
