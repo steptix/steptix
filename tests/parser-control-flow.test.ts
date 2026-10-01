@@ -537,7 +537,8 @@ describe('the control-flow examples in docs/ parse', () => {
   async function controlFences(): Promise<{ doc: string; index: number; body: string }[]> {
     const out: { doc: string; index: number; body: string }[] = [];
     for (const rel of DOCS) {
-      const text = await fs.readFile(path.join(process.cwd(), rel), 'utf8');
+      // A checkout with core.autocrlf on (GitHub's Windows runners) has CRLF.
+      const text = (await fs.readFile(path.join(process.cwd(), rel), 'utf8')).replace(/\r\n/g, '\n');
       let index = 0;
       for (const match of text.matchAll(/```markdown\n([\s\S]*?)```/g)) {
         index++;

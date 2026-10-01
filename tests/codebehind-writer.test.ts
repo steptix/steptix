@@ -301,14 +301,29 @@ describe('code-behind writer — files on disk', () => {
   it.runIf(process.platform === 'win32')('waits out a moment\'s lock on the file instead of failing the write', async () => {
     const file = path.join(dir, 'x.steps.ts');
     await fs.writeFile(file, HAZARDOUS, 'utf-8');
+    // PSModulePath is dropped because a parent running PowerShell 7 hands
+    // Windows PowerShell its own module paths, which it then has to sift.
+    const { PSModulePath: _, ...env } = process.env;
     const lock = spawn('powershell.exe', [
-      '-NoProfile', '-Command',
+      '-NoProfile', '-NonInteractive', '-Command',
       `$f = [System.IO.File]::Open('${file}', 'Open', 'Read', 'Read'); 'locked'; Start-Sleep -Milliseconds 600; $f.Close()`,
-    ]);
+    ], { env });
+    // Starting PowerShell is the slow part: on a busy CI runner it once took
+    // longer than this whole test's old 30 s budget. Bound it on its own so a
+    // slow start says so, with whatever PowerShell printed, instead of
+    // surfacing as a bare test timeout.
+    let stderr = '';
+    lock.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    const spawned = Date.now();
     await new Promise<void>((resolve, reject) => {
-      lock.stdout.on('data', (d: Buffer) => d.toString().includes('locked') && resolve());
-      lock.on('error', reject);
-      lock.on('exit', () => reject(new Error('the lock ended before it was taken')));
+      const timer = setTimeout(() => {
+        lock.kill();
+        reject(new Error(`powershell.exe had not taken the lock after ${Date.now() - spawned} ms${stderr ? `: ${stderr}` : ''}`));
+      }, 90_000);
+      const fail = (err: Error) => { clearTimeout(timer); reject(err); };
+      lock.stdout.on('data', (d: Buffer) => { if (d.toString().includes('locked')) { clearTimeout(timer); resolve(); } });
+      lock.on('error', fail);
+      lock.on('exit', () => fail(new Error(`the lock ended before it was taken${stderr ? `: ${stderr}` : ''}`)));
     });
     const started = Date.now();
     expect(await writeCodeBehindEntry({
@@ -318,7 +333,7 @@ describe('code-behind writer — files on disk', () => {
     expect(Date.now() - started).toBeGreaterThan(150); // it did meet the lock
     expect(await fs.readFile(file, 'utf-8')).toContain("page.click('#pay')");
     await new Promise((r) => lock.exitCode === null ? lock.on('exit', r) : r(null));
-  }, 30_000);
+  }, 120_000);
 
   it('restores the previous bytes when the generated code does not compile', async () => {
     const file = path.join(dir, 'x.steps.ts');
