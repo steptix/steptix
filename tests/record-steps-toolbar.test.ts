@@ -146,10 +146,13 @@ beforeAll(async () => {
   browser = await chromium.launch({ headless: true });
 }, 60_000);
 
+// Opening and closing Chromium takes seconds — tens of them when the whole
+// suite is starting at once — so every hook that does either gets the budget
+// the launch has, not the default.
 afterAll(async () => {
   await browser?.close().catch(() => {});
   await new Promise<void>((resolve) => server?.close(() => resolve()));
-});
+}, 60_000);
 
 function newRecorder(
   opts: { toolbar?: boolean; sendScreenshots?: boolean; checkInMs?: number; windows?: number } = {},
@@ -177,12 +180,12 @@ beforeEach(async () => {
   picks = [];
   commands = [];
   await page.goto(`${origin}/app.html`);
-});
+}, 60_000);
 
 afterEach(async () => {
   await recorder?.cancel().catch(() => {});
   await context?.close().catch(() => {});
-});
+}, 60_000);
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
