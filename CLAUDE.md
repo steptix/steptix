@@ -155,9 +155,6 @@ product. Linux and macOS support are meant to be on par with Windows, so
 behaviour that works on one platform should have a counterpart on the others,
 not a platform-specific gap that a test then works around.
 
-A Linux run on 2026-10-01 found 149 failures at `c422adc`, and almost none
-were product defects (PR #173). The rules below are what that run taught:
-
 - **No hard-coded Windows paths in fixtures.** `path.join('C:', 'proj')` is
   `C:/proj` on Linux, which `path.isAbsolute` rejects, so one fixture line
   failed 77 CDP tests at their first 400. Build paths that are native to the
