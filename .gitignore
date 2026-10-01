@@ -1,6 +1,8 @@
 node_modules/
 dist/
 dist-ui/
+dist-runtime/
+build-tools/
 reports/
 memory/
 # Written by the step cache, which was removed. Still ignored so a checkout
