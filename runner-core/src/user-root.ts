@@ -64,6 +64,24 @@ function readUserRootEnv(deps?: UserRootDeps): Record<string, string> {
   return parseEnv(content);
 }
 
+/**
+ * True when the user root's `.env` exists and other local users can read it
+ * (any group or other permission bit). Always false on Windows, where
+ * `%LOCALAPPDATA%` is private to the account and Node reports no such bits.
+ *
+ * The framework creates the file `0600`; this catches one made by hand to add
+ * `AI_API_KEY`, so Steptix can say `chmod 600` instead of leaving the keys
+ * readable (stories/machine-server-url.md). Never throws.
+ */
+export function userRootEnvExposed(deps?: UserRootDeps): boolean {
+  if ((deps?.platform ?? process.platform) === 'win32') return false;
+  try {
+    return (fs.statSync(userRootEnvPath(deps)).mode & 0o077) !== 0;
+  } catch {
+    return false;
+  }
+}
+
 /** `KEY` from the user root's `.env`, trimmed; null when absent or blank. */
 function readUserRootValue(key: string, deps?: UserRootDeps): string | null {
   const value = readUserRootEnv(deps)[key];

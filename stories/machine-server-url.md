@@ -64,6 +64,37 @@ waiting out the timeout.
 
 MCP auto-start passes `--port` itself, so it always lands on the URL it uses.
 
+## Linux and macOS
+
+The machine `.env` is `$XDG_CONFIG_HOME/steptix/.env` when that variable is
+set, else `~/.steptix/.env`; the framework and runner-core resolve it by the
+same rule.
+
+**It is private, as `%LOCALAPPDATA%` is on Windows.** It holds the server key
+and, once this story makes it the place for them, `AI_API_KEY`; the same
+folder holds signed-in CDP browser profiles. So:
+
+- Everything that can create the folder — the machine key, the stats store,
+  a CDP profile, MCP's server log — creates it `0700`. The key file is created
+  `0600`.
+- Adding the key to an existing `.env` (one made by hand for `AI_API_KEY`)
+  first sets it `0600`.
+- Reading a `.env` that other users can read warns once with the exact
+  `chmod 600` command: from `serve`, the CLI and MCP through the logger, and
+  from Steptix in the run log. A warning, not a refusal — the file works, and
+  a run that stopped over its permissions would be worse than one that says
+  how to fix them.
+
+Node ignores these bits on Windows, so none of this changes anything there.
+
+**`XDG_CONFIG_HOME` has to look the same to the server and to VS Code.** Set
+only in a shell startup file, a `serve` started from that shell reads a
+different `.env` from a VS Code that did not inherit it, and the two disagree
+on the port and the key. Documented rather than engineered around: auto-start
+hands VS Code's environment to the server it starts, macOS VS Code reads the
+login shell's environment at startup, and a mismatch already surfaces as a 401
+naming the key file Steptix read.
+
 ## Decisions
 
 - **No discovery file.** A `server.json` written by each server was considered

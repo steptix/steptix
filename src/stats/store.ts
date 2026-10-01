@@ -24,7 +24,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseBoolEnv } from '../env/loader.js';
-import { readUserRootEnv, userRootDir, type UserRootDeps } from '../env/user-root.js';
+import {
+  readUserRootEnv,
+  userRootDir,
+  PRIVATE_DIR_MODE,
+  type UserRootDeps,
+} from '../env/user-root.js';
 import { logger } from '../utils/logger.js';
 import type { StatsLine, StatsSuite } from './types.js';
 
@@ -205,7 +210,7 @@ async function appendOne(file: string, text: string): Promise<void> {
   // The folder is missing: the first line on this machine, or someone
   // deleted it while the server ran. Create it and try once more.
   try {
-    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    await fs.promises.mkdir(path.dirname(file), { recursive: true, mode: PRIVATE_DIR_MODE });
     await fs.promises.appendFile(file, text, 'utf-8');
   } catch (err) {
     logStatsErrorOnce(WRITE_FAILED, err);

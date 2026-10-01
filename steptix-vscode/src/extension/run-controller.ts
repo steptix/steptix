@@ -34,6 +34,7 @@ import {
   resolveEnvFile,
   resolveSection,
   userRootEnvPath,
+  userRootEnvExposed,
   type ClassifiedStep,
   type ServerUrlChoice,
   type CompileEvent,
@@ -220,6 +221,10 @@ export const defaultApiClientFactory: ApiClientFactory = (config) => new ApiClie
  * authenticated GET per interval.
  */
 const KEEP_ALIVE_INTERVAL_MS = 5 * 60_000;
+
+/** Whether a run in this window has already warned that the machine .env is
+ *  readable by other users — once is enough, the file is read on every run. */
+let machineEnvExposureReported = false;
 
 /** Outcome of the pre-run server phase. `proceed` covers both "it's ours" and
  *  the legacy/skip paths — from the run's point of view they are the same
@@ -2284,6 +2289,15 @@ export class RunController {
     }
     const { serverUrl } = choice;
     log(`SERVER_URL ${serverUrl} (from ${choice.source})`);
+    if (!machineEnvExposureReported && userRootEnvExposed()) {
+      // Once per window: the file is read on every run, and the fix is one
+      // command. Linux and macOS only — see userRootEnvExposed.
+      machineEnvExposureReported = true;
+      log(
+        `WARNING ${userRootEnvPath()} can be read by other users on this machine, and it holds ` +
+          `the Steptix server key (and any AI_API_KEY in it). Restrict it: chmod 600 "${userRootEnvPath()}"`,
+      );
+    }
     try {
       new URL(serverUrl);
     } catch {

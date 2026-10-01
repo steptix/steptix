@@ -24,8 +24,21 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseEnvFile } from './loader.js';
+import { logger } from '../utils/logger.js';
 
 export const MACHINE_KEY_VAR = 'STEPTIX_SERVER_API_KEY';
+
+/**
+ * Modes for what the framework creates in the user root. Its `.env` holds the
+ * server key and usually `AI_API_KEY`, and `.steptix/cdp-profiles/` holds
+ * signed-in browser sessions, so the whole root is private to its owner.
+ *
+ * On Windows `%LOCALAPPDATA%` is already private to the account and Node
+ * ignores these bits, so they only change anything on Linux and macOS, where a
+ * default umask would otherwise leave all of it readable by every local user.
+ */
+export const PRIVATE_DIR_MODE = 0o700;
+export const PRIVATE_FILE_MODE = 0o600;
 
 /** Injection seam for tests — the path derives entirely from these. */
 export interface UserRootDeps {
@@ -66,14 +79,42 @@ export function userRootEnvPath(deps?: UserRootDeps): string {
  * question is whether a value exists.
  */
 export function readUserRootEnv(deps?: UserRootDeps): Record<string, string> {
+  const envPath = userRootEnvPath(deps);
   let content: string;
   try {
-    content = fs.readFileSync(userRootEnvPath(deps), 'utf-8');
+    content = fs.readFileSync(envPath, 'utf-8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
     throw err;
   }
+  warnIfExposed(envPath, deps);
   return parseEnvFile(content);
+}
+
+/** Files already warned about, so a value read on every request says it once. */
+const warnedExposed = new Set<string>();
+
+/**
+ * Warn, once per file, when the user root's `.env` can be read by other local
+ * users — typically one created by hand to add `AI_API_KEY`, which the
+ * editor or shell makes `0644`. A warning rather than a refusal: the file
+ * works, and a run that stops over its permissions would be worse than one
+ * that says how to fix them.
+ */
+function warnIfExposed(envPath: string, deps?: UserRootDeps): void {
+  if ((deps?.platform ?? process.platform) === 'win32' || warnedExposed.has(envPath)) return;
+  let mode: number;
+  try {
+    mode = fs.statSync(envPath).mode;
+  } catch {
+    return;
+  }
+  if ((mode & 0o077) === 0) return;
+  warnedExposed.add(envPath);
+  logger.warn(
+    `${envPath} can be read by other users on this machine, and it holds the Steptix ` +
+      `server key (and any AI_API_KEY in it). Restrict it: chmod 600 "${envPath}"`,
+  );
 }
 
 /**
@@ -117,7 +158,7 @@ export function ensureMachineKey(deps?: UserRootDeps): {
   // without any parser anywhere caring about the shape.
   const key = `steptix_${crypto.randomBytes(32).toString('hex')}`;
 
-  fs.mkdirSync(path.dirname(envPath), { recursive: true });
+  fs.mkdirSync(path.dirname(envPath), { recursive: true, mode: PRIVATE_DIR_MODE });
 
   const line =
     `# Machine key for the Steptix Sessions API server.\n` +
@@ -127,11 +168,14 @@ export function ensureMachineKey(deps?: UserRootDeps): {
   if (fs.existsSync(envPath)) {
     // The file exists but has no (usable) key: append, preserving whatever
     // the user put there. Guard the joining newline rather than assuming one.
+    // Tightened first, so the key is never written into a file others can
+    // read — a hand-made one is usually 0644.
+    if ((deps?.platform ?? process.platform) !== 'win32') fs.chmodSync(envPath, PRIVATE_FILE_MODE);
     const content = fs.readFileSync(envPath, 'utf-8');
     const joiner = content === '' || content.endsWith('\n') ? '' : '\n';
     fs.appendFileSync(envPath, `${joiner}${line}`);
   } else {
-    fs.writeFileSync(envPath, line);
+    fs.writeFileSync(envPath, line, { mode: PRIVATE_FILE_MODE });
   }
 
   return { key, created: true, path: envPath };

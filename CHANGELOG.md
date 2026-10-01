@@ -36,8 +36,14 @@ client and `steptix serve` itself use the same one: `SERVER_URL` in the machine
   instead of being refused.
 - **`steptix status` / `steptix stop`** look at `--url`, else the machine
   `SERVER_URL`, else port 3100 on the config's `server.host`.
+- **Linux and macOS:** the machine folder (`$XDG_CONFIG_HOME/steptix` or
+  `~/.steptix`) is now private, as `%LOCALAPPDATA%` already is on Windows.
+  It is created `0700` and the key file `0600`, an existing `.env` is set
+  `0600` before the key is added to it, and reading one other users can read
+  warns once with the `chmod 600` command — from the CLI, the server and MCP,
+  and in Steptix's run log.
 
-Steptix extension 0.5.166.
+Steptix extension 0.5.167.
 
 ### Added — the version names the build: commit, and whether it was modified
 

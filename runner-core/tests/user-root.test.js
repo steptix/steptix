@@ -8,6 +8,7 @@ import {
   chooseServerUrl,
   readMachineKey,
   readMachineServerUrl,
+  userRootEnvExposed,
   userRootEnvPath,
   DEFAULT_SERVER_URL,
   MACHINE_KEY_VAR,
@@ -151,6 +152,33 @@ test('chooseServerUrl: the project wins, then the machine .env, then the default
       source: `SERVER_URL in ${projectEnv}`,
       path: projectEnv,
     });
+  } finally {
+    cleanup();
+  }
+});
+
+// The machine .env holds the server key and usually AI_API_KEY, so Steptix
+// says `chmod 600` when other local users can read it (Linux and macOS only).
+test('userRootEnvExposed: true only for a .env other users can read, never on Windows', { skip: process.platform === 'win32' }, () => {
+  const { deps, cleanup } = tmpDeps();
+  try {
+    assert.equal(userRootEnvExposed(deps), false, 'absent file');
+    const envPath = writeMachineEnv(deps, 'AI_API_KEY=k\n');
+    fs.chmodSync(envPath, 0o644);
+    assert.equal(userRootEnvExposed(deps), true, '0644');
+    fs.chmodSync(envPath, 0o600);
+    assert.equal(userRootEnvExposed(deps), false, '0600');
+    assert.equal(userRootEnvExposed({ ...deps, platform: 'win32' }), false, 'win32 is never exposed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('userRootEnvExposed: Windows reports nothing, whatever the file looks like', { skip: process.platform !== 'win32' }, () => {
+  const { deps, cleanup } = tmpDeps();
+  try {
+    writeMachineEnv(deps, 'AI_API_KEY=k\n');
+    assert.equal(userRootEnvExposed(deps), false);
   } finally {
     cleanup();
   }

@@ -36,6 +36,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
 import { probePort, type LaunchableEngine } from './cdp-discovery.js';
+import { PRIVATE_DIR_MODE } from '../env/user-root.js';
 
 export type { LaunchableEngine };
 
@@ -56,7 +57,7 @@ export interface LauncherDeps {
   /** Default: which() helper (PATH lookup via child_process). */
   which?: (cmd: string) => string | null;
   /** Default: fs.mkdirSync. */
-  mkdirSync?: (p: string, opts: { recursive: boolean }) => void;
+  mkdirSync?: (p: string, opts: { recursive: boolean; mode: number }) => void;
   /** Default: child_process.spawn. */
   spawn?: typeof import('node:child_process').spawn;
   /** Default: the real port probe. */
@@ -291,7 +292,9 @@ export async function launchCdpBrowser(
   const budget = deps?.launchTimeoutMs ?? LAUNCH_TIMEOUT_MS;
 
   try {
-    mkdirSync(opts.profileDir, { recursive: true });
+    // Private: a profile holds signed-in sessions, and in project-less mode
+    // this can be what creates the user root (src/env/user-root.ts).
+    mkdirSync(opts.profileDir, { recursive: true, mode: PRIVATE_DIR_MODE });
   } catch (err) {
     return {
       ok: false,

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +11,7 @@ import {
   userRootEnvPath,
   type UserRootDeps,
 } from '../src/env/user-root.js';
+import { logger } from '../src/utils/logger.js';
 
 let tmpDir: string;
 
@@ -131,5 +132,69 @@ describe('readMachineKey', () => {
     fs.mkdirSync(path.dirname(envPath), { recursive: true });
     fs.writeFileSync(envPath, `${MACHINE_KEY_VAR}=  spaced-key  \n`);
     expect(readMachineKey(deps())).toBe('spaced-key');
+  });
+});
+
+/**
+ * The user root holds the server key, usually AI_API_KEY and signed-in browser
+ * profiles, so it is private to its owner (stories/machine-server-url.md).
+ * Windows gets that from %LOCALAPPDATA%; elsewhere the framework sets modes.
+ */
+describe('user root permissions', () => {
+  const posix = process.platform !== 'win32';
+  const modeOf = (p: string): number => fs.statSync(p).mode & 0o777;
+
+  /** A hand-made .env, the way an editor or a shell redirect leaves it. */
+  function writeLooseEnv(content: string): string {
+    const envPath = userRootEnvPath(deps());
+    fs.mkdirSync(path.dirname(envPath), { recursive: true });
+    fs.writeFileSync(envPath, content);
+    fs.chmodSync(envPath, 0o644);
+    return envPath;
+  }
+
+  /** `logger.warn` lines naming `envPath`, collected while `fn` runs. */
+  function warningsAbout(envPath: string, fn: () => void): string[] {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      fn();
+      return warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes(envPath));
+    } finally {
+      warn.mockRestore();
+    }
+  }
+
+  it.runIf(posix)('ensureMachineKey creates the root 0700 and the .env 0600', () => {
+    const { path: envPath } = ensureMachineKey(deps());
+    expect(modeOf(path.dirname(envPath))).toBe(0o700);
+    expect(modeOf(envPath)).toBe(0o600);
+  });
+
+  it.runIf(posix)('ensureMachineKey tightens a hand-made .env before adding the key to it', () => {
+    const envPath = writeLooseEnv('AI_MODEL=m\n');
+    warningsAbout(envPath, () => ensureMachineKey(deps()));
+    expect(modeOf(envPath)).toBe(0o600);
+    expect(fs.readFileSync(envPath, 'utf-8')).toContain('AI_MODEL=m');
+  });
+
+  it.runIf(posix)('reading a .env other users can read warns once, naming the chmod', () => {
+    const envPath = writeLooseEnv('AI_API_KEY=k\n');
+    const said = warningsAbout(envPath, () => {
+      readUserRootEnv(deps());
+      readUserRootEnv(deps());
+    });
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain(`chmod 600 "${envPath}"`);
+  });
+
+  it.runIf(posix)('a private .env reads without a warning', () => {
+    const envPath = writeLooseEnv('AI_API_KEY=k\n');
+    fs.chmodSync(envPath, 0o600);
+    expect(warningsAbout(envPath, () => readUserRootEnv(deps()))).toHaveLength(0);
+  });
+
+  it.runIf(!posix)('Windows: %LOCALAPPDATA% is already private, so reading never warns', () => {
+    const envPath = writeLooseEnv('AI_API_KEY=k\n');
+    expect(warningsAbout(envPath, () => readUserRootEnv(deps()))).toHaveLength(0);
   });
 });

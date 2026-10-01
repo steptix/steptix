@@ -921,6 +921,12 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 | `OPEN_REPORT_IN_BROWSER_AFTER_RUN` | `true`/`false`. Open the generated HTML report in your OS default browser after `run` completes. Skipped automatically when `CI` is set. |
 | `APPEND_RUN_HISTORY_TO_TEST_FILE` | `true`/`false`. Append a "Latest runs" section at the bottom of each test `.md` file after it runs, linking to its HTML report (keeps the most recent 10). Default `false`. |
 
+**The machine `.env`** is the fallback for `SERVER_URL`, `STEPTIX_SERVER_API_KEY`, `AI_API_KEY` and `AI_MODEL` when a project sets none:
+
+- **Windows:** `%LOCALAPPDATA%\steptix\.env`, private to your account like everything in `%LOCALAPPDATA%`.
+- **Linux and macOS:** `$XDG_CONFIG_HOME/steptix/.env` when `XDG_CONFIG_HOME` is set, else `~/.steptix/.env`. Steptix creates the folder `0700` and the file `0600`. If you create the file yourself to add `AI_API_KEY`, run `chmod 600` on it; Steptix warns when other users can read it.
+- **`XDG_CONFIG_HOME`** must be set where both the server and VS Code see it — your login session, not only a shell startup file. Otherwise a `steptix serve` started from that shell and Steptix in VS Code read different files and disagree on the port and the key. A server Steptix auto-starts inherits VS Code's environment, so only a server started by hand can disagree.
+
 > **Don't set `AI_EFFORT=none` — it is not the cheap option.** Leaving
 > `AI_EFFORT` unset is what saves money. `none` costs *more* and can break runs.
 >
