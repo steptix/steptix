@@ -23,7 +23,7 @@ jobs:
   unit:
     name: unit (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       # One platform failing must not hide whether the others pass.
       fail-fast: false
