@@ -1,0 +1,92 @@
+# The four unit suites. CLAUDE.md §"Unit tests pass on Windows, Linux and
+# macOS" is the contract; CI covers Windows only for now (see the matrix),
+# so Linux still gets checked through WSL by hand. Live and
+# integration suites (VS Code instances, an AI gateway key, a real desktop)
+# are deliberately not here.
+name: Unit tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a PR supersedes the run already going for it.
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  unit:
+    name: unit (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      # One platform failing must not hide whether the others pass.
+      fail-fast: false
+      matrix:
+        # Windows only for now, to stay inside the private repo's Actions
+        # minutes. Linux is ubuntu-latest (1x minutes), macOS is
+        # macos-latest (10x) — add them back here when the budget allows.
+        os: [windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            runner-core/package-lock.json
+            flick-vscode/package-lock.json
+            steptix-vscode/package-lock.json
+            fixtures/tools/package-lock.json
+
+      # Order matters: runner-core first (its `prepare` builds the dist/ that
+      # steptix-vscode's file: dep links to), and the root before
+      # fixtures/tools (its `steptix` dep is file:../..).
+      - name: Install
+        shell: bash
+        run: |
+          npm ci
+          npm ci --prefix runner-core
+          npm ci --prefix fixtures/tools
+          npm ci --prefix flick-vscode
+          npm ci --prefix steptix-vscode
+
+      # The root suite's real-browser tests launch Playwright's Chromium.
+      # Cached per Playwright version so a run doesn't download it again;
+      # on a hit, `playwright install` finds it present and does nothing.
+      # The path is Windows'; Linux's is ~/.cache/ms-playwright, and Linux
+      # also needs `--with-deps` on the install for its system packages.
+      - name: Playwright version
+        id: pw
+        shell: bash
+        run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      # Each suite runs even if an earlier one failed, so one run reports all
+      # four. `npm test` keeps its pretest builds — several suites test dist/.
+      - name: Root
+        run: npm test
+      - name: runner-core
+        if: ${{ !cancelled() }}
+        run: npm test --prefix runner-core
+      - name: flick-vscode
+        if: ${{ !cancelled() }}
+        run: npm test --prefix flick-vscode
+      - name: steptix-vscode
+        if: ${{ !cancelled() }}
+        run: npm test --prefix steptix-vscode
