@@ -16,7 +16,7 @@ import { createServer, type Server } from 'node:http';
 import Jimp from 'jimp';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { PageTracker, type BrowserSession } from '../src/browser/manager.js';
-import { StepRecorder, classifyHistoryMove, historyBehind, type KnownSecret } from '../src/recorder/step-recorder.js';
+import { StepRecorder, classifyHistoryMove, classifyNavigation, historyBehind, type KnownSecret } from '../src/recorder/step-recorder.js';
 import type { Box, RecordedAction } from '../src/recorder/types.js';
 import { addLogCallback } from '../src/utils/logger.js';
 
@@ -47,6 +47,25 @@ const PAGES: Record<string, string> = {
     <button id="push" onclick="history.pushState({v:2}, '', '?view=2')">Show view 2</button>
     <button id="script-back" onclick="history.back()">In-page back</button>
     </body></html>`,
+  // One click, three history entries: a router that pushes a step at a time.
+  '/burst.html': `<!doctype html><html><head><title>Burst</title></head><body>
+    <button id="push3" onclick="history.pushState({}, '', '?a'); history.pushState({}, '', '?b'); history.pushState({}, '', '?c')">Go</button>
+    </body></html>`,
+  '/hop.html': `<!doctype html><html><head><title>Hop</title></head><body>
+    <a href="/redirect.html" id="to-redirect">Continue</a>
+    <a href="/redirect-error.html" id="to-error">Continue elsewhere</a></body></html>`,
+  // On to an address nothing answers: an error page, which commits at
+  // chrome-error:// while the history keeps the address that failed.
+  '/redirect-error.html': `<!doctype html><html><head><title>Redirect</title>
+    <script>location.replace('http://127.0.0.1:1/gone')</script></head><body></body></html>`,
+  // A page that sends the tab on at once — a second commit hard on the first.
+  '/redirect.html': `<!doctype html><html><head><title>Redirect</title>
+    <script>location.replace('/land.html')</script></head><body></body></html>`,
+  '/land.html': `<!doctype html><html><head><title>Land</title></head><body><h1>Landed</h1></body></html>`,
+  // location.replace keeps the entries after this one: Forward still works.
+  '/rep.html': `<!doctype html><html><head><title>Rep</title></head><body>
+    <button id="replace" onclick="location.replace('/land.html')">Replace</button></body></html>`,
+  '/fwd.html': `<!doctype html><html><head><title>Fwd</title></head><body><h1>Ahead</h1></body></html>`,
   '/form.html': `<!doctype html><html><head><title>Form</title></head><body>
     <nav aria-label="Main menu"><a href="/other.html" id="to-other">Reports</a>
       <a href="/other.html" target="_blank" id="new-tab">Open in new tab</a></nav>
@@ -594,35 +613,59 @@ describe('the browser\'s Back, Forward and Refresh (Chromium: read off the tab\'
   }, 30_000);
 
   /**
-   * `Page.frameNavigated` can arrive before the browser has put the
-   * navigation in the history the recorder reads. Seen under load: a link
-   * click's first read still showed the page it left, and the Back after it
-   * was recorded as a Reload. Here every commit's first read is made to lag
-   * that way, on purpose — the recorder must read again until it catches up.
+   * Meddle with the recorder's `Page.getNavigationHistory` reads, the two ways
+   * a busy browser does. `lag`: a new navigation's first read after its commit
+   * still shows the tab as it was — `Page.frameNavigated` can arrive before the
+   * browser records the new entry (seen under load). Only a new entry can be
+   * missing: during Back, Forward or Reload the browser already counts the
+   * destination as current, so those reads are left alone. `slow`: every read
+   * takes `ms` longer, so the recorder's reads fall behind the commits — the
+   * browser answering late with the history as it was when asked
+   * (`'reply'`), or getting to the question late and answering with the
+   * history as it is by then (`'request'`).
+   * Answers how many reads the recorder made.
    */
-  it('a history read that lags its commit is read again: link, Back, Forward, Reload and the same address again stay what they were', async () => {
+  function meddleWithHistoryReads(opts: {
+    lag?: boolean;
+    slow?: { ms: number; late: 'request' | 'reply' };
+  }): { reads: number } {
+    const count = { reads: 0 };
     const realSession = context.newCDPSession.bind(context);
     context.newCDPSession = (async (target: Page) => {
       const cdp = await realSession(target);
       const send = cdp.send.bind(cdp) as (method: string, params?: object) => Promise<unknown>;
+      const types = new Map<string, string>();
       let lastRead: unknown = null;
       let lagNext = false;
-      cdp.on('Page.frameNavigated', (e: { frame: { parentId?: string } }) => {
-        if (!e.frame.parentId) lagNext = true;
+      cdp.on('Page.frameStartedNavigating', (e: { loaderId?: string; navigationType?: string }) => {
+        if (e.loaderId && e.navigationType) types.set(e.loaderId, e.navigationType);
       });
-      cdp.on('Page.navigatedWithinDocument', () => (lagNext = true));
+      cdp.on('Page.frameNavigated', (e: { frame: { parentId?: string; loaderId?: string } }) => {
+        if (!e.frame.parentId && types.get(e.frame.loaderId ?? '') === 'differentDocument') lagNext = !!opts.lag;
+      });
+      cdp.on('Page.navigatedWithinDocument', () => (lagNext = !!opts.lag));
       (cdp as { send: unknown }).send = async (method: string, params?: object) => {
         if (method !== 'Page.getNavigationHistory') return send(method, params);
+        count.reads++;
+        const wait = (): Promise<void> => new Promise((r) => setTimeout(r, opts.slow?.ms ?? 0));
+        if (opts.slow?.late === 'request') await wait();
+        let answer: unknown;
         if (lagNext && lastRead) {
           lagNext = false;
-          return lastRead;
+          answer = lastRead;
+        } else {
+          answer = lastRead = await send(method, params);
         }
-        lastRead = await send(method, params);
-        return lastRead;
+        if (opts.slow?.late === 'reply') await wait();
+        return answer;
       };
       return cdp;
     }) as typeof context.newCDPSession;
+    return count;
+  }
 
+  it('a history read that lags its commit is read again: link, Back, Forward, Reload and the same address again stay what they were', async () => {
+    meddleWithHistoryReads({ lag: true });
     recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
     await recorder.start();
     await page.click('#to-other'); // a link: the page's own navigation
@@ -641,6 +684,167 @@ describe('the browser\'s Back, Forward and Refresh (Chromium: read off the tab\'
     await new Promise((r) => setTimeout(r, 500));
     expect(actions.map((a) => a.kind)).toEqual(['click', 'back', 'forward', 'reload']);
   }, 30_000);
+
+  /**
+   * The other way reads go wrong: they fall behind, and one taken for a commit
+   * already shows the next one. A page that sends the tab straight on
+   * (`location.replace` in its head) commits twice in a row; with slow reads,
+   * the first commit's read shows both, and the second commit's read shows no
+   * change. That is not a read that lags — waiting for a change there waits
+   * for the author's next move and takes it as the redirect's.
+   */
+  it('reads that fall behind the commits are not waited on: a redirect, then Back, is a back', async () => {
+    await page.goto(`${origin}/hop.html`);
+    const history = meddleWithHistoryReads({ slow: { ms: 150, late: 'request' } });
+    recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
+    await recorder.start();
+    await page.click('#to-redirect');
+    await page.waitForURL(/land\.html$/);
+    await new Promise((r) => setTimeout(r, 600));
+    // One read when recording started and one per commit — not a loop of
+    // them waiting for a change the last read already had.
+    expect(history.reads).toBe(3);
+    await page.goBack();
+    await actionsReach(2);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(actions.map((a) => a.kind)).toEqual(['click', 'back']);
+  }, 30_000);
+
+  it('an error page is not waited on: the history keeps the address that failed, not chrome-error://', async () => {
+    await page.goto(`${origin}/hop.html`);
+    const history = meddleWithHistoryReads({ slow: { ms: 150, late: 'request' } });
+    recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
+    await recorder.start();
+    await page.click('#to-error');
+    await page.waitForURL(/^chrome-error:/).catch(() => {}); // Playwright may report the failed address instead
+    await new Promise((r) => setTimeout(r, 800));
+    expect(history.reads).toBe(3);
+    expect(actions.map((a) => a.kind)).toEqual(['click']);
+  }, 30_000);
+
+  it('reads that fall behind a burst of pushState are not waited on: the Back after it is kept, and nothing stalls', async () => {
+    await page.goto(`${origin}/burst.html`);
+    const history = meddleWithHistoryReads({ slow: { ms: 150, late: 'reply' } });
+    recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
+    await recorder.start();
+    await page.click('#push3');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(history.reads).toBe(4); // one when recording started, one per pushState
+    await page.goBack();
+    await actionsReach(2);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(actions.map((a) => a.kind)).toEqual(['click', 'back']);
+  }, 30_000);
+
+  it('a same-document read that lags is read again: the Back after a pushState is still a back', async () => {
+    await page.goto(`${origin}/spa.html`);
+    meddleWithHistoryReads({ lag: true });
+    recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
+    await recorder.start();
+    await page.click('#push');
+    await new Promise((r) => setTimeout(r, 250));
+    await page.goBack();
+    await actionsReach(2);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(actions.map((a) => a.kind)).toEqual(['click', 'back']);
+  }, 30_000);
+
+  /**
+   * A commit still being read again when the author moves on. Back and Forward
+   * show their destination from the moment they start, so a read answered
+   * after the author's Forward has started holds it — taken as the earlier
+   * commit's, the Forward then shows no move and is recorded as a back. The
+   * reads are rigged: the `location.replace` commit's first read answers with
+   * the history from before it, and each read again answers a second later,
+   * with the real history only if a newer navigation has started by then. The
+   * author's Forward lands inside that second.
+   */
+  it("a read answered after the author's next move started is not taken: a Forward during a retry is a forward", async () => {
+    await page.goto(`${origin}/rep.html`);
+    await page.goto(`${origin}/fwd.html`);
+    await page.goBack(); // at rep.html, with fwd.html ahead
+    const realSession = context.newCDPSession.bind(context);
+    context.newCDPSession = (async (target: Page) => {
+      const cdp = await realSession(target);
+      const send = cdp.send.bind(cdp) as (method: string, params?: object) => Promise<unknown>;
+      const types = new Map<string, string>();
+      let lastRead: unknown = null;
+      let rig: 'waiting' | 'armed' | 'retrying' | 'over' = 'waiting';
+      let newerStarted = false;
+      cdp.on('Page.frameStartedNavigating', (e: { loaderId?: string; navigationType?: string }) => {
+        if (e.loaderId && e.navigationType) types.set(e.loaderId, e.navigationType);
+        if (rig === 'retrying') newerStarted = true;
+      });
+      cdp.on('Page.frameNavigated', (e: { frame: { parentId?: string; loaderId?: string } }) => {
+        if (e.frame.parentId) return;
+        if (rig === 'waiting' && types.get(e.frame.loaderId ?? '') === 'differentDocument') rig = 'armed';
+        else if (rig === 'retrying') rig = 'over';
+      });
+      (cdp as { send: unknown }).send = async (method: string, params?: object) => {
+        if (method !== 'Page.getNavigationHistory') return send(method, params);
+        if (rig === 'armed') {
+          rig = 'retrying';
+          return lastRead; // the history from before the commit
+        }
+        if (rig === 'retrying') {
+          await new Promise((r) => setTimeout(r, 1_000));
+          return newerStarted ? send(method, params) : lastRead;
+        }
+        lastRead = await send(method, params);
+        return lastRead;
+      };
+      return cdp;
+    }) as typeof context.newCDPSession;
+
+    recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
+    await recorder.start();
+    await page.click('#replace');
+    await page.waitForURL(/land\.html$/);
+    await new Promise((r) => setTimeout(r, 300));
+    await page.goForward();
+    await new Promise((r) => setTimeout(r, 2_500));
+    expect(actions.map((a) => a.kind)).toEqual(['click', 'forward']);
+  }, 30_000);
+
+  /**
+   * Playwright launches Chromium with the back/forward cache off; the browsers
+   * Steptix launches over CDP leave it on. A page restored from it commits
+   * under its old loader, so its start's word is not found — and it is always
+   * a Back or a Forward, so it is recorded as one even after a read that lagged.
+   */
+  it('a page restored from the back/forward cache is a back, even after a read that lagged', async () => {
+    const cached = await chromium.launch({ channel: 'chromium', ignoreDefaultArgs: ['--disable-back-forward-cache'] });
+    try {
+      await context.close();
+      context = await cached.newContext({ viewport: { width: 1000, height: 800 } });
+      page = await context.newPage();
+      const pageTracker = new PageTracker(page);
+      session = { browser: cached, context, page, pageTracker };
+      await page.goto(`${origin}/form.html`);
+      const restores: string[] = [];
+      const watcher = await context.newCDPSession(page);
+      await watcher.send('Page.enable');
+      watcher.on('Page.frameNavigated', (e: { type?: string; frame: { parentId?: string } }) => {
+        if (!e.frame.parentId && e.type) restores.push(e.type);
+      });
+      meddleWithHistoryReads({ lag: true });
+      recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
+      await recorder.start();
+      await page.click('#to-other');
+      await page.waitForURL(/other\.html$/);
+      await new Promise((r) => setTimeout(r, 250));
+      await page.goBack({ waitUntil: 'commit' }); // a restored page fires no load
+      await actionsReach(2);
+      await new Promise((r) => setTimeout(r, 200));
+      // Without a restore from the cache this test would prove nothing.
+      expect(restores).toContain('BackForwardCacheRestore');
+      expect(actions.map((a) => a.kind)).toEqual(['click', 'back']);
+    } finally {
+      await recorder?.cancel().catch(() => {});
+      await context.close().catch(() => {});
+      await cached.close();
+    }
+  }, 60_000);
 
   it('a same-document Back (a pushState entry) is a back too', async () => {
     await page.goto(`${origin}/spa.html`);
@@ -686,32 +890,65 @@ describe('classifyHistoryMove', () => {
 describe('historyBehind', () => {
   const h = (index: number, ids: number[], urls: string[]) => ({ index, ids, urls });
   const before = h(1, [1, 2], ['https://a.test/form', 'https://a.test/other']);
+  const same = h(1, [1, 2], ['https://a.test/form', 'https://a.test/other']);
+  const commit = (url: string, navigationType: string | undefined, beforeIsOlder = true) =>
+    ({ before, url, navigationType, beforeIsOlder });
 
-  it('a read identical to the history before is behind — unless the navigation was a Reload', () => {
-    const same = h(1, [1, 2], ['https://a.test/form', 'https://a.test/other']);
-    for (const type of ['differentDocument', 'historyDifferentDocument', 'historySameDocument']) {
-      expect(historyBehind(before, same, 'https://a.test/other', type)).toBe(true);
-    }
-    expect(historyBehind(before, same, 'https://a.test/other', 'reload')).toBe(false);
-    expect(historyBehind(before, same, 'https://a.test/other', 'reloadBypassingCache')).toBe(false);
+  it('a new document whose read shows no change is behind: at another address, or at the same one read before the commit', () => {
+    expect(historyBehind(commit('https://a.test/next', 'differentDocument'), same)).toBe(true);
+    expect(historyBehind(commit('https://a.test/other', 'differentDocument'), same)).toBe(true);
   });
 
-  it('without the browser\'s word for it: behind only when the address moved and the history did not', () => {
-    const same = h(1, [1, 2], ['https://a.test/form', 'https://a.test/other']);
-    expect(historyBehind(before, same, 'https://a.test/elsewhere', undefined)).toBe(true);
-    expect(historyBehind(before, same, 'https://a.test/other', undefined)).toBe(false);
+  it('…but not when the reads fell behind the commits, and the last one already took this one in', () => {
+    expect(historyBehind(commit('https://a.test/other', 'differentDocument', false), same)).toBe(false);
+  });
+
+  it('Reload, Back and Forward are never behind: the browser counts their destination as current from the start', () => {
+    for (const type of ['reload', 'reloadBypassingCache', 'historyDifferentDocument', 'historySameDocument']) {
+      expect(historyBehind(commit('https://a.test/elsewhere', type), same)).toBe(false);
+    }
+  });
+
+  it("without the browser's word for it: behind only when the address moved and the history did not", () => {
+    expect(historyBehind(commit('https://a.test/elsewhere', undefined), same)).toBe(true);
+    // A replaceState to the address it is at changes nothing, and says so.
+    expect(historyBehind(commit('https://a.test/other', undefined), same)).toBe(false);
   });
 
   it('a read that moved at all has caught up', () => {
-    // A new entry; the same address loaded again (a new id); Back.
-    expect(historyBehind(before, h(2, [1, 2, 3], ['', '', 'https://a.test/x']), 'https://a.test/x', 'differentDocument')).toBe(false);
-    expect(historyBehind(before, h(1, [1, 5], ['https://a.test/form', 'https://a.test/other']), 'https://a.test/other', 'differentDocument')).toBe(false);
-    expect(historyBehind(before, h(0, [1, 2], ['https://a.test/form', 'https://a.test/other']), 'https://a.test/form', 'historyDifferentDocument')).toBe(false);
-    // replaceState: same entry, new address.
-    expect(historyBehind(before, h(1, [1, 2], ['https://a.test/form', 'https://a.test/other?x']), 'https://a.test/other?x', undefined)).toBe(false);
-    expect(historyBehind(null, before, 'https://a.test/other', 'differentDocument')).toBe(false);
+    // A new entry; the same address loaded again (a new id); replaceState to a new address.
+    expect(historyBehind(commit('https://a.test/x', 'differentDocument'), h(2, [1, 2, 3], ['', '', 'https://a.test/x']))).toBe(false);
+    expect(historyBehind(commit('https://a.test/other', 'differentDocument'), h(1, [1, 5], ['https://a.test/form', 'https://a.test/other']))).toBe(false);
+    expect(historyBehind(commit('https://a.test/other?x', undefined), h(1, [1, 2], ['https://a.test/form', 'https://a.test/other?x']))).toBe(false);
+    expect(historyBehind({ ...commit('https://a.test/other', 'differentDocument'), before: null }, same)).toBe(false);
   });
 });
+
+describe('classifyNavigation', () => {
+  const h = (index: number, ids: number[]) => ({ index, ids, urls: ids.map(() => '') });
+  const before = h(1, [1, 2, 3]);
+
+  it("the browser's word decides Reload and new, whatever the history read says", () => {
+    // A read that never caught up looks like a reload; it is still a new document.
+    expect(classifyNavigation('differentDocument', before, h(1, [1, 2, 3]))).toBe('new');
+    expect(classifyNavigation('reload', before, h(1, [1, 2, 3]))).toBe('reload');
+    expect(classifyNavigation('reloadBypassingCache', before, null)).toBe('reload');
+  });
+
+  it('Back and Forward by the way the index moved; a traversal it cannot place is a back, as without CDP', () => {
+    expect(classifyNavigation('historyDifferentDocument', before, h(0, [1, 2, 3]))).toBe('back');
+    expect(classifyNavigation('historyDifferentDocument', before, h(2, [1, 2, 3]))).toBe('forward');
+    expect(classifyNavigation('historyDifferentDocument', before, h(1, [1, 2, 3]))).toBe('back');
+  });
+
+  it("without the browser's word, the history alone decides", () => {
+    expect(classifyNavigation(undefined, before, h(0, [1, 2, 3]))).toBe('back');
+    expect(classifyNavigation(undefined, before, h(1, [1, 2, 3]))).toBe('reload');
+    expect(classifyNavigation(undefined, before, h(2, [1, 2, 9]))).toBe('new');
+    expect(classifyNavigation(undefined, before, null)).toBe('new');
+  });
+});
+
 
 // ── The fix round (review of the server half) ─────────────────────────────
 

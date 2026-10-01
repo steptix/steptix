@@ -94,65 +94,124 @@ async function readHistory(cdp: CDPSession): Promise<TabHistory | null> {
 /** How long a commit waits for the tab's history to show it, at most. */
 const HISTORY_CATCH_UP_MS = 2_000;
 
+/** One main-frame commit, as its history read needs it. */
+export interface CommitForHistory {
+  /** The history the commit is classified against (the last commit's). */
+  before: TabHistory | null;
+  /** The address the history keeps for the commit — where the frame
+   *  committed, or for an error page the address that failed. */
+  url: string;
+  /** The browser's own word for the navigation (`Page.frameStartedNavigating`,
+   *  matched to the commit by its loader), when it gave one. */
+  navigationType: string | undefined;
+  /** `before` was answered before this commit was heard of. False when the
+   *  reads fell behind: the last commit's read, answered after this commit,
+   *  already took it in. */
+  beforeIsOlder: boolean;
+}
+
 /**
  * Whether a history read taken for a commit still shows the tab as it was
  * BEFORE that commit. `Page.frameNavigated` can arrive before the browser has
- * recorded the navigation in the history `Page.getNavigationHistory` reads —
- * measured on a link click while the whole suite ran — and a read taken then
- * makes the commit look like a Reload, and leaves a baseline that makes the
- * NEXT move look like one too (a Back read as a Reload).
+ * put a NEW entry in the history `Page.getNavigationHistory` reads — measured
+ * on a link click while the whole suite ran — and a read taken then made the
+ * commit look like a Reload, and left a baseline that made the next Back look
+ * like one too.
  *
- * Such a read is identical to the history before. That is wrong for every
- * navigation that is not a Reload: a new one always makes or replaces an
- * entry (a new id — even to the same address), and Back and Forward always
- * move the index. `navigationType` is the browser's own word for the
- * navigation (`Page.frameStartedNavigating`, matched to the commit by its
- * loader); without it — a same-document commit, or a Chromium too old to say
- * — the read is behind only when the address moved and the history did not.
+ * Only a new entry can be missing: during Back, Forward and Reload the
+ * browser already counts the destination as current (its pending entry), so
+ * those reads are never behind. A read that is behind is identical to
+ * `before`. It is, when the commit's address (`commit.url`) is not the one the
+ * history shows; or when the browser says it was a new document at the same
+ * address — that always makes or replaces an entry — and `before` was read
+ * before the commit. Without the browser's word (a same-document commit, a
+ * back/forward-cache restore, a Chromium too old to say) only the address
+ * tells: a `replaceState` to the same address really does change nothing.
+ *
+ * Not covered: an iframe navigation that adds a history entry leaves no
+ * main-frame commit to read for, so `before` misses that entry, and a read
+ * behind the next main-frame commit then does not look identical to it.
  * Exported for the unit test that pins it.
  */
-export function historyBehind(
-  before: TabHistory | null,
-  after: TabHistory,
-  url: string,
-  navigationType: string | undefined,
-): boolean {
+export function historyBehind(commit: CommitForHistory, after: TabHistory): boolean {
+  const { before, url, navigationType } = commit;
   if (!before) return false;
+  if (
+    navigationType === 'reload' ||
+    navigationType === 'reloadBypassingCache' ||
+    navigationType === 'historyDifferentDocument' ||
+    navigationType === 'historySameDocument'
+  ) {
+    return false;
+  }
   const unchanged =
     after.index === before.index &&
     after.ids.length === before.ids.length &&
     after.ids.every((id, i) => id === before.ids[i]) &&
     after.urls[after.index] === before.urls[before.index];
   if (!unchanged) return false;
+  if (after.urls[after.index] !== url) return true;
+  return navigationType === 'differentDocument' && commit.beforeIsOlder;
+}
+
+/**
+ * The history once it shows the commit — read again while it is
+ * {@link historyBehind}, every 20 ms up to {@link HISTORY_CATCH_UP_MS}; after
+ * that, the last read stands. Not once the tab has moved on (`stillLatest`
+ * false), checked before each read again and after it: Back and Forward show
+ * their destination from the moment they start, so a read that overlaps the
+ * author's next move can hold it, and it would be taken as this commit's.
+ * Then the read before stands. Answers the read and the navigation count
+ * when it was answered — a read answered after a commit was heard of may
+ * already hold it.
+ */
+async function readHistoryAfter(
+  cdp: CDPSession,
+  commit: CommitForHistory,
+  navigations: () => number,
+  stillLatest: () => boolean,
+): Promise<{ history: TabHistory; at: number } | null> {
+  const end = Date.now() + HISTORY_CATCH_UP_MS;
+  let history = await readHistory(cdp);
+  let at = navigations();
+  while (history && historyBehind(commit, history) && stillLatest() && Date.now() < end) {
+    await new Promise((r) => setTimeout(r, 20));
+    if (!stillLatest()) break;
+    const again = await readHistory(cdp);
+    if (!again || !stillLatest()) break;
+    history = again;
+    at = navigations();
+  }
+  return history ? { history, at } : null;
+}
+
+/**
+ * What a commit was. The browser's own word decides where there is one — a
+ * new-document commit's `Page.frameStartedNavigating`, or a back/forward-cache
+ * restore, which is always Back or Forward: a reload is a Reload and a new
+ * document is new, whatever a history read says. Back and Forward differ
+ * only in direction, which the history shows: the index went down or up. One
+ * whose index did not move — `before` missed an entry — is recorded as
+ * `back`, as a traversal is without CDP. Without the browser's word (a
+ * same-document commit, a restored session), the history alone decides
+ * ({@link classifyHistoryMove}). Exported for the unit test that pins it.
+ */
+export function classifyNavigation(
+  navigationType: string | undefined,
+  before: TabHistory | null,
+  after: TabHistory | null,
+): HistoryMove {
   switch (navigationType) {
     case 'reload':
     case 'reloadBypassingCache':
-      return false;
+      return 'reload';
     case 'differentDocument':
+      return 'new';
     case 'historyDifferentDocument':
-    case 'historySameDocument':
-      return true;
+      return before && after && after.index > before.index ? 'forward' : 'back';
     default:
-      return url !== before.urls[before.index];
+      return after ? classifyHistoryMove(before, after) : 'new';
   }
-}
-
-/** The history once it shows the commit at `url` — read again while it is
- *  {@link historyBehind}, up to {@link HISTORY_CATCH_UP_MS}; after that, the
- *  last read stands. */
-async function readHistoryAfter(
-  cdp: CDPSession,
-  before: TabHistory | null,
-  url: string,
-  navigationType: string | undefined,
-): Promise<TabHistory | null> {
-  const end = Date.now() + HISTORY_CATCH_UP_MS;
-  let after = await readHistory(cdp);
-  while (after && historyBehind(before, after, url, navigationType) && Date.now() < end) {
-    await new Promise((r) => setTimeout(r, 20));
-    after = await readHistory(cdp);
-  }
-  return after;
 }
 
 /** Upper bound on any one page round-trip the recorder makes. */
@@ -667,11 +726,20 @@ interface PageWatch {
   skipFirstCommitUntil: number;
   lastUrl: string;
   /** The tab's navigation history as last read over CDP: the current index,
-   *  and every entry's id — what tells Back from Forward from Reload from a
-   *  new navigation (`classifyHistoryMove`). Null without CDP. */
+   *  and every entry's id and address — what tells Back from Forward from
+   *  Reload from a new navigation (`classifyNavigation`). Null without CDP. */
   history: TabHistory | null;
-  /** The browser's own word for each main-frame navigation under way
-   *  (`Page.frameStartedNavigating`), by loader id, until its commit takes it. */
+  /** {@link navigations} when `history` was read. */
+  historyAt: number;
+  /** Main-frame navigation events heard so far — starts and commits, new
+   *  document or not. A commit's history read compares it with its own count
+   *  to know whether the tab has moved on since (`readHistoryAfter`). */
+  navigations: number;
+  /** The browser's own word for recent main-frame navigations
+   *  (`Page.frameStartedNavigating`), by loader id. A commit takes its own;
+   *  one that never commits (a 204, a download) or commits under another
+   *  loader (a back/forward-cache restore) is dropped once newer ones push it
+   *  out. */
   navigationTypes: Map<string, string>;
   /** Without CDP: when the page last said a document arrived by history or
    *  reload, so the typed-navigation check does not also call it `navigate`. */
@@ -923,7 +991,10 @@ export class StepRecorder {
       for (const watch of this.watches.values()) {
         if (watch.cdp) {
           const history = await readHistory(watch.cdp);
-          if (history) watch.history = history;
+          if (history) {
+            watch.history = history;
+            watch.historyAt = watch.navigations; // as answered, like a commit's read
+          }
         }
         watch.lastUrl = watch.page.url();
         watch.rendererNavAt = null;
@@ -1738,6 +1809,8 @@ export class StepRecorder {
       skipFirstCommitUntil,
       lastUrl: page.url(),
       history: null,
+      historyAt: 0,
+      navigations: 0,
       navigationTypes: new Map(),
       historyHintAt: Number.NEGATIVE_INFINITY,
       detach: () => {},
@@ -1791,12 +1864,15 @@ export class StepRecorder {
         loaderId?: string;
         navigationType?: string;
       }): void => {
-        if (e.frameId === watch.mainFrameId && e.loaderId && e.navigationType) {
-          // Kept for the commit to read its history by (`historyBehind`). One
-          // that never commits is dropped once a few newer ones have started.
-          watch.navigationTypes.set(e.loaderId, e.navigationType);
-          if (watch.navigationTypes.size > 8) {
-            watch.navigationTypes.delete(watch.navigationTypes.keys().next().value!);
+        if (e.frameId === watch.mainFrameId) {
+          watch.navigations++;
+          // Kept for the commit to be classified by (`classifyNavigation`,
+          // `historyBehind`).
+          if (e.loaderId && e.navigationType) {
+            watch.navigationTypes.set(e.loaderId, e.navigationType);
+            if (watch.navigationTypes.size > 8) {
+              watch.navigationTypes.delete(watch.navigationTypes.keys().next().value!);
+            }
           }
         }
         if (e.frameId !== watch.mainFrameId || watch.rendererNavAt === null) return;
@@ -1814,14 +1890,31 @@ export class StepRecorder {
         forgetRequest();
       };
       const onNavigated = (e: {
-        frame: { id: string; parentId?: string; loaderId?: string; url: string; urlFragment?: string };
+        type?: string;
+        frame: {
+          id: string;
+          parentId?: string;
+          loaderId?: string;
+          url: string;
+          urlFragment?: string;
+          unreachableUrl?: string;
+        };
       }): void => {
         if (e.frame.parentId) return;
         watch.mainFrameId = e.frame.id;
         const loader = e.frame.loaderId;
-        const navigationType = loader ? watch.navigationTypes.get(loader) : undefined;
+        let navigationType = loader ? watch.navigationTypes.get(loader) : undefined;
         if (loader) watch.navigationTypes.delete(loader);
-        this.onMainCommit(watch, e.frame.url + (e.frame.urlFragment ?? ''), false, navigationType);
+        // A back/forward-cache restore commits under the loader of the
+        // document it brings back, not the one its start named — and it is
+        // always Back or Forward.
+        if (!navigationType && e.type === 'BackForwardCacheRestore') navigationType = 'historyDifferentDocument';
+        // An error page commits at chrome-error://; the history keeps the
+        // address that failed.
+        this.onMainCommit(watch, e.frame.url + (e.frame.urlFragment ?? ''), false, {
+          navigationType,
+          historyUrl: e.frame.unreachableUrl,
+        });
       };
       // A same-document move — `pushState`, a `#hash`, and Back/Forward
       // between such entries — commits no new document, so `frameNavigated`
@@ -1886,8 +1979,17 @@ export class StepRecorder {
    * a traversal there is recorded as `back`. The typed-navigation check waits
    * a moment for the hint, so a traversal is not ALSO called `navigate`.
    */
-  private onMainCommit(watch: PageWatch, url: string, sameDocument: boolean, navigationType?: string): void {
+  private onMainCommit(
+    watch: PageWatch,
+    url: string,
+    sameDocument: boolean,
+    /** `navigationType`: the browser's own word for it, when it gave one.
+     *  `historyUrl`: the address the history keeps for it, when that is not
+     *  `url` (an error page). */
+    { navigationType, historyUrl }: { navigationType?: string | undefined; historyUrl?: string | undefined } = {},
+  ): void {
     const t = this.now();
+    const seq = ++watch.navigations;
     // Paused: the history and the address are followed, so resuming starts
     // from where the author is, but nothing is recorded (Back, Forward,
     // Reload and the address bar included).
@@ -1923,12 +2025,22 @@ export class StepRecorder {
       // this ahead of the click that came before it.
       this.enqueue(async () => {
         const before = watch.history;
-        // Not the first read: it can be from before this commit (`historyBehind`).
-        const after = await readHistoryAfter(cdp, before, url, navigationType);
-        if (after) watch.history = after;
+        // Not just the first read: it can be from before this commit
+        // (`historyBehind`) — but nothing is waited for once the tab has moved on.
+        const read = await readHistoryAfter(
+          cdp,
+          { before, url: historyUrl ?? url, navigationType, beforeIsOlder: watch.historyAt < seq },
+          () => watch.navigations,
+          () => watch.navigations === seq,
+        );
+        const after = read?.history ?? null;
+        if (read) {
+          watch.history = read.history;
+          watch.historyAt = read.at;
+        }
         if (pausedAtCommit) return;
         if (!this.active && !this.stopped) return;
-        let move = after ? classifyHistoryMove(before, after) : 'new';
+        let move = classifyNavigation(navigationType, before, after);
         // A same-document commit at the same entry is `history.replaceState`
         // — the page rewriting its own address — never the reload button,
         // which always makes a new document (review, finding 4).
