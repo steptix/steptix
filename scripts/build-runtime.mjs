@@ -119,17 +119,16 @@ const manifest = {
   node: { bundled: false, required: sourcePackage.engines.node, executableOverride: 'STEPTIX_NODE' },
   entryPoint: 'server/dist/index.js', cli: 'steptix.cmd', playwrightVersion: playwright.version,
   browsers: { bundled: false, cache: '%LOCALAPPDATA%/ms-playwright', revisions: browsers.browsers },
-  extensionAutoDiscovery: false,
+  extensionAutoDiscovery: true,
 };
 fs.writeFileSync(path.join(payload, 'runtime-manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 const readme = `Steptix Runtime ${version} - Windows x64 beta\n\n` +
 `PREREQUISITES\nNode.js x64 22.21 or later must be installed and available on PATH.\nYou can instead set STEPTIX_NODE to the absolute path of node.exe.\nNode.js, browsers and the VS Code extension are not included.\n\n` +
 `CLI\nIn PowerShell, run: & "$env:LOCALAPPDATA\\steptix\\runtimes\\${version}\\steptix.cmd" --help\nRun the CLI from your test project's directory so configuration and tools are resolved there.\nThis installer does not modify PATH or VS Code settings.\n\n` +
 `SERVER\nsteptix.cmd serve --idle-timeout 60\nThe launcher enables a localhost Node inspector on a free port for TypeScript debugging.\nThe server generates/reuses its local key at %LOCALAPPDATA%\\steptix\\.env.\nNo real credentials are included in this package.\n\n` +
-`VS CODE (CURRENT EXTENSION)\nAutomatic runtime discovery is not yet implemented. In VS Code User settings set:\n` +
-`steptix.serverAutoStart.command: "<installation folder>\\steptix.cmd" serve --idle-timeout 60\n` +
-`steptix.serverAutoStart.cwd: <installation folder>\n` +
-`Keep SERVER_URL configured for your server (normally http://127.0.0.1:3100).\nUse the extension's Server Status / Start Server commands.\n\n` +
+`VS CODE\nNothing to configure. When you run a test and no server is listening, the Steptix extension\nstarts the newest runtime under %LOCALAPPDATA%\\steptix\\runtimes on the port SERVER_URL names.\n` +
+`SERVER_URL comes from the project's .env, else the SERVER_URL environment variable,\nelse %LOCALAPPDATA%\\steptix\\.env, else it is http://127.0.0.1:3100. A project needs no .env of its own.\n` +
+`Setting steptix.serverAutoStart.command in VS Code User settings starts something else instead.\nUse the extension's Server Status / Start Server / Stop Server commands.\n\n` +
 `BROWSERS\nDefault Chromium-based runs use your installed Google Chrome; Edge is also supported.\nInstall the runtime's matching Playwright browser builds with:\nsteptix.cmd browsers install chromium\nsteptix.cmd browsers install firefox\nsteptix.cmd browsers install webkit\nPlaywright uses %LOCALAPPDATA%\\ms-playwright unless PLAYWRIGHT_BROWSERS_PATH is set.\nInstalling Chromium does not change Steptix's existing Chrome-channel default.\nBrowser installation downloads require network access.\n\n` +
 `UNINSTALL / VERSIONS\nEach version has its own folder and Windows Installed Apps entry.\nStop servers using this version before uninstalling.\nUninstall.exe removes runtime files only; projects, shared keys and browsers are preserved.\nThe beta installer is unsigned. Inspect the checksum supplied beside it.\n`;
 fs.writeFileSync(path.join(payload, 'README.txt'), readme.replaceAll('\n', '\r\n'));

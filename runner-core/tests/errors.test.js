@@ -155,6 +155,19 @@ test('STX028 still names both settings when no log is available', () => {
   assert.ok(!payload.message.includes('undefined'), 'no undefined leaks into the message');
 });
 
+test('STX028 for the installed runtime names its folder and what usually breaks it', () => {
+  // No command setting was involved, so a fix that only said "fix the
+  // command setting" would send the user to a setting they never wrote.
+  const payload = reportError('STX028', {
+    ...SAMPLE_CONTEXTS.STX028,
+    runtimeDir: '/home/x/.steptix/runtimes/1.0.0',
+  });
+  assert.ok(payload.message.includes('/home/x/.steptix/runtimes/1.0.0'), 'names the runtime folder');
+  assert.ok(payload.message.includes('/ws/globalStorage/server.log'), 'still names the log');
+  assert.ok(/Node\.js/.test(payload.fix), 'says the runtime needs Node');
+  assert.ok(payload.fix.endsWith('.'));
+});
+
 test('actions reference real-looking command ids', () => {
   for (const code of ALL_ERROR_CODES) {
     const payload = reportError(code, SAMPLE_CONTEXTS[code]);

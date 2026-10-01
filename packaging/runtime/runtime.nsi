@@ -24,7 +24,7 @@ Var TestMode
 Var UninstallKey
 Var DisplayName
 Var NodeExe
-!define MUI_WELCOMEPAGE_TEXT "Install the Steptix server and CLI for your Windows user account.$\r$\n$\r$\nRequires an existing x64 Node.js 22.21+ installation. Node.js and browsers are not included.$\r$\n$\r$\nUse installed Chrome/Edge or install Playwright browsers afterwards. The VS Code extension currently needs its server command configured; automatic runtime discovery is planned."
+!define MUI_WELCOMEPAGE_TEXT "Install the Steptix server and CLI for your Windows user account.$\r$\n$\r$\nRequires an existing x64 Node.js 22.21+ installation. Node.js and browsers are not included.$\r$\n$\r$\nUse installed Chrome/Edge or install Playwright browsers afterwards. The Steptix VS Code extension finds this runtime and starts its server when you run a test."
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${PAYLOAD}\server\LICENSE"
 !insertmacro MUI_PAGE_INSTFILES

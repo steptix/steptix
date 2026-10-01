@@ -28,6 +28,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const { glob } = require('glob');
+const { pinUserSettings } = require('./userSettings.cjs');
 const { downloadAndUnzipVSCode } = require('@vscode/test-electron');
 const {
   copyWorkspace,
@@ -196,6 +197,7 @@ function launchVSCode({
 }) {
   fs.rmSync(reportPath, { force: true });
   fs.rmSync(logPath, { force: true });
+  pinUserSettings(userDataDir);
 
   const args = [
     cliJs,

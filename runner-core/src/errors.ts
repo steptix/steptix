@@ -84,8 +84,16 @@ export interface ErrorContextMap {
   STX027: { serverUrl: string; service: string };
   /** Auto-start failed. `reason` distinguishes the two ways it can (spawn
    *  refused up front vs never became healthy); `logPath` is where to look
-   *  and `logTail` the last few lines when cheaply available. */
-  STX028: { serverUrl: string; reason: string; logPath?: string; logTail?: string };
+   *  and `logTail` the last few lines when cheaply available. `runtimeDir` is
+   *  set when what failed to start was the installed runtime rather than the
+   *  command setting — the fix is then a different one. */
+  STX028: {
+    serverUrl: string;
+    reason: string;
+    logPath?: string;
+    logTail?: string;
+    runtimeDir?: string;
+  };
   STX030: Record<string, never>;
   STX031: Record<string, never>;
   /** A chain member the chain cannot reach: an `Else if` / `Otherwise` that
@@ -110,7 +118,7 @@ type Builder<C extends ErrorCode> = (ctx: ErrorContextMap[C]) => {
 const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   STX001: (ctx) => ({
     diagnosis: `No .env file found for this test. Searched: ${ctx.searchedDirs.join(', ')}, then fallback setting "steptix.defaultEnvFile" (=${ctx.fallbackSetting || 'unset'})`,
-    fix: 'Create a .env next to this test (or any ancestor folder up to workspace root) with SERVER_URL, or set "steptix.defaultEnvFile" in Settings. STEPTIX_SERVER_API_KEY is optional — it falls back to the machine key.',
+    fix: 'Create the file "steptix.defaultEnvFile" names (or a .env next to this test), or clear the setting. A project needs no .env of its own: SERVER_URL and STEPTIX_SERVER_API_KEY both fall back to the machine .env.',
     actions: [
       { label: 'Open Settings', command: 'workbench.action.openSettings', args: ['steptix.defaultEnvFile'] },
     ],
@@ -122,7 +130,7 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   }),
   STX003: (ctx) => ({
     diagnosis: `STEPTIX_SERVER_API_KEY is nowhere: not in ${ctx.envPath}, not in the VS Code process environment, and no machine key at ${ctx.machineEnvPath}`,
-    fix: 'Start the server once and it writes the machine key there — set "steptix.serverAutoStart.command" and "steptix.serverAutoStart.cwd" and Run does it for you, or run `steptix serve`. If a server is already running, it was started with a key this machine does not have: add STEPTIX_SERVER_API_KEY=<that key> to the machine key file or this project\'s .env.',
+    fix: 'Start the server once and it writes the machine key there — Run does that for you when the Steptix runtime is installed or "steptix.serverAutoStart.command" is set, or run `steptix serve`. If a server is already running, it was started with a key this machine does not have: add STEPTIX_SERVER_API_KEY=<that key> to the machine key file or this project\'s .env.',
     actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
   STX004: (ctx) => ({
@@ -149,7 +157,7 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
     fix:
       "Start it with 'npx steptix serve' in your test project (or 'steptix serve' if the package is installed globally), then confirm SERVER_URL names the host and port it is listening on. " +
       'If it runs on another machine, check the firewall. ' +
-      'To have Steptix start it for you, configure "steptix.serverAutoStart.command" and ".cwd" in your user settings.',
+      'To have Steptix start it for you, install the Steptix runtime, or set "steptix.serverAutoStart.command" and ".cwd" in your user settings.',
     actions: [{ label: 'Show Run Log', command: 'steptix.showRunLog' }],
   }),
   STX011: (ctx) => ({
@@ -207,9 +215,11 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
     diagnosis:
       `Could not auto-start the Steptix server for ${ctx.serverUrl} — ${ctx.reason}` +
       (ctx.logTail ? `. Last log lines: ${ctx.logTail}` : ''),
-    fix: ctx.logPath
-      ? `Check the server log at ${ctx.logPath} (command "Steptix: Show Server Log"), then fix "steptix.serverAutoStart.command" / "steptix.serverAutoStart.cwd" in your USER settings — or start the server yourself.`
-      : 'Set "steptix.serverAutoStart.command" and "steptix.serverAutoStart.cwd" in your USER settings (they are machine-scoped and cannot be set per workspace) — or start the server yourself.',
+    fix: ctx.runtimeDir
+      ? `Check the server log at ${ctx.logPath ?? 'the server log'} (command "Steptix: Show Server Log"). Steptix started the runtime installed in ${ctx.runtimeDir}: make sure Node.js 22.21 or later is on PATH (or STEPTIX_NODE names it) and reinstall the runtime if its files are damaged, or set "steptix.serverAutoStart.command" and "steptix.serverAutoStart.cwd" in your USER settings to start something else — or start the server yourself.`
+      : ctx.logPath
+        ? `Check the server log at ${ctx.logPath} (command "Steptix: Show Server Log"), then fix "steptix.serverAutoStart.command" / "steptix.serverAutoStart.cwd" in your USER settings — or start the server yourself.`
+        : 'Set "steptix.serverAutoStart.command" and "steptix.serverAutoStart.cwd" in your USER settings (they are machine-scoped and cannot be set per workspace) — or start the server yourself.',
   }),
   STX030: () => ({
     diagnosis: 'Steptix needs an open folder so it can resolve .env',

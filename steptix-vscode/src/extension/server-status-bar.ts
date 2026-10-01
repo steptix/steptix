@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { readEnvFile, readEnvOverlayFile, readMachineKey, composeEnv } from 'steptix-runner-core';
 import { EnvSelector } from './env-selector.js';
@@ -8,6 +9,7 @@ import {
   type HealthProbe,
   type HealthProbeResult,
 } from './server-manager.js';
+import { resolveServerUrl, type ServerUrlOrigin } from './server-url.js';
 
 /** Command the status-bar item invokes. Exported so the registration and the
  *  item cannot drift apart into a silently dead click. */
@@ -20,6 +22,8 @@ const PROBE_TIMEOUT_MS = 1_500;
 export interface ServerTarget {
   serverUrl: string;
   apiKey: string;
+  /** Where `serverUrl` came from. */
+  origin: ServerUrlOrigin;
 }
 
 /**
@@ -29,7 +33,11 @@ export interface ServerTarget {
  * There is no test file in play, so the walk-up-from-the-test-file `.env`
  * search that runs use doesn't apply. This reads the **workspace root's**
  * `.env` composed with `.env.<activeEnv>` — the same overlay mechanism,
- * anchored where the env selector enumerates and where the CLI/server read it.
+ * anchored where the env selector enumerates and where the CLI/server read it
+ * — and then the rest of a run's chain (server-url.ts), so Start and Stop
+ * mean the server a run would use even when the project names none.
+ *
+ * Null only with no folder open, or an unreadable machine `.env`.
  *
  * A free function rather than a method, so the command layer can resolve a
  * target without holding a UI widget.
@@ -38,25 +46,38 @@ export async function resolveServerTarget(
   workspaceRoot: string | undefined,
 ): Promise<ServerTarget | null> {
   if (!workspaceRoot) return null;
+  const basePath = path.join(workspaceRoot, '.env');
+  let serverUrlFile = basePath;
   let env: Record<string, string> = {};
   try {
-    env = await readEnvFile(path.join(workspaceRoot, '.env'));
+    env = await readEnvFile(basePath);
   } catch {
-    // No readable base `.env` is not the end of it — §6.2 says the item hides
-    // only when the COMPOSITION yields no SERVER_URL, and an overlay alone
-    // can supply one.
+    // No readable base `.env` is not the end of it — an overlay can supply
+    // SERVER_URL, and so can the rest of the chain.
   }
   const envName = EnvSelector.activeEnv();
   if (envName) {
     try {
       const overlay = await readEnvOverlayFile(workspaceRoot, envName);
-      if (overlay) env = composeEnv(env, overlay);
+      if (overlay) {
+        env = composeEnv(env, overlay);
+        if (overlay['SERVER_URL']?.trim()) {
+          serverUrlFile = path.join(workspaceRoot, `.env.${envName.trim()}`);
+        }
+      }
     } catch {
       // A malformed overlay is a run-time error (STX005), not a status-bar one.
     }
   }
-  const serverUrl = env['SERVER_URL']?.trim();
-  if (!serverUrl) return null;
+  let serverUrl: string;
+  let origin: ServerUrlOrigin;
+  try {
+    ({ serverUrl, origin } = resolveServerUrl({ value: env['SERVER_URL'], path: serverUrlFile }));
+  } catch {
+    // An unreadable machine .env is a run-time error (STX007), not a
+    // status-bar one.
+    return null;
+  }
   // Same chain as a run (stories/machine-key.md): workspace .env, then the
   // extension host's environment, then the machine key. Without the fallback
   // the status bar's stop action would 401 against a machine-key server the
@@ -66,14 +87,30 @@ export async function resolveServerTarget(
     process.env['STEPTIX_SERVER_API_KEY']?.trim() ||
     readMachineKey() ||
     '';
-  return { serverUrl, apiKey };
+  return { serverUrl, apiKey, origin };
+}
+
+/**
+ * Whether the status bar should show a server for this folder at all.
+ *
+ * Every window activates the extension, and every one would now resolve a
+ * server — the chain ends in a default — so "is there a SERVER_URL" no longer
+ * tells a Steptix project from any other folder. Showing (and polling) a
+ * server item in every window open on unrelated code would be noise. So: a
+ * folder whose own env names a server, or one with a `steptix.config.json`
+ * at its root — what `steptix init` writes.
+ */
+export function showsServer(workspaceRoot: string, target: ServerTarget): boolean {
+  return (
+    target.origin.kind === 'project' || existsSync(path.join(workspaceRoot, 'steptix.config.json'))
+  );
 }
 
 /**
  * Status-bar item reporting whether the Sessions API server is up (§6).
  *
- * Hidden only when the composed env yields no SERVER_URL — in particular "no
- * env selected, SERVER_URL in the base .env" must still show it, which is the
+ * Shown for a Steptix folder (`showsServer`) — in particular "no env
+ * selected, SERVER_URL in the base .env" must still show it, which is the
  * common case.
  */
 export class ServerStatusBar implements vscode.Disposable {
@@ -151,7 +188,7 @@ export class ServerStatusBar implements vscode.Disposable {
     this.refreshPending = false;
     try {
       const target = await resolveServerTarget(this.workspaceRoot);
-      if (!target) {
+      if (!target || !this.workspaceRoot || !showsServer(this.workspaceRoot, target)) {
         this.item.hide();
         return;
       }

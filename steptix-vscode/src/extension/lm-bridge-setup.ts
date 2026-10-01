@@ -17,6 +17,7 @@ import {
   planEnvUpdate,
 } from './lm-bridge-env.js';
 import { EnvSelector } from './env-selector.js';
+import { resolveServerUrl } from './server-url.js';
 
 /**
  * **Steptix: Use Copilot for AI** — the one command that turns a Copilot
@@ -145,7 +146,18 @@ async function runSetup(bridge: LmBridge): Promise<void> {
     target.envName === null
       ? existing
       : await readIfPresent(path.join(target.folder.uri.fsPath, '.env'));
-  const serverUrl = effectiveServerUrl(baseText, overlay?.text ?? null);
+  // And when the project names none, the rest of a run's chain does: the
+  // environment, then the machine .env — which may well name a remote server.
+  let serverUrl: string | null = null;
+  try {
+    serverUrl = resolveServerUrl({
+      value: effectiveServerUrl(baseText, overlay?.text ?? null) ?? undefined,
+      path: target.envPath,
+    }).serverUrl;
+  } catch {
+    // An unreadable machine .env: the run reports that (STX007); a warning
+    // here could only guess.
+  }
   if (serverUrl && !isLocalServerUrl(serverUrl)) {
     void vscode.window.showWarningMessage(
       `Steptix: SERVER_URL for this project is ${serverUrl}, which is not ` +

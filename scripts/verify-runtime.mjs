@@ -32,9 +32,13 @@ const installerSha256 = createHash('sha256').update(readFileSync(installer)).dig
 // The long form of the temp directory: os.tmpdir() can be an 8.3 short path,
 // and a real install lives under the long one. Spaces are wanted, not avoided.
 const temp = await fs.mkdtemp(path.join(realpathSync.native(os.tmpdir()), 'steptix-runtime-verify-'));
-const install = path.join(temp, 'installed runtime');
 const project = path.join(temp, 'test project');
-const profile = path.join(temp, 'profile');
+// Stands in for %LOCALAPPDATA%. The runtime goes where the installer puts it
+// by default, relative to that — which is where the extension looks for it.
+// /D still has to say so: NSIS takes $LOCALAPPDATA from the shell folder, not
+// from the environment.
+const profile = path.join(temp, 'local app data');
+const install = path.join(profile, 'steptix', 'runtimes', version);
 const vscodeDir = path.join(temp, 'vscode');
 for (const dir of [project, profile, vscodeDir]) await fs.mkdir(dir, { recursive: true });
 const steptixCmd = path.join(install, 'steptix.cmd');
@@ -187,11 +191,15 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
   checks.push('steptix.cmd run: headless Chrome, compiled TypeScript steps and a custom tool, no AI, no project dependencies');
 
   // ── 3. VS Code: Run starts the installed server through steptix.cmd ────
+  // Nothing configured: no extension settings, no project .env. The one line
+  // written is SERVER_URL in the machine .env, because 3100 — the default the
+  // extension would otherwise use — may be a developer's own server.
   base = `http://127.0.0.1:${await freePort()}`;
-  await fs.writeFile(path.join(project, '.env'), `SERVER_URL=${base}\n`);
+  await fs.rm(path.join(project, '.env'), { force: true });
   // A first-time user has no machine key; the server the extension starts
-  // must create it, and the extension must then find it.
-  await fs.rm(keyFile, { force: true });
+  // must create it, beside the URL, and the extension must then find it.
+  await fs.mkdir(path.dirname(keyFile), { recursive: true });
+  await fs.writeFile(keyFile, `SERVER_URL=${base}\n`);
 
   console.log('Building the VS Code extension under test...');
   execSync('npm run build', { cwd: path.join(root, 'steptix-vscode'), stdio: 'inherit' });
@@ -232,7 +240,7 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
     );
   }
   assert.ok(started, 'the VS Code test passed but recorded no server');
-  checks.push('VS Code: Run auto-starts the installed server through steptix.cmd, with Node from PATH and a generated key, and the test passes');
+  checks.push('VS Code: with no settings and no project .env, Run finds the installed runtime and the machine .env\'s SERVER_URL, starts the server through steptix.cmd with Node from PATH and a generated key, and the test passes');
 
   // ── 4. The started server, from outside VS Code ────────────────────────
   const key = (await fs.readFile(keyFile, 'utf8')).match(/^STEPTIX_SERVER_API_KEY=(.+)$/m)?.[1].trim();

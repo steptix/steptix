@@ -62,13 +62,14 @@ The test does what a user does, in a temporary folder whose path has spaces:
    `init`, then a headless Chrome test with compiled TypeScript steps and a
    custom tool.
 3. **VS Code.**
-   - It opens VS Code with the extension from this checkout, a fresh profile,
-     no machine key, and Node found on PATH.
-   - It sets the two User settings below, with nothing listening.
+   - It opens VS Code with the extension from this checkout, a fresh profile
+     with no Steptix settings, a project with no `.env`, no machine key, and
+     Node found on PATH. The machine `.env` holds only `SERVER_URL`, on a free
+     port, with nothing listening.
    - It presses Run.
-   - It checks that the extension started the installed server through
-     `cmd.exe` → `steptix.cmd` → the launcher, that the server generated the
-     machine key, and that every step passed.
+   - It checks that the extension found the installed runtime and started its
+     server through `cmd.exe` → `steptix.cmd` → the launcher, on that port,
+     that the server generated the machine key, and that every step passed.
 4. **Server.** It runs the Sessions API with that key, checks tool source
    maps, then stops the server with `steptix.cmd stop`.
 5. **Uninstall.** It runs the Installed Apps entry's uninstall command. Then it
@@ -91,21 +92,32 @@ installer by hand:
 node scripts/verify-runtime.mjs dist-runtime/SteptixRuntimeSetup-<version>-win-x64.exe
 ```
 
-## Use with the current extension
+## Use with the extension
 
-The extension does not yet discover this runtime automatically. In VS Code
-**User** settings, replace the example user path with your actual path:
+Nothing to configure. When you run a test and no server is listening, the
+extension starts the newest runtime under `%LOCALAPPDATA%\steptix\runtimes`
+itself, as `steptix.cmd serve --port <port> --idle-timeout 60`.
 
-```json
-{
-  "steptix.serverAutoStart.command": "\"C:\\Users\\YOUR_NAME\\AppData\\Local\\steptix\\runtimes\\1.0.0-beta.1\\steptix.cmd\" serve --idle-timeout 60",
-  "steptix.serverAutoStart.cwd": "C:\\Users\\YOUR_NAME\\AppData\\Local\\steptix\\runtimes\\1.0.0-beta.1"
-}
-```
+It finds the server the same way for every project:
 
-Keep the project's `SERVER_URL` pointed at the server, normally
-`http://127.0.0.1:3100`. Use the existing extension server commands to start
-it. The `serve` launcher enables a localhost Node inspector on an available
+1. `SERVER_URL` in the project's `.env`, if the project has one and sets it.
+2. The `SERVER_URL` environment variable.
+3. `SERVER_URL` in `%LOCALAPPDATA%\steptix\.env`, the file that also holds
+   the machine key.
+4. `http://127.0.0.1:3100`, where `steptix serve` listens by default.
+
+So a project needs no `.env` at all. To run the server on another port for
+every project, add a line like `SERVER_URL=http://127.0.0.1:3200` to
+`%LOCALAPPDATA%\steptix\.env`; the extension starts the runtime on that port.
+
+Two User settings change this. `steptix.serverAutoStart.command` starts
+something else instead, such as a framework checkout; it then needs
+`steptix.serverAutoStart.cwd` as well. Turning off
+`steptix.serverAutoStart.useInstalledRuntime` means nothing is started unless
+a command is set.
+
+The Steptix: Start Server, Stop Server and Server Status commands use the same
+server. The `serve` launcher enables a localhost Node inspector on an available
 port. Standalone TypeScript tools can import `steptix/tools` and
 `steptix/codebehind` through the runtime when their project has no framework
 dependency; any installed project dependency takes precedence. Other custom
@@ -129,5 +141,5 @@ channel uses installed Google Chrome; downloading Playwright Chromium does
 not change that default. The browser installer command is included, but
 downloads require network access.
 
-Automatic extension discovery, managed upgrades, runtime selection and a
-dedicated runtime-management command family remain future work.
+Managed upgrades, choosing a runtime other than the newest, and a dedicated
+runtime-management command family remain future work.
