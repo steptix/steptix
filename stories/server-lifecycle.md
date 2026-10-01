@@ -59,6 +59,18 @@ as a side effect of health reporting.
   inferred. Unset ⇒ auto-start never fires, so the feature can't misfire
   against a remote `SERVER_URL` or on machines without the framework
   checkout.
+
+  *Amended 2026-10-01.* The Windows runtime installer gave the recipe a
+  well-known place: `<user root>/runtimes/<version>/`. With `command` unset,
+  auto-start now starts the newest runtime found there
+  (`serve --port <SERVER_URL's port> --idle-timeout 60`, cwd = the runtime's
+  folder), unless the machine-scoped `serverAutoStart.useInstalledRuntime` is
+  off. The reasons above still hold: it fires for a localhost `SERVER_URL`
+  only, and a folder under the user root is one no workspace can write, so a
+  repo still cannot decide what Run executes. A `command`, when set, wins.
+  The run's `SERVER_URL` gained machine-level fallbacks at the same time —
+  the user root's `.env`, then `http://127.0.0.1:3100` — so a project needs
+  no `.env` (stories/machine-key.md).
 - **Auto-start runs `dist/`**, not the tsx dev entry point. (User accepts
   the stale-build tradeoff; no build-on-start in the default command.)
 - **The extension attaches the debugger to what `/health` reports**, and

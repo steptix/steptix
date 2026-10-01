@@ -9,6 +9,42 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Changed — Steptix runs a test with nothing configured
+
+Running a test used to need two things set up by hand: a `.env` in the
+project naming `SERVER_URL`, and the `steptix.serverAutoStart.command` and
+`.cwd` User settings pointing at a server to start. Neither is needed now
+(extension 0.5.167).
+
+- **The server address has a machine-level home.** `SERVER_URL` comes from
+  the project's `.env` (and the active `.env.<name>`) as before, then the
+  `SERVER_URL` environment variable, then `SERVER_URL` in
+  `%LOCALAPPDATA%\steptix\.env` (`~/.steptix/.env` elsewhere) — the file that
+  already holds the machine key — and finally `http://127.0.0.1:3100`, where
+  `steptix serve` listens by default. The run log says which one it used.
+- **A project needs no `.env`.** One without a `.env` now runs instead of
+  failing with STX001. STX001 remains only for a `steptix.defaultEnvFile` that
+  names a missing file, and a project `.env` without `SERVER_URL` no longer
+  fails with STX002.
+- **The installed runtime starts itself.** With
+  `steptix.serverAutoStart.command` empty, a run that finds no server on a
+  localhost `SERVER_URL` starts the newest runtime under
+  `%LOCALAPPDATA%\steptix\runtimes` (`~/.steptix/runtimes` elsewhere) as
+  `serve --port <SERVER_URL's port> --idle-timeout 60`, in the runtime's own
+  folder. The new `steptix.serverAutoStart.useInstalledRuntime` User setting
+  (on by default) turns this off. A command setting, when set, still wins.
+- Start Server, Stop Server, Server Status and the Copilot setup's
+  "server is not on this machine" check resolve the server the same way. The
+  status-bar item shows in a folder whose own env names a server or that has
+  a `steptix.config.json`.
+- STX003, STX010 and STX028 name the installed runtime in their fixes. STX028
+  for a runtime that would not start names its folder and says it needs
+  Node.js.
+
+The runtime installer's end-to-end test now proves this: a fresh profile with
+no Steptix settings and a project with no `.env` runs a test, and the server
+is started from the installed runtime on the port the machine `.env` names.
+
 ### Added — the version names the build: commit, and whether it was modified
 
 Between betas every build reports the same version, so the version alone no

@@ -11,18 +11,21 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { createServer } from 'node:http';
-import { mkdtempSync, writeFileSync, readFileSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   AutoStartGuard,
+  compareVersions,
   decideServerAction,
   defaultHealthProbe,
   describeHealth,
   describeServerVersion,
+  findInstalledRuntime,
   isLoopbackUrl,
   readAutoStartSettings,
   readLogTail,
+  runtimeServeCommand,
   startServerAndWait,
   HEALTH_SERVICE_ID,
 } from '../src/extension/server-manager.ts';
@@ -395,14 +398,148 @@ test('decide: down + REMOTE url ⇒ skip, however configured', () => {
   assert.match(action.reason, /not a localhost URL/);
 });
 
-test('decide: down + no command ⇒ skip (auto-start is opt-in)', () => {
-  const action = decideServerAction(LOCAL, { kind: 'down', detail: 'refused' }, {
-    command: '',
-    cwd: '',
-    readyTimeoutSeconds: 20,
-  });
+const UNCONFIGURED = { command: '', cwd: '', readyTimeoutSeconds: 20, useInstalledRuntime: true };
+const DOWN = { kind: 'down', detail: 'refused' };
+const RUNTIMES_DIR = path.resolve(path.sep, 'lad', 'steptix', 'runtimes');
+const RUNTIME = { version: '1.0.0-beta.1', dir: path.join(RUNTIMES_DIR, '1.0.0-beta.1') };
+/** A discovery that finds `runtime`, counting how often it was asked. */
+function discovery(runtime) {
+  const fn = () => {
+    fn.calls++;
+    return { runtimesDir: RUNTIMES_DIR, runtime };
+  };
+  fn.calls = 0;
+  return fn;
+}
+
+test('decide: down + no command + no runtime installed ⇒ skip, naming where it looked', () => {
+  const action = decideServerAction(LOCAL, DOWN, UNCONFIGURED, discovery(null));
   assert.equal(action.kind, 'skip');
   assert.match(action.reason, /serverAutoStart\.command/);
+  assert.ok(action.reason.includes(RUNTIMES_DIR), action.reason);
+});
+
+test('decide: down + no command + a runtime installed ⇒ spawn that runtime on the URL\'s port', () => {
+  const action = decideServerAction('http://127.0.0.1:3207', DOWN, UNCONFIGURED, discovery(RUNTIME));
+  assert.equal(action.kind, 'spawn');
+  assert.deepEqual(action.runtime, RUNTIME);
+  assert.equal(action.config.cwd, RUNTIME.dir, 'the runtime starts in its own folder');
+  assert.equal(action.config.readyTimeoutSeconds, 20);
+  assert.match(action.config.command, /serve --port 3207 --idle-timeout 60$/);
+});
+
+test('decide: a command setting wins over an installed runtime, which is not even looked for', () => {
+  const discover = discovery(RUNTIME);
+  const action = decideServerAction(LOCAL, DOWN, { ...CONFIGURED, useInstalledRuntime: true }, discover);
+  assert.equal(action.kind, 'spawn');
+  assert.deepEqual(action.config, CONFIGURED);
+  assert.equal(action.runtime, undefined);
+  assert.equal(discover.calls, 0);
+});
+
+test('decide: useInstalledRuntime off ⇒ skip, however many runtimes are installed', () => {
+  const discover = discovery(RUNTIME);
+  const action = decideServerAction(LOCAL, DOWN, { ...UNCONFIGURED, useInstalledRuntime: false }, discover);
+  assert.equal(action.kind, 'skip');
+  assert.match(action.reason, /useInstalledRuntime/);
+  assert.equal(discover.calls, 0);
+});
+
+test('decide: a healthy server costs no runtime scan, and a REMOTE url never starts the runtime', () => {
+  const discover = discovery(RUNTIME);
+  decideServerAction(LOCAL, { kind: 'healthy', health: { service: HEALTH_SERVICE_ID } }, UNCONFIGURED, discover);
+  const remote = decideServerAction('http://build-box:3100', DOWN, UNCONFIGURED, discover);
+  assert.equal(remote.kind, 'skip');
+  assert.equal(discover.calls, 0);
+});
+
+// ---------------------------------------------------------------------------
+// The installed runtime
+// ---------------------------------------------------------------------------
+
+/** A runtimes folder holding `versions`, each with the files named (default:
+ *  everything a startable runtime has on any platform). */
+function runtimesFolder(versions, files = ['runtime-launcher.cjs', 'server/dist/index.js', 'steptix.cmd']) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'steptix-runtimes-'));
+  for (const version of versions) {
+    for (const file of files) {
+      const full = path.join(dir, version, ...file.split('/'));
+      mkdirSync(path.dirname(full), { recursive: true });
+      writeFileSync(full, '');
+    }
+  }
+  return dir;
+}
+
+test('runtime: the newest version wins, by semver rather than by spelling', () => {
+  const dir = runtimesFolder(['1.0.0-beta.2', '1.0.0-beta.10', '0.9.0', '1.0.0-alpha.3']);
+  const runtime = findInstalledRuntime(dir);
+  assert.deepEqual(runtime, { version: '1.0.0-beta.10', dir: path.join(dir, '1.0.0-beta.10') });
+});
+
+test('runtime: a release outranks its prereleases', () => {
+  const dir = runtimesFolder(['1.0.0-beta.1', '1.0.0', '1.0.0-rc.1']);
+  assert.equal(findInstalledRuntime(dir).version, '1.0.0');
+});
+
+test('runtime: a folder missing a launch file is skipped — the leftovers of an unfinished uninstall', () => {
+  const dir = runtimesFolder(['1.0.0-beta.1']);
+  // A newer folder an uninstall could not finish removing: its server is gone.
+  mkdirSync(path.join(dir, '1.0.0-beta.2'), { recursive: true });
+  writeFileSync(path.join(dir, '1.0.0-beta.2', 'runtime-launcher.cjs'), '');
+  assert.equal(findInstalledRuntime(dir).version, '1.0.0-beta.1');
+});
+
+test('runtime: steptix.cmd is required on Windows only', () => {
+  const dir = runtimesFolder(['1.0.0'], ['runtime-launcher.cjs', 'server/dist/index.js']);
+  assert.equal(findInstalledRuntime(dir, 'win32'), null);
+  assert.equal(findInstalledRuntime(dir, 'linux').version, '1.0.0');
+  assert.equal(findInstalledRuntime(dir, 'darwin').version, '1.0.0');
+});
+
+test('runtime: no runtimes folder at all is null, not a throw', () => {
+  assert.equal(findInstalledRuntime(path.join(tmpdir(), 'steptix-no-such-runtimes-dir')), null);
+});
+
+test('compareVersions: semver precedence, and names that are not versions sort first', () => {
+  const sorted = ['1.0.0', 'scratch', '1.0.0-beta.2', '1.0.0-beta', '0.10.0', '1.0.0-beta.11', '0.9.9', '1.0.0-beta.alpha']
+    .sort(compareVersions);
+  assert.deepEqual(sorted, [
+    'scratch',
+    '0.9.9',
+    '0.10.0',
+    '1.0.0-beta',
+    '1.0.0-beta.2',
+    '1.0.0-beta.11',
+    '1.0.0-beta.alpha',
+    '1.0.0',
+  ]);
+});
+
+test('runtime command: Windows goes through steptix.cmd, quoted for a path with spaces', () => {
+  const runtime = { version: '1.0.0', dir: path.join(tmpdir(), 'local app data', 'steptix', 'runtimes', '1.0.0') };
+  assert.equal(
+    runtimeServeCommand(runtime, 'http://localhost:3100', { platform: 'win32' }),
+    `"${path.join(runtime.dir, 'steptix.cmd')}" serve --port 3100 --idle-timeout 60`,
+  );
+});
+
+test('runtime command: elsewhere the launcher runs under Node — STEPTIX_NODE when set, as steptix.cmd does', () => {
+  const runtime = { version: '1.0.0', dir: path.join(tmpdir(), "it's here", '1.0.0') };
+  const launcher = path.join(runtime.dir, 'runtime-launcher.cjs').replace(/'/g, `'\\''`);
+  assert.equal(
+    runtimeServeCommand(runtime, 'http://127.0.0.1:3200/', { platform: 'linux', env: {} }),
+    `'node' '${launcher}' serve --port 3200 --idle-timeout 60`,
+  );
+  assert.equal(
+    runtimeServeCommand(runtime, 'http://127.0.0.1:3200', { platform: 'darwin', env: { STEPTIX_NODE: '/opt/node 22/bin/node' } }),
+    `'/opt/node 22/bin/node' '${launcher}' serve --port 3200 --idle-timeout 60`,
+  );
+});
+
+test('runtime command: a URL with no port starts the server on its scheme\'s', () => {
+  const runtime = { version: '1.0.0', dir: path.join(tmpdir(), '1.0.0') };
+  assert.match(runtimeServeCommand(runtime, 'http://localhost', { platform: 'linux', env: {} }), /--port 80 /);
 });
 
 test('isLoopbackUrl accepts both IPv6 loopback spellings', () => {
@@ -496,15 +633,20 @@ test('settings: values are trimmed and a bad timeout falls back to 20s', () => {
         'serverAutoStart.readyTimeoutSeconds': -1,
       }),
     ),
-    { command: 'node x.js', cwd: '/repo', readyTimeoutSeconds: 20 },
+    { command: 'node x.js', cwd: '/repo', readyTimeoutSeconds: 20, useInstalledRuntime: true },
   );
 });
 
-test('settings: everything unset means auto-start is off', () => {
+test('settings: everything unset means no command, and the installed runtime is used', () => {
   const settings = readAutoStartSettings(cfg({}));
   assert.equal(settings.command, '');
   assert.equal(settings.cwd, '');
   assert.equal(settings.readyTimeoutSeconds, 20);
+  assert.equal(settings.useInstalledRuntime, true);
+  assert.equal(
+    readAutoStartSettings(cfg({ 'serverAutoStart.useInstalledRuntime': false })).useInstalledRuntime,
+    false,
+  );
 });
 
 test('log tail: reads only the end of a large file', () => {
@@ -542,6 +684,7 @@ test('the serverAutoStart settings are machine-scoped in contributes.configurati
     'steptix.serverAutoStart.command',
     'steptix.serverAutoStart.cwd',
     'steptix.serverAutoStart.readyTimeoutSeconds',
+    'steptix.serverAutoStart.useInstalledRuntime',
   ]) {
     assert.ok(props[key], `${key} must be declared`);
     assert.equal(props[key].scope, 'machine', `${key} must be machine-scoped`);

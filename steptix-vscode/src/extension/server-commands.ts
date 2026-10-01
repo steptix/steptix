@@ -42,14 +42,17 @@ export function registerServerCommands(args: {
     getOutputChannel().appendLine(`[${new Date().toISOString().slice(11, 23)}] server: ${line}`);
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+  /** The one reason `resolveTarget` comes back empty that a user can act on
+   *  from here; the other (an unreadable machine .env) a Run names as STX007. */
+  const noTarget = (): void => {
+    void vscode.window.showWarningMessage(
+      'Steptix: open a folder first — the server is resolved from its .env.',
+    );
+  };
+
   const startServer = async (): Promise<void> => {
     const target = await statusBar.resolveTarget();
-    if (!target) {
-      void vscode.window.showWarningMessage(
-        'Steptix: no SERVER_URL — add one to the workspace root .env (or the active .env.<name>).',
-      );
-      return;
-    }
+    if (!target) return noTarget();
 
     const result = await probe(target.serverUrl, HEALTH_PROBE_TIMEOUT_MS);
     const config = readAutoStartSettings(vscode.workspace.getConfiguration('steptix'));
@@ -78,10 +81,13 @@ export function registerServerCommands(args: {
         return;
       case 'skip':
         // Same preconditions the run path enforces: localhost only, and a
-        // command must be configured.
+        // command setting or an installed runtime to start.
         await offerAutoStartSettings(`Steptix: cannot start a server — ${action.reason}.`);
         return;
       case 'spawn':
+        if (action.runtime) {
+          log(`using the Steptix runtime ${action.runtime.version} installed in ${action.runtime.dir}`);
+        }
         break;
     }
 
@@ -130,10 +136,7 @@ export function registerServerCommands(args: {
 
   const stopServer = async (force = false): Promise<void> => {
     const target = await statusBar.resolveTarget();
-    if (!target) {
-      void vscode.window.showWarningMessage('Steptix: no SERVER_URL to stop.');
-      return;
-    }
+    if (!target) return noTarget();
     if (!target.apiKey) {
       void vscode.window.showErrorMessage(
         'Steptix: no STEPTIX_SERVER_API_KEY anywhere — not in the workspace .env, the process ' +
@@ -200,10 +203,7 @@ export function registerServerCommands(args: {
 
   const serverStatus = async (): Promise<void> => {
     const target = await statusBar.resolveTarget();
-    if (!target) {
-      void vscode.window.showWarningMessage('Steptix: no SERVER_URL resolved.');
-      return;
-    }
+    if (!target) return noTarget();
     const result = await probe(target.serverUrl, HEALTH_PROBE_TIMEOUT_MS);
     // One probe, two consumers — the toast and the item render the same
     // answer rather than each fetching their own.

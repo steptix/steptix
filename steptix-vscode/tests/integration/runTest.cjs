@@ -39,6 +39,8 @@ async function main() {
       '--disable-workspace-trust',
     ];
 
+    require('./userSettings.cjs').pinUserSettings(userDataDir);
+
     console.log('Launching:', codeExe);
     console.log('  args:', args.join(' '));
 
