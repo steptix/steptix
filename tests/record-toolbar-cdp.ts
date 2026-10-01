@@ -115,10 +115,39 @@ export function toolbarButtonAt(page: Page, cmd: string): Promise<{ x: number; y
   });
 }
 
-/** Click a toolbar button with the real (trusted) mouse. */
+/**
+ * Where a control of the bar is once it is showing and has stopped moving:
+ * two reads a moment apart that agree. The bar rebuilds a row whenever what
+ * it shows changes — a step lands, "updating…" comes or goes, a notice
+ * shows — and the server's push can land at any moment, so a control looked
+ * up just after a test's last wait may be mid-rebuild: its node detached
+ * before its box is read, or moved by the time the mouse gets there. Waits up
+ * to `timeoutMs`, then throws `missing` with what the bar showed instead.
+ */
+async function settledAt(
+  page: Page,
+  locate: () => Promise<{ x: number; y: number } | null>,
+  missing: string,
+  timeoutMs = 8_000,
+): Promise<{ x: number; y: number }> {
+  const end = Date.now() + timeoutMs;
+  let at = await locate();
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 60));
+    const again = await locate();
+    if (at && again && Math.abs(again.x - at.x) < 0.5 && Math.abs(again.y - at.y) < 0.5) return again;
+    at = again;
+    if (Date.now() > end) {
+      const bar = await readToolbar(page).catch(() => null);
+      throw new Error(`${missing}; the bar shows: ${bar ? JSON.stringify(bar.all) : 'no toolbar'}`);
+    }
+  }
+}
+
+/** Click a toolbar button with the real (trusted) mouse, once it is showing
+ *  and has stopped moving. */
 export async function clickToolbar(page: Page, cmd: string): Promise<void> {
-  const at = await toolbarButtonAt(page, cmd);
-  if (!at) throw new Error(`the toolbar has no "${cmd}" button showing`);
+  const at = await settledAt(page, () => toolbarButtonAt(page, cmd), `the toolbar has no "${cmd}" button showing`);
   await page.mouse.click(at.x, at.y);
 }
 
@@ -246,22 +275,14 @@ export function drawerAt(page: Page, id: string, cmd: string | null): Promise<{ 
 }
 
 /** Use a drawer row's control with the real mouse: the pointer goes over
- *  the row first — its ✕ and + show on hover — then onto the control. */
+ *  the row first — its ✕ and + show on hover — then onto the control. Both
+ *  are found once they have stopped moving: a push that adds a row
+ *  ("updating…") grows a bottom-docked bar upward, and every row moves. */
 export async function clickDrawer(page: Page, id: string, cmd: string): Promise<void> {
-  const row = await drawerAt(page, id, null);
-  if (!row) throw new Error(`the drawer has no row for ${id}`);
+  const row = await settledAt(page, () => drawerAt(page, id, null), `the drawer has no row for ${id}`);
   await page.mouse.move(row.x, row.y);
   await new Promise((r) => setTimeout(r, 80));
-  // Where the control is once the bar has stopped moving: a push that adds a
-  // row ("updating…") grows a bottom-docked bar upward, and every row moves.
-  let at = await drawerAt(page, id, cmd);
-  for (let i = 0; i < 10 && at; i++) {
-    await new Promise((r) => setTimeout(r, 60));
-    const again = await drawerAt(page, id, cmd);
-    if (again && Math.abs(again.x - at.x) < 0.5 && Math.abs(again.y - at.y) < 0.5) break;
-    at = again;
-  }
-  if (!at) throw new Error(`the row for ${id} has no "${cmd}"`);
+  const at = await settledAt(page, () => drawerAt(page, id, cmd), `the row for ${id} has no "${cmd}"`);
   await page.mouse.move(at.x, at.y, { steps: 3 });
   await new Promise((r) => setTimeout(r, 50));
   await page.mouse.click(at.x, at.y);
