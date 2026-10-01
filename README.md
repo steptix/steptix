@@ -2,6 +2,8 @@
 
 AI-powered UI test automation using natural language Markdown test files. Write tests in plain English, and an AI model interprets each step using Playwright to drive the browser.
 
+> **Steptix is beta software.** Test-file syntax, configuration keys, CLI options and the Sessions API can still change between versions without a deprecation period. Check the [CHANGELOG](CHANGELOG.md) before upgrading.
+
 For AI-assisted test generation, give your AI the [test-writing handbook](docs/test-writing-handbook.md) — how the framework reads a test, the phrasing that maps to real actions, and how to use skills and tools — together with the [test authoring guide](docs/ai-test-authoring-guide.md), the rule-by-rule reference covering variables, data-driven flows, hooks and validation.
 
 ## Prerequisites
@@ -623,7 +625,7 @@ Inside your test project's `tools/` directory:
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "steptix": "^1.0.0",
+    "steptix": "^1.0.0-beta.1",
     "playwright": "^1.59.1",
     "typescript": "^5.5.0"
   }

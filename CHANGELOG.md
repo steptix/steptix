@@ -1,10 +1,35 @@
 # Changelog
 
 All notable changes to this project are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; this project
-does not yet use semantic version numbers, so entries are grouped by date.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely. The
+framework's version follows [Semantic Versioning](https://semver.org/); while
+Steptix is in beta it carries a `-beta.N` suffix. The VS Code extensions keep
+plain `major.minor.patch` numbers, because the Marketplace does not accept a
+suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
+
+### Changed — Steptix is beta software: version `1.0.0-beta.1`
+
+The framework claimed `1.0.0`, which under semver promises a stable surface.
+It is not one yet, so the version is now `1.0.0-beta.1`. Test-file syntax,
+configuration keys, CLI options and the Sessions API can still change between
+betas without a deprecation period. `steptix --version`, the server's
+`/health`, the MCP server, the Steptix status bar and the scoreboard's `fw`
+field all report the new version. Nothing compares versions, so no behaviour
+changes.
+
+Later betas count up (`-beta.2`, …), then `-rc.N`, then `1.0.0`. A tools
+project that depends on the package needs `"steptix": "^1.0.0-beta.1"`: a
+plain `^1.0.0` range does not match a pre-release.
+
+The Steptix extension says so too. The Extensions panel lists it as
+"Steptix (Beta)", and `npm run package` in `steptix-vscode/` passes
+`--pre-release`, so every `.vsix` is marked as a pre-release build — which is
+how the Marketplace publishes a beta. Its version stays `0.5.x`: an odd minor
+number is the Marketplace's convention for a pre-release, and the first
+release takes the next even one or `1.0.0`. The "Steptix" output channel and
+the status bar keep their names.
 
 ### Changed — the product is now Steptix
 
