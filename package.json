@@ -36,6 +36,7 @@
     "dev:ui": "concurrently \"vite --config src/ui/renderer/vite.config.ts\" \"sleep 2 && VITE_DEV_SERVER_URL=http://localhost:5173 electron dist/ui/main/index.js\"",
     "ui": "npm run build:all && env -u ELECTRON_RUN_AS_NODE electron --no-sandbox --ozone-platform-hint=auto dist/ui/main/index.cjs",
     "pretest": "npm run build",
+    "prepack": "npm run build",
     "test": "vitest run --config vitest.config.ts",
     "test:watch": "vitest --config vitest.config.ts",
     "pretest:coverage": "npm run build",

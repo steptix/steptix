@@ -25,6 +25,9 @@ reported beside the version:
   started" message and the run log show the commit.
 - The scoreboard's `fw` takes its commit from the stamp, so it names the code
   that ran rather than whatever the checkout had moved on to since start-up.
+- `npm pack` and `npm publish` build first (`prepack`), so a package carries
+  a stamp of the commit it was packed from, not whatever `dist/` was last
+  built. Commit before packing and the stamp names exactly that commit.
 
 Both are `null` (and the version is shown alone) when unknown: built without
 git, outside a checkout, or running from `src/` (`npm run dev`), where the
