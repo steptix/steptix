@@ -60,8 +60,22 @@ jobs:
           npm ci --prefix steptix-vscode
 
       # The root suite's real-browser tests launch Playwright's Chromium.
+      # Cached per Playwright version so a run doesn't download it again;
+      # on a hit, `playwright install` finds it present and does nothing.
+      # The path is Windows'; Linux's is ~/.cache/ms-playwright, and Linux
+      # also needs `--with-deps` on the install for its system packages.
+      - name: Playwright version
+        id: pw
+        shell: bash
+        run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
       - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
       # Each suite runs even if an earlier one failed, so one run reports all
       # four. `npm test` keeps its pretest builds — several suites test dist/.
