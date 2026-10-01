@@ -1059,7 +1059,8 @@ rather than the framework:
 2. Against that real Chrome the dialog still did not appear, before AND after
    the "Ask where to save each file before downloading" setting was turned
    on. The setting was turned on by the framework itself:
-   `templates/init/tests/chrome-ask-where-to-save.md` ran 7/7 in 60 s on the
+   a `chrome-ask-where-to-save.md` test (since removed: it changed a real
+   Chrome setting) ran 7/7 in 60 s on the
    computer surface alone — no browser launched, Chrome focused by title,
    Ctrl+L, the URL typed, the toggle judged off from the screenshot by an
    `If … then` condition and clicked, the assertion held. Why the PDF viewer

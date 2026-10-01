@@ -462,15 +462,12 @@ arrangement:
   2026-09-11: a gate failed twice on exactly this while another session's
   live run was adopting the app.
 
-There used to be an exception here: `templates/init/tests/github.md` drove a
-real github.com login, so two worktrees ran it with the same credentials from
-the same IP, and one run's sign-out could invalidate the other's session
-mid-test. That is gone — `pause-resume` and `stop-report` now drive
-`templates/init/tests/securebank.md` against the fixture app instead. Same
-shape of flow (navigate, sign in, read a list, sign out), no external account,
-no rate limit, no 2FA challenge. `github.md` itself stays on disk: the fast
-suite opens it as a parse fixture, and it remains a worked example of testing
-a real site.
+Tests under `templates/init/tests/` drive only applications this repo
+controls: the `fixtures/test-app` site (SecureBank) or the local desktop. Do
+not add tests against third-party sites. Two runs would share one external
+account and IP, so one run's sign-out can invalidate the other's session, and
+rate limits and 2FA challenges fail runs for reasons unrelated to the code
+under test.
 
 The AI gateway key is still shared, and now by eight shards rather than two
 runs. Not a correctness problem, but they share whatever rate limit it

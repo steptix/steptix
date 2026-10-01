@@ -8,7 +8,7 @@ tests/integration/test-report.json
 tests/integration/live-test-report.json
 tests/integration/live-test-output.log
 tests/integration/fast-suite-output.log
-tests/integration/fixtures/github.md
+tests/integration/fixtures/securebank.md
 integration-out.log
 *.vsix
 
