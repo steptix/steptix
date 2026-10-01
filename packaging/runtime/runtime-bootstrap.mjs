@@ -18,5 +18,9 @@ registerHooks({
   },
 });
 const require = createRequire(path.join(server, 'package.json'));
-const { register } = await import(pathToFileURL(require.resolve('tsx/esm/api')).href);
-register();
+// tsx's main entry, as `node --import tsx` loads it: the ESM and the CommonJS
+// hooks both. `tsx/esm/api` alone is not enough — a project with no
+// package.json, which is what `steptix init` makes, puts its `.ts` files in a
+// CommonJS scope, and a tool written with `import`/`export` there failed to
+// load with ERR_REQUIRE_CYCLE_MODULE.
+await import(pathToFileURL(require.resolve('tsx')).href);
