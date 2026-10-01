@@ -28,7 +28,7 @@ export function registerStopCommand(program: Command): void {
     .command('stop')
     .description('Stop a running Sessions API server (closing any open sessions)')
     .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
-    .option('--url <url>', 'Server base URL (default: from config server.host/port)')
+    .option('--url <url>', 'Server base URL (default: SERVER_URL in the machine .env, else port 3100)')
     .option('--force', 'Stop even while a run is executing', false)
     .action(async (opts: StopOptions) => {
       process.exit(await stopCommand(opts));

@@ -1,6 +1,13 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import { readEnvFile, readEnvOverlayFile, readMachineKey, composeEnv } from 'steptix-runner-core';
+import {
+  chooseServerUrl,
+  composeEnv,
+  readEnvFile,
+  readEnvOverlayFile,
+  readMachineKey,
+  type ServerUrlChoice,
+} from 'steptix-runner-core';
 import { EnvSelector } from './env-selector.js';
 import {
   defaultHealthProbe,
@@ -19,6 +26,8 @@ const PROBE_TIMEOUT_MS = 1_500;
 
 export interface ServerTarget {
   serverUrl: string;
+  /** Where `serverUrl` came from: `SERVER_URL in <path>`, or `the default`. */
+  source: string;
   apiKey: string;
 }
 
@@ -30,6 +39,9 @@ export interface ServerTarget {
  * search that runs use doesn't apply. This reads the **workspace root's**
  * `.env` composed with `.env.<activeEnv>` — the same overlay mechanism,
  * anchored where the env selector enumerates and where the CLI/server read it.
+ * With no SERVER_URL there, it falls back to the machine `.env`, then the
+ * default, as a run does (stories/machine-server-url.md) — so every open
+ * folder has a server to report on. Null only with no folder open.
  *
  * A free function rather than a method, so the command layer can resolve a
  * target without holding a UI widget.
@@ -39,42 +51,53 @@ export async function resolveServerTarget(
 ): Promise<ServerTarget | null> {
   if (!workspaceRoot) return null;
   let env: Record<string, string> = {};
+  let envPath: string | null = path.join(workspaceRoot, '.env');
   try {
-    env = await readEnvFile(path.join(workspaceRoot, '.env'));
+    env = await readEnvFile(envPath);
   } catch {
-    // No readable base `.env` is not the end of it — §6.2 says the item hides
-    // only when the COMPOSITION yields no SERVER_URL, and an overlay alone
-    // can supply one.
+    // No readable base `.env` is not the end of it: an overlay alone can
+    // supply SERVER_URL, and without either the machine `.env` can.
+    envPath = null;
   }
   const envName = EnvSelector.activeEnv();
   if (envName) {
     try {
       const overlay = await readEnvOverlayFile(workspaceRoot, envName);
-      if (overlay) env = composeEnv(env, overlay);
+      if (overlay) {
+        env = composeEnv(env, overlay);
+        if (overlay['SERVER_URL']?.trim()) envPath = path.join(workspaceRoot, `.env.${envName}`);
+      }
     } catch {
       // A malformed overlay is a run-time error (STX005), not a status-bar one.
     }
   }
-  const serverUrl = env['SERVER_URL']?.trim();
-  if (!serverUrl) return null;
   // Same chain as a run (stories/machine-key.md): workspace .env, then the
   // extension host's environment, then the machine key. Without the fallback
   // the status bar's stop action would 401 against a machine-key server the
   // runs themselves can talk to.
+  let choice: ServerUrlChoice;
+  let machineKey: string | null;
+  try {
+    choice = chooseServerUrl(env, envPath);
+    machineKey = readMachineKey();
+  } catch {
+    // An unreadable machine `.env` is the run's to report (STX007). Here it
+    // only means there is nothing trustworthy to show.
+    return null;
+  }
   const apiKey =
     env['STEPTIX_SERVER_API_KEY']?.trim() ||
     process.env['STEPTIX_SERVER_API_KEY']?.trim() ||
-    readMachineKey() ||
+    machineKey ||
     '';
-  return { serverUrl, apiKey };
+  return { serverUrl: choice.serverUrl, source: choice.source, apiKey };
 }
 
 /**
  * Status-bar item reporting whether the Sessions API server is up (§6).
  *
- * Hidden only when the composed env yields no SERVER_URL — in particular "no
- * env selected, SERVER_URL in the base .env" must still show it, which is the
- * common case.
+ * Shown whenever a folder is open: every folder resolves a server now, from
+ * its own `.env` or the machine fallback. Hidden with no folder open.
  */
 export class ServerStatusBar implements vscode.Disposable {
   private readonly item: vscode.StatusBarItem;

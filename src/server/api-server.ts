@@ -23,6 +23,7 @@ import {
   launchBrowser,
 } from '../browser/manager.js';
 import { userRootDir } from '../env/user-root.js';
+import type { ServePort } from '../env/server-url.js';
 import { loadConfig } from '../config/loader.js';
 import fs from 'node:fs';
 import {
@@ -2622,11 +2623,13 @@ export interface CrashGuardTarget {
  * and "definitely lose every session" is worse than "possibly degraded".
  *
  * **Armed only once the listener is bound**, which is load-bearing rather than
- * tidy. A failed `listen` — EADDRINUSE, above all — surfaces as an uncaught
- * exception, and `mcp/server-start.ts` depends on that being fatal: a second
- * server spawned onto a taken port must die there, not linger as a process that
- * never bound anything. `app.listen`'s callback never runs in that case, so
- * startup stays exactly as fatal as it was.
+ * tidy. `mcp/server-start.ts` depends on a failed `listen` — EADDRINUSE, above
+ * all — being fatal: a second server spawned onto a taken port must die there,
+ * not linger as a process that never bound anything. `startServer` exits on
+ * that error itself, and anything else thrown before the bind must keep the
+ * default uncaught-exception exit, which these guards would swallow.
+ * `app.listen`'s callback never runs when the bind fails, so startup stays
+ * exactly as fatal as it was.
  */
 export function installCrashGuards(target: CrashGuardTarget = process): void {
   const describe = (err: unknown): string =>
@@ -2646,7 +2649,14 @@ export function installCrashGuards(target: CrashGuardTarget = process): void {
   });
 }
 
-export async function startServer(config: Config): Promise<void> {
+/**
+ * Listen on `listen.port` and serve until shut down.
+ *
+ * The port is an argument rather than a config value: it comes from `serve`'s
+ * own order (`-p`, the machine `SERVER_URL`, 3100 — src/env/server-url.ts),
+ * and `listen.source` is what a taken port is reported against.
+ */
+export async function startServer(config: Config, listen: ServePort): Promise<void> {
   let shuttingDown = false;
 
   // `shutdown` is a hoisted function declaration, not a `const` arrow, so the
@@ -2657,14 +2667,31 @@ export async function startServer(config: Config): Promise<void> {
     requestShutdown: (force) =>
       void shutdown(`${force ? 'Forced shutdown' : 'Shutdown'} requested — ${closingSummary()}`),
   });
-  const { host, port } = config.server;
+  const { host } = config.server;
+  const { port } = listen;
 
   /** Shared tail of every shutdown log line, so the reason reads as one
    *  sentence naming what is about to be closed. */
   const closingSummary = () =>
     `closing ${sessionManager.countOpenSessions()} session(s) and shutting down`;
 
+  // A failed bind still ends the process — `mcp/server-start.ts` depends on a
+  // server spawned onto a taken port dying there — but with a line saying
+  // which port was taken and where that number came from, instead of a bare
+  // EADDRINUSE stack. Removed once bound, so a later socket error is not
+  // mistaken for a failed start.
+  const onListenError = (err: NodeJS.ErrnoException): void => {
+    logger.error(
+      err.code === 'EADDRINUSE'
+        ? `Port ${port} (from ${listen.source}) is already in use on ${host}. ` +
+            'Stop whatever holds it, or start this server on another port with -p.'
+        : `Could not listen on ${host}:${port} (from ${listen.source}): ${err.message}`,
+    );
+    process.exit(1);
+  };
+
   const server = app.listen(port, host, () => {
+    server.off('error', onListenError);
     // Only now — see `installCrashGuards` on why a failed bind must stay fatal.
     installCrashGuards();
     logger.info(`Sessions API server listening on http://${host}:${port}`);
@@ -2676,6 +2703,7 @@ export async function startServer(config: Config): Promise<void> {
     }
     logger.info('Server ready — press Ctrl+C to stop');
   });
+  server.once('error', onListenError);
 
   const stopIdleReaper = startIdleReaper({
     monitor: idleMonitor,

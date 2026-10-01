@@ -103,9 +103,10 @@ The extension does not yet discover this runtime automatically. In VS Code
 }
 ```
 
-Keep the project's `SERVER_URL` pointed at the server, normally
-`http://127.0.0.1:3100`. Use the existing extension server commands to start
-it. The `serve` launcher enables a localhost Node inspector on an available
+A project needs no `SERVER_URL`: with none, Steptix uses `SERVER_URL` from
+`%LOCALAPPDATA%\steptix\.env`, else `http://127.0.0.1:3100` — the port this
+`serve` listens on. Use the existing extension server commands to start it.
+The `serve` launcher enables a localhost Node inspector on an available
 port. Standalone TypeScript tools can import `steptix/tools` and
 `steptix/codebehind` through the runtime when their project has no framework
 dependency; any installed project dependency takes precedence. Other custom

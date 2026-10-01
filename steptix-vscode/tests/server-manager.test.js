@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { createServer } from 'node:http';
-import { mkdtempSync, writeFileSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -23,6 +23,7 @@ import {
   isLoopbackUrl,
   readAutoStartSettings,
   readLogTail,
+  servePortOfCommand,
   startServerAndWait,
   HEALTH_SERVICE_ID,
 } from '../src/extension/server-manager.ts';
@@ -363,26 +364,28 @@ test('start: a spawn that throws is refused, not a timeout', async () => {
 
 const LOCAL = 'http://127.0.0.1:3100';
 const CONFIGURED = { command: 'node x.js', cwd: '/repo', readyTimeoutSeconds: 20 };
+/** Where the configured command listens — the same port as LOCAL. */
+const SERVES_3100 = { ok: true, port: 3100, source: 'the default' };
 
 test('decide: healthy ⇒ proceed, carrying the health through', () => {
   const health = { service: HEALTH_SERVICE_ID, inspector: 'ws://x:1/y' };
-  const action = decideServerAction(LOCAL, { kind: 'healthy', health }, CONFIGURED);
+  const action = decideServerAction(LOCAL, { kind: 'healthy', health }, CONFIGURED, SERVES_3100);
   assert.equal(action.kind, 'proceed');
   assert.equal(action.health.inspector, 'ws://x:1/y');
 });
 
 test('decide: foreign ⇒ refuse, even when auto-start is configured', () => {
-  const action = decideServerAction(LOCAL, { kind: 'foreign', service: 'grafana' }, CONFIGURED);
+  const action = decideServerAction(LOCAL, { kind: 'foreign', service: 'grafana' }, CONFIGURED, SERVES_3100);
   assert.deepEqual(action, { kind: 'refuse-foreign', service: 'grafana' });
 });
 
 test('decide: unknown ⇒ legacy (never refuse, never spawn)', () => {
-  const action = decideServerAction(LOCAL, { kind: 'unknown', detail: 'HTTP 404' }, CONFIGURED);
+  const action = decideServerAction(LOCAL, { kind: 'unknown', detail: 'HTTP 404' }, CONFIGURED, SERVES_3100);
   assert.equal(action.kind, 'legacy');
 });
 
 test('decide: down + localhost + configured ⇒ spawn', () => {
-  const action = decideServerAction(LOCAL, { kind: 'down', detail: 'refused' }, CONFIGURED);
+  const action = decideServerAction(LOCAL, { kind: 'down', detail: 'refused' }, CONFIGURED, SERVES_3100);
   assert.equal(action.kind, 'spawn');
   assert.deepEqual(action.config, CONFIGURED);
 });
@@ -390,7 +393,7 @@ test('decide: down + localhost + configured ⇒ spawn', () => {
 test('decide: down + REMOTE url ⇒ skip, however configured', () => {
   // The rule the manual Start Server command used to be missing: starting a
   // local server for a remote SERVER_URL produces one nothing will talk to.
-  const action = decideServerAction('http://build-box:3100', { kind: 'down', detail: 'refused' }, CONFIGURED);
+  const action = decideServerAction('http://build-box:3100', { kind: 'down', detail: 'refused' }, CONFIGURED, SERVES_3100);
   assert.equal(action.kind, 'skip');
   assert.match(action.reason, /not a localhost URL/);
 });
@@ -400,9 +403,110 @@ test('decide: down + no command ⇒ skip (auto-start is opt-in)', () => {
     command: '',
     cwd: '',
     readyTimeoutSeconds: 20,
-  });
+  }, SERVES_3100);
   assert.equal(action.kind, 'skip');
   assert.match(action.reason, /serverAutoStart\.command/);
+});
+
+test('decide: down + the command would listen on another port ⇒ refuse-port, never spawn', () => {
+  // stories/machine-server-url.md: a project pointing at 3104 while the
+  // command starts on 3100 would leave a stray server and time out (STX028).
+  const action = decideServerAction(
+    'http://localhost:3104',
+    { kind: 'down', detail: 'refused' },
+    CONFIGURED,
+    SERVES_3100,
+  );
+  assert.deepEqual(action, { kind: 'refuse-port', servePort: SERVES_3100 });
+});
+
+test('decide: down + the command would not start at all ⇒ refuse-port carrying why', () => {
+  const servePort = { ok: false, reason: 'SERVER_URL in /m/.env has no port: "http://x"' };
+  const action = decideServerAction(LOCAL, { kind: 'down', detail: 'refused' }, CONFIGURED, servePort);
+  assert.deepEqual(action, { kind: 'refuse-port', servePort });
+});
+
+test('decide: a URL with no port is compared as its scheme default', () => {
+  const action = decideServerAction(
+    'http://localhost',
+    { kind: 'down', detail: 'refused' },
+    CONFIGURED,
+    { ok: true, port: 80, source: '-p' },
+  );
+  assert.equal(action.kind, 'spawn');
+});
+
+test('decide: a running server is used whatever port the command would pick', () => {
+  // The port check only guards a spawn; it must never refuse a healthy server.
+  const health = { service: HEALTH_SERVICE_ID };
+  const action = decideServerAction('http://localhost:3104', { kind: 'healthy', health }, CONFIGURED, SERVES_3100);
+  assert.equal(action.kind, 'proceed');
+});
+
+/** Point the machine `.env` at a temp dir for `fn`, holding `content` (or no file). */
+function withMachineEnv(content, fn) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'steptix-machine-env-'));
+  const saved = { LOCALAPPDATA: process.env.LOCALAPPDATA, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  process.env.LOCALAPPDATA = dir;
+  process.env.XDG_CONFIG_HOME = dir;
+  try {
+    if (content !== null) {
+      mkdirSync(path.join(dir, 'steptix'), { recursive: true });
+      writeFileSync(path.join(dir, 'steptix', '.env'), content);
+    }
+    return fn(path.join(dir, 'steptix', '.env'));
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+test('servePortOfCommand: a -p / --port after serve wins, in every spelling', () => {
+  withMachineEnv('SERVER_URL=http://127.0.0.1:3200\n', () => {
+    for (const command of [
+      'node dist/index.js serve -p 3104 --idle-timeout 60',
+      'node dist/index.js serve --port 3104',
+      'node dist/index.js serve --port=3104',
+      'node dist/index.js serve -p3104',
+    ]) {
+      const result = servePortOfCommand(command);
+      assert.equal(result.ok, true, command);
+      assert.equal(result.port, 3104, command);
+      assert.match(result.source, /serverAutoStart\.command/, command);
+    }
+  });
+});
+
+test('servePortOfCommand: a launcher flag before serve is not the server port', () => {
+  // `npx -p <pkg>` names a package; only flags after `serve` belong to it.
+  withMachineEnv(null, () => {
+    assert.deepEqual(servePortOfCommand('npx -p 5 steptix serve --idle-timeout 60'), {
+      ok: true,
+      port: 3100,
+      source: 'the default',
+    });
+  });
+});
+
+test('servePortOfCommand: no -p ⇒ the machine SERVER_URL port, else 3100', () => {
+  const bare = 'node --inspect=0 dist/index.js serve --idle-timeout 60';
+  withMachineEnv(null, () => {
+    assert.deepEqual(servePortOfCommand(bare), { ok: true, port: 3100, source: 'the default' });
+  });
+  withMachineEnv('SERVER_URL=http://localhost:3200\n', (envPath) => {
+    assert.deepEqual(servePortOfCommand(bare), {
+      ok: true,
+      port: 3200,
+      source: `SERVER_URL in ${envPath}`,
+    });
+  });
+  withMachineEnv('SERVER_URL=http://localhost\n', () => {
+    const result = servePortOfCommand(bare);
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /has no port/);
+  });
 });
 
 test('isLoopbackUrl accepts both IPv6 loopback spellings', () => {

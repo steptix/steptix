@@ -137,13 +137,6 @@ export function projectlessCodeSteps(
 // Environment and server discovery
 // ---------------------------------------------------------------------------
 
-export function noServerUrl(envFiles: readonly string[]): McpToolError {
-  return preflightError(
-    'No SERVER_URL: cannot tell which Sessions API server to use.\n' +
-      `Looked in: ${envFiles.join(', ')}, then the SERVER_URL environment variable.`,
-  );
-}
-
 /**
  * A Sessions API server is up, and we have no key to talk to it with.
  *

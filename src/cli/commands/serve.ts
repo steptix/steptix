@@ -3,6 +3,7 @@ import type { Command } from 'commander';
 import { loadConfig } from '../../config/loader.js';
 import { DEFAULT_CONFIG } from '../../config/defaults.js';
 import { ensureMachineKey, readMachineKey } from '../../env/user-root.js';
+import { resolveServePort, ServePortError, type ServePort } from '../../env/server-url.js';
 import { nonNegativeInt } from '../parse-args.js';
 import { startServer } from '../../server/api-server.js';
 import { setLogLevel, type ConsoleLogLevel } from '../../utils/logger.js';
@@ -18,7 +19,11 @@ export function registerServeCommand(program: Command): void {
     .command('serve')
     .description('Start the Sessions API server')
     .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
-    .option('-p, --port <number>', 'Port to listen on', parseInt)
+    .option(
+      '-p, --port <number>',
+      'Port to listen on (default: the port of SERVER_URL in the machine .env, else 3100)',
+      parseInt,
+    )
     .option('-H, --host <host>', 'Host to bind to')
     .option(
       '--console-log-level <level>',
@@ -64,7 +69,16 @@ export function registerServeCommand(program: Command): void {
           );
         }
       }
-      if (opts.port !== undefined) config.server.port = opts.port;
+      // -p, then the machine SERVER_URL's port, then 3100 — never a project's
+      // own .env or config (stories/machine-server-url.md).
+      let listen: ServePort;
+      try {
+        listen = resolveServePort(opts.port);
+      } catch (err) {
+        if (!(err instanceof ServePortError)) throw err;
+        console.error(chalk.red(err.message));
+        process.exit(1);
+      }
       if (opts.host !== undefined) config.server.host = opts.host;
       if (opts.idleTimeout !== undefined) config.server.idleTimeoutMinutes = opts.idleTimeout;
 
@@ -93,6 +107,6 @@ export function registerServeCommand(program: Command): void {
       // and must never reach the real user root through.
       void pruneStatsFiles({ retainMonths: statsSettings().retainMonths });
 
-      await startServer(config);
+      await startServer(config, listen);
     });
 }

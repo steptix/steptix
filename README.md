@@ -382,9 +382,10 @@ refused.
 
 - Hosts run `dist/`, so **run `npm run build`** after changing the source — and
   once on a fresh clone, or the configs above point at a file that isn't there.
-- If you let the MCP server auto-start the API server, check on it with
-  `steptix status --url $SERVER_URL`. Plain `steptix status` reads
-  `steptix.config.json`, which can name a different host or port than `SERVER_URL`.
+- If you let the MCP server auto-start the API server for a project whose
+  `.env` names its own `SERVER_URL`, check on it with
+  `steptix status --url $SERVER_URL`. Plain `steptix status` looks where a bare
+  `steptix serve` listens — the machine `.env`'s `SERVER_URL`, else port 3100.
 - The Codex VS Code extension currently has an open bug picking up MCP servers
   from `config.toml`. Verify with Codex CLI first — a no-show in the extension
   is not a problem with this server.
@@ -914,6 +915,7 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 | `AWS_REGION` | Only for a `bedrock/` model, and then **required** — the client does not read `~/.aws/config`, so an SSO profile carrying a region is not enough. Read by the AWS SDK straight from `process.env`, not by this framework, so unlike every other row in this table it belongs in the **machine environment** — the shell that starts `steptix serve`, or the CI job — rather than in a project `.env`. Same for `AWS_DEFAULT_REGION`, `AWS_PROFILE` and the rest of the credential chain, which work exactly as they do for any AWS tool. A project `.env` reaches it on `steptix run` and the Electron UI only; see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). |
 | `AI_GATEWAY_URL` | Overrides `ai.gatewayUrl` from the config file — the OpenAI-compatible endpoint gateway-routed models go through. Optional; set it when your org runs its own internal gateway, so pointing a shared repo at it stays a one-line `.env` change with nothing tracked to edit. Pair it with `AI_MODEL=gateway/<model>`: that spelling says "route here", and a `gateway/` model with this variable unset is refused rather than sent to the default host. Same precedence as `AI_MODEL` (environment → `steptix.config.json` → machine `.env` → built-in default), and it reaches the server path too: the Steptix extension ships the project's `.env` with each run. |
 | `AI_EFFORT` | How hard the model thinks on **routine** steps: `low`, `medium`, `high`, `xhigh`, `max` — plus `none` and `minimal`, but see the warning below before using `none`. Optional — **unset is the default and changes nothing on the wire**. Setting it also raises the routine output cap to 8192, since reasoning tokens count against the same cap. Authoring calls (code-behind generation/review, assertions, failure diagnosis) already run at `high` and are deliberately *not* lowered by this. A level the bound model doesn't support fails on the first AI call with `invalid_effort`. Process-level like `maxInputTokens`, not per-session overridable. |
+| `SERVER_URL` | Which Sessions API server a client talks to. In a project `.env` it says where *that project* connects. Optional: with none, clients use `SERVER_URL` from the machine `.env` (`%LOCALAPPDATA%\steptix\.env`, `~/.steptix/.env` elsewhere), else `http://127.0.0.1:3100`. `steptix serve` listens on `-p`, else that machine `SERVER_URL`'s port, else 3100 — never on a port a project `.env` names, so a server for a project on another port is started with `-p`. See [stories/machine-server-url.md](./stories/machine-server-url.md). |
 | `STEPTIX_SERVER_API_KEY` | Shared secret between the Sessions API server and its clients. **Not usually set anywhere**: `steptix serve` generates a machine key at `%LOCALAPPDATA%\steptix\.env` (`~/.steptix/.env` elsewhere) on first start, and every client falls back to it. Set per-project only to pin a dedicated server's key. |
 | `INTERACTIVE_ON_FAILURE` | `true`/`false`. Pause the runner on failure so you can inspect the browser. |
 | `OPEN_REPORT_IN_BROWSER_AFTER_RUN` | `true`/`false`. Open the generated HTML report in your OS default browser after `run` completes. Skipped automatically when `CI` is set. |

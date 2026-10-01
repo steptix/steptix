@@ -182,8 +182,10 @@ Behind the auth middleware. Body: `{ "force": true }` optional.
 ### 4. CLI: `steptix status`, `steptix stop`
 
 Both new commands resolve the target URL the same way: `--url <url>` flag
-if given, else `http://<config.server.host>:<config.server.port>` from the
-loaded config (same discovery as `serve`).
+if given, else `SERVER_URL` from the machine `.env`, else
+`http://<config.server.host>:3100` — the order `serve` picks its port in
+([machine-server-url.md](machine-server-url.md); `server.port` was dropped
+from the config).
 
 - **`steptix status [--url] [--json]`** — GET `/health` (2 s timeout).
   - Healthy + `service` matches: print version, pid, uptime, open

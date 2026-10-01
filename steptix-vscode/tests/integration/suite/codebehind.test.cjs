@@ -37,6 +37,13 @@ const { ApiClientError } = require('steptix-runner-core');
 const EXT_ID = 'pkent.steptix-vscode';
 const FIXTURES_DIR =
   process.env.STEPTIX_FIXTURES_DIR || path.resolve(__dirname, '..', 'fixtures');
+
+/** The auto-start command, naming the fixture SERVER_URL's port with -p — a
+ *  command without it listens on 3100, and Steptix refuses to start a server
+ *  on a port the run will not connect to (stories/machine-server-url.md). */
+const SERVE_CMD = `node dist/index.js serve -p ${new URL(
+  /^SERVER_URL=(.*)$/m.exec(fs.readFileSync(path.join(FIXTURES_DIR, '.env'), 'utf8'))[1].trim(),
+).port}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function waitFor(label, predicate, timeoutMs = 5_000) {
@@ -1437,7 +1444,7 @@ tags: [codebehind]
     });
 
     it('a down server is auto-started before the request goes out, as it is for a Run', async () => {
-      await setAutoStart({ command: 'node dist/index.js serve', cwd: FIXTURES_DIR });
+      await setAutoStart({ command: SERVE_CMD, cwd: FIXTURES_DIR });
       void vscode.commands.executeCommand('steptix.runAndCompile');
       await waitFor('run requested', () => fake.requests.length > 0);
 

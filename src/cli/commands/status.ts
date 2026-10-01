@@ -17,7 +17,7 @@ export function registerStatusCommand(program: Command): void {
     .command('status')
     .description('Report whether the Sessions API server is running')
     .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
-    .option('--url <url>', 'Server base URL (default: from config server.host/port)')
+    .option('--url <url>', 'Server base URL (default: SERVER_URL in the machine .env, else port 3100)')
     .option('--json', 'Emit the raw /health body as JSON', false)
     .action(async (opts: StatusOptions) => {
       process.exit(await statusCommand(opts));

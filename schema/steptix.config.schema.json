@@ -36,7 +36,7 @@
           "$ref": "#/definitions/DeepPartial%3CLoggingConfig%3E"
         },
         "tables": {
-          "$ref": "#/definitions/DeepPartial%3Cdef-interface-src_config_types.ts-20463-21581-src_config_types.ts-0-29782226896703235751837%3E"
+          "$ref": "#/definitions/DeepPartial%3Cdef-interface-src_config_types.ts-20420-21538-src_config_types.ts-0-29739226896703235751837%3E"
         },
         "mcp": {
           "$ref": "#/definitions/McpConfig",
@@ -104,10 +104,10 @@
           "description": "Show browser window (false = headless)"
         },
         "viewport": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-5936-5970-src_config_types.ts-5878-5971-src_config_types.ts-5777-13668-src_config_types.ts-0-29782449752545%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-5936-5970-src_config_types.ts-5878-5971-src_config_types.ts-5777-13668-src_config_types.ts-0-29739449752545%3E"
         },
         "windowSize": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6027-6061-src_config_types.ts-5971-6062-src_config_types.ts-5777-13668-src_config_types.ts-0-297821327565221%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6027-6061-src_config_types.ts-5971-6062-src_config_types.ts-5777-13668-src_config_types.ts-0-297391327565221%3E"
         },
         "fixedViewport": {
           "type": "object",
@@ -210,7 +210,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-5936-5970-src_config_types.ts-5878-5971-src_config_types.ts-5777-13668-src_config_types.ts-0-29782449752545>": {
+    "DeepPartial<structure-src_config_types.ts-5936-5970-src_config_types.ts-5878-5971-src_config_types.ts-5777-13668-src_config_types.ts-0-29739449752545>": {
       "type": "object",
       "properties": {
         "width": {
@@ -223,7 +223,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-6027-6061-src_config_types.ts-5971-6062-src_config_types.ts-5777-13668-src_config_types.ts-0-297821327565221>": {
+    "DeepPartial<structure-src_config_types.ts-6027-6061-src_config_types.ts-5971-6062-src_config_types.ts-5777-13668-src_config_types.ts-0-297391327565221>": {
       "type": "object",
       "properties": {
         "width": {
@@ -467,10 +467,6 @@
           "type": "string",
           "description": "Host to bind the API server to"
         },
-        "port": {
-          "type": "number",
-          "description": "Port to listen on"
-        },
         "apiKey": {
           "type": "string",
           "description": "API key for authentication (checked via x-api-key header)"
@@ -510,7 +506,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<def-interface-src_config_types.ts-20463-21581-src_config_types.ts-0-29782226896703235751837>": {
+    "DeepPartial<def-interface-src_config_types.ts-20420-21538-src_config_types.ts-0-29739226896703235751837>": {
       "type": "object",
       "properties": {
         "structure": {

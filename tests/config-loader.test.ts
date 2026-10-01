@@ -120,14 +120,14 @@ describe('loadConfig — steptix.config.json loading + deep merge', () => {
 
   it('loads JSON and merges over defaults (omitted keys keep defaults)', async () => {
     const file = await writeConfig({
-      server: { port: 4242 },
+      server: { host: '0.0.0.0' },
       tests: { skillsDir: './my-skills' },
     });
     const config = await loadConfig(file);
-    expect(config.server.port).toBe(4242);
+    expect(config.server.host).toBe('0.0.0.0');
     expect(config.tests.skillsDir).toBe('./my-skills');
     // Untouched keys keep their defaults.
-    expect(config.server.host).toBe('127.0.0.1');
+    expect(config.reports.outputDir).toBe('./reports');
     expect(config.tests.pattern).toBe('**/*.md');
   });
 
@@ -193,12 +193,12 @@ describe('loadConfig — steptix.config.json loading + deep merge', () => {
     // setting does something.
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
     try {
-      const file = await writeConfig({ cache: { enabled: true, dir: '.cache' }, server: { port: 4242 } });
+      const file = await writeConfig({ cache: { enabled: true, dir: '.cache' }, server: { host: '0.0.0.0' } });
 
       const config = await loadConfig(file);
       expect('cache' in config).toBe(false);
       // The rest of the file still merges.
-      expect(config.server.port).toBe(4242);
+      expect(config.server.host).toBe('0.0.0.0');
       const said = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('"cache"'));
       expect(said).toHaveLength(1);
       expect(said[0]).toContain(file);
@@ -209,6 +209,25 @@ describe('loadConfig — steptix.config.json loading + deep merge', () => {
       warn.mockClear();
       expect('cache' in (await loadConfig(file))).toBe(false);
       expect(warn.mock.calls.filter((c) => String(c[0]).includes('"cache"'))).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('drops server.port with a warning and keeps the rest of the section', async () => {
+    // stories/machine-server-url.md: `serve` takes its port from -p, the
+    // machine SERVER_URL or 3100 — a project's config no longer decides it.
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const file = await writeConfig({ server: { host: '0.0.0.0', port: 4242 } });
+
+      const config = await loadConfig(file);
+      expect('port' in config.server).toBe(false);
+      expect(config.server.host).toBe('0.0.0.0');
+      const said = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('"server.port"'));
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain(file);
+      expect(said[0]).toContain('SERVER_URL');
     } finally {
       warn.mockRestore();
     }
@@ -253,26 +272,26 @@ describe('loadConfig — steptix.config.json loading + deep merge', () => {
     // way serve.ts does. A second load must still see the pristine default.
     const fileA = await writeConfig({ tests: { skillsDir: './a' } });
     const first = await loadConfig(fileA);
-    first.server.port = 65000;
+    first.server.host = '0.0.0.0';
 
     const fileB = await writeConfig({ tests: { skillsDir: './b' } });
     const second = await loadConfig(fileB);
-    expect(second.server.port).toBe(3100);
+    expect(second.server.host).toBe('127.0.0.1');
   });
 
   it('throws with the file path on malformed JSON', async () => {
     const file = path.join(tmpDir, 'steptix.config.json');
-    await fs.writeFile(file, '{ "server": { "port": 3100, }', 'utf8'); // trailing comma
+    await fs.writeFile(file, '{ "server": { "host": "127.0.0.1", }', 'utf8'); // trailing comma
     await expect(loadConfig(file)).rejects.toThrow(file);
   });
 
   it('ignores a top-level $schema key', async () => {
     const file = await writeConfig({
       $schema: 'https://example.com/steptix.config.schema.json',
-      server: { port: 5000 },
+      server: { host: '0.0.0.0' },
     });
     const config = await loadConfig(file);
-    expect(config.server.port).toBe(5000);
+    expect(config.server.host).toBe('0.0.0.0');
     expect((config as unknown as Record<string, unknown>)['$schema']).toBeUndefined();
   });
 
@@ -282,14 +301,14 @@ describe('loadConfig — steptix.config.json loading + deep merge', () => {
     // unconfigured and falls back to defaults.
     await fs.writeFile(
       path.join(tmpDir, 'steptix.config.ts'),
-      'export default { server: { port: 9999 } };',
+      "export default { server: { host: '0.0.0.0' } };",
       'utf8',
     );
     const cwd = process.cwd();
     try {
       process.chdir(tmpDir);
       const config = await loadConfig();
-      expect(config.server.port).toBe(3100); // default, not 9999
+      expect(config.server.host).toBe('127.0.0.1'); // default, not the .ts value
     } finally {
       process.chdir(cwd);
     }
@@ -491,8 +510,12 @@ describe('steptix.config.schema.json validates configs', () => {
     expect(validate({ browser: { browser: 'firefx' } })).toBe(false);
   });
 
-  it('rejects a wrong-typed port', () => {
-    expect(validate({ server: { port: '3100' } })).toBe(false);
+  it('rejects a wrong-typed host', () => {
+    expect(validate({ server: { host: 127001 } })).toBe(false);
+  });
+
+  it('flags server.port in the editor, since serve no longer reads it', () => {
+    expect(validate({ server: { port: 3100 } })).toBe(false);
   });
 
   it('accepts browser.cdp.hideAutomation as a boolean and nothing else', () => {

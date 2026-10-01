@@ -25,6 +25,13 @@ const FIXTURES_DIR =
   process.env.STEPTIX_FIXTURES_DIR || path.resolve(__dirname, '..', 'fixtures');
 const fixtureUri = (name) => vscode.Uri.file(path.resolve(FIXTURES_DIR, name));
 
+/** The auto-start command, naming the fixture SERVER_URL's port with -p — a
+ *  command without it listens on 3100, and Steptix refuses to start a server
+ *  on a port the run will not connect to (stories/machine-server-url.md). */
+const SERVE_CMD = `node dist/index.js serve -p ${new URL(
+  /^SERVER_URL=(.*)$/m.exec(fs.readFileSync(path.join(FIXTURES_DIR, '.env'), 'utf8'))[1].trim(),
+).port}`;
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function waitFor(label, predicate, timeoutMs = 8_000) {
@@ -213,13 +220,13 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
   it('down + configured: spawns, waits for health, then runs', async () => {
     probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
     spawnBringsServerUp = true; // the spawn is what makes it healthy
-    await setAutoStart({ command: 'node dist/index.js serve', cwd: FIXTURES_DIR, readyTimeoutSeconds: 10 });
+    await setAutoStart({ command: SERVE_CMD, cwd: FIXTURES_DIR, readyTimeoutSeconds: 10 });
 
     void vscode.commands.executeCommand('steptix.runAll');
     await waitFor('stream active', () => fake.hasActiveStream);
 
     assert.equal(spawns.length, 1, 'exactly one spawn');
-    assert.equal(spawns[0].command, 'node dist/index.js serve');
+    assert.equal(spawns[0].command, SERVE_CMD);
     assert.equal(spawns[0].cwd, FIXTURES_DIR);
     assert.match(spawns[0].logPath, /server\.log$/);
     assert.equal(hooks.lastRunError(), null);
@@ -228,9 +235,28 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
+  it('down + the command would listen elsewhere: STX033, nothing spawned', async () => {
+    // stories/machine-server-url.md: with no -p, `serve` listens on the
+    // machine SERVER_URL's port or 3100 — not the fixture's — so starting it
+    // would leave a stray server and time out. The test instance has no
+    // machine SERVER_URL of its own to lean on, so -p 1 makes the mismatch
+    // certain whatever this machine's .env says.
+    probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
+    await setAutoStart({ command: 'node dist/index.js serve -p 1', cwd: FIXTURES_DIR, readyTimeoutSeconds: 10 });
+
+    await vscode.commands.executeCommand('steptix.runAll');
+    await waitFor('STX033 reported', () => hooks.lastRunError()?.code === 'STX033');
+
+    assert.deepEqual(spawns, [], 'a server on another port is never started');
+    assert.equal(fake.streamCallCount, 0, 'the run must not reach the server');
+    const error = hooks.lastRunError();
+    assert.match(error.diagnosis, /port 1 \(from -p in "steptix\.serverAutoStart\.command"\)/);
+    assert.match(error.fix, /steptix serve -p \d+/);
+  });
+
   it('never healthy: STX028 within readyTimeoutSeconds', async () => {
     probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
-    await setAutoStart({ command: 'node dist/index.js serve', cwd: FIXTURES_DIR, readyTimeoutSeconds: 1 });
+    await setAutoStart({ command: SERVE_CMD, cwd: FIXTURES_DIR, readyTimeoutSeconds: 1 });
 
     const started = Date.now();
     await vscode.commands.executeCommand('steptix.runAll');
@@ -333,7 +359,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
           `STEPTIX_SERVER_API_KEY=${GENERATED_KEY}\n`,
         );
       };
-      await setAutoStart({ command: 'node dist/index.js serve', cwd: FIXTURES_DIR, readyTimeoutSeconds: 10 });
+      await setAutoStart({ command: SERVE_CMD, cwd: FIXTURES_DIR, readyTimeoutSeconds: 10 });
 
       void vscode.commands.executeCommand('steptix.runAll');
       await waitFor('stream active', () => fake.hasActiveStream);
@@ -390,7 +416,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
     // readyTimeoutSeconds stall PER TEST, so a 40-test batch spawns 40 shells
     // and stalls for minutes before reporting 40 identical STX028s.
     probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
-    await setAutoStart({ command: 'node dist/index.js serve', cwd: FIXTURES_DIR, readyTimeoutSeconds: 1 });
+    await setAutoStart({ command: SERVE_CMD, cwd: FIXTURES_DIR, readyTimeoutSeconds: 1 });
 
     await vscode.commands.executeCommand('steptix.runAll');
     await waitFor('first STX028', () => hooks.lastRunError()?.code === 'STX028');
@@ -412,7 +438,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
     // The security-relevant branch: the command is cwd-relative, so a blank
     // cwd must never fall back to the open workspace folder.
     probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
-    await setAutoStart({ command: 'node dist/index.js serve', cwd: '', readyTimeoutSeconds: 5 });
+    await setAutoStart({ command: SERVE_CMD, cwd: '', readyTimeoutSeconds: 5 });
 
     await vscode.commands.executeCommand('steptix.runAll');
     await waitFor('STX028 reported', () => hooks.lastRunError()?.code === 'STX028');
@@ -550,7 +576,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
     // loser's poll goes green against the WINNER's server, so no locking is
     // needed and the run proceeds normally.
     probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
-    await setAutoStart({ command: 'node dist/index.js serve', cwd: FIXTURES_DIR, readyTimeoutSeconds: 10 });
+    await setAutoStart({ command: SERVE_CMD, cwd: FIXTURES_DIR, readyTimeoutSeconds: 10 });
 
     void vscode.commands.executeCommand('steptix.runAll');
     await waitFor('spawn attempted', () => spawns.length === 1);
@@ -568,7 +594,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
 
   it('Stop during the health poll: the run is aborted, not an STX028', async () => {
     probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
-    await setAutoStart({ command: 'node dist/index.js serve', cwd: FIXTURES_DIR, readyTimeoutSeconds: 30 });
+    await setAutoStart({ command: SERVE_CMD, cwd: FIXTURES_DIR, readyTimeoutSeconds: 30 });
 
     void vscode.commands.executeCommand('steptix.runAll');
     // Wait until the poll is genuinely under way (the spawn has happened).

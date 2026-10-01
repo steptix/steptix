@@ -9,6 +9,36 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Changed — a test runs without a `.env`; one default server per machine
+
+A Markdown file with a `## Steps` heading now runs in Steptix with no `.env`
+and no `steptix.config.json` around it. When nothing names a server, every
+client and `steptix serve` itself use the same one: `SERVER_URL` in the machine
+`.env` (`%LOCALAPPDATA%\steptix\.env`, `~/.steptix/.env` elsewhere), else
+`http://127.0.0.1:3100`. See
+[stories/machine-server-url.md](stories/machine-server-url.md).
+
+- **`steptix serve`** listens on `-p`, else that machine `SERVER_URL`'s port,
+  else 3100. A project's files never decide it any more: `server.port` in
+  `steptix.config.json` is ignored with a warning (delete it), and the schema
+  flags it. A taken port now exits naming the port and where it came from; a
+  machine `SERVER_URL` with no port stops `serve` before it binds.
+- **Steptix** falls back to the machine `SERVER_URL`, then the default, when
+  a test has no project `.env` or its `.env` has no `SERVER_URL`. STX001 and
+  STX002 are retired. The run log names where the URL came from. The server
+  status bar item now shows in every open folder.
+- **Auto-start** no longer starts a server on a port the run will not connect
+  to: when `serverAutoStart.command` would listen elsewhere, Run fails with the
+  new **STX033**, naming both ports, instead of timing out with STX028 and
+  leaving a stray server behind.
+- **MCP**: a project-less call defaults to `http://127.0.0.1:3100` instead of
+  3141, and a project `.env` without `SERVER_URL` falls back the same way
+  instead of being refused.
+- **`steptix status` / `steptix stop`** look at `--url`, else the machine
+  `SERVER_URL`, else port 3100 on the config's `server.host`.
+
+Steptix extension 0.5.166.
+
 ### Added — the version names the build: commit, and whether it was modified
 
 Between betas every build reports the same version, so the version alone no

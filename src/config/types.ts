@@ -376,8 +376,6 @@ export interface ApiConfig {
 export interface ServerConfig {
   /** Host to bind the API server to */
   host: string;
-  /** Port to listen on */
-  port: number;
   /** API key for authentication (checked via x-api-key header) */
   apiKey: string;
   /**

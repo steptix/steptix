@@ -129,7 +129,7 @@ const readme = `Steptix Runtime ${version} - Windows x64 beta\n\n` +
 `VS CODE (CURRENT EXTENSION)\nAutomatic runtime discovery is not yet implemented. In VS Code User settings set:\n` +
 `steptix.serverAutoStart.command: "<installation folder>\\steptix.cmd" serve --idle-timeout 60\n` +
 `steptix.serverAutoStart.cwd: <installation folder>\n` +
-`Keep SERVER_URL configured for your server (normally http://127.0.0.1:3100).\nUse the extension's Server Status / Start Server commands.\n\n` +
+`SERVER_URL is optional: with none, Steptix uses http://127.0.0.1:3100, the port serve listens on.\nUse the extension's Server Status / Start Server commands.\n\n` +
 `BROWSERS\nDefault Chromium-based runs use your installed Google Chrome; Edge is also supported.\nInstall the runtime's matching Playwright browser builds with:\nsteptix.cmd browsers install chromium\nsteptix.cmd browsers install firefox\nsteptix.cmd browsers install webkit\nPlaywright uses %LOCALAPPDATA%\\ms-playwright unless PLAYWRIGHT_BROWSERS_PATH is set.\nInstalling Chromium does not change Steptix's existing Chrome-channel default.\nBrowser installation downloads require network access.\n\n` +
 `UNINSTALL / VERSIONS\nEach version has its own folder and Windows Installed Apps entry.\nStop servers using this version before uninstalling.\nUninstall.exe removes runtime files only; projects, shared keys and browsers are preserved.\nThe beta installer is unsigned. Inspect the checksum supplied beside it.\n`;
 fs.writeFileSync(path.join(payload, 'README.txt'), readme.replaceAll('\n', '\r\n'));

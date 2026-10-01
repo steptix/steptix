@@ -27,6 +27,7 @@ import {
   readEnvFile,
   readEnvOverlayFile,
   readMachineKey,
+  chooseServerUrl,
   reportError,
   describeStepFailure,
   isSkippedPass,
@@ -34,6 +35,7 @@ import {
   resolveSection,
   userRootEnvPath,
   type ClassifiedStep,
+  type ServerUrlChoice,
   type CompileEvent,
   type CompileProgressEvent,
   type CompileSummary,
@@ -100,6 +102,7 @@ import {
 } from './row-selection-core.js';
 import {
   decideServerAction,
+  servePortOfCommand,
   defaultHealthProbe,
   defaultServerSpawner,
   describeServerVersion,
@@ -1497,19 +1500,23 @@ export class RunController {
    */
   private async ensureServerReady(args: {
     serverUrl: string;
+    /** Where `serverUrl` came from — named by STX033. */
+    serverUrlSource: string;
     signal: AbortSignal;
     log: (line: string) => void;
   }): Promise<ServerReadiness> {
-    const { serverUrl, signal, log } = args;
+    const { serverUrl, serverUrlSource, signal, log } = args;
     this.currentInspectorUrl = undefined;
 
     const probe = await this.healthProbe(serverUrl, HEALTH_PROBE_TIMEOUT_MS, signal);
     if (signal.aborted) return { kind: 'aborted' };
 
+    const autoStart = readAutoStartSettings(vscode.workspace.getConfiguration('steptix'));
     const action = decideServerAction(
       serverUrl,
       probe,
-      readAutoStartSettings(vscode.workspace.getConfiguration('steptix')),
+      autoStart,
+      servePortOfCommand(autoStart.command),
     );
 
     switch (action.kind) {
@@ -1551,6 +1558,25 @@ export class RunController {
             ` — not auto-starting (${action.reason})`,
         );
         return { kind: 'proceed' };
+
+      case 'refuse-port': {
+        // Starting it anyway would leave a server on a port this run never
+        // connects to, then fail the wait with STX028 (stories/machine-server-url.md).
+        const { servePort } = action;
+        const payload = servePort.ok
+          ? reportError('STX033', {
+              serverUrl,
+              urlSource: serverUrlSource,
+              servePort: servePort.port,
+              servePortSource: servePort.source,
+            })
+          : reportError('STX028', {
+              serverUrl,
+              reason: `a server started by "steptix.serverAutoStart.command" would not start: ${servePort.reason}`,
+            });
+        log(`${payload.code} ${payload.diagnosis}`);
+        return { kind: 'fail', payload };
+      }
 
       case 'spawn': {
         // A start that just failed is not retried per-test. In a Test
@@ -2078,29 +2104,35 @@ export class RunController {
       workspaceRoot: this.workspaceFolder.uri.fsPath,
       fallbackPath: fallbackSetting,
     });
-    if (!envResolution.hit) return null;
-    let env: Record<string, string>;
+    // No project .env is a supported setup: SERVER_URL then comes from the
+    // machine .env or the default, exactly as on the run path.
+    const envPath = envResolution.hit ? envResolution.path : null;
+    let env: Record<string, string> = {};
+    let choice: ServerUrlChoice;
+    let machineKey: string | null;
     try {
-      env = await readEnvFile(envResolution.path);
+      if (envPath !== null) env = await readEnvFile(envPath);
+      choice = chooseServerUrl(env, envPath);
+      machineKey = readMachineKey();
     } catch {
       return null;
     }
-    const serverUrl = env['SERVER_URL']?.trim();
     // Same chain as the run path (stories/machine-key.md): the project's .env,
     // the extension host's environment, then the machine key. Without the last
     // two, Compile would refuse on a machine where Run works.
     const apiKey =
       env['STEPTIX_SERVER_API_KEY']?.trim() ||
       process.env['STEPTIX_SERVER_API_KEY']?.trim() ||
-      readMachineKey() ||
+      machineKey ||
       '';
-    if (!serverUrl || !apiKey) return null;
+    if (!apiKey) return null;
+    const { serverUrl } = choice;
     return {
       client: this.clientFactory({ serverUrl, apiKey }),
       sessionId,
       serverUrl,
-      source: `SERVER_URL in ${envResolution.path}`,
-      envPath: envResolution.path,
+      source: choice.source,
+      envPath,
     };
   }
 
@@ -2109,6 +2141,11 @@ export class RunController {
    * resolved `.env` (with the selected environment's `.env.<name>` laid over
    * it) and SERVER_URL. Refusals are the STXxxx payloads a run has always
    * failed with; the caller reports them.
+   *
+   * A test with no project `.env` is not refused: its env map is empty and
+   * SERVER_URL comes from the machine `.env`, else the default — the same two
+   * a bare `steptix serve` takes its port from (stories/machine-server-url.md).
+   * `envPath` is then null.
    *
    * NOT the API key: that is `resolveApiKey`'s, after the server is ready.
    *
@@ -2122,9 +2159,11 @@ export class RunController {
     | {
         ok: true;
         env: Record<string, string>;
-        envPath: string;
+        envPath: string | null;
         envName: string | null;
         serverUrl: string;
+        /** Where `serverUrl` came from, for logs and STX033. */
+        serverUrlSource: string;
       }
     | { ok: false; payload: ErrorPayload }
   > {
@@ -2138,34 +2177,34 @@ export class RunController {
       fallbackPath: fallbackSetting,
     });
 
-    if (!envResolution.hit) {
-      log(`.env not found. Searched: ${envResolution.searchedDirs.join(' → ')}; fallback: "${envResolution.fallbackPath || 'unset'}"`);
-      const payload = reportError('STX001', {
-        searchedDirs: envResolution.searchedDirs,
-        fallbackSetting: fallbackSetting,
-      });
-      this.lastResolvedEnvPath = null;
-      return { ok: false, payload };
-    }
-
-    log(`.env resolved (${envResolution.source}): ${envResolution.path}`);
-    this.lastResolvedEnvPath = envResolution.path;
-
-    let env: Record<string, string>;
-    try {
-      env = await readEnvFile(envResolution.path);
-    } catch (err) {
-      if (err instanceof EnvParseError) {
-        const payload = reportError('STX005', {
-          envPath: envResolution.path,
-          lineNumber: err.lineNumber,
-          line: err.line,
-        });
-        log(`STX005 ${payload.diagnosis}`);
-        return { ok: false, payload };
+    const envPath = envResolution.hit ? envResolution.path : null;
+    this.lastResolvedEnvPath = envPath;
+    let env: Record<string, string> = {};
+    if (envResolution.hit) {
+      log(`.env resolved (${envResolution.source}): ${envResolution.path}`);
+      try {
+        env = await readEnvFile(envResolution.path);
+      } catch (err) {
+        if (err instanceof EnvParseError) {
+          const payload = reportError('STX005', {
+            envPath: envResolution.path,
+            lineNumber: err.lineNumber,
+            line: err.line,
+          });
+          log(`STX005 ${payload.diagnosis}`);
+          return { ok: false, payload };
+        }
+        throw err;
       }
-      throw err;
+    } else {
+      log(
+        `no project .env (searched: ${envResolution.searchedDirs.join(' → ')}; ` +
+          `steptix.defaultEnvFile: "${envResolution.fallbackPath || 'unset'}")`,
+      );
     }
+    /** The project file SERVER_URL would be read from — the overlay's when it
+     *  sets one, since that is the line to fix. */
+    let serverUrlFile = envPath;
 
     // Which environment this run targets. An explicit override (batch mode
     // passes one per test) wins over the workspace-level EnvSelector. The SAME
@@ -2212,12 +2251,12 @@ export class RunController {
         const payload = reportError('STX006', {
           envName: effectiveEnvName,
           expectedPath: overlayPath,
-          baseEnvPath: envResolution.path,
         });
         log(`STX006 ${payload.diagnosis}`);
         return { ok: false, payload };
       }
       env = composeEnv(env, overlay);
+      if (overlay['SERVER_URL']?.trim()) serverUrlFile = overlayPath;
       // The KEYS, not just how many: this line is the only place a run says
       // which values the overlay took over, and the ones that mislead hardest
       // when they are silently replaced (AI_API_KEY, SERVER_URL) look exactly
@@ -2232,18 +2271,34 @@ export class RunController {
       );
     }
 
-    if (!env['SERVER_URL'] || env['SERVER_URL'].trim() === '') {
-      const payload = reportError('STX002', { envPath: envResolution.path });
+    let choice: ServerUrlChoice;
+    try {
+      choice = chooseServerUrl(env, serverUrlFile);
+    } catch (err) {
+      const payload = reportError('STX007', {
+        machineEnvPath: userRootEnvPath(),
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      log(`STX007 ${payload.diagnosis}`);
       return { ok: false, payload };
     }
-    const serverUrl = env['SERVER_URL'].trim();
+    const { serverUrl } = choice;
+    log(`SERVER_URL ${serverUrl} (from ${choice.source})`);
     try {
       new URL(serverUrl);
     } catch {
-      const payload = reportError('STX004', { envPath: envResolution.path, value: serverUrl });
+      // The default always parses, so a bad URL always has a file to name.
+      const payload = reportError('STX004', { envPath: choice.path ?? choice.source, value: serverUrl });
       return { ok: false, payload };
     }
-    return { ok: true, env, envPath: envResolution.path, envName: effectiveEnvName, serverUrl };
+    return {
+      ok: true,
+      env,
+      envPath,
+      envName: effectiveEnvName,
+      serverUrl,
+      serverUrlSource: choice.source,
+    };
   }
 
   /**
@@ -2267,7 +2322,7 @@ export class RunController {
    */
   private resolveApiKey(target: {
     env: Record<string, string>;
-    envPath: string;
+    envPath: string | null;
   }): { kind: 'proceed'; apiKey: string } | { kind: 'fail'; payload: ErrorPayload } {
     const pinned =
       target.env['STEPTIX_SERVER_API_KEY']?.trim() ||
@@ -3004,7 +3059,12 @@ export class RunController {
     const ac = new AbortController();
     this.active = ac;
 
-    const ready = await this.ensureServerReady({ serverUrl, signal: ac.signal, log });
+    const ready = await this.ensureServerReady({
+      serverUrl,
+      serverUrlSource: target.serverUrlSource,
+      signal: ac.signal,
+      log,
+    });
     // Only now the key: an auto-started `serve` may just have generated it.
     const serverReady = ready.kind === 'proceed' ? this.resolveApiKey(target) : ready;
     if (serverReady.kind !== 'proceed') {
@@ -5557,7 +5617,12 @@ export class RunController {
         await this.closeStaleSession();
       }
 
-      const ready = await this.ensureServerReady({ serverUrl, signal: ac.signal, log });
+      const ready = await this.ensureServerReady({
+        serverUrl,
+        serverUrlSource: target.serverUrlSource,
+        signal: ac.signal,
+        log,
+      });
       if (ready.kind === 'aborted' || ac.signal.aborted) return { status: 'cancelled' };
       if (ready.kind === 'fail') {
         this.fail(ready.payload, log);
@@ -5768,7 +5833,7 @@ export class RunController {
   private describeRecordError(
     err: unknown,
     serverUrl: string,
-    envPath: string,
+    envPath: string | null,
     log: (line: string) => void,
   ): string {
     const apiErr = asApiClientError(err);
@@ -5862,7 +5927,7 @@ function asApiClientError(err: unknown): ApiClientError | null {
 
 function mapApiErrorToPayload(
   err: unknown,
-  ctx: { serverUrl: string; envPath: string },
+  ctx: { serverUrl: string; envPath: string | null },
 ): ErrorPayload {
   const apiErr = asApiClientError(err);
   if (apiErr) {

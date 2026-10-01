@@ -21,13 +21,13 @@ import path from 'node:path';
 import { DEFAULT_CONFIG } from '../config/defaults.js';
 import { readDefaultEnvVars, readEnvFileVars } from '../env/loader.js';
 import { readMachineKey, readUserRootEnv, userRootDir } from '../env/user-root.js';
+import { DEFAULT_SERVER_URL, readMachineServerUrl } from '../env/server-url.js';
 import {
   badEnvName,
   badProjectConfig,
   badRootEntry,
   envFileMissing,
   noProjectConfig,
-  noServerUrl,
   pathMustBeAbsolute,
   pathOutsideProjectRoot,
   pathOutsideRoots,
@@ -39,19 +39,6 @@ import {
 import { PreflightFailure, type ProjectContext, type ResolveProjectArgs } from './types.js';
 
 const CONFIG_FILENAME = 'steptix.config.json';
-
-/**
- * Where a project-less call looks for its Sessions API server when neither the
- * user root's `.env` nor the process environment names one
- * (stories/mcp-no-project.md).
- *
- * Loopback because it must be — auto-start only ever spawns on a loopback host
- * (§5 arm 4) — and a port that is distinctive rather than 3100 because people
- * already run the *project* server there: a project-less call colliding with it
- * would find a server whose key it may not hold, and auto-start would refuse a
- * port that answers with someone else's service.
- */
-export const USER_SCOPE_SERVER_URL = 'http://127.0.0.1:3141';
 
 /**
  * §4a rule 6. No separators and no `..`, because `readEnvFileVars` does
@@ -427,17 +414,20 @@ function firstNonEmpty(...values: (string | undefined)[]): string | null {
  * per-server configuration surface a user has, and `STEPTIX_MCP_ROOTS` is already
  * read from exactly that channel.
  *
- * User scope gets one extra rung: a missing `SERVER_URL` defaults to
- * {@link USER_SCOPE_SERVER_URL} instead of failing. A project must say which
- * server it means — its `.env` is a file someone wrote — but project-less mode
- * exists precisely for the directory with no files in it, so "nothing
- * configured" has to resolve to something startable.
+ * Below those, `SERVER_URL` falls back the way every client's does
+ * (stories/machine-server-url.md): the user root's `.env`, then
+ * {@link DEFAULT_SERVER_URL} — the same two a bare `steptix serve` takes its
+ * port from, so the server auto-start spawns for a project that names none is
+ * the one every other client finds. In user scope the map already *is* the
+ * user root's `.env`, so the first of those adds nothing there.
  */
 function withServerDiscovery(fields: ProjectDraft): ProjectContext {
   const serverUrl =
-    firstNonEmpty(fields.env['SERVER_URL'], process.env['SERVER_URL']) ??
-    (fields.scope === 'user' ? USER_SCOPE_SERVER_URL : null);
-  if (serverUrl === null) fail(noServerUrl(fields.envFilesConsulted));
+    firstNonEmpty(
+      fields.env['SERVER_URL'],
+      process.env['SERVER_URL'],
+      readMachineServerUrl() ?? undefined,
+    ) ?? DEFAULT_SERVER_URL;
 
   // The client chain of stories/machine-key.md: project `.env` → environment
   // → the machine key. A miss on all three is NOT failed here — only

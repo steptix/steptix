@@ -9,7 +9,7 @@ import {
   mkdirSync,
 } from 'node:fs';
 import * as path from 'node:path';
-import { describeFetchError } from 'steptix-runner-core';
+import { bareServePort, describeFetchError, type BareServePort } from 'steptix-runner-core';
 
 /**
  * Server lifecycle helpers for the extension: the `/health` identity probe and
@@ -393,6 +393,10 @@ export type ServerAction =
   | { kind: 'legacy'; detail: string }
   /** Nothing listening, and we are allowed to start one. */
   | { kind: 'spawn'; config: AutoStartConfig }
+  /** Nothing listening, and the configured command would not serve this URL:
+   *  it listens on another port (`servePort.ok`), or would refuse to start at
+   *  all. Never spawn — a server we will not connect to is a stray. */
+  | { kind: 'refuse-port'; servePort: BareServePort }
   /** Nothing listening and we must not start one. `reason` explains which
    *  precondition failed, for the log/toast. */
   | { kind: 'skip'; reason: string };
@@ -401,6 +405,8 @@ export function decideServerAction(
   serverUrl: string,
   probe: HealthProbeResult,
   config: AutoStartConfig,
+  /** Where the configured command will listen — {@link servePortOfCommand}. */
+  servePort: BareServePort,
 ): ServerAction {
   switch (probe.kind) {
     case 'healthy':
@@ -416,7 +422,44 @@ export function decideServerAction(
       if (!config.command) {
         return { kind: 'skip', reason: '"steptix.serverAutoStart.command" is not set' };
       }
+      if (!servePort.ok || servePort.port !== portOfUrl(serverUrl)) {
+        return { kind: 'refuse-port', servePort };
+      }
       return { kind: 'spawn', config };
+  }
+}
+
+/** `url`'s port, or its scheme's default when it names none. */
+function portOfUrl(url: string): number {
+  const parsed = new URL(url);
+  if (parsed.port !== '') return Number(parsed.port);
+  return parsed.protocol === 'https:' ? 443 : 80;
+}
+
+/**
+ * Where the auto-start command will listen: the `-p` / `--port` it passes to
+ * `serve`, else wherever a bare `serve` listens — the machine `SERVER_URL`'s
+ * port, else 3100 (stories/machine-server-url.md).
+ *
+ * Only arguments after a `serve` word are read, so a flag belonging to the
+ * launcher (`npx -p <package>`) is never mistaken for the server's. A command
+ * that wraps `serve` in a script shows no flag here and is taken to be bare;
+ * if it pins a port of its own, a mismatch surfaces as STX028's timeout
+ * rather than up front.
+ */
+export function servePortOfCommand(command: string): BareServePort {
+  const afterServe = command.split(/\bserve\b/).slice(1).join(' serve ');
+  const flag = /(?:^|\s)(?:-p|--port)(?:=|\s+)?(\d+)(?=\s|$|["'])/.exec(afterServe);
+  if (flag?.[1] !== undefined) {
+    return { ok: true, port: Number(flag[1]), source: '-p in "steptix.serverAutoStart.command"' };
+  }
+  try {
+    return bareServePort();
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `the machine .env could not be read (${err instanceof Error ? err.message : String(err)})`,
+    };
   }
 }
 

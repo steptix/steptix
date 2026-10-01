@@ -2303,7 +2303,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           { sessions },
           `${sessions.length} open session(s)` +
             // Reported, never silent (stories/mcp-no-project.md): a project-less
-            // resolution talks to the user-root server (127.0.0.1:3141), and a
+            // resolution talks to the machine's default server, and a
             // caller who expected their project's sessions should see why the
             // list looks unfamiliar rather than read "0 open" off the wrong one.
             (project.scope === 'user'

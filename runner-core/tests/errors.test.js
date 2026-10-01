@@ -3,12 +3,10 @@ import { strict as assert } from 'node:assert';
 import { ALL_ERROR_CODES, reportError } from '../dist/errors.js';
 
 const SAMPLE_CONTEXTS = {
-  STX001: { searchedDirs: ['/ws/a/b', '/ws/a', '/ws'], fallbackSetting: '' },
-  STX002: { envPath: '/ws/.env' },
   STX003: { envPath: '/ws/.env', machineEnvPath: '/home/x/.steptix/.env' },
   STX004: { envPath: '/ws/.env', value: 'not-a-url' },
   STX005: { envPath: '/ws/.env', lineNumber: 4, line: 'bad line' },
-  STX006: { envName: 't2', expectedPath: '/ws/.env.t2', baseEnvPath: '/ws/base/.env' },
+  STX006: { envName: 't2', expectedPath: '/ws/.env.t2' },
   STX007: {
     machineEnvPath: '/home/x/.steptix/.env',
     reason: "EACCES: permission denied, open '/home/x/.steptix/.env'",
@@ -32,6 +30,12 @@ const SAMPLE_CONTEXTS = {
   },
   STX030: {},
   STX031: {},
+  STX033: {
+    serverUrl: 'http://localhost:3101',
+    urlSource: 'SERVER_URL in /ws/.env',
+    servePort: 3100,
+    servePortSource: 'the default',
+  },
   STX032: {
     // Verbatim `danglingChainMemberError` output, which is verbatim the CLI
     // parser's — see tests/control-line-parity.test.ts.
@@ -67,7 +71,6 @@ test('every fix sentence ends with a period', () => {
 
 test('errors involving a file path mention the path verbatim', () => {
   const cases = [
-    ['STX002', '/ws/.env'],
     ['STX003', '/ws/.env'],
     ['STX004', '/ws/.env'],
     ['STX005', '/ws/.env'],
@@ -93,11 +96,30 @@ test('errors involving SERVER_URL mention it verbatim', () => {
   }
 });
 
-test('STX001 lists searched directories and the fallback setting name', () => {
-  const payload = reportError('STX001', SAMPLE_CONTEXTS.STX001);
-  assert.ok(payload.message.includes('/ws/a/b'));
-  assert.ok(payload.message.includes('/ws'));
-  assert.ok(payload.message.includes('steptix.defaultEnvFile'));
+test('STX001 and STX002 are retired: a test without a project .env or SERVER_URL is not an error', () => {
+  // stories/machine-server-url.md — SERVER_URL falls back to the machine .env,
+  // then the default, so neither "no .env" nor "no SERVER_URL" refuses a run.
+  assert.ok(!ALL_ERROR_CODES.includes('STX001'));
+  assert.ok(!ALL_ERROR_CODES.includes('STX002'));
+});
+
+test('codes that name the project .env say so plainly when there is none', () => {
+  const stx003 = reportError('STX003', { envPath: null, machineEnvPath: '/home/x/.steptix/.env' });
+  assert.ok(stx003.message.includes('this test has no project .env'));
+  assert.ok(!stx003.message.includes('null'));
+
+  const stx011 = reportError('STX011', { envPath: null, serverUrl: 'http://localhost:3100' });
+  assert.ok(stx011.message.includes('from the process environment'));
+  assert.ok(!stx011.message.includes('null'));
+});
+
+test('STX033 names both ports, where each came from, and the serve command that fixes it', () => {
+  const payload = reportError('STX033', SAMPLE_CONTEXTS.STX033);
+  assert.ok(payload.message.includes('http://localhost:3101'));
+  assert.ok(payload.message.includes('SERVER_URL in /ws/.env'));
+  assert.ok(payload.message.includes('port 3100'));
+  assert.ok(payload.message.includes('the default'));
+  assert.ok(payload.message.includes('steptix serve -p 3101'));
 });
 
 test('STX005 mentions the offending line number and content', () => {
@@ -110,9 +132,6 @@ test('STX006 names the selected env and the expected .env.<name> path', () => {
   const payload = reportError('STX006', SAMPLE_CONTEXTS.STX006);
   assert.ok(payload.message.includes('t2'), 'mentions the env name');
   assert.ok(payload.message.includes('/ws/.env.t2'), 'mentions the expected overlay path');
-  // Distinct from expectedPath so this proves baseEnvPath is actually surfaced
-  // (not trivially satisfied as a substring of /ws/.env.t2).
-  assert.ok(payload.message.includes('/ws/base/.env'), 'mentions the base .env path');
 });
 
 test('STX007 carries the read error, so the cause is not a guess', () => {

@@ -9,6 +9,7 @@ import {
   describeServerVersion,
   normalizeBaseUrl,
   readAutoStartSettings,
+  servePortOfCommand,
   startServerAndWait,
   HEALTH_PROBE_TIMEOUT_MS,
   type HealthProbe,
@@ -45,15 +46,18 @@ export function registerServerCommands(args: {
   const startServer = async (): Promise<void> => {
     const target = await statusBar.resolveTarget();
     if (!target) {
-      void vscode.window.showWarningMessage(
-        'Steptix: no SERVER_URL — add one to the workspace root .env (or the active .env.<name>).',
-      );
+      void vscode.window.showWarningMessage('Steptix: open a folder to start a server for it.');
       return;
     }
 
     const result = await probe(target.serverUrl, HEALTH_PROBE_TIMEOUT_MS);
     const config = readAutoStartSettings(vscode.workspace.getConfiguration('steptix'));
-    const action = decideServerAction(target.serverUrl, result, config);
+    const action = decideServerAction(
+      target.serverUrl,
+      result,
+      config,
+      servePortOfCommand(config.command),
+    );
 
     switch (action.kind) {
       case 'proceed':
@@ -80,6 +84,18 @@ export function registerServerCommands(args: {
         // Same preconditions the run path enforces: localhost only, and a
         // command must be configured.
         await offerAutoStartSettings(`Steptix: cannot start a server — ${action.reason}.`);
+        return;
+      case 'refuse-port':
+        // The same refusal as the run path's STX033: a server on another port
+        // is one nothing here would talk to.
+        void vscode.window.showErrorMessage(
+          action.servePort.ok
+            ? `Steptix: ${target.serverUrl} (from ${target.source}) is not running, and ` +
+                `"steptix.serverAutoStart.command" would start a server on port ` +
+                `${action.servePort.port} (from ${action.servePort.source}) instead. ` +
+                `Start one yourself with \`steptix serve -p ${new URL(target.serverUrl).port || 80}\`.`
+            : `Steptix: cannot start a server — it would not start: ${action.servePort.reason}.`,
+        );
         return;
       case 'spawn':
         break;

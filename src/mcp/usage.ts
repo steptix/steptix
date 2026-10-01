@@ -46,10 +46,10 @@ Environment
                     your project. The user root is always allowed on top,
                     and never counts as a project candidate.
   SERVER_URL        Sessions API base URL. Normally read from the project's
-                    .env / .env.<name>; this is a lowest-precedence fallback.
-                    Project-less calls default to http://127.0.0.1:3141 —
-                    a distinct port, so they never collide with a project
-                    server on 3100.
+                    .env / .env.<name>; this variable comes next, then
+                    SERVER_URL in %LOCALAPPDATA%\\steptix\\.env (~/.steptix
+                    elsewhere), then http://127.0.0.1:3100 — the port a bare
+                    \`steptix serve\` listens on.
   STEPTIX_SERVER_API_KEY    Sessions API key. Chain: project .env, then this
                     variable, then the machine key at %LOCALAPPDATA%\steptix\.env
                     (~/.steptix elsewhere) — which is generated on first need,

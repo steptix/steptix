@@ -10,9 +10,10 @@
  * the literal name of any setting key involved so the user can grep.
  */
 
+// STX001 (no .env found) and STX002 (.env without SERVER_URL) are retired: a
+// test with neither falls back to the machine SERVER_URL, then the default
+// (stories/machine-server-url.md). Their numbers stay unused.
 export type ErrorCode =
-  | 'STX001'
-  | 'STX002'
   | 'STX003'
   | 'STX004'
   | 'STX005'
@@ -32,7 +33,8 @@ export type ErrorCode =
   | 'STX028'
   | 'STX030'
   | 'STX031'
-  | 'STX032';
+  | 'STX032'
+  | 'STX033';
 
 /** A button shown beneath the inline banner — `command` is a VS Code command id. */
 export interface ErrorAction {
@@ -57,19 +59,24 @@ export interface ErrorPayload {
 // Per-code context types — each ErrorCode declares exactly what it needs.
 // ---------------------------------------------------------------------------
 
+/*
+ * A `envPath` / `baseEnvPath` of null means the test has no project `.env`:
+ * nothing was found walking up from it and `steptix.defaultEnvFile` names
+ * none. That is a supported setup, not an error of its own.
+ */
 export interface ErrorContextMap {
-  STX001: { searchedDirs: string[]; fallbackSetting: string };
-  STX002: { envPath: string };
-  STX003: { envPath: string; machineEnvPath: string };
+  STX003: { envPath: string | null; machineEnvPath: string };
+  /** `envPath` is whichever file the bad SERVER_URL came from — the project's
+   *  `.env` or the machine one. */
   STX004: { envPath: string; value: string };
   STX005: { envPath: string; lineNumber: number; line: string };
-  STX006: { envName: string; expectedPath: string; baseEnvPath: string };
-  /** The machine key file exists but could not be read. Distinct from STX003
+  STX006: { envName: string; expectedPath: string };
+  /** The machine `.env` exists but could not be read. Distinct from STX003
    *  ("nowhere"): the key may well be in there. `reason` is the read error's
    *  message, which names the errno (EACCES, EISDIR, EBUSY…). */
   STX007: { machineEnvPath: string; reason: string };
   STX010: { serverUrl: string; reason: string };
-  STX011: { envPath: string; serverUrl: string };
+  STX011: { envPath: string | null; serverUrl: string };
   STX012: { serverUrl: string };
   STX013: { serverUrl: string; status: number; bodyExcerpt?: string };
   STX014: { serverUrl: string; reason: string };
@@ -95,6 +102,11 @@ export interface ErrorContextMap {
    *  is the CLI parser's own wording, naming the line and what is wrong with
    *  where it sits (stories/control-flow.md). */
   STX032: { detail: string };
+  /** Auto-start would start a server somewhere other than `serverUrl`, so it
+   *  did not start one. `servePort` is where the configured command listens
+   *  and `servePortSource` why (its own `-p`, the machine SERVER_URL, or the
+   *  default); `urlSource` is where `serverUrl` came from. */
+  STX033: { serverUrl: string; urlSource: string; servePort: number; servePortSource: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -108,20 +120,8 @@ type Builder<C extends ErrorCode> = (ctx: ErrorContextMap[C]) => {
 };
 
 const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
-  STX001: (ctx) => ({
-    diagnosis: `No .env file found for this test. Searched: ${ctx.searchedDirs.join(', ')}, then fallback setting "steptix.defaultEnvFile" (=${ctx.fallbackSetting || 'unset'})`,
-    fix: 'Create a .env next to this test (or any ancestor folder up to workspace root) with SERVER_URL, or set "steptix.defaultEnvFile" in Settings. STEPTIX_SERVER_API_KEY is optional — it falls back to the machine key.',
-    actions: [
-      { label: 'Open Settings', command: 'workbench.action.openSettings', args: ['steptix.defaultEnvFile'] },
-    ],
-  }),
-  STX002: (ctx) => ({
-    diagnosis: `SERVER_URL is missing from ${ctx.envPath}`,
-    fix: 'Add a line like SERVER_URL=http://localhost:3100 (full URL including scheme and port).',
-    actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
-  }),
   STX003: (ctx) => ({
-    diagnosis: `STEPTIX_SERVER_API_KEY is nowhere: not in ${ctx.envPath}, not in the VS Code process environment, and no machine key at ${ctx.machineEnvPath}`,
+    diagnosis: `STEPTIX_SERVER_API_KEY is nowhere: ${ctx.envPath === null ? 'this test has no project .env' : `not in ${ctx.envPath}`}, not in the VS Code process environment, and no machine key at ${ctx.machineEnvPath}`,
     fix: 'Start the server once and it writes the machine key there — set "steptix.serverAutoStart.command" and "steptix.serverAutoStart.cwd" and Run does it for you, or run `steptix serve`. If a server is already running, it was started with a key this machine does not have: add STEPTIX_SERVER_API_KEY=<that key> to the machine key file or this project\'s .env.',
     actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
@@ -137,11 +137,11 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   }),
   STX006: (ctx) => ({
     diagnosis: `Active environment "${ctx.envName}" is selected, but no .env.${ctx.envName} was found at ${ctx.expectedPath}`,
-    fix: `Create .env.${ctx.envName} next to ${ctx.baseEnvPath}, or clear the env selection in the status bar (globe → env).`,
+    fix: `Create ${ctx.expectedPath}, or clear the env selection in the status bar (globe → env).`,
     actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
   STX007: (ctx) => ({
-    diagnosis: `Could not read the machine key file ${ctx.machineEnvPath}: ${ctx.reason}`,
+    diagnosis: `Could not read the machine .env file ${ctx.machineEnvPath}: ${ctx.reason}`,
     fix: 'Make sure it is a file your account can read and that no other program holds it locked, then run again.',
   }),
   STX010: (ctx) => ({
@@ -155,7 +155,7 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   STX011: (ctx) => ({
     diagnosis: `Server at ${ctx.serverUrl} rejected the API key (HTTP 401)`,
     fix:
-      `The STEPTIX_SERVER_API_KEY Steptix sent (from ${ctx.envPath}, the process environment, ` +
+      `The STEPTIX_SERVER_API_KEY Steptix sent (from ${ctx.envPath === null ? '' : `${ctx.envPath}, `}the process environment, ` +
       'or the machine key file) must match the key the server was started with.',
     actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
@@ -235,7 +235,23 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
     diagnosis: `This test can't be run as written — ${ctx.detail}`,
     fix: 'Edit the line and run again. Steptix refuses up front because a decision cannot be split across two requests: a member with nothing to be the alternative of would perform its branch unconditionally, and one written below the `Otherwise` that ended the chain is never the branch the decision picks.',
   }),
+  STX033: (ctx) => ({
+    diagnosis:
+      `No Steptix server is running at ${ctx.serverUrl} (from ${ctx.urlSource}), and auto-start would start one on port ${ctx.servePort} (from ${ctx.servePortSource}) instead — so it did not start one`,
+    fix: `Start the server for ${ctx.serverUrl} yourself with \`steptix serve -p ${portOf(ctx.serverUrl)}\`, or point SERVER_URL at port ${ctx.servePort}.`,
+  }),
 };
+
+/** `url`'s port as written, or its scheme's default — for a fix sentence, so
+ *  never throws. */
+function portOf(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+  } catch {
+    return '<port>';
+  }
+}
 
 /**
  * Build a structured error payload for a given code + context.
