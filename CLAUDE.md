@@ -150,32 +150,28 @@ extension isn't on the path at all.
 ## Unit tests pass on Windows, Linux and macOS
 
 The four unit suites must pass on all three: root `npm test`, and `npm test` in
-`runner-core/`, `flick-vscode/` and `steptix-vscode/`. The same holds for the
-product. Linux and macOS support are meant to be on par with Windows, so
-behaviour that works on one platform should have a counterpart on the others,
-not a platform-specific gap that a test then works around.
+`runner-core/`, `flick-vscode/` and `steptix-vscode/`. Product behaviour must
+be on par too: what works on one platform needs a counterpart on the others,
+not a platform-specific gap that a test works around.
 
-- **No hard-coded Windows paths in fixtures.** `path.join('C:', 'proj')` is
-  `C:/proj` on Linux, which `path.isAbsolute` rejects, so one fixture line
-  failed 77 CDP tests at their first 400. Build paths that are native to the
-  platform: `path.resolve(path.sep, 'proj')`, `os.tmpdir()`, or `path.join`
-  from such a root. `pathToFileURL` and `path` are platform-native too, so a
-  `C:\…` string fed to them on Linux is a relative name full of backslashes.
-- **A test that is genuinely about one platform says so.** Use
+- **Build fixture paths that are native to the platform.** Use
+  `path.resolve(path.sep, 'proj')`, `os.tmpdir()`, or `path.join` from such a
+  root. Never hard-code `C:\…` or `path.join('C:', …)`: on Linux and macOS
+  that is a relative name, which `path.isAbsolute` rejects and
+  `pathToFileURL` resolves against the working directory.
+- **Mark a test that is about one platform.** Use
   `it.runIf(process.platform === 'win32')` (or `path.sep === '/'` for Linux
   and macOS together), or `path.win32` / `path.posix` explicitly. Give the
   other platforms their own case where the behaviour differs, as
   `tests/upload-paths.test.ts` does for rooted paths.
-- **`npm test` builds first** (`pretest`), because several suites run `dist/`
-  on purpose. Don't remove that to save the few seconds. A stale `dist/`
-  silently tested months-old code on Linux and cost 67 false failures.
-  Plain `npx vitest` skips `pretest`, so build first if you use it.
-- **macOS is POSIX but not Linux.** Its default filesystem is
-  case-insensitive (as Windows is, and Linux is not), so a test must not
-  depend on case either way. `os.tmpdir()` is under `/var/folders/…`, a
-  symlink to `/private/var/…`, so a path read back through `realpath` or
-  `process.cwd()` may not string-equal the one the test built. Compare
-  `fs.realpathSync` forms when that matters.
+- **Keep `npm test` building first** (`pretest`). Several suites run `dist/`
+  on purpose, and a stale one tests old code without any warning. Plain
+  `npx vitest` skips `pretest`, so build first if you use it.
+- **Treat macOS as POSIX but not Linux.** Its default filesystem is
+  case-insensitive, so a test must not depend on case either way.
+  `os.tmpdir()` is under `/var/folders/…`, a symlink to `/private/var/…`, so
+  compare `fs.realpathSync` forms when a path is read back through
+  `realpath` or `process.cwd()`.
 
 To check on Linux from this machine, use WSL Ubuntu. Node 24 is in
 `~/.local/node/bin` there (not on the default PATH), and `~/steptix-linux` is
@@ -185,12 +181,12 @@ a test clone of the Windows checkout with its own Linux `node_modules`:
 wsl.exe -e bash -lc 'export PATH=$HOME/.local/node/bin:$PATH; cd ~/steptix-linux && git fetch -q && git checkout -f origin/<branch> && npm test'
 ```
 
-Its `origin` is the Windows checkout, so an uncommitted change needs
-`git diff HEAD > patch` there and `git apply` in the clone instead. Run
-`npm ci` in each of the five projects if the branch changed dependencies.
-WSL has no Playwright browser, so the root suite's real-browser tests (about
-60, each failing with `browserType.launch: Executable doesn't exist`) fail
-there for that reason alone. Judge Linux on everything else.
+Its `origin` is the Windows checkout, so to test an uncommitted change, run
+`git diff HEAD > patch` there and `git apply` in the clone. Run `npm ci` in
+each of the five projects if the branch changed dependencies. WSL has no
+Playwright browser, so ignore the root suite's real-browser tests there (they
+fail with `browserType.launch: Executable doesn't exist`) and judge Linux on
+everything else.
 
 ## Seed gitignored files into a new worktree
 
