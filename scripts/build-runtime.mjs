@@ -2,17 +2,35 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const version = process.argv[2] ?? '1.0.0-beta.1';
+const sourcePackage = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+// The runtime is the framework at this checkout's version unless told otherwise.
+const version = process.argv[2] ?? sourcePackage.version;
 if (!/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(version)) throw new Error('Invalid runtime version');
 if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Build this package on Windows x64');
+// Checked before anything is staged, so a missing compiler costs nothing.
+const compiler = process.env.STEPTIX_MAKENSIS ?? path.join(root, 'build-tools/nsis/compiler/Bin/makensis.exe');
+if (!fs.existsSync(compiler)) throw new Error('Set STEPTIX_MAKENSIS to a portable NSIS compiler');
 const output = path.join(root, 'dist-runtime');
 const payload = path.join(output, `steptix-runtime-${version}-win-x64`);
-if (fs.existsSync(payload)) throw new Error(`Payload already exists: ${payload}. Use a fresh output directory.`);
-const sourcePackage = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+const installerName = `SteptixRuntimeSetup-${version}-win-x64.exe`;
+const released = path.join(output, installerName);
+// The compiler writes here; an installer moves to `released` only once the
+// end-to-end test has passed on it.
+const unverified = path.join(output, 'unverified');
+const candidate = path.join(unverified, installerName);
+// A rebuild replaces this version's outputs, the released installer first: a
+// rebuild that fails must not leave the previous build standing in its place.
+for (const file of [released, candidate]) {
+  for (const suffix of ['', '.sha256', '.verification.json']) fs.rmSync(file + suffix, { force: true });
+}
+fs.rmSync(payload, { recursive: true, force: true });
+// The installer carries what this checkout builds now, with a build stamp of
+// this commit — not whatever dist/ happened to be built last.
+execSync('npm run build', { cwd: root, stdio: 'inherit' });
 const sourceModules = fs.realpathSync(path.join(root, 'node_modules'));
 const server = path.join(payload, 'server');
 fs.mkdirSync(server, { recursive: true });
@@ -125,10 +143,20 @@ function walk(directory) {
 }
 walk(payload);
 fs.writeFileSync(path.join(output, `inventory-${version}.json`), JSON.stringify({ version, packages: installed.size, files: inventory }, null, 2));
-const compiler = process.env.STEPTIX_MAKENSIS ?? path.join(root, 'build-tools/nsis/compiler/Bin/makensis.exe');
-if (!fs.existsSync(compiler)) throw new Error('Set STEPTIX_MAKENSIS to a portable NSIS compiler');
-execFileSync(compiler, ['/V2', `/DVERSION=${version}`, `/DPRODUCT_VERSION=${version.split('-')[0]}.0`, `/DPAYLOAD=${payload}`, `/DOUTPUT=${output}`, path.join(root, 'packaging/runtime/runtime.nsi')], { stdio: 'inherit' });
-const installer = path.join(output, `SteptixRuntimeSetup-${version}-win-x64.exe`);
-const checksum = createHash('sha256').update(fs.readFileSync(installer)).digest('hex');
-fs.writeFileSync(`${installer}.sha256`, `${checksum}  ${path.basename(installer)}\n`);
-console.log(JSON.stringify({ installer, bytes: fs.statSync(installer).size, packages: installed.size, files: inventory.length, sha256: checksum }, null, 2));
+fs.mkdirSync(unverified, { recursive: true });
+execFileSync(compiler, ['/V2', `/DVERSION=${version}`, `/DPRODUCT_VERSION=${version.split('-')[0]}.0`, `/DPAYLOAD=${payload}`, `/DOUTPUT=${unverified}`, path.join(root, 'packaging/runtime/runtime.nsi')], { stdio: 'inherit' });
+// Every installer is tested end to end before it is released: installed,
+// started from VS Code through steptix.cmd to run a test, and uninstalled
+// (scripts/verify-runtime.mjs). There is no flag to skip it.
+const verify = spawnSync(process.execPath, [path.join(root, 'scripts/verify-runtime.mjs'), candidate], { stdio: 'inherit' });
+if (verify.status !== 0) {
+  throw new Error(`The end-to-end test failed, so the installer was not released. It is left at ${candidate} for diagnosis.`);
+}
+const checksum = createHash('sha256').update(fs.readFileSync(candidate)).digest('hex');
+const verification = JSON.parse(fs.readFileSync(`${candidate}.verification.json`, 'utf8'));
+if (verification.sha256 !== checksum) throw new Error(`${candidate} changed after it was tested`);
+fs.renameSync(candidate, released);
+fs.rmSync(`${candidate}.verification.json`);
+fs.writeFileSync(`${released}.verification.json`, JSON.stringify({ ...verification, installer: released }, null, 2) + '\n');
+fs.writeFileSync(`${released}.sha256`, `${checksum}  ${installerName}\n`);
+console.log(JSON.stringify({ installer: released, bytes: fs.statSync(released).size, packages: installed.size, files: inventory.length, sha256: checksum, verified: verification.checks.length }, null, 2));

@@ -147,6 +147,17 @@ The live integration tests were never affected: their harness passes its own
 `--extensions-dir` under the worktree's `.vscode-test/`, so the installed
 extension isn't on the path at all.
 
+## Runtime installer: every build is tested end to end
+
+Build the Windows runtime installer only with `node scripts/build-runtime.mjs`.
+It runs `scripts/verify-runtime.mjs` on every installer it compiles: install,
+the CLI through `steptix.cmd`, a VS Code Run that auto-starts the installed
+server through `steptix.cmd`, and uninstall through the Installed Apps entry.
+The installer only moves into `dist-runtime/` if all of that passes. Never
+compile `packaging/runtime/runtime.nsi` by hand, never add a way to skip the
+test, and never ship anything from `dist-runtime/unverified/`. See
+[packaging/runtime/README.md](packaging/runtime/README.md).
+
 ## Unit tests pass on Windows, Linux and macOS
 
 The four unit suites must pass on all three: root `npm test`, and `npm test` in

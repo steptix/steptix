@@ -5,6 +5,9 @@ Unicode true
 !include "x64.nsh"
 !define PRODUCT "Steptix Runtime"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\SteptixRuntime-${VERSION}"
+; Names this folder's Installed Apps entry, for the uninstaller: a test install
+; registers under its own key, and the uninstaller must remove that one.
+!define KEY_FILE ".steptix-runtime-uninstall-key"
 Name "${PRODUCT} ${VERSION}"
 OutFile "${OUTPUT}\SteptixRuntimeSetup-${VERSION}-win-x64.exe"
 InstallDir "$LOCALAPPDATA\steptix\runtimes\${VERSION}"
@@ -18,6 +21,8 @@ VIAddVersionKey /LANG=1033 "FileVersion" "${VERSION}"
 VIAddVersionKey /LANG=1033 "FileDescription" "Steptix per-user runtime installer (Node.js required)"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright 2026 Paul Kent"
 Var TestMode
+Var UninstallKey
+Var DisplayName
 Var NodeExe
 !define MUI_WELCOMEPAGE_TEXT "Install the Steptix server and CLI for your Windows user account.$\r$\n$\r$\nRequires an existing x64 Node.js 22.21+ installation. Node.js and browsers are not included.$\r$\n$\r$\nUse installed Chrome/Edge or install Playwright browsers afterwards. The VS Code extension currently needs its server command configured; automatic runtime discovery is planned."
 !insertmacro MUI_PAGE_WELCOME
@@ -38,11 +43,24 @@ Function .onInit
     Abort
   ${EndIf}
   StrCpy $TestMode "0"
+  StrCpy $UninstallKey "${UNINSTALL_KEY}"
+  StrCpy $DisplayName "${PRODUCT} ${VERSION}"
+  ; /TESTMODE=<id> is the end-to-end test's install (scripts/verify-runtime.mjs).
+  ; It still registers with Installed Apps, because uninstalling through that
+  ; entry is part of what the test proves, but under a key of its own: a real
+  ; install of the same version on the same machine is never touched. It
+  ; creates no Start menu folder.
   ${GetParameters} $0
   ClearErrors
-  ${GetOptions} $0 "/TESTMODE" $1
+  ${GetOptions} $0 "/TESTMODE=" $1
   ${IfNot} ${Errors}
+    ${If} $1 == ""
+      MessageBox MB_ICONSTOP "/TESTMODE needs an id: /TESTMODE=<id>."
+      Abort
+    ${EndIf}
     StrCpy $TestMode "1"
+    StrCpy $UninstallKey "${UNINSTALL_KEY}-test-$1"
+    StrCpy $DisplayName "${PRODUCT} ${VERSION} (installer test $1)"
   ${EndIf}
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
@@ -67,15 +85,18 @@ Section "Steptix Runtime" Main
   FileOpen $0 "$INSTDIR\.steptix-runtime-install" w
   FileWrite $0 "${VERSION}"
   FileClose $0
+  FileOpen $0 "$INSTDIR\${KEY_FILE}" w
+  FileWrite $0 "$UninstallKey"
+  FileClose $0
   WriteUninstaller "$INSTDIR\Uninstall.exe"
+  WriteRegStr HKCU "$UninstallKey" "DisplayName" "$DisplayName"
+  WriteRegStr HKCU "$UninstallKey" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKCU "$UninstallKey" "Publisher" "Paul Kent"
+  WriteRegStr HKCU "$UninstallKey" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "$UninstallKey" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'
+  WriteRegDWORD HKCU "$UninstallKey" "NoModify" 1
+  WriteRegDWORD HKCU "$UninstallKey" "NoRepair" 1
   ${If} $TestMode != "1"
-    WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${PRODUCT} ${VERSION}"
-    WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
-    WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "Paul Kent"
-    WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
-    WriteRegStr HKCU "${UNINSTALL_KEY}" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'
-    WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoModify" 1
-    WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoRepair" 1
     CreateDirectory "$SMPROGRAMS\Steptix Runtime ${VERSION}"
     CreateShortCut "$SMPROGRAMS\Steptix Runtime ${VERSION}\Setup instructions.lnk" "$INSTDIR\README.txt"
     CreateShortCut "$SMPROGRAMS\Steptix Runtime ${VERSION}\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
@@ -98,6 +119,12 @@ Section "Uninstall"
     MessageBox MB_ICONSTOP "Runtime installation marker does not match this version."
     Abort
   ${EndIf}
+  StrCpy $UninstallKey "${UNINSTALL_KEY}"
+  ${If} ${FileExists} "$INSTDIR\${KEY_FILE}"
+    FileOpen $0 "$INSTDIR\${KEY_FILE}" r
+    FileRead $0 $UninstallKey
+    FileClose $0
+  ${EndIf}
   ; Remove only this version's packaged directories. Never remove the shared user root or browser cache.
   RMDir /r "$INSTDIR\server"
   Delete "$INSTDIR\steptix.cmd"
@@ -107,11 +134,16 @@ Section "Uninstall"
   Delete "$INSTDIR\runtime-manifest.json"
   Delete "$INSTDIR\README.txt"
   Delete "$INSTDIR\.steptix-runtime-install"
+  Delete "$INSTDIR\${KEY_FILE}"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
-  ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
+  ReadRegStr $0 HKCU "$UninstallKey" "InstallLocation"
   ${If} $0 == $INSTDIR
-    DeleteRegKey HKCU "${UNINSTALL_KEY}"
-    RMDir /r "$SMPROGRAMS\Steptix Runtime ${VERSION}"
+    DeleteRegKey HKCU "$UninstallKey"
+    ; The Start menu folder belongs to the real entry only. A test install made
+    ; none, and must not remove a real install's.
+    ${If} $UninstallKey == "${UNINSTALL_KEY}"
+      RMDir /r "$SMPROGRAMS\Steptix Runtime ${VERSION}"
+    ${EndIf}
   ${EndIf}
 SectionEnd

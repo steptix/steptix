@@ -32,25 +32,64 @@ The default compiler path is `build-tools/nsis/compiler/Bin/makensis.exe`.
 Then run:
 
 ```powershell
-node scripts/build-runtime.mjs 1.0.0-beta.1
-node scripts/verify-runtime.mjs dist-runtime/SteptixRuntimeSetup-1.0.0-beta.1-win-x64.exe
+node scripts/build-runtime.mjs
 ```
 
-The build refuses to overwrite an existing staged payload directory. Remove
-only the generated `dist-runtime/steptix-runtime-<version>-win-x64` directory
-before rebuilding that version. `STEPTIX_GIT` can select a Git executable
-when Git is not on PATH.
+The version is the root `package.json`'s unless you pass one. The build runs
+`npm run build` first, so the installer carries this checkout's code and build
+stamp, and it replaces any earlier output for the same version.
+`STEPTIX_GIT` can select a Git executable when Git is not on PATH.
 
-Outputs in `dist-runtime/` include the installer, its SHA-256 checksum, an
-uncompressed payload, and a package/file inventory. Only tracked template
-files are eligible for packaging; local `.env` files, browser profiles,
-reports and project dependencies are excluded. Dependency license files
-and a third-party notice inventory are retained. This local beta is unsigned.
+Outputs in `dist-runtime/` include the installer, its SHA-256 checksum, its
+verification report, an uncompressed payload, and a package/file inventory.
+Only tracked template files are eligible for packaging; local `.env` files,
+browser profiles, reports and project dependencies are excluded. Dependency
+license files and a third-party notice inventory are retained. This local beta
+is unsigned.
 
-The verifier silently installs to a temporary directory containing spaces
-and skips Windows registry/Start menu integration using `/TESTMODE`.
-It uses a separate profile and generated test key, an installed Chrome
-browser, and no AI calls. Temporary diagnostic directories are retained.
+### Every installer is tested end to end
+
+The build compiles the installer into `dist-runtime/unverified/` and runs
+`scripts/verify-runtime.mjs` on it. The installer moves to `dist-runtime/`
+only if every check passes. If the test fails, the build fails and the
+installer stays in `unverified/`. There is no flag to skip the test.
+
+The test does what a user does, in a temporary folder whose path has spaces:
+
+1. **Install.** It runs the installer silently. The runtime registers with
+   Installed Apps.
+2. **CLI.** It runs the CLI through `steptix.cmd`: version, help, `browsers`,
+   `init`, then a headless Chrome test with compiled TypeScript steps and a
+   custom tool.
+3. **VS Code.**
+   - It opens VS Code with the extension from this checkout, a fresh profile,
+     no machine key, and Node found on PATH.
+   - It sets the two User settings below, with nothing listening.
+   - It presses Run.
+   - It checks that the extension started the installed server through
+     `cmd.exe` → `steptix.cmd` → the launcher, that the server generated the
+     machine key, and that every step passed.
+4. **Server.** It runs the Sessions API with that key, checks tool source
+   maps, then stops the server with `steptix.cmd stop`.
+5. **Uninstall.** It runs the Installed Apps entry's uninstall command. Then it
+   checks that the install folder and the entry are gone and that the project
+   and the key are untouched.
+
+The installer's `/TESTMODE=<id>` switch exists for this test. With it, the
+Installed Apps entry is registered under a key of its own and is labelled
+"(installer test <id>)", so a real install of the same version is never
+touched. It creates no Start menu folder. The test removes its entry even when
+it fails.
+
+Running the test needs a desktop session (it opens a VS Code window), Google
+Chrome, and `steptix-vscode`'s dependencies installed. It makes no AI calls
+and uses a temporary `%LOCALAPPDATA%`, so your machine key and settings are
+not used. It keeps its temporary folder for diagnosis. To re-check an
+installer by hand:
+
+```powershell
+node scripts/verify-runtime.mjs dist-runtime/SteptixRuntimeSetup-<version>-win-x64.exe
+```
 
 ## Use with the current extension
 
