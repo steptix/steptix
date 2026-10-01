@@ -178,10 +178,31 @@ async function atomicWrite(file: string, contents: string): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(temp, contents, 'utf-8');
   try {
-    await fs.rename(temp, file);
+    await renameOver(temp, file);
   } catch (err) {
     await fs.rm(temp, { force: true }).catch(() => {});
     throw err;
+  }
+}
+
+/** The codes Windows answers a rename with while another process — a virus
+ *  scanner, the search indexer, esbuild reading the file — has the target open. */
+const LOCKED = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+/** `fs.rename` over an existing file. Windows refuses to replace a file that
+ *  another process has open, for as long as it has it open — usually a few
+ *  milliseconds — so a refusal there is tried again for up to two seconds
+ *  before it counts. Elsewhere a rename replaces an open file. */
+async function renameOver(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.rename(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? '';
+      if (process.platform !== 'win32' || !LOCKED.has(code) || attempt >= 20) throw err;
+      await new Promise((r) => setTimeout(r, 100));
+    }
   }
 }
 
