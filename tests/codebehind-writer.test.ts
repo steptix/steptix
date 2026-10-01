@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   createFile,
@@ -34,7 +35,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true });
+  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 /** A file with every brace hazard sprinkled around the entry to be replaced. */
@@ -292,6 +293,32 @@ describe('code-behind writer — files on disk', () => {
     expect(findEntrySpans(scan(written), 'Open the cart', undefined)).toHaveLength(1);
     expect(findEntrySpans(scan(written), 'Read the total', undefined)).toHaveLength(1);
   });
+
+  // Windows will not replace a file another process has open without delete
+  // sharing — a virus scanner or the search indexer reading a file just
+  // written. Node's own handles always share delete, so the lock comes from
+  // .NET, which by default does not.
+  it.runIf(process.platform === 'win32')('waits out a moment\'s lock on the file instead of failing the write', async () => {
+    const file = path.join(dir, 'x.steps.ts');
+    await fs.writeFile(file, HAZARDOUS, 'utf-8');
+    const lock = spawn('powershell.exe', [
+      '-NoProfile', '-Command',
+      `$f = [System.IO.File]::Open('${file}', 'Open', 'Read', 'Read'); 'locked'; Start-Sleep -Milliseconds 600; $f.Close()`,
+    ]);
+    await new Promise<void>((resolve, reject) => {
+      lock.stdout.on('data', (d: Buffer) => d.toString().includes('locked') && resolve());
+      lock.on('error', reject);
+      lock.on('exit', () => reject(new Error('the lock ended before it was taken')));
+    });
+    const started = Date.now();
+    expect(await writeCodeBehindEntry({
+      file, source: 'Click Pay now', occurrence: 0,
+      entryCode: `{ source: 'Click Pay now', async run({ page }) { await page.click('#pay'); } }`,
+    })).toBe('appended');
+    expect(Date.now() - started).toBeGreaterThan(150); // it did meet the lock
+    expect(await fs.readFile(file, 'utf-8')).toContain("page.click('#pay')");
+    await new Promise((r) => lock.exitCode === null ? lock.on('exit', r) : r(null));
+  }, 30_000);
 
   it('restores the previous bytes when the generated code does not compile', async () => {
     const file = path.join(dir, 'x.steps.ts');

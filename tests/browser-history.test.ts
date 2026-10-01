@@ -224,7 +224,7 @@ describe('back and forward over a real page (§4.3, the same-document cases)', (
 
   beforeAll(async () => {
     browser = await chromium.launch({ headless: true });
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
     await browser?.close();

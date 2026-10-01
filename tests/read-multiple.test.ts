@@ -83,7 +83,7 @@ describe('executeAction — read multiple over a real page', () => {
       </section>
     </body></html>`;
     await page.setContent(html);
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
     await browser?.close();

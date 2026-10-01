@@ -62,7 +62,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   try { await browser?.close(); } catch { /* noop */ }
-}, 15_000);
+}, 60_000);
 
 beforeEach(async () => {
   // A fresh context per test: `context.on('page')` listeners accumulate, and a

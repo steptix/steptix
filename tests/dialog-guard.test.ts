@@ -282,7 +282,7 @@ describe('installDialogGuard — the crash race, real browser', () => {
 
   afterAll(async () => {
     try { await browser?.close(); } catch { /* noop */ }
-  }, 20_000);
+  }, 60_000);
 
   it('survives a cross-origin iframe torn down while its own dialog is open', async () => {
     // A dialog raised by an OOPIF blocks that renderer but NOT the parent's,

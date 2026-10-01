@@ -43,7 +43,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   try { await browser?.close(); } catch { /* noop */ }
-}, 15_000);
+}, 60_000);
 
 beforeEach(async () => {
   await page.goto(pathToFileURL(FIXTURE).href);

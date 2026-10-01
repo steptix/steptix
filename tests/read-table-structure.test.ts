@@ -33,7 +33,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await browser?.close();
-}, 30_000);
+}, 60_000);
 
 async function load(bodyHtml: string): Promise<void> {
   await page.setContent(`<html><body>${bodyHtml}</body></html>`);

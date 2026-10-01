@@ -33,7 +33,7 @@ afterAll(async () => {
   // Explicit budget: this is the suite's SECOND Chromium-launching file, so
   // under a full-suite run two browsers start and stop at once and the
   // default 10s hook budget is occasionally not enough to close one.
-}, 30_000);
+}, 60_000);
 
 /**
  * The app's own table style: `<th>` is upper-cased for looks only (§7.3).

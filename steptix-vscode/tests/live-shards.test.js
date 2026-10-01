@@ -91,16 +91,32 @@ test("runPool: a free worker takes the next item rather than waiting its turn", 
   // two workers: a pre-computed split could give one worker the long item AND
   // two short ones; pulling means the fast worker drains the short ones while
   // the other is still on the long one.
+  //
+  // "Long" is not a duration: the long item lasts until every short one is
+  // done. Timers cannot be trusted to order it — Windows rounds a 1 ms timer
+  // up to its ~15 ms tick, so four "short" ones can outlast a 60 ms one. A
+  // split that queued short items behind the long one would never finish
+  // them; the backstop releases it so that fails on the assertion, not by
+  // hanging.
   const workers = [{ index: 1 }, { index: 2 }];
-  const durations = { long: 60, a: 1, b: 1, c: 1, d: 1 };
   const byWorker = new Map();
+  let releaseLong;
+  const longEnds = new Promise((r) => (releaseLong = r));
+  const backstop = setTimeout(() => releaseLong(), 10_000);
+  let shortsDone = 0;
 
   await runPool(workers, ["long", "a", "b", "c", "d"], async (worker, item) => {
-    await new Promise((r) => setTimeout(r, durations[item]));
+    if (item === "long") {
+      await longEnds;
+    } else {
+      await new Promise((r) => setTimeout(r, 1));
+      if (++shortsDone === 4) releaseLong();
+    }
     const list = byWorker.get(worker.index) ?? [];
     list.push(item);
     byWorker.set(worker.index, list);
   });
+  clearTimeout(backstop);
 
   const longWorker = [...byWorker.entries()].find(([, items]) => items.includes("long"))[0];
   assert.deepEqual(

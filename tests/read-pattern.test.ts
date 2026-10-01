@@ -83,7 +83,7 @@ describe('executeAction — read pattern over a real page', () => {
       <span class="empty">No digits here</span>
     </body></html>`;
     await page.setContent(html);
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
     await browser?.close();

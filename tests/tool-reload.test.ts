@@ -78,7 +78,7 @@ async function run(
 }
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true });
+  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 describe('tool reload — edited files (issue 033 Part 1)', () => {
@@ -265,7 +265,7 @@ describe('refreshIndex — added / removed files (issue 033 Part 2)', () => {
     await cat.resolve('marker'); // load something so byFile is non-empty
     expect(cat.indexedCount).toBe(1);
 
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     await cat.refreshIndex();
     expect(cat.indexedCount).toBe(0);
     expect(cat.diagnostics?.toolsDirMissing).toBe(true);

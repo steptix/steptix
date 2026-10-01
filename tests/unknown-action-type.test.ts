@@ -127,7 +127,7 @@ const CART = `<!doctype html><html><head><title>Cart</title></head><body>
 let browser: Browser;
 beforeAll(async () => {
   browser = await chromium.launch({ headless: true });
-}, 30_000);
+}, 60_000);
 afterAll(async () => {
   await browser?.close();
 });

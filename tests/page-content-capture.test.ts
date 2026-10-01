@@ -31,7 +31,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   try { await browser?.close(); } catch { /* noop */ }
-}, 15_000);
+}, 60_000);
 
 describe('captureVisibleText — real browser', () => {
   it('returns visible text', async () => {
