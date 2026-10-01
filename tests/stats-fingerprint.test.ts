@@ -11,7 +11,7 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 vi.mock('../src/ai/prompts.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/ai/prompts.js')>();
@@ -90,16 +90,24 @@ describe('rulesFingerprint', () => {
 });
 
 describe('frameworkVersion', () => {
-  it('is the package version plus the commit dist/ was built from (pretest builds at HEAD)', () => {
-    const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8')) as { version: string };
+  const pkg = () =>
+    (JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8')) as { version: string }).version;
+
+  it('from src/ (as here, under vitest) is the version alone: no build to name', () => {
+    expect(frameworkVersion()).toBe(pkg());
+    expect(frameworkVersion()).toBe(pkg());
+  });
+
+  it('from dist/ is the version plus the commit it was built from (pretest builds at HEAD)', async () => {
     let head: string | undefined;
     try {
       head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf-8' }).trim();
     } catch {
       head = undefined; // no git on this machine: the version alone is right
     }
-    const expected = head ? `${pkg.version}+${head.slice(0, 7)}` : pkg.version;
-    expect(frameworkVersion()).toBe(expected);
-    expect(frameworkVersion()).toBe(expected);
+    const built = (await import(
+      pathToFileURL(path.join(REPO_ROOT, 'dist', 'stats', 'fingerprint.js')).href
+    )) as typeof import('../src/stats/fingerprint.js');
+    expect(built.frameworkVersion()).toBe(head ? `${pkg()}+${head.slice(0, 7)}` : pkg());
   });
 });

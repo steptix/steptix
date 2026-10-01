@@ -972,11 +972,11 @@ describe('server lifecycle', () => {
       });
       expect(typeof body.version).toBe('string');
       expect(body.version).not.toBe('');
-      // The build stamp, passed through as read — `pretest` built dist/ from
-      // this checkout, so the commit is known here.
+      // The build, passed through as `getBuildInfo` reports it. Vitest runs
+      // src/, where that is unknown by design (tests/build-info.test.ts covers
+      // the dist/ side), so both keys are present and null.
       expect(body).toMatchObject(getBuildInfo());
-      expect(body.commit).toMatch(/^[0-9a-f]{7}$/);
-      expect(typeof body.modified).toBe('boolean');
+      expect(body).toMatchObject({ commit: null, modified: null });
       expect(new Date(body.startedAt).toString()).not.toBe('Invalid Date');
       expect(typeof body.openSessions).toBe('number');
       expect(typeof body.runsInFlight).toBe('number');

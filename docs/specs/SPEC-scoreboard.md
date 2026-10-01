@@ -272,8 +272,9 @@ option set is enough.
 
 `fw` is the framework's package version, plus the short commit `dist/` was
 built from when it was built in a git checkout (stamped by `npm run build`
-into `dist/build-info.json`, read once at start-up). It's absent, not guessed,
-when unknown. A build with uncommitted changes carries the same form; `GET
+into `dist/build-info.json`, read once at start-up). Running from `src/`
+(`npm run dev`) reports the version alone, since the stamp describes some
+other build. It's absent, not guessed, when unknown. A build with uncommitted changes carries the same form; `GET
 /health` reports `modified` alongside.
 
 Which lines carry no fingerprint, and why:

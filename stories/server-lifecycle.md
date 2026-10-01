@@ -110,7 +110,8 @@ sensitive). Response:
   from, and whether the tree held uncommitted changes then. `npm run build`
   stamps them into `dist/build-info.json` (`scripts/build-info.mjs`), so they
   describe the code running, not the checkout's current state. Both are
-  `null` when unknown — no git at build time, or not built from a checkout.
+  `null` when unknown — no git at build time, not built from a checkout, or
+  running from `src/` (`npm run dev`), which the stamp does not describe.
   Added after this story; a server predating them omits both.
 - Handler is synchronous and touches no session state beyond counts.
 

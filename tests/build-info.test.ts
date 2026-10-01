@@ -11,10 +11,11 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { describeVersion, parseBuildInfo } from '../src/utils/version.js';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { describeVersion, getBuildInfo, parseBuildInfo } from '../src/utils/version.js';
 
-const SCRIPT = fileURLToPath(new URL('../scripts/build-info.mjs', import.meta.url));
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
+const SCRIPT = path.join(REPO_ROOT, 'scripts', 'build-info.mjs');
 
 describe('describeVersion', () => {
   it('the version, then the commit in brackets', () => {
@@ -138,5 +139,29 @@ describe.runIf(hasGit)('scripts/build-info.mjs', () => {
       commit: null,
       modified: null,
     });
+  });
+});
+
+describe('getBuildInfo', () => {
+  it('from src/ (npm run dev, or vitest as here) is unknown: the stamp names a different build', () => {
+    expect(getBuildInfo()).toEqual({ commit: null, modified: null });
+  });
+
+  it('from dist/ is the stamp the build wrote beside it', async () => {
+    const built = (await import(
+      pathToFileURL(path.join(REPO_ROOT, 'dist', 'utils', 'version.js')).href
+    )) as typeof import('../src/utils/version.js');
+    const stamp = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'dist', 'build-info.json'), 'utf-8'));
+    expect(built.getBuildInfo()).toEqual(parseBuildInfo(stamp));
+  });
+
+  it.runIf(hasGit)('end to end: the built CLI names the commit `pretest` just built from', () => {
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf-8' }).trim();
+    const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8')) as { version: string };
+    const out = execFileSync(process.execPath, [path.join(REPO_ROOT, 'dist', 'index.js'), '--version'], {
+      encoding: 'utf-8',
+    }).trim();
+    const commit = head.slice(0, 7);
+    expect([`${pkg.version} (${commit})`, `${pkg.version} (${commit}, modified)`]).toContain(out);
   });
 });

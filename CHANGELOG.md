@@ -27,8 +27,9 @@ reported beside the version:
   that ran rather than whatever the checkout had moved on to since start-up.
 
 Both are `null` (and the version is shown alone) when unknown: built without
-git, or outside a checkout. A server predating the fields omits them, and
-every client reads that as unknown.
+git, outside a checkout, or running from `src/` (`npm run dev`), where the
+stamp would describe some other build. A server predating the fields omits
+them, and every client reads that as unknown.
 
 ### Changed — Steptix is beta software: version `1.0.0-beta.1`
 

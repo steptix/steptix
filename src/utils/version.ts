@@ -1,9 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 /** The package root: `src/utils/` and `dist/utils/` both sit two levels under it. */
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+/** Whether this module is running from `dist/` (built) rather than `src/`
+ *  (`npm run dev` through tsx, or vitest). */
+const RUNNING_FROM_DIST = basename(join(dirname(fileURLToPath(import.meta.url)), '..')) === 'dist';
 
 let cached: string | undefined;
 
@@ -49,12 +53,17 @@ export interface BuildInfo {
 let cachedBuild: BuildInfo | undefined;
 
 /**
- * Read once per process, like the version. The stamp lives at
- * `<package root>/dist/build-info.json` whether this module runs from `dist/`
- * or from `src/` (under vitest, after `pretest` built it).
+ * Read once per process, like the version, from
+ * `<package root>/dist/build-info.json`.
+ *
+ * Unknown when running from `src/`: the stamp describes the last build of
+ * `dist/`, and source run directly (`npm run dev`) may have moved on from it
+ * by any number of commits and edits. Reporting it there would name a build
+ * that is not the one answering.
  */
 export function getBuildInfo(): BuildInfo {
   if (cachedBuild !== undefined) return cachedBuild;
+  if (!RUNNING_FROM_DIST) return (cachedBuild = { commit: null, modified: null });
   try {
     cachedBuild = parseBuildInfo(JSON.parse(readFileSync(join(PACKAGE_ROOT, 'dist', 'build-info.json'), 'utf-8')));
   } catch {
