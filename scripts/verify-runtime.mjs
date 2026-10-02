@@ -9,7 +9,8 @@
 //
 // Needs a desktop session (it opens a VS Code window), installed Google Chrome,
 // and this checkout's steptix-vscode dependencies. Makes no AI calls. Uses a
-// temporary %LOCALAPPDATA%, so the machine key and settings are never touched.
+// temporary %LOCALAPPDATA%, so the machine key and settings are never touched,
+// and a Path value of its own, so your PATH is never touched either.
 // The temporary folder is kept for diagnosis; it holds no real credentials.
 import fs from 'node:fs/promises';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
@@ -48,6 +49,12 @@ const keyFile = path.join(profile, 'steptix', '.env');
 // (runtime.nsi, /TESTMODE), so a real install of this version is never touched.
 const testId = randomBytes(4).toString('hex');
 const regKey = `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\SteptixRuntime-${version}-test-${testId}`;
+// It adds `steptix` to a Path value of its own too (user-path.nsh), seeded here
+// the way Windows keeps a user's: REG_EXPAND_SZ, with a %VARIABLE% entry and a
+// folder whose name has a space.
+const userPathKey = `HKCU\\Software\\SteptixInstallerTest-${testId}`;
+const userPathBefore = '%USERPROFILE%\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Program Files\\Some Tool';
+const binDir = path.join(profile, 'steptix', 'bin');
 
 // Nothing of the developer's may leak in: no key, no AI settings, no server.
 const baseEnv = { ...process.env, LOCALAPPDATA: profile, STEPTIX_STATS: 'off' };
@@ -96,6 +103,17 @@ function regValues(key) {
   return values;
 }
 
+/** One registry value as stored, `{ type, data }`, or null when there is none. */
+function regValue(key, name) {
+  const result = spawnSync('reg.exe', ['query', key, '/v', name], { encoding: 'utf8', windowsHide: true });
+  if (result.status !== 0) return null;
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const m = /^\s+(\S+)\s+(REG_\w+)\s+(.*)$/.exec(line);
+    if (m && m[1] === name) return { type: m[2], data: m[3] };
+  }
+  return null;
+}
+
 /** Which of `pids` are still running. */
 function alive(pids) {
   if (pids.length === 0) return [];
@@ -138,6 +156,8 @@ let started = null;
 
 try {
   // ── 1. Install ──────────────────────────────────────────────────────────
+  const seeded = spawnSync('reg.exe', ['add', userPathKey, '/v', 'Path', '/t', 'REG_EXPAND_SZ', '/d', userPathBefore, '/f'], { windowsHide: true });
+  assert.equal(seeded.status, 0, `could not seed ${userPathKey}`);
   // NSIS requires /D to be the last argument and unquoted, even with spaces.
   await run(installer, ['/S', `/TESTMODE=${testId}`, `/D=${install}`], { cwd: temp, timeout: 180_000, verbatim: true });
   const manifest = JSON.parse(await fs.readFile(path.join(install, 'runtime-manifest.json'), 'utf8'));
@@ -149,6 +169,11 @@ try {
   assert.equal(entry.InstallLocation, install);
   assert.equal(entry.UninstallString, `"${path.join(install, 'Uninstall.exe')}"`);
   checks.push('Installs silently into a fresh path with spaces and registers with Installed Apps');
+
+  // "Add steptix to PATH" is ticked by default, so a silent install adds it.
+  assert.deepEqual(regValue(userPathKey, 'Path'), { type: 'REG_EXPAND_SZ', data: `${userPathBefore};${binDir}` });
+  for (const file of ['steptix.cmd', 'run-newest-runtime.cjs']) await fs.access(path.join(binDir, file));
+  checks.push('Adds %LOCALAPPDATA%\\steptix\\bin to the end of the user Path, keeping every entry as written and the value\'s type');
 
   // ── 2. The CLI, through steptix.cmd ─────────────────────────────────────
   assert.match(await steptix('--version'), new RegExp(escapeRegExp(version)));
@@ -276,7 +301,36 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
   await until('the server, launcher and shell to exit', () => alive(pids).length === 0, 30_000);
   checks.push('steptix.cmd stop ends the server, its launcher and its shell');
 
-  // ── 5. Uninstall the way Installed Apps does ────────────────────────────
+  // ── 5. steptix on PATH ──────────────────────────────────────────────────
+  // A terminal opened after the install: System32, then the user Path the
+  // installer wrote, expanded as Windows expands it. Beside the real runtime,
+  // two that `steptix` must not run: an older one, and a newer one that an
+  // unfinished uninstall left without its launch files.
+  const runtimesDir = path.dirname(install);
+  const older = path.join(runtimesDir, '0.0.1');
+  await fs.mkdir(path.join(older, 'server', 'dist'), { recursive: true });
+  await fs.writeFile(path.join(older, 'steptix.cmd'), '');
+  await fs.writeFile(path.join(older, 'server', 'dist', 'index.js'), '');
+  await fs.writeFile(path.join(older, 'runtime-launcher.cjs'), "console.log('the older runtime ran');\n");
+  const unfinished = path.join(runtimesDir, '99.0.0');
+  await fs.mkdir(unfinished, { recursive: true });
+  await fs.writeFile(path.join(unfinished, 'runtime-launcher.cjs'), "console.log('the unfinished uninstall ran');\n");
+  const expand = (value) => value.replace(/%([^%;]+)%/g, (whole, name) => process.env[name] ?? whole);
+  const terminalEnv = {
+    ...cliEnv,
+    [pathKey]: `${path.join(process.env.SystemRoot, 'System32')};${expand(regValue(userPathKey, 'Path').data)}`,
+  };
+  const found = await run('where.exe', ['steptix'], { env: terminalEnv });
+  assert.equal(found.split(/\r?\n/)[0], path.join(binDir, 'steptix.cmd'));
+  const onPath = await run('steptix --version', [], { env: terminalEnv, shell: true });
+  assert.match(onPath, new RegExp(escapeRegExp(version)));
+  assert.doesNotMatch(onPath, /older runtime|unfinished uninstall/);
+  checks.push('steptix on PATH, in a new terminal, runs the newest installed runtime');
+  // An older runtime still installed would keep the PATH folder through the
+  // uninstall below. The unfinished one must not, so it stays.
+  await fs.rm(older, { recursive: true });
+
+  // ── 6. Uninstall the way Installed Apps does ────────────────────────────
   // UninstallString, not Uninstall.exe with _?=: run normally, the uninstaller
   // copies itself out and returns at once, then removes everything including
   // itself. So the check is that the folder goes, not that a process exits.
@@ -288,10 +342,17 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
   } catch (error) {
     throw new Error(`${error.message}. Left behind:\n  ${(await listFiles(install)).join('\n  ') || '(nothing — the folder itself)'}`);
   }
-  assert.equal(regValues(regKey), null, 'the Installed Apps entry was not removed');
+  // Removing its Installed Apps entry is the uninstaller's last step, after
+  // the PATH folder, so this waits for the whole uninstall.
+  await until('the Installed Apps entry to be removed', () => regValues(regKey) === null, 30_000);
   await fs.access(testFile);
   assert.equal(await fs.readFile(keyFile, 'utf8'), keyContents);
   checks.push('Uninstall through the Installed Apps entry removes the install folder and the entry, and keeps the project and the machine key');
+  // The unfinished uninstall's folder does not count as a runtime, so this
+  // was the last one: the PATH folder and its entry go, every other entry stays.
+  assert.deepEqual(regValue(userPathKey, 'Path'), { type: 'REG_EXPAND_SZ', data: userPathBefore });
+  assert.equal(existsSync(binDir), false, `${binDir} was not removed`);
+  checks.push('Uninstalling the last runtime removes the PATH folder and its entry, and keeps the rest of the user Path as written');
 
   const report = {
     installer, sha256: installerSha256, version, installedTestPath: install,
@@ -301,7 +362,7 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
   console.log(JSON.stringify(report, null, 2));
 } finally {
   // Whatever happened: no server left running, no test entry left in
-  // Installed Apps. The folder itself stays, for diagnosis. A test that failed
+  // Installed Apps, no test Path value. The folder itself stays, for diagnosis. A test that failed
   // after the start but before recording it still left a server on `base`.
   try {
     const pids = started ? started.processes.map((p) => p.pid) : [];
@@ -317,5 +378,6 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
     console.error(`Could not stop the test's server: ${error.message}`);
   }
   if (regValues(regKey)) spawnSync('reg.exe', ['delete', regKey, '/f'], { windowsHide: true, stdio: 'ignore' });
+  if (regValues(userPathKey)) spawnSync('reg.exe', ['delete', userPathKey, '/f'], { windowsHide: true, stdio: 'ignore' });
   console.log(`Diagnostics kept in ${temp}`);
 }

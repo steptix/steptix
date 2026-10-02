@@ -8,6 +8,9 @@ Unicode true
 ; Names this folder's Installed Apps entry, for the uninstaller: a test install
 ; registers under its own key, and the uninstaller must remove that one.
 !define KEY_FILE ".steptix-runtime-uninstall-key"
+; Names the HKCU key whose Path value the uninstaller cleans up: a test install
+; uses a key of its own (user-path.nsh).
+!define PATH_KEY_FILE ".steptix-runtime-path-key"
 Name "${PRODUCT} ${VERSION}"
 OutFile "${OUTPUT}\SteptixRuntimeSetup-${VERSION}-win-x64.exe"
 InstallDir "$LOCALAPPDATA\steptix\runtimes\${VERSION}"
@@ -27,6 +30,7 @@ Var NodeExe
 !define MUI_WELCOMEPAGE_TEXT "Install the Steptix server and CLI for your Windows user account.$\r$\n$\r$\nRequires an existing x64 Node.js 22.21+ installation. Node.js and browsers are not included.$\r$\n$\r$\nUse installed Chrome/Edge or install Playwright browsers afterwards. The Steptix VS Code extension finds this runtime and starts its server when you run a test."
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${PAYLOAD}\server\LICENSE"
+!insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_TEXT "Open runtime setup instructions"
@@ -35,6 +39,8 @@ Var NodeExe
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
+; Functions: it cannot come before SetCompressor.
+!include "user-path.nsh"
 
 Function .onInit
   SetShellVarContext current
@@ -45,11 +51,13 @@ Function .onInit
   StrCpy $TestMode "0"
   StrCpy $UninstallKey "${UNINSTALL_KEY}"
   StrCpy $DisplayName "${PRODUCT} ${VERSION}"
+  StrCpy $PathKey "Environment"
   ; /TESTMODE=<id> is the end-to-end test's install (scripts/verify-runtime.mjs).
   ; It still registers with Installed Apps, because uninstalling through that
   ; entry is part of what the test proves, but under a key of its own: a real
   ; install of the same version on the same machine is never touched. It
-  ; creates no Start menu folder.
+  ; creates no Start menu folder, and it adds to a Path value of its own, so
+  ; the PATH of whoever runs the test is never touched either.
   ${GetParameters} $0
   ClearErrors
   ${GetOptions} $0 "/TESTMODE=" $1
@@ -61,6 +69,7 @@ Function .onInit
     StrCpy $TestMode "1"
     StrCpy $UninstallKey "${UNINSTALL_KEY}-test-$1"
     StrCpy $DisplayName "${PRODUCT} ${VERSION} (installer test $1)"
+    StrCpy $PathKey "Software\SteptixInstallerTest-$1"
   ${EndIf}
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
@@ -88,6 +97,9 @@ Section "Steptix Runtime" Main
   FileOpen $0 "$INSTDIR\${KEY_FILE}" w
   FileWrite $0 "$UninstallKey"
   FileClose $0
+  FileOpen $0 "$INSTDIR\${PATH_KEY_FILE}" w
+  FileWrite $0 "$PathKey"
+  FileClose $0
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "$UninstallKey" "DisplayName" "$DisplayName"
   WriteRegStr HKCU "$UninstallKey" "DisplayVersion" "${VERSION}"
@@ -102,6 +114,15 @@ Section "Steptix Runtime" Main
     CreateShortCut "$SMPROGRAMS\Steptix Runtime ${VERSION}\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
   ${EndIf}
 SectionEnd
+
+Section "Add steptix to PATH" PathSection
+  Call AddSteptixToPath
+SectionEnd
+
+!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
+  !insertmacro MUI_DESCRIPTION_TEXT ${Main} "The Steptix server and CLI, in a folder of this version's own."
+  !insertmacro MUI_DESCRIPTION_TEXT ${PathSection} "Run steptix from any new terminal. Adds %LOCALAPPDATA%\steptix\bin to your user PATH, which needs no administrator rights. Terminals and VS Code windows that are already open need a restart to see it."
+!insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Function OpenReadme
   ExecShell "open" "$INSTDIR\README.txt"
@@ -125,6 +146,12 @@ Section "Uninstall"
     FileRead $0 $UninstallKey
     FileClose $0
   ${EndIf}
+  StrCpy $PathKey "Environment"
+  ${If} ${FileExists} "$INSTDIR\${PATH_KEY_FILE}"
+    FileOpen $0 "$INSTDIR\${PATH_KEY_FILE}" r
+    FileRead $0 $PathKey
+    FileClose $0
+  ${EndIf}
   ; Remove only this version's packaged directories. Never remove the shared user root or browser cache.
   RMDir /r "$INSTDIR\server"
   Delete "$INSTDIR\steptix.cmd"
@@ -135,8 +162,11 @@ Section "Uninstall"
   Delete "$INSTDIR\README.txt"
   Delete "$INSTDIR\.steptix-runtime-install"
   Delete "$INSTDIR\${KEY_FILE}"
+  Delete "$INSTDIR\${PATH_KEY_FILE}"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
+  ; After this version's files: the PATH folder goes only with the last runtime.
+  Call un.RemoveSteptixFromPath
   ReadRegStr $0 HKCU "$UninstallKey" "InstallLocation"
   ${If} $0 == $INSTDIR
     DeleteRegKey HKCU "$UninstallKey"

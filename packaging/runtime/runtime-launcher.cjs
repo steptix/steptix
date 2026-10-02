@@ -1,3 +1,6 @@
+// Run by this runtime's steptix.cmd, and loaded with require() by bin/run-newest-runtime.cjs
+// for `steptix` on PATH. So it does its work on load: a require.main check would make
+// `steptix` on PATH silently do nothing.
 require('./node-check.cjs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
