@@ -28,6 +28,5 @@ Two things to know:
   are parsed server-side during expansion.)
 
 ## Steps
-1. Navigate to ${catalog.site.url} and verify the ${catalog.site.name} search box is visible
-2. Type "${catalog.query}" into the search box and submit the search
-3. Verify a results page for "${catalog.query}" is shown
+1. Navigate to ${catalog.site.url}${catalog.page.path} and verify the page title starts with "${catalog.site.name}"
+2. Verify the page's main heading reads "${catalog.page.heading}"

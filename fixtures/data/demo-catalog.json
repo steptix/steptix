@@ -1,7 +1,10 @@
 {
   "site": {
-    "name": "DuckDuckGo",
-    "url": "https://duckduckgo.com"
+    "name": "SecureBank",
+    "url": "http://localhost:8787"
   },
-  "query": "Playwright end-to-end testing"
+  "page": {
+    "path": "/transactions",
+    "heading": "Transaction History"
+  }
 }
