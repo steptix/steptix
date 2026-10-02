@@ -2,6 +2,7 @@ Unicode true
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 !include "FileFunc.nsh"
+!include "Sections.nsh"
 !include "x64.nsh"
 !define PRODUCT "Steptix Runtime"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\SteptixRuntime-${VERSION}"
@@ -42,10 +43,13 @@ Var NodeExe
 ; Functions: it cannot come before SetCompressor.
 !include "user-path.nsh"
 
+; Every MessageBox that can show during a silent install (/S) or uninstall
+; carries /SD, the answer silent mode takes without showing it. Without one,
+; NSIS shows the box anyway and a script waits on it for good.
 Function .onInit
   SetShellVarContext current
   ${IfNot} ${RunningX64}
-    MessageBox MB_ICONSTOP "This installer requires 64-bit Windows."
+    MessageBox MB_ICONSTOP "This installer requires 64-bit Windows." /SD IDOK
     Abort
   ${EndIf}
   StrCpy $TestMode "0"
@@ -63,13 +67,20 @@ Function .onInit
   ${GetOptions} $0 "/TESTMODE=" $1
   ${IfNot} ${Errors}
     ${If} $1 == ""
-      MessageBox MB_ICONSTOP "/TESTMODE needs an id: /TESTMODE=<id>."
+      MessageBox MB_ICONSTOP "/TESTMODE needs an id: /TESTMODE=<id>." /SD IDOK
       Abort
     ${EndIf}
     StrCpy $TestMode "1"
     StrCpy $UninstallKey "${UNINSTALL_KEY}-test-$1"
     StrCpy $DisplayName "${PRODUCT} ${VERSION} (installer test $1)"
     StrCpy $PathKey "Software\SteptixInstallerTest-$1"
+  ${EndIf}
+  ; /NOPATH starts "Add steptix to PATH" unticked: the way to keep PATH as it
+  ; is on a silent install, which takes every option's default.
+  ClearErrors
+  ${GetOptions} $0 "/NOPATH" $1
+  ${IfNot} ${Errors}
+    Call UntickPathSection
   ${EndIf}
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
@@ -82,8 +93,7 @@ Function .onInit
   Pop $0
   Pop $1
   ${If} $0 != "0"
-    IfSilent +2
-    MessageBox MB_ICONINFORMATION "Node.js x64 22.21+ was not found or is incompatible. Install it and restart VS Code before using this runtime. Alternatively set STEPTIX_NODE to your node.exe path.$\r$\n$\r$\nThe runtime can still be installed now."
+    MessageBox MB_ICONINFORMATION "Node.js x64 22.21+ was not found or is incompatible. Install it and restart VS Code before using this runtime. Alternatively set STEPTIX_NODE to your node.exe path.$\r$\n$\r$\nThe runtime can still be installed now." /SD IDOK
   ${EndIf}
 FunctionEnd
 
@@ -119,6 +129,12 @@ Section "Add steptix to PATH" PathSection
   Call AddSteptixToPath
 SectionEnd
 
+; For /NOPATH in .onInit, which comes before this section and so cannot name
+; its index itself.
+Function UntickPathSection
+  !insertmacro UnselectSection ${PathSection}
+FunctionEnd
+
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${Main} "The Steptix server and CLI, in a folder of this version's own."
   !insertmacro MUI_DESCRIPTION_TEXT ${PathSection} "Run steptix from any new terminal. Adds %LOCALAPPDATA%\steptix\bin to your user PATH, which needs no administrator rights. Terminals and VS Code windows that are already open need a restart to see it."
@@ -131,13 +147,13 @@ FunctionEnd
 Section "Uninstall"
   SetShellVarContext current
   IfFileExists "$INSTDIR\.steptix-runtime-install" +3
-    MessageBox MB_ICONSTOP "Runtime installation marker is missing. Refusing to remove files."
+    MessageBox MB_ICONSTOP "Runtime installation marker is missing. Refusing to remove files." /SD IDOK
     Abort
   FileOpen $0 "$INSTDIR\.steptix-runtime-install" r
   FileRead $0 $1
   FileClose $0
   ${If} $1 != "${VERSION}"
-    MessageBox MB_ICONSTOP "Runtime installation marker does not match this version."
+    MessageBox MB_ICONSTOP "Runtime installation marker does not match this version." /SD IDOK
     Abort
   ${EndIf}
   StrCpy $UninstallKey "${UNINSTALL_KEY}"

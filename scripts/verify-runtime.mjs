@@ -91,6 +91,12 @@ const quote = (arg) => (/[\s"]/.test(arg) ? `"${arg}"` : arg);
  *  command line, run by cmd.exe /d /s /c. */
 const steptix = (...args) => run([quote(steptixCmd), ...args.map(quote)].join(' '), [], { shell: true });
 
+/** The installer, silently, into `install`. `options` go before /D, which
+ *  NSIS requires to be last and unquoted, even with spaces. */
+const installSilently = (...options) => run(installer, ['/S', `/TESTMODE=${testId}`, ...options, `/D=${install}`], {
+  cwd: temp, timeout: 180_000, verbatim: true,
+});
+
 /** The values under a registry key, or null when the key does not exist. */
 function regValues(key) {
   const result = spawnSync('reg.exe', ['query', key], { encoding: 'utf8', windowsHide: true });
@@ -158,8 +164,8 @@ try {
   // ── 1. Install ──────────────────────────────────────────────────────────
   const seeded = spawnSync('reg.exe', ['add', userPathKey, '/v', 'Path', '/t', 'REG_EXPAND_SZ', '/d', userPathBefore, '/f'], { windowsHide: true });
   assert.equal(seeded.status, 0, `could not seed ${userPathKey}`);
-  // NSIS requires /D to be the last argument and unquoted, even with spaces.
-  await run(installer, ['/S', `/TESTMODE=${testId}`, `/D=${install}`], { cwd: temp, timeout: 180_000, verbatim: true });
+  // With /NOPATH; step 5 reinstalls without it.
+  await installSilently('/NOPATH');
   const manifest = JSON.parse(await fs.readFile(path.join(install, 'runtime-manifest.json'), 'utf8'));
   assert.equal(manifest.version, version);
   assert.equal(manifest.node.bundled, false);
@@ -170,10 +176,9 @@ try {
   assert.equal(entry.UninstallString, `"${path.join(install, 'Uninstall.exe')}"`);
   checks.push('Installs silently into a fresh path with spaces and registers with Installed Apps');
 
-  // "Add steptix to PATH" is ticked by default, so a silent install adds it.
-  assert.deepEqual(regValue(userPathKey, 'Path'), { type: 'REG_EXPAND_SZ', data: `${userPathBefore};${binDir}` });
-  for (const file of ['steptix.cmd', 'run-newest-runtime.cjs']) await fs.access(path.join(binDir, file));
-  checks.push('Adds %LOCALAPPDATA%\\steptix\\bin to the end of the user Path, keeping every entry as written and the value\'s type');
+  assert.deepEqual(regValue(userPathKey, 'Path'), { type: 'REG_EXPAND_SZ', data: userPathBefore });
+  assert.equal(existsSync(binDir), false, `/NOPATH still created ${binDir}`);
+  checks.push('With /NOPATH, leaves the user Path and %LOCALAPPDATA%\\steptix\\bin alone');
 
   // ── 2. The CLI, through steptix.cmd ─────────────────────────────────────
   assert.match(await steptix('--version'), new RegExp(escapeRegExp(version)));
@@ -302,6 +307,13 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
   checks.push('steptix.cmd stop ends the server, its launcher and its shell');
 
   // ── 5. steptix on PATH ──────────────────────────────────────────────────
+  // Reinstalled over the same folder without /NOPATH: "Add steptix to PATH" is
+  // ticked by default, so a silent install adds it.
+  await installSilently();
+  assert.deepEqual(regValue(userPathKey, 'Path'), { type: 'REG_EXPAND_SZ', data: `${userPathBefore};${binDir}` });
+  for (const file of ['steptix.cmd', 'run-newest-runtime.cjs']) await fs.access(path.join(binDir, file));
+  checks.push('Reinstalling without /NOPATH adds %LOCALAPPDATA%\\steptix\\bin to the end of the user Path, keeping every entry as written and the value\'s type');
+
   // A terminal opened after the install: System32, then the user Path the
   // installer wrote, expanded as Windows expands it. Beside the real runtime,
   // two that `steptix` must not run: an older one, and a newer one that an
@@ -330,7 +342,30 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
   // uninstall below. The unfinished one must not, so it stays.
   await fs.rm(older, { recursive: true });
 
-  // ── 6. Uninstall the way Installed Apps does ────────────────────────────
+  // ── 6. A silent uninstall that has to refuse ────────────────────────────
+  // The uninstaller refuses a folder whose marker is missing or names another
+  // version. Silent, it must refuse with an exit code: NSIS shows a MessageBox
+  // without /SD even under /S, and a script would wait on it for good. Each
+  // runs in place (_?=) on a copy whose key files name this test's own
+  // entries, so even an uninstaller that went ahead could touch nothing else.
+  for (const [label, marker] of [['missing', null], ['for another version', '0.0.0-another']]) {
+    const dir = path.join(temp, `uninstall refused, marker ${label}`);
+    await fs.mkdir(path.join(dir, 'server'), { recursive: true });
+    await fs.copyFile(path.join(install, 'Uninstall.exe'), path.join(dir, 'Uninstall.exe'));
+    await fs.writeFile(path.join(dir, 'server', 'kept.txt'), '');
+    await fs.writeFile(path.join(dir, '.steptix-runtime-uninstall-key'), regKey.replace(/^HKCU\\/, ''));
+    await fs.writeFile(path.join(dir, '.steptix-runtime-path-key'), userPathKey.replace(/^HKCU\\/, ''));
+    if (marker) await fs.writeFile(path.join(dir, '.steptix-runtime-install'), marker);
+    const refused = spawnSync(path.join(dir, 'Uninstall.exe'), ['/S', `_?=${dir}`], {
+      env: cliEnv, timeout: 30_000, windowsHide: true, windowsVerbatimArguments: true,
+    });
+    assert.equal(refused.error, undefined, `a silent uninstall with its marker ${label} did not exit: ${refused.error?.message}`);
+    assert.notEqual(refused.status, 0, `a silent uninstall with its marker ${label} reported success`);
+    await fs.access(path.join(dir, 'server', 'kept.txt'));
+  }
+  checks.push('A silent uninstall refuses a folder whose marker is missing or wrong with an exit code, no dialog, and nothing removed');
+
+  // ── 7. Uninstall the way Installed Apps does ────────────────────────────
   // UninstallString, not Uninstall.exe with _?=: run normally, the uninstaller
   // copies itself out and returns at once, then removes everything including
   // itself. So the check is that the folder goes, not that a process exits.
