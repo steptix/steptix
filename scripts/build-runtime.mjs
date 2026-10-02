@@ -145,11 +145,31 @@ function walk(directory) {
 walk(payload);
 fs.writeFileSync(path.join(output, `inventory-${version}.json`), JSON.stringify({ version, packages: installed.size, files: inventory }, null, 2));
 fs.mkdirSync(unverified, { recursive: true });
-execFileSync(compiler, ['/V2', `/DVERSION=${version}`, `/DPRODUCT_VERSION=${version.split('-')[0]}.0`, `/DPAYLOAD=${payload}`, `/DOUTPUT=${unverified}`, path.join(root, 'packaging/runtime/runtime.nsi')], { stdio: 'inherit' });
+const compile = (asVersion, into) => execFileSync(compiler, ['/V2', `/DVERSION=${asVersion}`, `/DPRODUCT_VERSION=${asVersion.split('-')[0]}.0`, `/DPAYLOAD=${payload}`, `/DOUTPUT=${into}`, path.join(root, 'packaging/runtime/runtime.nsi')], { stdio: 'inherit' });
+compile(version, unverified);
+// A newer version of the same runtime, for the test's two-version steps:
+// installed beside the candidate, with the candidate then uninstalled while
+// it stays. Its version is bumped where `--version` and the manifest report
+// it, so the test can tell which runtime ran, and the payload is put back
+// before anything else reads it. It stays in unverified/ and is never released.
+const [, major, minor, patch] = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+const newerVersion = `${major}.${minor}.${Number(patch) + 1}-verify`;
+const newerDir = path.join(unverified, 'newer');
+fs.rmSync(newerDir, { recursive: true, force: true });
+fs.mkdirSync(newerDir, { recursive: true });
+const stamped = ['server/package.json', 'runtime-manifest.json'].map((file) => path.join(payload, file));
+const originals = stamped.map((file) => fs.readFileSync(file, 'utf8'));
+try {
+  stamped.forEach((file, i) => fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(originals[i]), version: newerVersion }, null, 2) + '\n'));
+  compile(newerVersion, newerDir);
+} finally {
+  stamped.forEach((file, i) => fs.writeFileSync(file, originals[i]));
+}
+const newer = path.join(newerDir, `SteptixRuntimeSetup-${newerVersion}-win-x64.exe`);
 // Every installer is tested end to end before it is released: installed,
 // started from VS Code through steptix.cmd to run a test, and uninstalled
 // (scripts/verify-runtime.mjs). There is no flag to skip it.
-const verify = spawnSync(process.execPath, [path.join(root, 'scripts/verify-runtime.mjs'), candidate], { stdio: 'inherit' });
+const verify = spawnSync(process.execPath, [path.join(root, 'scripts/verify-runtime.mjs'), candidate, newer], { stdio: 'inherit' });
 if (verify.status !== 0) {
   throw new Error(`The end-to-end test failed, so the installer was not released. It is left at ${candidate} for diagnosis.`);
 }

@@ -2,10 +2,15 @@
 // Windows does, uses the runtime through steptix.cmd from the CLI and from VS
 // Code, and uninstalls it the way Installed Apps does.
 //
+// The second installer is a newer version of the same runtime, which
+// scripts/build-runtime.mjs compiles beside the one under test (in
+// dist-runtime/unverified/newer/). It is installed alongside, so that the
+// installer under test is uninstalled while another version stays.
+//
 // scripts/build-runtime.mjs runs this on every installer it builds and
 // releases none that fails it. Run it by hand to re-check one:
 //
-//   node scripts/verify-runtime.mjs dist-runtime/SteptixRuntimeSetup-<version>-win-x64.exe
+//   node scripts/verify-runtime.mjs dist-runtime/SteptixRuntimeSetup-<version>-win-x64.exe dist-runtime/unverified/newer/SteptixRuntimeSetup-<newer>-win-x64.exe
 //
 // Needs a desktop session (it opens a VS Code window), installed Google Chrome,
 // and this checkout's steptix-vscode dependencies. Makes no AI calls. Uses a
@@ -24,11 +29,20 @@ import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-if (!process.argv[2]) throw new Error('Usage: node scripts/verify-runtime.mjs <installer.exe>');
+if (!process.argv[3]) throw new Error('Usage: node scripts/verify-runtime.mjs <installer.exe> <newer installer.exe>');
+const installerVersion = (file) => {
+  const found = /^SteptixRuntimeSetup-(.+)-win-x64\.exe$/.exec(path.basename(file))?.[1];
+  if (!found) throw new Error(`Not a runtime installer name: ${path.basename(file)}`);
+  return found;
+};
 const installer = path.resolve(process.argv[2]);
-const version = /^SteptixRuntimeSetup-(.+)-win-x64\.exe$/.exec(path.basename(installer))?.[1];
-if (!version) throw new Error(`Not a runtime installer name: ${path.basename(installer)}`);
+const version = installerVersion(installer);
 const installerSha256 = createHash('sha256').update(readFileSync(installer)).digest('hex');
+const newerInstaller = path.resolve(process.argv[3]);
+const newerVersion = installerVersion(newerInstaller);
+// Ordered the way `steptix` on PATH orders runtimes, which is the extension's way.
+const { compareVersions } = createRequire(import.meta.url)('../packaging/runtime/bin/run-newest-runtime.cjs');
+if (compareVersions(newerVersion, version) <= 0) throw new Error(`${newerVersion} is not newer than ${version}`);
 
 // The long form of the temp directory: os.tmpdir() can be an 8.3 short path,
 // and a real install lives under the long one. Spaces are wanted, not avoided.
@@ -40,6 +54,7 @@ const project = path.join(temp, 'test project');
 // from the environment.
 const profile = path.join(temp, 'local app data');
 const install = path.join(profile, 'steptix', 'runtimes', version);
+const newerInstall = path.join(profile, 'steptix', 'runtimes', newerVersion);
 const vscodeDir = path.join(temp, 'vscode');
 for (const dir of [project, profile, vscodeDir]) await fs.mkdir(dir, { recursive: true });
 const steptixCmd = path.join(install, 'steptix.cmd');
@@ -49,6 +64,7 @@ const keyFile = path.join(profile, 'steptix', '.env');
 // (runtime.nsi, /TESTMODE), so a real install of this version is never touched.
 const testId = randomBytes(4).toString('hex');
 const regKey = `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\SteptixRuntime-${version}-test-${testId}`;
+const newerRegKey = `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\SteptixRuntime-${newerVersion}-test-${testId}`;
 // It adds `steptix` to a Path value of its own too (user-path.nsh), seeded here
 // the way Windows keeps a user's: REG_EXPAND_SZ, with a %VARIABLE% entry and a
 // folder whose name has a space.
@@ -91,11 +107,12 @@ const quote = (arg) => (/[\s"]/.test(arg) ? `"${arg}"` : arg);
  *  command line, run by cmd.exe /d /s /c. */
 const steptix = (...args) => run([quote(steptixCmd), ...args.map(quote)].join(' '), [], { shell: true });
 
-/** The installer, silently, into `install`. `options` go before /D, which
- *  NSIS requires to be last and unquoted, even with spaces. */
-const installSilently = (...options) => run(installer, ['/S', `/TESTMODE=${testId}`, ...options, `/D=${install}`], {
+/** An installer, silently, into `dir`. `options` go before /D, which NSIS
+ *  requires to be last and unquoted, even with spaces. */
+const silentInstall = (file, dir, options) => run(file, ['/S', `/TESTMODE=${testId}`, ...options, `/D=${dir}`], {
   cwd: temp, timeout: 180_000, verbatim: true,
 });
+const installSilently = (...options) => silentInstall(installer, install, options);
 
 /** The values under a registry key, or null when the key does not exist. */
 function regValues(key) {
@@ -152,6 +169,24 @@ async function freePort() {
 async function listFiles(dir) {
   const entries = await fs.readdir(dir, { recursive: true, withFileTypes: true }).catch(() => []);
   return entries.filter((e) => e.isFile()).map((e) => path.relative(dir, path.join(e.parentPath, e.name)));
+}
+
+/**
+ * Uninstalls through `key`'s UninstallString, the way Installed Apps does,
+ * and waits for the whole uninstall. Run normally, the uninstaller copies
+ * itself out and returns at once, then removes everything including itself.
+ * Removing the entry is its last step, after the folder and the PATH folder.
+ */
+async function uninstallLikeInstalledApps(key, dir) {
+  const uninstallString = regValues(key)?.UninstallString;
+  assert.ok(uninstallString, `${key} has no UninstallString`);
+  await run(`${uninstallString} /S`, [], { cwd: temp, shell: true });
+  try {
+    await until(`${dir} to be removed`, () => !existsSync(dir), 120_000);
+  } catch (error) {
+    throw new Error(`${error.message}. Left behind:\n  ${(await listFiles(dir)).join('\n  ') || '(nothing — the folder itself)'}`);
+  }
+  await until(`${key} to be removed`, () => regValues(key) === null, 30_000);
 }
 
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -328,13 +363,15 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
   await fs.mkdir(unfinished, { recursive: true });
   await fs.writeFile(path.join(unfinished, 'runtime-launcher.cjs'), "console.log('the unfinished uninstall ran');\n");
   const expand = (value) => value.replace(/%([^%;]+)%/g, (whole, name) => process.env[name] ?? whole);
-  const terminalEnv = {
+  /** The environment of a terminal opened now, with the user Path the registry holds now. */
+  const newTerminal = () => ({
     ...cliEnv,
-    [pathKey]: `${path.join(process.env.SystemRoot, 'System32')};${expand(regValue(userPathKey, 'Path').data)}`,
-  };
-  const found = await run('where.exe', ['steptix'], { env: terminalEnv });
+    [pathKey]: `${path.join(process.env.SystemRoot, 'System32')};${expand(regValue(userPathKey, 'Path')?.data ?? '')}`,
+  });
+  const steptixOnPath = () => run('steptix --version', [], { env: newTerminal(), shell: true });
+  const found = await run('where.exe', ['steptix'], { env: newTerminal() });
   assert.equal(found.split(/\r?\n/)[0], path.join(binDir, 'steptix.cmd'));
-  const onPath = await run('steptix --version', [], { env: terminalEnv, shell: true });
+  const onPath = await steptixOnPath();
   assert.match(onPath, new RegExp(escapeRegExp(version)));
   assert.doesNotMatch(onPath, /older runtime|unfinished uninstall/);
   checks.push('steptix on PATH, in a new terminal, runs the newest installed runtime');
@@ -365,40 +402,46 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
   }
   checks.push('A silent uninstall refuses a folder whose marker is missing or wrong with an exit code, no dialog, and nothing removed');
 
-  // ── 7. Uninstall the way Installed Apps does ────────────────────────────
-  // UninstallString, not Uninstall.exe with _?=: run normally, the uninstaller
-  // copies itself out and returns at once, then removes everything including
-  // itself. So the check is that the folder goes, not that a process exits.
-  const uninstallString = regValues(regKey)?.UninstallString;
-  assert.ok(uninstallString, 'the Installed Apps entry has no UninstallString');
-  await run(`${uninstallString} /S`, [], { cwd: temp, shell: true });
-  try {
-    await until('the install folder to be removed', () => !existsSync(install), 120_000);
-  } catch (error) {
-    throw new Error(`${error.message}. Left behind:\n  ${(await listFiles(install)).join('\n  ') || '(nothing — the folder itself)'}`);
-  }
-  // Removing its Installed Apps entry is the uninstaller's last step, after
-  // the PATH folder, so this waits for the whole uninstall.
-  await until('the Installed Apps entry to be removed', () => regValues(regKey) === null, 30_000);
+  // ── 7. A newer version beside it ────────────────────────────────────────
+  // As after an upgrade: the newer version installs into a folder of its own
+  // and this one stays. Its PATH entry is already there, so none is added, and
+  // `steptix` now runs the newer one.
+  await silentInstall(newerInstaller, newerInstall, []);
+  assert.ok(regValues(newerRegKey), `no Installed Apps entry at ${newerRegKey}`);
+  assert.deepEqual(regValue(userPathKey, 'Path'), { type: 'REG_EXPAND_SZ', data: `${userPathBefore};${binDir}` });
+  assert.match(await steptixOnPath(), new RegExp(escapeRegExp(newerVersion)));
+  checks.push('Installing a newer version beside it adds no second PATH entry, and steptix on PATH runs the newer one');
+
+  // ── 8. Uninstall it, the way Installed Apps does, while the newer stays ──
+  await uninstallLikeInstalledApps(regKey, install);
   await fs.access(testFile);
   assert.equal(await fs.readFile(keyFile, 'utf8'), keyContents);
   checks.push('Uninstall through the Installed Apps entry removes the install folder and the entry, and keeps the project and the machine key');
-  // The unfinished uninstall's folder does not count as a runtime, so this
-  // was the last one: the PATH folder and its entry go, every other entry stays.
+  // The PATH folder still runs the newer version, so it stays, and so does its entry.
+  assert.deepEqual(regValue(userPathKey, 'Path'), { type: 'REG_EXPAND_SZ', data: `${userPathBefore};${binDir}` });
+  assert.match(await steptixOnPath(), new RegExp(escapeRegExp(newerVersion)));
+  checks.push('Uninstalling it while a newer version stays keeps the PATH folder and its entry, and steptix on PATH still runs the newer one');
+
+  // ── 9. Uninstall the last version ───────────────────────────────────────
+  // The unfinished uninstall's folder does not count as a runtime, so the
+  // newer version is the last one: the PATH folder and its entry go, and every
+  // other entry stays.
+  await uninstallLikeInstalledApps(newerRegKey, newerInstall);
   assert.deepEqual(regValue(userPathKey, 'Path'), { type: 'REG_EXPAND_SZ', data: userPathBefore });
   assert.equal(existsSync(binDir), false, `${binDir} was not removed`);
-  checks.push('Uninstalling the last runtime removes the PATH folder and its entry, and keeps the rest of the user Path as written');
+  checks.push('Uninstalling the last version removes the PATH folder and its entry, and keeps the rest of the user Path as written');
 
   const report = {
-    installer, sha256: installerSha256, version, installedTestPath: install,
+    installer, sha256: installerSha256, version, newerVersion, installedTestPath: install,
     checks, passed: checks.length, verifiedAt: new Date().toISOString(),
   };
   await fs.writeFile(`${installer}.verification.json`, JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify(report, null, 2));
 } finally {
   // Whatever happened: no server left running, no test entry left in
-  // Installed Apps, no test Path value. The folder itself stays, for diagnosis. A test that failed
-  // after the start but before recording it still left a server on `base`.
+  // Installed Apps, no test Path value. The folder itself stays, for
+  // diagnosis. A test that failed after the start but before recording it
+  // still left a server on `base`.
   try {
     const pids = started ? started.processes.map((p) => p.pid) : [];
     if (!started && base) {
@@ -412,7 +455,9 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
   } catch (error) {
     console.error(`Could not stop the test's server: ${error.message}`);
   }
-  if (regValues(regKey)) spawnSync('reg.exe', ['delete', regKey, '/f'], { windowsHide: true, stdio: 'ignore' });
+  for (const key of [regKey, newerRegKey]) {
+    if (regValues(key)) spawnSync('reg.exe', ['delete', key, '/f'], { windowsHide: true, stdio: 'ignore' });
+  }
   if (regValues(userPathKey)) spawnSync('reg.exe', ['delete', userPathKey, '/f'], { windowsHide: true, stdio: 'ignore' });
   console.log(`Diagnostics kept in ${temp}`);
 }

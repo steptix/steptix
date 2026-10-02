@@ -110,6 +110,13 @@ The build compiles the installer into `dist-runtime/unverified/` and runs
 only if every check passes. If the test fails, the build fails and the
 installer stays in `unverified/`. There is no flag to skip the test.
 
+The build also compiles a second installer from the same payload, as a newer
+version: one patch higher, with a `-verify` suffix (`1.0.1-verify` beside
+`1.0.0-beta.1`). Its version is bumped in the two files that report it, so
+`steptix --version` can tell the two runtimes apart. It lives in
+`dist-runtime/unverified/newer/` and is never released. The test needs it to
+uninstall one version while another stays.
+
 The test does what a user does, in a temporary folder whose path has spaces:
 
 1. **Install.** It runs the installer silently with `/NOPATH`. The runtime
@@ -139,11 +146,18 @@ The test does what a user does, in a temporary folder whose path has spaces:
    folder whose marker is missing, then on one whose marker names another
    version. Each must exit with an error code and no dialog, and remove
    nothing.
-7. **Uninstall.** It runs the Installed Apps entry's uninstall command. Then it
-   checks that the install folder and the entry are gone and that the project
-   and the key are untouched. The newer folder missing its launch files does
-   not count as a runtime, so this was the last one: the PATH folder and its
-   entry must be gone, and the rest of `Path` as it was.
+7. **A newer version beside it.** It installs the newer installer silently,
+   as after an upgrade. `Path` must still hold one entry for the PATH folder,
+   and `steptix --version` must now report the newer version.
+8. **Uninstall, while the newer version stays.** It runs the Installed Apps
+   entry's uninstall command for the installer under test. Then it checks that
+   the install folder and the entry are gone and that the project and the key
+   are untouched. The PATH folder and its entry must stay, and `steptix` must
+   still run the newer version.
+9. **Uninstall the last version.** It uninstalls the newer version the same
+   way. The newer folder missing its launch files does not count as a runtime,
+   so this was the last one: the PATH folder and its entry must be gone, and
+   the rest of `Path` as it was.
 
 The installer's `/TESTMODE=<id>` switch exists for this test. With it, the
 Installed Apps entry is registered under a key of its own and is labelled
@@ -157,10 +171,10 @@ Running the test needs a desktop session (it opens a VS Code window), Google
 Chrome, and `steptix-vscode`'s dependencies installed. It makes no AI calls
 and uses a temporary `%LOCALAPPDATA%`, so your machine key and settings are
 not used. It keeps its temporary folder for diagnosis. To re-check an
-installer by hand:
+installer by hand, give it the newer installer the build left beside it:
 
 ```powershell
-node scripts/verify-runtime.mjs dist-runtime/SteptixRuntimeSetup-<version>-win-x64.exe
+node scripts/verify-runtime.mjs dist-runtime/SteptixRuntimeSetup-<version>-win-x64.exe dist-runtime/unverified/newer/SteptixRuntimeSetup-<newer>-win-x64.exe
 ```
 
 ## Use with the extension
