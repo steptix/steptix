@@ -19,7 +19,8 @@ timeout: 300s
 3. Capture the value of the hidden __RequestVerificationToken input [store as: csrfToken]
 4. Call GET /api/delegates to retrieve the list of delegates
 5. Verify the response contains at least one delegate
-6. Update the first delegate's mobile number to "{{newMobile}}" using PUT /api/delegates/:id with the header x-csrf-token set to "{{csrfToken}}"
-7. Verify the status code of the step 6 PUT response equals 200
-8. Verify the mobile field in the step 6 PUT response body equals "{{newMobile}}"
-9. Reload the delegates page and verify the mobile number "{{newMobile}}" is shown in the table
+6. Capture the data-id attribute of the first row in the delegates table [store as: delegateId]
+7. Update the mobile number to "{{newMobile}}" using PUT /api/delegates/{{delegateId}} with the header x-csrf-token set to "{{csrfToken}}"
+8. Verify the status code of the step 7 PUT response equals "200"
+9. Verify the mobile field in the step 7 PUT response body equals "{{newMobile}}"
+10. Reload the delegates page and verify the mobile number "{{newMobile}}" is shown in the table
