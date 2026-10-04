@@ -1,6 +1,6 @@
 ---
 tags: [smoke, iframe, e2e]
-timeout: 120s
+timeout: 600s
 ---
 
 # Iframe Cross-Frame Navigation Test

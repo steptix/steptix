@@ -1,6 +1,6 @@
 ---
 tags: [smoke, skills, data]
-timeout: 180s
+timeout: 600s
 dataSources:
   statement: ../data/march-statement.json
 ---

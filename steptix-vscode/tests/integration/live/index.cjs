@@ -19,8 +19,8 @@ async function run() {
 
   // Optional scope: STEPTIX_LIVE_GREP restricts the run to suites/tests
   // whose title matches (Mocha --grep). Useful for running one live test
-  // (e.g. just the wait-timeout scenarios) without the others that need
-  // GitHub creds. Unset → run all live tests.
+  // (e.g. just the wait-timeout scenarios) without the others. Unset → run
+  // all live tests.
   if (process.env.STEPTIX_LIVE_GREP) {
     mocha.grep(process.env.STEPTIX_LIVE_GREP);
   }

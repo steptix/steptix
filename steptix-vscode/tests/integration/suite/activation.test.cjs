@@ -35,11 +35,11 @@ describe('Steptix extension — structural smoke', function () {
     assert.ok(ext, `extension ${EXT_ID} not found in test host`);
     if (!ext.isActive) await ext.activate();
 
-    // Make sure the github.md template fixture exists in the fixtures dir.
+    // Make sure the securebank.md template fixture exists in the fixtures dir.
     // The test harness sets STEPTIX_FIXTURES_DIR to tests/integration/fixtures;
     // copy the canonical template in if it's not already there.
-    const githubMd = path.resolve(FIXTURES_DIR, 'github.md');
-    if (!fs.existsSync(githubMd)) {
+    const securebankMd = path.resolve(FIXTURES_DIR, 'securebank.md');
+    if (!fs.existsSync(securebankMd)) {
       const src = path.resolve(
         __dirname,
         '..',
@@ -49,9 +49,9 @@ describe('Steptix extension — structural smoke', function () {
         'templates',
         'init',
         'tests',
-        'github.md',
+        'securebank.md',
       );
-      if (fs.existsSync(src)) fs.copyFileSync(src, githubMd);
+      if (fs.existsSync(src)) fs.copyFileSync(src, securebankMd);
     }
   });
 
@@ -200,14 +200,14 @@ describe('Steptix extension — structural smoke', function () {
     vscode.debug.removeBreakpoints([bp]);
   });
 
-  it('opens the github.md template without errors', async () => {
-    const uri = fixtureUri('github.md');
+  it('opens the securebank.md template without errors', async () => {
+    const uri = fixtureUri('securebank.md');
     if (!fs.existsSync(uri.fsPath)) {
       this.skip();
       return;
     }
     await vscode.commands.executeCommand('vscode.open', uri);
-    await waitFor('github.md active', () => {
+    await waitFor('securebank.md active', () => {
       const editor = vscode.window.activeTextEditor;
       return editor && editor.document.uri.toString() === uri.toString();
     });

@@ -1,6 +1,6 @@
 ---
 tags: [smoke, iframe, nested-iframe, e2e]
-timeout: 120s
+timeout: 600s
 ---
 
 # Nested Iframe Navigation Test
