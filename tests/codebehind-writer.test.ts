@@ -294,46 +294,82 @@ describe('code-behind writer — files on disk', () => {
     expect(findEntrySpans(scan(written), 'Read the total', undefined)).toHaveLength(1);
   });
 
-  // Windows will not replace a file another process has open without delete
-  // sharing — a virus scanner or the search indexer reading a file just
-  // written. Node's own handles always share delete, so the lock comes from
-  // .NET, which by default does not.
-  it.runIf(process.platform === 'win32')('waits out a moment\'s lock on the file instead of failing the write', async () => {
+  // Windows will not replace a file that is open — a virus scanner or the
+  // search indexer reading a file just written. Any open handle does it, even
+  // one that shares delete as Node's do; the lock here is the scanner's kind,
+  // held by another process without delete sharing.
+  //
+  // The lock ends when the test says so, not on a timer: it is released only
+  // once the writer has been refused, and the writer only tries again once it
+  // is released. A timed lock raced the writer's retry budget, and lost on a
+  // loaded runner, where a 600 ms Start-Sleep took 2 to 3 s.
+  it.runIf(process.platform === 'win32')('waits out a lock on the file instead of failing the write', async () => {
     const file = path.join(dir, 'x.steps.ts');
     await fs.writeFile(file, HAZARDOUS, 'utf-8');
     // PSModulePath is dropped because a parent running PowerShell 7 hands
     // Windows PowerShell its own module paths, which it then has to sift.
+    // The script calls no cmdlets, so nothing auto-loads while the file is
+    // held; ReadLine returns at the test's newline, or at end of input if
+    // the test goes away first.
     const { PSModulePath: _, ...env } = process.env;
     const lock = spawn('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-Command',
-      `$f = [System.IO.File]::Open('${file}', 'Open', 'Read', 'Read'); 'locked'; Start-Sleep -Milliseconds 600; $f.Close()`,
+      `$f = [System.IO.File]::Open('${file}', 'Open', 'Read', 'Read'); 'locked'; [void][Console]::In.ReadLine(); $f.Close(); 'released'`,
     ], { env });
-    // Starting PowerShell is the slow part: on a busy CI runner it once took
-    // longer than this whole test's old 30 s budget. Bound it on its own so a
-    // slow start says so, with whatever PowerShell printed, instead of
-    // surfacing as a bare test timeout.
+    let stdout = '';
     let stderr = '';
+    lock.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
     lock.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-    const spawned = Date.now();
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        lock.kill();
-        reject(new Error(`powershell.exe had not taken the lock after ${Date.now() - spawned} ms${stderr ? `: ${stderr}` : ''}`));
-      }, 90_000);
-      const fail = (err: Error) => { clearTimeout(timer); reject(err); };
-      lock.stdout.on('data', (d: Buffer) => { if (d.toString().includes('locked')) { clearTimeout(timer); resolve(); } });
-      lock.on('error', fail);
-      lock.on('exit', () => fail(new Error(`the lock ended before it was taken${stderr ? `: ${stderr}` : ''}`)));
+    lock.stdin.on('error', () => {}); // EPIPE once PowerShell has gone; the exit says why
+    /** Resolves once PowerShell has printed `line`; bounded so a stall says
+     *  which side stalled, with whatever PowerShell printed. */
+    const printed = (line: string, budgetMs: number) => new Promise<void>((resolve, reject) => {
+      const began = Date.now();
+      const done = (err?: Error) => {
+        clearTimeout(timer);
+        lock.stdout.off('data', check);
+        lock.off('exit', exited);
+        lock.off('error', done);
+        if (err) reject(err); else resolve();
+      };
+      const check = () => { if (stdout.includes(line)) done(); };
+      const exited = () => done(new Error(`powershell.exe exited before printing '${line}'${stderr ? `: ${stderr}` : ''}`));
+      const timer = setTimeout(() => done(new Error(
+        `powershell.exe had not printed '${line}' after ${Date.now() - began} ms${stderr ? `: ${stderr}` : ''}`,
+      )), budgetMs);
+      lock.stdout.on('data', check);
+      lock.on('exit', exited);
+      lock.on('error', done);
+      check();
     });
-    const started = Date.now();
-    expect(await writeCodeBehindEntry({
-      file, source: 'Click Pay now', occurrence: 0,
-      entryCode: `{ source: 'Click Pay now', async run({ page }) { await page.click('#pay'); } }`,
-    })).toBe('appended');
-    expect(Date.now() - started).toBeGreaterThan(150); // it did meet the lock
-    expect(await fs.readFile(file, 'utf-8')).toContain("page.click('#pay')");
-    await new Promise((r) => lock.exitCode === null ? lock.on('exit', r) : r(null));
-  }, 120_000);
+    try {
+      // Starting PowerShell is the slow part: on a busy CI runner it once
+      // took longer than this whole test's old 30 s budget.
+      await printed('locked', 90_000);
+      const refusals: string[] = [];
+      const action = await writeCodeBehindEntry({
+        file, source: 'Click Pay now', occurrence: 0,
+        entryCode: `{ source: 'Click Pay now', async run({ page }) { await page.click('#pay'); } }`,
+      }, {
+        onLocked: async (code) => {
+          refusals.push(code);
+          if (refusals.length > 1) return;
+          lock.stdin.write('\n');
+          await printed('released', 30_000);
+        },
+      });
+      expect(refusals, 'the writer never met the lock').not.toHaveLength(0);
+      expect(action).toBe('appended');
+      expect(await fs.readFile(file, 'utf-8')).toContain("page.click('#pay')");
+    } finally {
+      lock.stdin.end();
+      if (lock.exitCode === null && lock.signalCode === null) {
+        const exited = new Promise((r) => lock.once('exit', r));
+        if (!stdout.includes('released')) lock.kill();
+        await exited;
+      }
+    }
+  }, 150_000);
 
   it('restores the previous bytes when the generated code does not compile', async () => {
     const file = path.join(dir, 'x.steps.ts');
