@@ -114,6 +114,14 @@ const silentInstall = (file, dir, options) => run(file, ['/S', `/TESTMODE=${test
 });
 const installSilently = (...options) => silentInstall(installer, install, options);
 
+/** Runs an installer or an uninstaller to its end and returns its exit code.
+ *  A dialog it should not show would hold it open, so that is a timeout. */
+function exitCodeOf(file, args) {
+  const result = spawnSync(file, args, { cwd: temp, env: cliEnv, timeout: 180_000, windowsHide: true, windowsVerbatimArguments: true });
+  assert.equal(result.error, undefined, `${path.basename(file)} ${args.join(' ')} did not exit: ${result.error?.message}`);
+  return result.status;
+}
+
 /** The values under a registry key, or null when the key does not exist. */
 function regValues(key) {
   const result = spawnSync('reg.exe', ['query', key], { encoding: 'utf8', windowsHide: true });
@@ -336,6 +344,29 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
   assert.match(mapCheck, /inline-source-map/);
   checks.push('Custom TypeScript tool compilation retains inline debugger source maps');
 
+  // While Steptix runs from this runtime, nothing that would change its folder
+  // goes ahead: reinstalling it, upgrading from it (which removes it), or
+  // uninstalling it. Each refuses with exit code 3, changes nothing, and the
+  // server keeps serving. The uninstaller runs in place (_?=), so the exit
+  // code is its own and not that of a copy it hands over to.
+  const serving = await (await fetch(`${base}/health`)).json();
+  // Uninstall.exe and the marker are rewritten by any install. NSIS gives the
+  // files it extracts their original times, so those would not show one.
+  const fingerprint = async () => JSON.stringify({
+    times: await Promise.all(['Uninstall.exe', '.steptix-runtime-install', 'server/dist/index.js'].map(async (file) => (await fs.stat(path.join(install, file))).mtimeMs)),
+    entry: regValues(regKey),
+    path: regValue(userPathKey, 'Path'),
+  });
+  const untouched = await fingerprint();
+  assert.equal(exitCodeOf(installer, ['/S', `/TESTMODE=${testId}`, `/D=${install}`]), 3, 'reinstalling under a running server');
+  assert.equal(exitCodeOf(newerInstaller, ['/S', `/TESTMODE=${testId}`, `/D=${newerInstall}`]), 3, 'upgrading under a running server');
+  assert.equal(existsSync(newerInstall), false, 'the refused upgrade installed the newer version');
+  assert.equal(regValues(newerRegKey), null, 'the refused upgrade registered the newer version');
+  assert.equal(exitCodeOf(path.join(install, 'Uninstall.exe'), ['/S', `_?=${install}`]), 3, 'uninstalling under a running server');
+  assert.equal(await fingerprint(), untouched, 'a refused install or uninstall changed the runtime');
+  assert.equal((await (await fetch(`${base}/health`)).json()).pid, serving.pid, 'the server stopped serving');
+  checks.push('While Steptix runs from the runtime, reinstalling, upgrading and uninstalling it each refuse with exit code 3 and change nothing');
+
   await steptix('stop', '--url', base);
   const pids = started.processes.map((p) => p.pid);
   await until('the server, launcher and shell to exit', () => alive(pids).length === 0, 30_000);
@@ -402,15 +433,26 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
   }
   checks.push('A silent uninstall refuses a folder whose marker is missing or wrong with an exit code, no dialog, and nothing removed');
 
-  // ── 7. A newer version beside it ────────────────────────────────────────
-  // As after an upgrade: the newer version installs into a folder of its own
-  // and this one stays. Its PATH entry is already there, so none is added, and
-  // `steptix` now runs the newer one.
+  // ── 7. Upgrade to a newer version, then roll back ───────────────────────
+  // The newer installer removes this version with this version's own
+  // uninstaller: its folder and its Installed Apps entry go. The PATH folder
+  // now runs the newer version, so its entry stays, and only once.
   await silentInstall(newerInstaller, newerInstall, []);
   assert.ok(regValues(newerRegKey), `no Installed Apps entry at ${newerRegKey}`);
+  assert.equal(existsSync(install), false, `the upgrade left ${install} behind:\n  ${(await listFiles(install)).join('\n  ')}`);
+  assert.equal(regValues(regKey), null, 'the upgrade left the older version\'s Installed Apps entry');
   assert.deepEqual(regValue(userPathKey, 'Path'), { type: 'REG_EXPAND_SZ', data: `${userPathBefore};${binDir}` });
   assert.match(await steptixOnPath(), new RegExp(escapeRegExp(newerVersion)));
-  checks.push('Installing a newer version beside it adds no second PATH entry, and steptix on PATH runs the newer one');
+  checks.push('Installing a newer version removes this one and its Installed Apps entry, keeps one PATH entry, and steptix on PATH runs the newer one');
+
+  // A rollback: this installer again while the newer version is installed. It
+  // removes nothing newer, so both are installed, and the newest still runs
+  // until it is uninstalled.
+  await installSilently();
+  assert.ok(regValues(regKey), `no Installed Apps entry at ${regKey}`);
+  assert.ok(existsSync(newerInstall) && regValues(newerRegKey), 'installing the older version removed the newer one');
+  assert.match(await steptixOnPath(), new RegExp(escapeRegExp(newerVersion)));
+  checks.push('Installing an older version again leaves the newer one, which steptix on PATH still runs');
 
   // ── 8. Uninstall it, the way Installed Apps does, while the newer stays ──
   await uninstallLikeInstalledApps(regKey, install);

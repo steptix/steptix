@@ -152,9 +152,9 @@ extension isn't on the path at all.
 Build the Windows runtime installer only with `node scripts/build-runtime.mjs`.
 It runs `scripts/verify-runtime.mjs` on every installer it compiles: install,
 the CLI through `steptix.cmd`, a VS Code Run that auto-starts the installed
-server through `steptix.cmd`, `steptix` on PATH, and uninstall through the
-Installed Apps entry, with a newer version installed beside it and then
-uninstalled last.
+server through `steptix.cmd`, refusals while that server runs, `steptix` on
+PATH, an upgrade to a newer version that removes it and a rollback, and
+uninstall through the Installed Apps entry.
 The installer only moves into `dist-runtime/` if all of that passes. Never
 compile `packaging/runtime/runtime.nsi` by hand, never add a way to skip the
 test, and never ship anything from `dist-runtime/unverified/`. See

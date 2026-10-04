@@ -40,8 +40,9 @@ Var NodeExe
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
-; Functions: it cannot come before SetCompressor.
+; Functions: they cannot come before SetCompressor.
 !include "user-path.nsh"
+!include "runtime-scan.nsh"
 
 ; Every MessageBox that can show during a silent install (/S) or uninstall
 ; carries /SD, the answer silent mode takes without showing it. Without one,
@@ -85,6 +86,7 @@ Function .onInit
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
   File "${PAYLOAD}\node-check.cjs"
+  File "${PAYLOAD}\runtime-scan.ps1"
   ReadEnvStr $NodeExe "STEPTIX_NODE"
   ${If} $NodeExe == ""
     StrCpy $NodeExe "node"
@@ -95,10 +97,14 @@ Function .onInit
   ${If} $0 != "0"
     MessageBox MB_ICONINFORMATION "Node.js x64 22.21+ was not found or is incompatible. Install it and restart VS Code before using this runtime. Alternatively set STEPTIX_NODE to your node.exe path.$\r$\n$\r$\nThe runtime can still be installed now." /SD IDOK
   ${EndIf}
+  ; Before any page, so a silent install refuses at once.
+  Call CheckSteptixNotRunning
 FunctionEnd
 
 Section "Steptix Runtime" Main
   SectionIn RO
+  ; Again, before the first file: a server can start while the pages are up.
+  Call CheckSteptixNotRunning
   SetOutPath "$INSTDIR"
   File /r "${PAYLOAD}\*"
   FileOpen $0 "$INSTDIR\.steptix-runtime-install" w
@@ -123,6 +129,9 @@ Section "Steptix Runtime" Main
     CreateShortCut "$SMPROGRAMS\Steptix Runtime ${VERSION}\Setup instructions.lnk" "$INSTDIR\README.txt"
     CreateShortCut "$SMPROGRAMS\Steptix Runtime ${VERSION}\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
   ${EndIf}
+  ; Once this runtime is in place, so their uninstallers see it and keep the
+  ; PATH folder that now runs it.
+  Call RemoveOlderRuntimes
 SectionEnd
 
 Section "Add steptix to PATH" PathSection
@@ -136,7 +145,7 @@ Function UntickPathSection
 FunctionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
-  !insertmacro MUI_DESCRIPTION_TEXT ${Main} "The Steptix server and CLI, in a folder of this version's own."
+  !insertmacro MUI_DESCRIPTION_TEXT ${Main} "The Steptix server and CLI, in a folder of this version's own. Older Steptix runtime versions are removed."
   !insertmacro MUI_DESCRIPTION_TEXT ${PathSection} "Run steptix from any new terminal. Adds %LOCALAPPDATA%\steptix\bin to your user PATH, which needs no administrator rights. Terminals and VS Code windows that are already open need a restart to see it."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
@@ -156,6 +165,7 @@ Section "Uninstall"
     MessageBox MB_ICONSTOP "Runtime installation marker does not match this version." /SD IDOK
     Abort
   ${EndIf}
+  Call un.CheckSteptixNotRunning
   StrCpy $UninstallKey "${UNINSTALL_KEY}"
   ${If} ${FileExists} "$INSTDIR\${KEY_FILE}"
     FileOpen $0 "$INSTDIR\${KEY_FILE}" r
@@ -174,6 +184,7 @@ Section "Uninstall"
   Delete "$INSTDIR\runtime-launcher.cjs"
   Delete "$INSTDIR\runtime-bootstrap.mjs"
   Delete "$INSTDIR\node-check.cjs"
+  Delete "$INSTDIR\runtime-scan.ps1"
   Delete "$INSTDIR\runtime-manifest.json"
   Delete "$INSTDIR\README.txt"
   Delete "$INSTDIR\.steptix-runtime-install"
