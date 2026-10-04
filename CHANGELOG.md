@@ -9,6 +9,26 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Added — `steptix` on PATH from the runtime installer
+
+The Windows runtime installer has a new option, "Add steptix to PATH", ticked
+by default. It adds `%LOCALAPPDATA%\steptix\bin` to the user's own `Path`,
+which needs no administrator rights, so `steptix` works in any new terminal.
+That folder serves every installed version. It runs the newest runtime under
+`%LOCALAPPDATA%\steptix\runtimes`, the same one the VS Code extension starts.
+Other `Path` entries stay as written, including unexpanded `%VARIABLE%`
+entries. A `Path` too long to change safely is left alone, and the installer
+says how to add the folder by hand. Uninstalling the last runtime removes the
+folder and its `Path` entry. See
+[packaging/runtime/README.md](packaging/runtime/README.md#on-path).
+
+A silent install (`/S`) takes the option too. Pass `/NOPATH` to leave `PATH`
+alone. Silent installs and uninstalls also no longer wait on a dialog nobody
+can see: the 64-bit check and the uninstaller's marker checks used to show
+theirs even under `/S`. Now they stop without one: the installer exits with
+code 2, and the uninstaller removes nothing. See
+[Silent install](packaging/runtime/README.md#silent-install).
+
 ### Security — no high or critical `npm audit` findings, dev tooling included
 
 `npm audit` is clean of high and critical findings in all five projects.
