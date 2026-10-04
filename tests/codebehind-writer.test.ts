@@ -301,8 +301,8 @@ describe('code-behind writer — files on disk', () => {
   //
   // The lock ends when the test says so, not on a timer: it is released only
   // once the writer has been refused, and the writer only tries again once it
-  // is released. A timed lock raced the writer's retry budget on a loaded
-  // runner, where PowerShell's sleep alone outlasted it.
+  // is released. A timed lock raced the writer's retry budget, and lost on a
+  // loaded runner, where a 600 ms Start-Sleep took 2 to 3 s.
   it.runIf(process.platform === 'win32')('waits out a lock on the file instead of failing the write', async () => {
     const file = path.join(dir, 'x.steps.ts');
     await fs.writeFile(file, HAZARDOUS, 'utf-8');
