@@ -9,6 +9,14 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Changed — the default model is openai/gpt-6-luna
+
+The built-in default model, the one `steptix init` writes into a new
+project's config, and the template project's model all moved from
+`openai/gpt-5.6-luna` to `openai/gpt-6-luna`. An `openai/` model goes
+straight to OpenAI, so it needs an OpenAI key in `AI_API_KEY`. A project
+that already names a model in its `steptix.config.json` keeps that one.
+
 ### Changed — no built-in AI gateway
 
 Steptix no longer has a default gateway URL. Before, `ai.gatewayUrl` defaulted
