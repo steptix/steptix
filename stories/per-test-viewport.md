@@ -160,6 +160,14 @@ fixedViewport?: { width: number; height: number };
   phone-shaped video with no extra work.
 - Screenshots, `fullPageScreenshots`, scroll behavior: unchanged — all already
   derive from the context's viewport.
+- The AI is told the same size. The per-step "Test Information" block carries
+  `- Viewport: <w>×<h>px (<mode> view)`, and it must read the size in effect
+  rather than the `viewport`/`windowSize` pair, which a test's `viewport:` does
+  not write back into. This is not cosmetic: system-prompt rule 4 has the model
+  choose between a responsive page's duplicate mobile and desktop elements on
+  exactly this number, and a relative scroll sizes itself from the height. One
+  helper, `effectiveViewport`, answers it for every caller that DESCRIBES the
+  page rather than imposing it.
 
 ## §3 The wire
 
@@ -270,6 +278,12 @@ overrides it per §1 precedence. Document the distinction from the legacy pair:
   argument overrides file per key.
 - **CLI**: test-runner launches with the resolved viewport; cdp conflict
   errors.
+- **Prompt** (`tests/step-executor-viewport.test.ts`): through the real
+  `executeStep`, `executeBranchedStep` and `evaluateConditions` (the judge
+  behind `[if …]` guards) with a stub client, the Test Information block the
+  model receives names the fixed size and its device mode, headed and headless
+  — and without a fixed viewport it still names the project pair. Asserted at that seam deliberately: the bug was a call site
+  that never consulted the size, which no unit test of the resolver can see.
 - **Live proof** (manual or live-suite): a `viewport: mobile` run against
   `fixtures/test-app` asserting `window.innerWidth` is 390 in headed mode —
   verification rule (1).

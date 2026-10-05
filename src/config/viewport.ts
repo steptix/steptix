@@ -159,3 +159,37 @@ export function describeViewportSource(rawSpec: string | undefined): string {
   const trimmed = rawSpec?.trim();
   return trimmed ? `${trimmed}, from test config` : 'from project config';
 }
+
+/**
+ * The size the PAGE actually is, for anything that has to describe it rather
+ * than impose it (stories/per-test-viewport.md §2/§4).
+ *
+ * The three sizing keys are not interchangeable — see `BrowserConfig` — and
+ * `fixedViewport` is the only one that pins the page in BOTH modes, so it wins
+ * whenever it is set. Without it the old pair still answers: `windowSize` when
+ * headed, `viewport` when headless.
+ *
+ * This exists because the AI prompt used to read that pair directly, which is
+ * correct only while no test declares a viewport. A test with
+ * `## Config: viewport: mobile` renders at 390×844 and was told it was looking
+ * at 1440×900 — and the prompt's rule 4 has the model choose between a page's
+ * duplicate mobile and desktop elements on exactly that number.
+ *
+ * Structurally typed rather than taking `BrowserConfig`, to keep this module
+ * import-free and browser-free like the rest of it.
+ *
+ * Known imprecision, unchanged from before: in headed mode with no
+ * `fixedViewport`, `windowSize` is the OS WINDOW, whose page area is smaller by
+ * the browser chrome (~88px of height, see `HEADED_CHROME_HEIGHT_PX`). The
+ * width — which is what device-mode classification reads — is right either way,
+ * and subtracting an approximation would trade a known small error for an
+ * unknown one.
+ */
+export function effectiveViewport(browser: {
+  headed: boolean;
+  viewport: ViewportSize;
+  windowSize: ViewportSize;
+  fixedViewport?: ViewportSize | undefined;
+}): ViewportSize {
+  return browser.fixedViewport ?? (browser.headed ? browser.windowSize : browser.viewport);
+}
