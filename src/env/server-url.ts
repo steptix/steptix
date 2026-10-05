@@ -21,11 +21,11 @@ export const DEFAULT_SERVER_PORT = 3100;
  *  address family `localhost` resolves to first. */
 export const DEFAULT_SERVER_URL = `http://127.0.0.1:${DEFAULT_SERVER_PORT}`;
 
-export const SERVER_URL_VAR = 'STEPTIX_SERVER_URL';
+export const MACHINE_SERVER_URL_VAR = 'STEPTIX_SERVER_URL';
 
 /** `STEPTIX_SERVER_URL` from the user root's `.env`, trimmed, or null when absent or blank. */
 export function readMachineServerUrl(deps?: UserRootDeps): string | null {
-  const value = readUserRootEnv(deps)[SERVER_URL_VAR];
+  const value = readUserRootEnv(deps)[MACHINE_SERVER_URL_VAR];
   if (value === undefined || value.trim() === '') return null;
   return value.trim();
 }

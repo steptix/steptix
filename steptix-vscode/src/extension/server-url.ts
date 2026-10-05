@@ -23,8 +23,8 @@ import {
  * Kept free of `vscode` so the `node --test` suite can load it.
  */
 
-/** Where `steptix serve` listens by default — `server.host` and `server.port`
- *  in src/config/defaults.ts. Nothing links the two copies (the extension
+/** Where `steptix serve` listens by default — `DEFAULT_SERVER_URL` in
+ *  src/env/server-url.ts. Nothing links the two copies (the extension
  *  bundles separately from the framework), so change both together. */
 export const DEFAULT_STEPTIX_SERVER_URL = 'http://127.0.0.1:3100';
 
