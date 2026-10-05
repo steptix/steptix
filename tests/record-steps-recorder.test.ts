@@ -1236,7 +1236,7 @@ describe('history moves the author did not make — and ones they did (review, f
 describe('masked, then clipped (review, finding 8)', () => {
   it("a known secret across the page's length limit leaves no prefix behind", async () => {
     await page.goto(`${origin}/actions.html`);
-    const secret = 'sk_live_ABCDEFGHIJ1234567890';
+    const secret = 'fake-recorder-masking-secret';
     known = [{ name: 'api_key', value: secret }];
     await page.evaluate((s) => {
       document.getElementById('long')!.textContent = `${'x '.repeat(145)}${s} tail`;
