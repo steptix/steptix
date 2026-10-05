@@ -2747,12 +2747,6 @@ export class RunController {
     // previous pause linger at that line while the new run boots, which
     // reads as "the arrow jumped straight to the breakpoint."
     this.post({ type: 'breakpointStop', line: null });
-    /** Was a Continue owed when this call started? Read BEFORE the flag is
-     *  cleared, because a run injected at a pause — the skill-step picker's
-     *  `runLines([callLine], { isContinuation: true })` — leaves the paused
-     *  run parked and its Continue still to come, and by the time the
-     *  narrowing is decided below there is no way left to tell. */
-    const injectedAtPause = this.parkedAtPause && options.isResume !== true;
     this.parkedAtPause = false;
 
     /**
@@ -2781,9 +2775,10 @@ export class RunController {
      * only if this call parks with it still unspent.
      */
     const inheritedRunStart = options.isResume === true && this.parkedRunStartOwed;
-    // Kept across an injected run, like `parkedNarrowing`: the paused run's
-    // Continue is still to come, and it still owes what it owed.
-    if (!injectedAtPause) this.parkedRunStartOwed = false;
+    // Cleared like `parkedNarrowing` below: the park belongs to the run that
+    // made it, and nothing can start a run injected at a pause, so a new run
+    // supersedes it with no exception.
+    this.parkedRunStartOwed = false;
     const runStartOwedAtStart = startsRun || inheritedRunStart;
 
     // A new run — including a Resume — supersedes any paused state, so the
@@ -3164,14 +3159,16 @@ export class RunController {
      * this; the continuation inherits it, as it inherits the compile mode.
      */
     const resumingNarrowing = options.isResume === true ? this.parkedNarrowing : null;
-    // Cleared unless a Continue is still owed. A run INJECTED at a pause — the
-    // skill-step picker's `runLines([callLine], { isContinuation: true })`,
-    // which is followed by a `isParkedAtPause` check precisely because the
-    // paused run is still there — is not a resume and carries no `isResume`,
-    // but the Continue after it is. Dropping the park here would run the rest
-    // of the narrowed body on that Continue, paint the marks the selection
-    // excluded, and disarm the old-server detector on the way past.
-    if (!injectedAtPause) this.parkedNarrowing = null;
+    // The park belongs to the run that made it, and a new run supersedes it.
+    // There is no exception for a run "injected at a pause": nothing can start
+    // one. The skill-step picker excludes parked controllers when it builds
+    // its rows (`collectSkillRunTargets`) and refuses again on the pick
+    // (`isParkedAtPause`, commands/index.ts), and Run and Compile refuse the
+    // same way. A guard for that case would only keep a previous run's
+    // narrowing alive across every OTHER fresh non-resume run started while
+    // parked — a plain F5 on the parked file — which is the drift the clearing
+    // exists to prevent.
+    this.parkedNarrowing = null;
     /**
      * The section-loop narrowings that survive this run's step selection.
      *
@@ -3231,12 +3228,19 @@ export class RunController {
       // reads as one that expired there.
       for (const [name, indices] of Object.entries(resumingNarrowing.steps ?? {})) {
         const snapshot = this.narrowedBodySnapshot?.[name];
+        // No snapshot, no line. The two are parked together and travel
+        // together, so a missing one means something is wrong with the park
+        // rather than with this section — and the fallback that was here
+        // ("of `indices.length`") would have printed `body step 2 of 1`,
+        // a sentence whose halves contradict each other. Silence is the
+        // smaller lie; the narrowing itself still applies.
+        if (!snapshot) continue;
         this.postOutput(
           sectionStepsResumedLogLine(
             name,
             indices.map((n) => n + 1),
-            snapshot?.steps.length ?? indices.length,
-            snapshot?.everyCall ?? false,
+            snapshot.steps.length,
+            snapshot.everyCall,
           ),
           'info',
         );
@@ -3769,13 +3773,20 @@ export class RunController {
         }
       }
 
-      // Will this row's block leave the run PARKED at a breakpoint? The post-
-      // loop code below turns `pausedAt` into the yellow ▶ under exactly these
+      // Will this block leave the run PARKED at a breakpoint? The post-loop
+      // code below turns `pausedAt` into the yellow ▶ under exactly these
       // conditions; asked here because that is where the loop can still act on
       // the answer, and because the row that is parked in is not a row that
       // has passed — half its steps have not run.
-      const parkedHere =
-        row !== null && pausedAt !== null && !anyFailed && !ac.signal.aborted;
+      //
+      // Asked of a file with NO table too (`row === null`, one `null` block).
+      // It has no row to settle, but it does have an `endReason`, and the one
+      // way to reach here with `loopEnd` already set and a park still coming is
+      // a cancelled `[input:]` prompt above a breakpoint. `prompt-cancelled`
+      // would then be the reason for a run that is sitting at a pause offering
+      // Continue — and everything downstream that asks "did this run park?" by
+      // reading the reason would answer no.
+      const parkedHere = pausedAt !== null && !anyFailed && !ac.signal.aborted;
       if (parkedHere) loopEnd = { kind: 'paused' };
 
       if (row !== null && !parkedHere && loopEnd === null) {
@@ -3990,32 +4001,31 @@ export class RunController {
       // from the pause point and cannot re-derive any of this, so the one
       // thing that must survive is handed over explicitly.
       //
-      // An injected run at a pause parks nothing of its own and takes nothing
-      // away: the paused run's Continue is still owed, and its narrowing is
-      // still the one that Continue must carry.
-      this.parkedNarrowing =
-        endReason.kind === 'paused' && this.parkedAtPause
-          ? {
-              rows: this.sectionRowsOfRun,
-              rowTotals: this.sectionRowTotalsOfRun,
-              steps: this.sectionStepsOfRun,
-              unselectedBodyLines: this.unselectedBodyLines,
-              bodySnapshot: this.narrowedBodySnapshot,
-            }
-          : injectedAtPause
-            ? this.parkedNarrowing
-            : null;
-      // Same handover, same precedence, for the one thing a run that paused
-      // before sending anything still owes the server: its `runStart`. An
-      // `[input:]` answered and then a breakpoint, an `[interactive]` session
-      // left without a step, a Pause pressed at a prompt — each parks a run
-      // the server has not heard begin.
-      this.parkedRunStartOwed =
-        endReason.kind === 'paused' && this.parkedAtPause
-          ? runStartOwed
-          : injectedAtPause
-            ? this.parkedRunStartOwed
-            : false;
+      // `parkedAtPause` alone decides it, not `endReason`. A cancelled
+      // `[input:]` prompt (or an `[interactive]` `/quit`) in a run that ALSO
+      // parks at a breakpoint is BOTH things at once, and `endReason` can only
+      // name one: `loopEnd` wins, the reason reads `prompt-cancelled`, and the
+      // park is dropped while the yellow ▶ and a Continue are still on offer.
+      // A file with a data table was saved from that by accident — `parkedHere`
+      // rewrites `loopEnd` to `paused` for it — and a file without one ran its
+      // whole body on the Continue, painting the marks the selection excluded.
+      // The question this answers is "is a Continue owed?", which is exactly
+      // what the flag says.
+      this.parkedNarrowing = this.parkedAtPause
+        ? {
+            rows: this.sectionRowsOfRun,
+            rowTotals: this.sectionRowTotalsOfRun,
+            steps: this.sectionStepsOfRun,
+            unselectedBodyLines: this.unselectedBodyLines,
+            bodySnapshot: this.narrowedBodySnapshot,
+          }
+        : null;
+      // Same handover, same rule, for the one thing a run that paused before
+      // sending anything still owes the server: its `runStart`. An `[input:]`
+      // answered and then a breakpoint, an `[interactive]` session left without
+      // a step, a Pause pressed at a prompt — each parks a run the server has
+      // not heard begin.
+      this.parkedRunStartOwed = this.parkedAtPause ? runStartOwed : false;
       this.sectionRowsOfRun = undefined;
       this.sectionRowTotalsOfRun = undefined;
       this.sectionStepsOfRun = undefined;
@@ -4177,15 +4187,13 @@ export class RunController {
         everyCall: pick.everyCall,
       };
       // A chain kept whole. Said before the narrowing line, because it changes
-      // what that line is about to claim.
-      if (pick.addedForChain.length > 0 && pick.chainLink) {
+      // what that line is about to claim — and once per BROKEN LINK, because a
+      // body can hold two independent chains and a selection can break both.
+      // One line naming the first left the other chain's added steps in the
+      // narrowing with nothing anywhere saying where they came from.
+      for (const link of pick.chainLinks) {
         this.postOutput(
-          chainMembersKeptLogLine(
-            pick.section,
-            pick.addedForChain,
-            pick.ordinals.filter((n) => !pick.addedForChain.includes(n)),
-            pick.chainLink,
-          ),
+          chainMembersKeptLogLine(pick.section, link.added, [link.selected], link),
           'warn',
         );
       }

@@ -205,6 +205,7 @@ test('body split: the reported gesture — three steps, one body step, one row',
       total: 2,
       addedForChain: [],
       everyCall: false,
+      chainLinks: [],
     },
   ]);
 });
@@ -223,6 +224,7 @@ test('body split: the call has to be among the steps that will run', () => {
       total: 2,
       addedForChain: [],
       everyCall: false,
+      chainLinks: [],
     },
   ]);
 });
@@ -282,6 +284,7 @@ test('body split: two sections are two independent answers', () => {
       total: 2,
       addedForChain: [],
       everyCall: false,
+      chainLinks: [],
     },
   ]);
   assert.deepEqual(ignored, [
@@ -292,6 +295,7 @@ test('body split: two sections are two independent answers', () => {
       total: 2,
       addedForChain: [],
       everyCall: false,
+      chainLinks: [],
     },
   ]);
 });
@@ -487,7 +491,7 @@ test('body split: an Otherwise brings its If with it', () => {
       total: 4,
       addedForChain: [1],
       everyCall: false,
-      chainLink: { member: 'Otherwise', needs: 'If' },
+      chainLinks: [{ member: 'Otherwise', needs: 'If', added: [1], selected: 2 }],
     },
   ]);
 });
@@ -771,25 +775,35 @@ test('narrowed section: a call outside the selected steps is logged, not refused
 });
 
 test('narrowed body: the line says which body steps, of how many', () => {
-  // The sibling of the rows line, in the same voice. Always plural — this
-  // names positions in a list, and "step 2 of 2" reads as a progress counter.
-  assert.equal(sectionStepsLogLine('Log In', [2], 2), 'Log In — running body steps 2 of 2');
+  // The sibling of the rows line, in the same voice — and agreeing with the
+  // `kept with` line beside it about how many steps there are. One step is a
+  // `step`; the unconditional plural read as a typo next to `body step 1 kept`.
+  assert.equal(sectionStepsLogLine('Log In', [2], 2), 'Log In — running body step 2 of 2');
   assert.equal(sectionStepsLogLine('Log In', [1, 3], 3), 'Log In — running body steps 1, 3 of 3');
   assert.equal(sectionStepsLogLine('Log In', [2, 3], 4), 'Log In — running body steps 2–3 of 4');
 });
 
 test('narrowed body: a contiguous run is a range, a gapped one is a list', () => {
   // An Alt+click pick of body steps 1 and 3 must not read as if 2 ran too.
-  assert.equal(bodyStepsText([2]), 'steps 2');
+  assert.equal(bodyStepsText([2]), 'step 2');
   assert.equal(bodyStepsText([1, 2, 3]), 'steps 1–3');
   assert.equal(bodyStepsText([3, 1]), 'steps 1, 3');
   assert.equal(bodyStepsText([2, 2, 3]), 'steps 2–3');
+  // A repeat that collapses to one is singular too — the count is of steps,
+  // not of what the caller happened to pass.
+  assert.equal(bodyStepsText([2, 2]), 'step 2');
 });
 
 test('narrowed body: a call outside the selected steps is logged, not refused', () => {
   assert.equal(
     sectionStepsIgnoredLogLine('Log In', [2]),
-    'Log In — body steps 2 ignored: ' +
+    'Log In — body step 2 ignored: ' +
+      'the step that calls this section is not in your selection',
+  );
+  // Two steps, and the same sentence in the plural.
+  assert.equal(
+    sectionStepsIgnoredLogLine('Log In', [1, 3]),
+    'Log In — body steps 1, 3 ignored: ' +
       'the step that calls this section is not in your selection',
   );
 });
@@ -802,10 +816,10 @@ test('narrowed body: a section reached more than once says the narrowing hits ev
   // any number of frames.
   assert.equal(
     sectionStepsLogLine('Log In', [2], 2, true),
-    'Log In — running body steps 2 of 2 (applies to every call of this section)',
+    'Log In — running body step 2 of 2 (applies to every call of this section)',
   );
   // Called exactly once, from a plain main-flow step: no parenthesis.
-  assert.equal(sectionStepsLogLine('Log In', [2], 2, false), 'Log In — running body steps 2 of 2');
+  assert.equal(sectionStepsLogLine('Log In', [2], 2, false), 'Log In — running body step 2 of 2');
 });
 
 test('narrowed body: a chain kept whole quotes the pair the author wrote', () => {
@@ -841,16 +855,78 @@ test('narrowed body: the chain link is read off the file, member by member', () 
     '4. Submit the form',
   );
   // Selecting only the `Otherwise` grows twice; the link the author can see is
-  // the one their own selection broke.
+  // the one their own selection broke, and it carries both steps it dragged in.
   const { narrowed } = splitBodySteps(chain, [4, 9], ['Log In']);
   assert.deepEqual(narrowed[0].addedForChain, [1, 2]);
-  assert.deepEqual(narrowed[0].chainLink, { member: 'Otherwise', needs: 'Else if' });
+  assert.deepEqual(narrowed[0].chainLinks, [
+    { member: 'Otherwise', needs: 'Else if', added: [1, 2], selected: 3 },
+  ]);
   // Selecting the `Else if` grows once, and says so in its own words.
   const elseIf = splitBodySteps(chain, [4, 8], ['Log In']).narrowed[0];
   assert.deepEqual(elseIf.addedForChain, [1]);
-  assert.deepEqual(elseIf.chainLink, { member: 'Else if', needs: 'If' });
+  assert.deepEqual(elseIf.chainLinks, [
+    { member: 'Else if', needs: 'If', added: [1], selected: 2 },
+  ]);
   // Nothing added, nothing to explain.
-  assert.equal(splitBodySteps(chain, [4, 7], ['Log In']).narrowed[0].chainLink, undefined);
+  assert.deepEqual(splitBodySteps(chain, [4, 7], ['Log In']).narrowed[0].chainLinks, []);
+});
+
+test('narrowed body: two chains broken by one selection report BOTH links', () => {
+  //  4 1. Log In | 6 ### Log In | 7 1. Click Next | 8 2. If … | 9 3. Otherwise …
+  // 10 4. If … | 11 5. Else if … | 12 6. Submit
+  //
+  // One line naming the first link left steps 2 and 4 in the run with nothing
+  // saying where they came from — and the reader checking the sentence against
+  // their own file found one of the two additions unaccounted for.
+  const twoChains = doc(
+    '# Two chains',
+    '',
+    '## Steps',
+    '1. Log In',
+    '',
+    '### Log In',
+    '1. Click Next',
+    '2. If a banner is shown, then Dismiss the banner',
+    '3. Otherwise, Click Sign in',
+    '4. If a dialog is shown, then Close the dialog',
+    '5. Else if a toast is shown, then Wait for it',
+    '6. Submit the form',
+  );
+  // Body steps 3 and 5 — the `Otherwise` of the first chain and the `Else if`
+  // of the second. Each pulls its own `If` in.
+  const { narrowed } = splitBodySteps(twoChains, [4, 9, 11], ['Log In']);
+  assert.deepEqual(narrowed[0].indices, [1, 2, 3, 4]);
+  assert.deepEqual(narrowed[0].addedForChain, [2, 4]);
+  assert.deepEqual(narrowed[0].chainLinks, [
+    { member: 'Otherwise', needs: 'If', added: [2], selected: 3 },
+    { member: 'Else if', needs: 'If', added: [4], selected: 5 },
+  ]);
+});
+
+test('narrowed body: a predecessor that is not a chain member gets no invented If', () => {
+  //  4 1. Log In | 6 ### Log In | 7 1. Click Next | 8 2. Otherwise, … | 9 3. Submit
+  //
+  // A file the run's own pre-flight (`danglingChainMemberError`) refuses before
+  // any narrowing is read. `memberWord` used to answer `If` for anything that
+  // was not an `Else if` or an `Otherwise`, so this printed "an Otherwise needs
+  // its If" about a `Click Next` line — a sentence quoting a word the author
+  // can see is not in their file. The step is still kept; only the invented
+  // sentence is gone.
+  const dangling = doc(
+    '# Dangling',
+    '',
+    '## Steps',
+    '1. Log In',
+    '',
+    '### Log In',
+    '1. Click Next',
+    '2. Otherwise, Dismiss the banner',
+    '3. Submit the form',
+  );
+  const { narrowed } = splitBodySteps(dangling, [4, 8], ['Log In']);
+  assert.deepEqual(narrowed[0].indices, [0, 1]);
+  assert.deepEqual(narrowed[0].addedForChain, [1]);
+  assert.deepEqual(narrowed[0].chainLinks, []);
 });
 
 test('narrowed body: a continuation says the narrowing still applies', () => {
@@ -859,14 +935,14 @@ test('narrowed body: a continuation says the narrowing still applies', () => {
   // breakpoint and reads as one that expired there.
   assert.equal(
     sectionStepsResumedLogLine('Log In', [2], 2),
-    'Log In — the narrowing still applies: body steps 2 of 2',
+    'Log In — the narrowing still applies: body step 2 of 2',
   );
   // Including the qualifier: the continuation is where the second call of a
   // twice-called section usually happens, so this is the copy that most needs
   // to carry it.
   assert.equal(
     sectionStepsResumedLogLine('Log In', [2], 2, true),
-    'Log In — the narrowing still applies: body steps 2 of 2 ' +
+    'Log In — the narrowing still applies: body step 2 of 2 ' +
       '(applies to every call of this section)',
   );
 });

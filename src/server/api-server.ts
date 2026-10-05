@@ -59,7 +59,6 @@ import { PageCaptureError } from '../browser/dom-cleaner.js';
 import { createLoginBroker, type FieldHint, type LoginBroker } from '../credentials/index.js';
 import { IdleMonitor, startIdleReaper } from './idle-monitor.js';
 import { HEALTH_SERVICE_ID, type HealthResponse } from './health.js';
-import { matchText } from '../parser/section-match.js';
 // Its own module so a CLIENT-side test can run a payload it just built through
 // the exact rules that would 400 it here. Behaviour is unchanged — this is the
 // same function, moved.

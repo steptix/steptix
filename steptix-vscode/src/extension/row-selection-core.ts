@@ -144,10 +144,17 @@ export interface BodyStepPick {
    *  frame an unknown number of times, and a counted claim there would be a
    *  number the reader could check and find wrong. */
   everyCall: boolean;
-  /** The link the chain growth started at, when `addedForChain` is not empty:
-   *  the selected member, and the kind of the step above it that came along.
-   *  Absent exactly when nothing was added. */
-  chainLink?: ChainLink;
+  /** Every link the chain growth started at, in body order — one per selected
+   *  member whose predecessor had to come along. A body can hold two
+   *  independent chains and a selection can break both, so this is a LIST: one
+   *  entry reported the first break and left the second one silent, with the
+   *  steps it added unexplained.
+   *
+   *  Empty when nothing was added, and also when the predecessor is not a
+   *  chain member at all — a file the run's own pre-flight
+   *  (`danglingChainMemberError`) refuses before any of this is read, and not
+   *  one to invent an `If` for. */
+  chainLinks: ChainLinkKept[];
 }
 
 /** One section a run reaches, and what the text can say about how often. */
@@ -288,14 +295,25 @@ export function splitBodySteps(
     return kind === 'elseif' || kind === 'else';
   };
   /** How a body line reads as a chain member, for the sentence that explains
-   *  the growth. A step that is neither is the head the chain hangs off — a
-   *  file where it is not an `If` is one the server refuses on its own terms,
-   *  and this sentence is not the place to argue about it. */
-  const memberWord = (instruction: string): ChainMemberWord => {
+   *  the growth — or null when it does not read as one at all.
+   *
+   *  Null rather than a fallback `If`: a body of `Click Next` /
+   *  `Otherwise, Dismiss it` would have had the sentence quote an `If` the
+   *  author never wrote, about a line they can see is not one. That file is
+   *  refused before any of this runs (`danglingChainMemberError`, the run's
+   *  own pre-flight), so the honest answer here is to say nothing — the chain
+   *  is still kept whole, it just gets no sentence invented for it. */
+  const memberWord = (instruction: string): ChainMemberWord | null => {
     const kind = sectionNames.has(matchText(instruction))
       ? undefined
       : parseControlLine(instruction)?.kind;
-    return kind === 'else' ? 'Otherwise' : kind === 'elseif' ? 'Else if' : 'If';
+    return kind === 'else'
+      ? 'Otherwise'
+      : kind === 'elseif'
+        ? 'Else if'
+        : kind === 'if'
+          ? 'If'
+          : null;
   };
   for (const section of sections) {
     const picked = section.steps
@@ -316,10 +334,29 @@ export function splitBodySteps(
     const indices = [...kept].sort((a, b) => a - b);
     const wanted = new Set(picked);
     const sites = called.get(matchText(section.name));
-    // Where the growth STARTED: the selected member whose predecessor had to
-    // be brought in. A three-member chain grows twice, and this is the link the
-    // author can see for themselves — the one their own selection broke.
-    const linkAt = indices.find((n) => wanted.has(n) && n > 0 && kept.has(n - 1) && !wanted.has(n - 1));
+    // Where each growth STARTED: a selected member whose predecessor had to be
+    // brought in. One body can hold two independent chains and one selection
+    // can break both, so every such link is collected — reporting only the
+    // first left the second chain's added steps in `addedForChain` with
+    // nothing anywhere saying why they came.
+    //
+    // A three-member chain still reports ONE link: the growth cascades from
+    // the member the author picked, and the steps it dragged in are that
+    // link's, listed with it.
+    const chainLinks: ChainLinkKept[] = [];
+    for (const n of indices) {
+      if (!wanted.has(n) || n === 0 || !kept.has(n - 1) || wanted.has(n - 1)) continue;
+      const member = memberWord(section.steps[n]!.instruction);
+      const needs = memberWord(section.steps[n - 1]!.instruction);
+      // A predecessor that is not a chain member at all belongs to a file the
+      // pre-flight refuses; nothing here is going to describe it truthfully.
+      if (member === null || needs === null) continue;
+      // The steps THIS link brought in: the unselected run immediately above
+      // it, which is how far its own cascade reached.
+      const added: number[] = [];
+      for (let k = n - 1; k >= 0 && kept.has(k) && !wanted.has(k); k--) added.unshift(k + 1);
+      chainLinks.push({ member, needs, added, selected: n + 1 });
+    }
     const pick: BodyStepPick = {
       section: section.name,
       indices,
@@ -327,12 +364,7 @@ export function splitBodySteps(
       total: section.steps.length,
       addedForChain: indices.filter((n) => !wanted.has(n)).map((n) => n + 1),
       everyCall: sites !== undefined && !sites.onceFromMainFlow,
-      ...(linkAt !== undefined && {
-        chainLink: {
-          member: memberWord(section.steps[linkAt]!.instruction),
-          needs: memberWord(section.steps[linkAt - 1]!.instruction),
-        },
-      }),
+      chainLinks,
     };
     (sites !== undefined ? narrowed : ignored).push(pick);
   }
@@ -645,15 +677,21 @@ export function sectionRowsIgnoredLogLine(name: string, rows: number[]): string 
 }
 
 /**
- * `steps 2` / `steps 1, 3` / `steps 2–3` — the body steps a narrowing kept.
+ * `step 2` / `steps 1, 3` / `steps 2–3` — the body steps a narrowing kept.
  *
- * Always plural, like `rows 2 of 3` a line above it: this names positions in a
- * list, and "step 2 of 2" would read as a progress counter. A contiguous run
- * is a range for the reason `stepRangeText` makes one — an Alt+click pick of
- * body steps 1 and 3 must not read as if it ran 2 as well.
+ * Agrees with itself, like `bodyStepWord` below: one step is a `step`. The
+ * plural used to be unconditional — `running body steps 2 of 2` for a single
+ * step, beside a `kept with` line that got the singular right — on the
+ * reasoning that these are positions in a list rather than a count. But the
+ * reader is looking at one step, and the two lines disagreeing about it is
+ * more jarring than either wording alone.
+ *
+ * A contiguous run is a range for the reason `stepRangeText` makes one — an
+ * Alt+click pick of body steps 1 and 3 must not read as if it ran 2 as well.
  */
 export function bodyStepsText(ordinals: number[]): string {
   const sorted = [...new Set(ordinals)].sort((a, b) => a - b);
+  if (sorted.length === 1) return `step ${sorted[0]}`;
   if (sorted.length > 1 && sorted.every((n, i) => i === 0 || n === sorted[i - 1]! + 1)) {
     return `steps ${sorted[0]}–${sorted[sorted.length - 1]}`;
   }
@@ -663,7 +701,7 @@ export function bodyStepsText(ordinals: number[]): string {
 /**
  * The line a section with a narrowed BODY prints at run start:
  *
- *     Log In — running body steps 2 of 2
+ *     Log In — running body step 2 of 2
  *
  * The sibling of `sectionRowsLogLine`, in the same voice, and posted beside it
  * when a selection narrowed both axes of the same section. It says less than
@@ -704,7 +742,7 @@ function everyCallText(everyCall: boolean): string {
 /**
  * …and the line the CONTINUATION of a paused run prints:
  *
- *     Log In — the narrowing still applies: body steps 2 of 2
+ *     Log In — the narrowing still applies: body step 2 of 2
  *
  * A Continue is a separate run with its own log, and it rebuilds its lines
  * from the pause point — so the narrowing it inherits is invisible in
@@ -744,8 +782,11 @@ export function sectionRowsResumedLogLine(
   return `${name} — the narrowing still applies: rows ${rows.join(', ')} of ${total}`;
 }
 
-/** `step 1` / `steps 1, 2` — the additions, counted as things rather than
- *  as positions in a range, so the singular is right. */
+/** `step 1` / `steps 1, 2` — the additions, counted as things rather than as
+ *  positions in a range, so they are never collapsed to `1–2` the way
+ *  `bodyStepsText` collapses a contiguous run. The singular is the same rule
+ *  as its sibling's: the two lines sit next to each other in the Output and
+ *  must not disagree about how many steps there are. */
 function bodyStepWord(ordinals: number[]): string {
   const sorted = [...new Set(ordinals)].sort((a, b) => a - b);
   return `${sorted.length === 1 ? 'step' : 'steps'} ${sorted.join(', ')}`;
@@ -759,6 +800,16 @@ export type ChainMemberWord = 'If' | 'Else if' | 'Otherwise';
 export interface ChainLink {
   member: ChainMemberWord;
   needs: ChainMemberWord;
+}
+
+/** One broken link and what it cost: the pair, the ordinals the growth brought
+ *  in for it, and the ordinal the author actually selected. One per link
+ *  because one body can hold two chains and one selection can break both. */
+export interface ChainLinkKept extends ChainLink {
+  /** Body-step ordinals kept for this link, ascending. */
+  added: number[];
+  /** The selected ordinal they were kept for. */
+  selected: number;
 }
 
 /**
@@ -795,7 +846,7 @@ export function chainMembersKeptLogLine(
  * …and the line it prints instead when the call is not among the steps this
  * run will execute:
  *
- *     Log In — body steps 2 ignored: the step that calls this section is not in your selection
+ *     Log In — body step 2 ignored: the step that calls this section is not in your selection
  *
  * Logged rather than refused, exactly as the row equivalent is: the body will
  * not be entered at all, and a selection that stops short of the call has
