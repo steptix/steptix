@@ -22,13 +22,13 @@
  * blind — and the `steptix_bridge` field is how the bridge says it is the bridge
  * and not a corporate gateway that happens to share the URL shape.
  */
-import { gatewayRoutePrefix, isCustomGatewayUrl } from '../ai/client.js';
+import { gatewayRoutePrefix, hasGatewayUrl } from '../ai/client.js';
 
 /** The AI settings a request goes out with: the three that decide where it
  *  goes and who it says it is. */
 export interface VisionRouteAi {
   model: string;
-  gatewayUrl: string;
+  gatewayUrl?: string | undefined;
   apiKey?: string | undefined;
 }
 
@@ -37,9 +37,6 @@ export interface VisionRouteDeps {
   fetch?: typeof fetch;
   /** Default {@link VISION_ROUTE_TIMEOUT_MS}. */
   timeoutMs?: number;
-  /** Default: the AI client's own definition (`isCustomGatewayUrl`,
-   *  src/ai/client.ts), so the check can never disagree with the routing. */
-  isCustomGatewayUrl?: (url: string) => boolean;
 }
 
 /**
@@ -89,9 +86,10 @@ async function decide(ai: VisionRouteAi, deps: VisionRouteDeps): Promise<VisionR
   if (prefix === null) {
     return { ok: true, note: `${ai.model} is not gateway-routed; not checked` };
   }
-  const custom = (deps.isCustomGatewayUrl ?? isCustomGatewayUrl)(ai.gatewayUrl);
-  if (!custom) {
-    return { ok: true, note: 'the gateway URL is the built-in default; not checked' };
+  // The client refuses this route itself (GatewayUrlRequiredError), so there is
+  // nothing to ask and nothing the screenshot could be sent to.
+  if (!hasGatewayUrl(ai.gatewayUrl)) {
+    return { ok: true, note: 'no gateway URL is set; not checked' };
   }
 
   const url = `${ai.gatewayUrl.trim().replace(/\/+$/, '')}/v1/models`;

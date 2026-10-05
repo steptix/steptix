@@ -411,9 +411,7 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
     );
 
     process.env['AI_GATEWAY_URL'] = '   ';
-    expect((await loadConfig(await writeConfig({}))).ai.gatewayUrl).toBe(
-      DEFAULT_CONFIG.ai.gatewayUrl,
-    );
+    expect((await loadConfig(await writeConfig({}))).ai.gatewayUrl).toBeUndefined();
   });
 
   it('a config-file gatewayUrl beats the machine .env', async () => {
@@ -445,11 +443,12 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
     expect(config.ai.gatewayUrl).toBe('https://env.gateway.test');
   });
 
-  it('no gateway anywhere leaves the built-in default', async () => {
+  it('no gateway anywhere leaves it unset — there is no built-in one', async () => {
     await writeUserRootEnv('AI_GATEWAY_URL=   \n');
     const config = await loadConfig(await writeConfig({}));
 
-    expect(config.ai.gatewayUrl).toBe(DEFAULT_CONFIG.ai.gatewayUrl);
+    expect(config.ai.gatewayUrl).toBeUndefined();
+    expect(DEFAULT_CONFIG.ai.gatewayUrl).toBeUndefined();
   });
 });
 

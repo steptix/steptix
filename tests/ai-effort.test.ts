@@ -76,7 +76,7 @@ describe('AiClient — reasoning effort profiles', () => {
 
   beforeEach(() => {
     baseConfig = {
-      gatewayUrl: 'https://llm.corp.example',
+      gatewayUrl: 'https://broker.example',
       apiKey: 'test-key',
       model: 'aibroker/openai/chatgpt-5.5',
       maxInputTokens: 1_000_000,

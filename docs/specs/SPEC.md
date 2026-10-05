@@ -543,7 +543,6 @@ extension, an optional `"$schema"` key pointing at
 ```json
 {
   "ai": {
-    "gatewayUrl": "https://llm.corp.example",
     "model": "gpt-5.4",
     "maxInputTokens": 1000000,
     "streamResponses": true

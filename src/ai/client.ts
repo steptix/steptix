@@ -2,7 +2,6 @@ import { AIGateway } from '@pkent/aigateway';
 import type { CallOptions, Effort, V2ContentBlock } from '@pkent/aigateway';
 import type { AiConfig } from '../config/types.js';
 import { aiConfigured } from '../config/loader.js';
-import { DEFAULT_CONFIG } from '../config/defaults.js';
 import type { ChatMessage, MessageContentBlock } from './types.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { logger } from '../utils/logger.js';
@@ -109,30 +108,27 @@ export class AiNotConfiguredError extends Error {
 }
 
 /**
- * What a `gateway/` model says when nobody chose the endpoint
- * (stories/copilot-lm-bridge.md §Part B).
+ * What a gateway-routed model (`gateway/…` or `aibroker/…`) says when no
+ * endpoint was set (stories/copilot-lm-bridge.md §Part B).
  *
- * `gateway/` means "route to `AI_GATEWAY_URL`, whatever it names" — a local
- * bridge, a corporate gateway, Ollama. When that variable was never set, the
- * resolved value is the built-in default, and sending the request anyway would
- * ship the key and the DOM payload to the hosted broker: exactly the egress the
- * corporate reader picked this spelling to avoid. So it is refused rather than
- * routed, and the message names the variable it needs.
+ * Both prefixes mean "route to `AI_GATEWAY_URL`, whatever it names" — a hosted
+ * broker, a local bridge, a corporate gateway, Ollama. There is no built-in
+ * endpoint to fall back to, so a request with none is refused before anything
+ * is sent, and the message names the variable it needs.
  *
  * Deliberately silent about `AI_API_KEY`: a key is not the problem here, and
  * pointing at it would send the reader to edit a line that is already correct.
  */
 export const GATEWAY_URL_REQUIRED_MESSAGE =
-  'AI_GATEWAY_URL is not set, so a gateway/ model has no endpoint to route to: ' +
-  'it resolved to the built-in default, which is not what "gateway/" asks for. ' +
-  'Refusing to send this request rather than routing it somewhere you did not ' +
-  'choose. Set AI_GATEWAY_URL in the project .env to the endpoint you mean — a ' +
-  'local bridge, your org\'s gateway, Ollama — or use ' +
-  'AI_MODEL=aibroker/<provider>/<model>, which is the spelling for the hosted ' +
-  'broker on the default endpoint.';
+  'AI_GATEWAY_URL is not set, so this gateway-routed model (gateway/… or ' +
+  'aibroker/…) has no endpoint to route to, and there is no built-in one. ' +
+  'Set AI_GATEWAY_URL in the project .env or the machine .env to the endpoint ' +
+  'you mean — a hosted broker, your org\'s gateway, a local bridge, Ollama — ' +
+  'or use a direct model such as AI_MODEL=openai/<model>, which goes straight ' +
+  'to the provider.';
 
 /**
- * Thrown when a `gateway/` model is paired with an unset `AI_GATEWAY_URL`.
+ * Thrown when a gateway-routed model is paired with an unset `AI_GATEWAY_URL`.
  * Typed for {@link AiNotConfiguredError}'s reason — a caller distinguishing
  * "misconfigured routing" from "the model failed" should not match on prose.
  */
@@ -179,17 +175,20 @@ export class AiForbiddenByPolicyError extends Error {
 }
 
 /**
- * Did someone actually choose this gateway URL, or is it just the built-in?
+ * Is a gateway URL set? There is no built-in one, so any non-blank value is a
+ * URL somebody chose.
  *
- * The one definition of "a custom gateway URL", exported so the computer-mode
- * vision check (src/desktop/vision-route.ts, SPEC-use-computer.md §15.4) asks
- * the question the client asks rather than a copy of it. See
- * {@link AiClient}'s `hasCustomGatewayUrl` for why it is a comparison against
- * `DEFAULT_CONFIG` rather than against `undefined`.
+ * The one definition, exported so the computer-mode vision check
+ * (src/desktop/vision-route.ts, SPEC-use-computer.md §15.4) asks the question
+ * the client asks rather than a copy of it.
  */
-export function isCustomGatewayUrl(gatewayUrl: string): boolean {
-  const trim = (url: string): string => url.trim().replace(/\/+$/, '');
-  return trim(gatewayUrl) !== trim(DEFAULT_CONFIG.ai.gatewayUrl);
+export function hasGatewayUrl(gatewayUrl: string | undefined): gatewayUrl is string {
+  return gatewayUrl !== undefined && gatewayUrl.trim() !== '';
+}
+
+/** `gatewayUrl`'s `/v1` surface, trailing slashes normalised. */
+function gatewayV1(gatewayUrl: string): string {
+  return `${gatewayUrl.trim().replace(/\/+$/, '')}/v1`;
 }
 
 /**
@@ -289,26 +288,22 @@ export class AiClient {
    * (`openai/…`, `anthropic/…`, …) passing it would point the provider's own SDK
    * at the gateway instead of the real upstream.
    *
-   * Two prefixes route, and they differ only in what they say about the
-   * destination (stories/copilot-lm-bridge.md §Part B). `gateway/` means "route
-   * to `AI_GATEWAY_URL`", so it REQUIRES one to have been set; `aibroker/` names
-   * the hosted broker application and keeps its fall-through to the built-in
-   * default, which is what makes it the zero-config spelling. The library strips
-   * whichever first segment it was given and forwards the rest, so the model
-   * string goes across verbatim either way.
+   * Two prefixes route, and they mean the same thing: send the request to
+   * `AI_GATEWAY_URL`'s `/v1` surface. `aibroker/` names the hosted broker
+   * application and `gateway/` names the mechanism (stories/copilot-lm-bridge.md
+   * §Part B); neither has a built-in endpoint, so both are refused until one is
+   * set. The library strips whichever first segment it was given and forwards
+   * the rest, so the model string goes across verbatim either way.
    */
   private buildGateway(): AIGateway {
     const viaGateway = gatewayRoutePrefix(this.config.model) !== null;
-    // Refused before anything is built or sent. The loader keeps no provenance —
-    // an explicitly-set URL and the built-in default are indistinguishable on
-    // the result — so this is the same value comparison `hasCustomGatewayUrl`
-    // makes for the warning below. It also refuses the one edge that comparison
-    // cannot see, a URL explicitly set TO the default host; acceptable, because
-    // `aibroker/` is precisely the spelling for that.
-    if (this.config.model.startsWith('gateway/') && !this.hasCustomGatewayUrl()) {
+    const gatewayUrl = this.config.gatewayUrl;
+    // Refused before anything is built or sent: with no URL there is nowhere
+    // the caller chose to send the key and the DOM payload.
+    if (viaGateway && !hasGatewayUrl(gatewayUrl)) {
       throw new GatewayUrlRequiredError();
     }
-    if (!viaGateway && this.hasCustomGatewayUrl()) {
+    if (!viaGateway && hasGatewayUrl(gatewayUrl)) {
       // Someone deliberately pointed this run at an endpoint and it is being
       // ignored — silently, and often in the direction that matters: the
       // request leaves for the provider instead of staying inside the org's
@@ -325,7 +320,7 @@ export class AiClient {
       // keep a gateway URL configured while the approved AI is Bedrock
       // (stories/bedrock-provider.md §"Notes for the builder").
       logger.warn(
-        `AI_GATEWAY_URL is set to ${this.config.gatewayUrl}, but the model ` +
+        `AI_GATEWAY_URL is set to ${gatewayUrl}, but the model ` +
           `"${this.config.model}" is not a gateway-routed model — the gateway URL ` +
           'applies only to gateway-routed models (gateway/… and aibroker/…), so this ' +
           'request goes wherever the model prefix points instead: for openai/…, ' +
@@ -336,27 +331,21 @@ export class AiClient {
           'simply unused here.',
       );
     }
-    const opts = viaGateway
-      ? { baseURL: `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1` }
-      : {};
+    const opts = viaGateway && hasGatewayUrl(gatewayUrl) ? { baseURL: gatewayV1(gatewayUrl) } : {};
     return new AIGateway(this.config.model, this.config.apiKey ?? '', opts);
   }
 
   /**
-   * Did someone actually choose this gateway URL, or is it just the built-in?
-   *
-   * Compared against `DEFAULT_CONFIG` rather than against `undefined` because
-   * `gatewayUrl` is a required field with a default — every resolved config has
-   * one, so "is it set?" can only ever answer yes. Trailing slashes are
-   * normalised the same way {@link buildGateway} normalises them, so a value
-   * that differs from the default only by a `/` is not treated as a choice.
-   *
-   * Two callers, opposite directions: the inert-pair warning fires when a
-   * chosen URL is being ignored, and the `gateway/` guard fires when no URL was
-   * chosen at all.
+   * Where a chat request goes, for the log: the gateway's endpoint for a
+   * gateway-routed model, or the provider's own for a direct one. The provider
+   * SDK owns that URL, so a direct model is named by its provider instead.
    */
-  private hasCustomGatewayUrl(): boolean {
-    return isCustomGatewayUrl(this.config.gatewayUrl);
+  private requestTarget(): string {
+    const gatewayUrl = this.config.gatewayUrl;
+    if (gatewayRoutePrefix(this.config.model) !== null && hasGatewayUrl(gatewayUrl)) {
+      return `${gatewayV1(gatewayUrl)}/chat/completions`;
+    }
+    return `${this.config.model.split('/')[0]} (direct)`;
   }
 
   /**
@@ -428,15 +417,20 @@ export class AiClient {
    * (stories/keyless-replay-and-gateway-env.md), and a memoized gateway would
    * keep talking to the old endpoint for the life of the session.
    *
-   * `gatewayUrl` is optional so that a caller which does not manage it — the
-   * config's value is a required string, so there is no "cleared" state to
-   * express — leaves today's URL alone rather than reading as a change.
+   * `gatewayUrl` has three states: a URL re-points the client, `null` clears
+   * it (the project's `.env` stopped setting one and nothing else does), and
+   * `undefined` — the argument left out — leaves today's URL alone, for a
+   * caller that does not manage it.
    *
    * Returns a short, key-safe description of what changed (for logging), or
    * `null` when nothing changed. The returned string NEVER contains the key
    * value — only the fact that it changed.
    */
-  syncAuth(model: string, apiKey: string | undefined, gatewayUrl?: string): string | null {
+  syncAuth(
+    model: string,
+    apiKey: string | undefined,
+    gatewayUrl?: string | null,
+  ): string | null {
     const changes: string[] = [];
     if (model !== this.config.model) {
       changes.push(`AI model ${this.config.model} → ${model}`);
@@ -450,11 +444,14 @@ export class AiClient {
       if (apiKey === undefined) delete this.config.apiKey;
       else this.config.apiKey = apiKey;
     }
-    if (gatewayUrl !== undefined && gatewayUrl !== this.config.gatewayUrl) {
+    if (gatewayUrl !== undefined && (gatewayUrl ?? undefined) !== this.config.gatewayUrl) {
       // Safe to log in full: an endpoint is routing, not a secret — the same
       // reason it takes AI_MODEL's precedence rather than AI_API_KEY's.
-      changes.push(`AI gateway ${this.config.gatewayUrl} → ${gatewayUrl}`);
-      this.config.gatewayUrl = gatewayUrl;
+      changes.push(
+        `AI gateway ${this.config.gatewayUrl ?? '(none)'} → ${gatewayUrl ?? '(none)'}`,
+      );
+      if (gatewayUrl === null) delete this.config.gatewayUrl;
+      else this.config.gatewayUrl = gatewayUrl;
     }
     // A model, key or gateway change invalidates the cached gateway (the model
     // is bound at construction, and the baseURL — both whether there is one and
@@ -517,7 +514,7 @@ export class AiClient {
     // statement earlier.
     const gateway = this.getGateway();
     const requestId = nextRequestId++;
-    const url = `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1/chat/completions`;
+    const url = this.requestTarget();
 
     logger.debug(`POST ${url} (${messages.length} messages) [req#${requestId}]`);
     logger.trace(`ai.request#${requestId}`, {
@@ -578,7 +575,7 @@ export class AiClient {
     // claims a request went out.
     const gateway = this.getGateway();
     const requestId = nextRequestId++;
-    const url = `${this.config.gatewayUrl.replace(/\/+$/, '')}/v1/chat/completions`;
+    const url = this.requestTarget();
 
     logger.debug(`POST ${url} (streaming, ${messages.length} messages) [req#${requestId}]`);
     logger.trace(`ai.request#${requestId}`, {
