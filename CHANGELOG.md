@@ -29,6 +29,25 @@ For the same reason, the live integration tests' `LIVE_SERVER_URL` is now
 `LIVE_STEPTIX_SERVER_URL`. Set the new name when you point a live run at a
 server yourself; the old one is ignored and the tests check against `:3100`.
 
+### Fixed — a fresh clone can run every test suite
+
+On a fresh clone, each suite failed before it tested anything:
+- **Unit suites:** the README's one `npm install` left four of the five
+  projects uninstalled, so 25 root tests could not load their packages.
+- **`test:integration`:** 374 of 516 tests failed with STX003. Their fixture
+  project's `.env` was gitignored.
+- **`test:live`:** the runner exited because `templates/.env` was missing. The
+  two `data-rows` tests that call the server got 401, because they looked for
+  the server key in `templates/.env`, and that key now lives in the machine
+  file.
+
+Now:
+- **`npm run setup`** installs all five projects and Playwright's Chromium.
+- **The integration fixture's `.env` is tracked.** It holds only fake values.
+- **The live tests find the server key the way the extension does.**
+- **The live runner needs only a model key.** Put `AI_API_KEY` in the machine
+  `.env`. If the key is missing, the runner says so before it starts anything.
+
 ### Changed — the default model is openai/gpt-6-luna
 
 The built-in default model, the one `steptix init` writes into a new

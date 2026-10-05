@@ -123,9 +123,24 @@ npx steptix ui --config ./custom.config.ts
 | `npm run ui` | Build all and launch the Runner UI |
 | `npm run dev:ui` | Dev mode with hot-reload for the renderer |
 | `npm run dev` | Run the CLI directly via tsx (no build needed) |
+| `npm run setup` | Install all five projects and Playwright's Chromium — run once after cloning (see below) |
 | `npm test` | Run the test suite |
 | `npm run lint` | Type-check without emitting |
 | `npm run clean` | Remove build artifacts |
+
+### Set up a clone to run the tests
+
+The repo is five npm projects — the framework at the root, `runner-core/`,
+`steptix-vscode/`, `flick-vscode/` and `fixtures/tools/` — and the root suite
+uses all of them, plus Playwright's Chromium. One command, once:
+
+```bash
+npm run setup
+```
+
+After that the four unit suites (`npm test` at the root and in `runner-core/`,
+`flick-vscode/` and `steptix-vscode/`) and `npm run test:integration` need no
+keys or `.env` files. The live suite needs a model key; see below.
 
 ### Testing the Steptix extension
 
