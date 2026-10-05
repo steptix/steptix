@@ -78,7 +78,14 @@ jobs:
         run: npx playwright install chromium
 
       # Each suite runs even if an earlier one failed, so one run reports all
-      # four. `npm test` keeps its pretest builds — several suites test dist/.
+      # four. Several suites test dist/, so something must build it first —
+      # but only once. The root's `npm test` keeps its pretest build of the
+      # root dist/, and runner-core's dist/ was built by its `prepare` during
+      # Install. runner-core's and steptix-vscode's pretests would only
+      # rebuild those two (about 40 s), so they run with --ignore-scripts,
+      # which skips pre/post scripts but still runs `test`. That makes them
+      # depend on the Root step having built: if the root fails to compile,
+      # steptix-vscode fails too, and the root's error is the one to read.
       #
       # Vitest starts CPUs - 1 workers outside watch mode, which is one on a
       # 2-vCPU hosted runner: every file in turn. The root suite mostly waits
@@ -87,10 +94,10 @@ jobs:
         run: npm test -- --maxWorkers=6
       - name: runner-core
         if: ${{ !cancelled() }}
-        run: npm test --prefix runner-core
+        run: npm test --ignore-scripts --prefix runner-core
       - name: flick-vscode
         if: ${{ !cancelled() }}
         run: npm test --prefix flick-vscode
       - name: steptix-vscode
         if: ${{ !cancelled() }}
-        run: npm test --prefix steptix-vscode
+        run: npm test --ignore-scripts --prefix steptix-vscode
