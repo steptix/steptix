@@ -231,6 +231,40 @@ and on any developer's machine.
   - Pass `loadConfig` an explicit project root.
   - Don't depend on the locale or on a fixed calendar year.
 
+## No real secrets in tracked files
+
+Treat every commit as public, history included: deleting a line later does
+not unpublish it. Keep every real credential — `STEPTIX_SERVER_API_KEY`, `AI_API_KEY`, gateway
+and provider keys, GitHub, npm and Marketplace tokens, passwords — out of
+tracked files: code, tests, scripts, docs, issues, stories and fixtures.
+
+- **Read keys from where they live.** The server key is the machine key in
+  `%LOCALAPPDATA%\steptix\.env` (`~/.steptix/.env` elsewhere); AI keys come
+  from a gitignored `.env` or the environment. A script that talks to a
+  server reads `process.env.STEPTIX_SERVER_API_KEY`, else `readMachineKey()`
+  or `ensureMachineKey()` from `src/env/user-root.ts` — the same chain
+  `serve` uses, so the two always agree.
+- **Use fakes that say what they are in tests.** Name the key after the test
+  (`'compile-api-key'`, `'integration-test-key'`), never a random-looking
+  string, so neither a reader nor a scanner mistakes it for a real one.
+- **Paste nothing real into docs.** Redact keys, tokens and `Authorization`
+  headers from logs, stack traces and request dumps before they go into an
+  issue, story or report.
+- **Keep `.env` files untracked.** Add new variables to `.env.example` with an
+  empty value.
+- **Rotate a key that was ever committed.** Deleting it from the file or from
+  history does not unpublish it; rotating does. For the server key, remove
+  its line from the machine `.env` and restart `serve`, which writes a new
+  one; then update every client that holds a copy, such as `flick.apiKey`.
+
+When reviewing a diff, `/code-review` included, report as a blocking finding
+any string literal that looks like a real credential: one assigned to a
+`*KEY*`, `*TOKEN*`, `*SECRET*` or `*PASSWORD*` name, sent as `x-api-key` or
+`Authorization`, or shaped like a known key (`steptix_` + hex, a bare UUID,
+`sk-`, `ghp_`, `github_pat_`, `npm_`, `AKIA`, a PEM block). Also report a
+tracked `.env`, and a real value added to `.env.example`. A fake that names
+its own test is not a finding.
+
 ## Seed gitignored files into a new worktree
 
 After creating a worktree (via `git worktree add` or the `EnterWorktree`
