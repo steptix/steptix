@@ -34,6 +34,7 @@ const {
   copyWorkspace,
   rebaseConfigPaths,
   pointEnvAtServer,
+  liveAiProblem,
   pickFreePorts,
   probeHealth,
   buildFramework,
@@ -314,11 +315,14 @@ async function main() {
   // code a compile emits is bundled from whatever that walk finds.
   const shardRoot = path.resolve(__dirname, '..', '..', '..', '.live-shards');
 
-  if (!fs.existsSync(path.join(templatesDir, '.env'))) {
-    console.error(
-      `templates/.env not found at ${templatesDir}. The live test ` +
-        `requires STEPTIX_SERVER_URL, STEPTIX_SERVER_API_KEY, AI_API_KEY in that file.`,
-    );
+  // `templates/.env` is optional: each shard's copy gets its own
+  // STEPTIX_SERVER_URL either way, and the server key lives in the machine
+  // file. What a live run cannot do without is a model, so that is checked
+  // here, before any server or VS Code starts, rather than as a failed step
+  // minutes in.
+  const aiProblem = liveAiProblem({ templatesDir, repoRoot });
+  if (aiProblem) {
+    console.error(aiProblem);
     process.exit(2);
   }
 

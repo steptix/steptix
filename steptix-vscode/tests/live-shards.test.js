@@ -18,6 +18,7 @@ const {
   copyWorkspace,
   rebaseConfigPaths,
   pointEnvAtServer,
+  liveAiProblem,
   scheduleOrder,
   runPool,
   sharedServerStatsWarning,
@@ -390,15 +391,77 @@ test("pointEnvAtServer: a commented-out STEPTIX_SERVER_URL is not mistaken for t
   assert.match(text, /^STEPTIX_SERVER_URL=http:\/\/localhost:3207$/m, "a real line is added");
 });
 
-test("pointEnvAtServer: a missing .env is an error, not a silent no-op", () => {
-  // Silence here would send the shard's extension at whatever STEPTIX_SERVER_URL the
-  // walk-up found next — in practice the other checkout's server, testing the
-  // wrong `src/` while reporting green.
+test("pointEnvAtServer: a missing .env is created holding only STEPTIX_SERVER_URL", () => {
+  // A fresh clone has no templates/.env (it is gitignored). Skipping the file
+  // would send the shard's extension at whatever STEPTIX_SERVER_URL the
+  // walk-up found next — in practice another checkout's server, testing the
+  // wrong `src/` while reporting green — so the shard gets a .env of its own.
   const dir = tmpDir();
-  assert.throws(
-    () => pointEnvAtServer(path.join(dir, ".env"), "http://localhost:3207"),
-    /no \.env/,
+  const env = path.join(dir, ".env");
+
+  pointEnvAtServer(env, "http://localhost:3207");
+
+  assert.equal(fs.readFileSync(env, "utf8"), "STEPTIX_SERVER_URL=http://localhost:3207\n");
+});
+
+// ─── liveAiProblem ─────────────────────────────────────────────────────────
+
+/** A repo root with a templates/ dir and an empty machine file, all under tmp. */
+function aiFixture({ templatesEnv, rootEnv, machineEnv, config } = {}) {
+  const repoRoot = tmpDir();
+  const templatesDir = path.join(repoRoot, "templates");
+  fs.mkdirSync(templatesDir, { recursive: true });
+  if (templatesEnv !== undefined) write(path.join(templatesDir, ".env"), templatesEnv);
+  if (rootEnv !== undefined) write(path.join(repoRoot, ".env"), rootEnv);
+  if (config !== undefined) write(path.join(repoRoot, "steptix.config.json"), JSON.stringify(config));
+  const machineEnvPath = path.join(repoRoot, "machine", ".env");
+  fs.mkdirSync(path.dirname(machineEnvPath), { recursive: true });
+  if (machineEnv !== undefined) write(machineEnvPath, machineEnv);
+  return { repoRoot, templatesDir, machineEnvPath, env: {} };
+}
+
+test("liveAiProblem: no key anywhere — names every place looked and the one line to add", () => {
+  const f = aiFixture();
+  const problem = liveAiProblem(f);
+  assert.match(problem, /no AI_API_KEY was found/);
+  assert.match(problem, /templates\/\.env/);
+  assert.match(problem, /the environment/);
+  assert.ok(problem.includes(f.machineEnvPath), "names the machine file");
+  assert.match(problem, /AI_API_KEY=<your OpenAI API key>/);
+});
+
+test("liveAiProblem: a key in any one source passes — templates, environment, repo root or machine", () => {
+  assert.equal(liveAiProblem(aiFixture({ templatesEnv: "AI_API_KEY=k\n" })), null);
+  assert.equal(liveAiProblem({ ...aiFixture(), env: { AI_API_KEY: "k" } }), null);
+  assert.equal(liveAiProblem(aiFixture({ rootEnv: "AI_API_KEY=k\n" })), null);
+  assert.equal(liveAiProblem(aiFixture({ machineEnv: "AI_API_KEY=k\n" })), null);
+});
+
+test("liveAiProblem: a blank or commented-out key is no key", () => {
+  const f = aiFixture({ templatesEnv: "AI_API_KEY=\n# AI_API_KEY=k\n" });
+  assert.match(liveAiProblem(f), /no AI_API_KEY was found/);
+});
+
+test("liveAiProblem: a gateway-routed model with no AI_GATEWAY_URL anywhere is refused", () => {
+  for (const model of ["aibroker/openai/x", "gateway/copilot/x"]) {
+    const f = aiFixture({ machineEnv: `AI_API_KEY=k\nAI_MODEL=${model}\n` });
+    const problem = liveAiProblem(f);
+    assert.match(problem, new RegExp(`AI_MODEL=${model} routes through a gateway`));
+    assert.match(problem, /AI_GATEWAY_URL/);
+  }
+});
+
+test("liveAiProblem: a gateway-routed model passes once a URL is set in an env file or the config", () => {
+  const key = "AI_API_KEY=k\nAI_MODEL=aibroker/openai/x\n";
+  assert.equal(liveAiProblem(aiFixture({ machineEnv: `${key}AI_GATEWAY_URL=https://g.test\n` })), null);
+  assert.equal(
+    liveAiProblem(aiFixture({ machineEnv: key, config: { ai: { gatewayUrl: "https://g.test" } } })),
+    null,
   );
+});
+
+test("liveAiProblem: a direct model needs no gateway URL", () => {
+  assert.equal(liveAiProblem(aiFixture({ machineEnv: "AI_API_KEY=k\nAI_MODEL=openai/gpt-6-luna\n" })), null);
 });
 
 // ─── sharedServerStatsWarning ──────────────────────────────────────────────
