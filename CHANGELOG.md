@@ -23,10 +23,7 @@ There is no fallback to the old name. A `SERVER_URL` line is ignored: the VS
 Code extension then uses the default, `http://127.0.0.1:3100`, and the MCP
 server refuses a project with "No STEPTIX_SERVER_URL". Rename the line in
 each `.env`, `.env.<name>` and the machine `.env`, and rename a `SERVER_URL`
-environment variable if you set one. `scripts/migrate-to-steptix.ps1` does
-all of that; run it with `-WhatIf` first. It copies a `SERVER_URL` user
-variable rather than moving it, since another tool may read that name, and
-leaves a worktree alone until it is named with `-ProjectsOnly -Path`.
+environment variable if you set one.
 
 For the same reason, the live integration tests' `LIVE_SERVER_URL` is now
 `LIVE_STEPTIX_SERVER_URL`. Set the new name when you point a live run at a
@@ -257,12 +254,8 @@ one go and with no fallback to the old names:
 | folder `testbench-native/` | `steptix-vscode/` |
 
 The new extension ID is a different extension to VS Code: uninstall the old
-one, and move settings across. `scripts/migrate-to-steptix.ps1` does that and
-the rest of one machine's state (the user-root folder and its `.env`, user
-environment variables, VS Code settings, and each checkout's `.env` files,
-config file and `.aiui/` folders); run it with `-WhatIf` first. The Copilot
-bridge token lives in the old extension's secret storage, so run "Steptix: Use
-Copilot for AI" once more.
+one, and move settings across. The Copilot bridge token lives in the old
+extension's secret storage, so run "Steptix: Use Copilot for AI" once more.
 
 Entries below this one, and resolved issues, keep the names they were written
 with.

@@ -11,10 +11,7 @@ entries keep the old names on purpose; read `aiui` there as `steptix` and
 
 The server address variable `SERVER_URL` became `STEPTIX_SERVER_URL` the same
 way, with no fallback, and the live tests' `LIVE_SERVER_URL` became
-`LIVE_STEPTIX_SERVER_URL`. Resolved issues keep the old names. After merging
-main into a worktree seeded before the rename, run
-`<main-checkout>\scripts\migrate-to-steptix.ps1 -ProjectsOnly -Path <worktree>`
-to rename the line in its `.env` files.
+`LIVE_STEPTIX_SERVER_URL`. Resolved issues keep the old names.
 
 The checkout folder was renamed from `ai-ui-automation` to `steptix` as well.
 Anything that stored the old absolute path went stale with the rename rather
