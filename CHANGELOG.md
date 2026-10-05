@@ -73,6 +73,16 @@ silent one exits with code 3 and changes nothing. If Windows PowerShell cannot
 run the check, the install goes ahead as before but removes no older version.
 See [packaging/runtime/README.md](packaging/runtime/README.md#upgrades).
 
+### Fixed — Add check outlines what the pointer already rests on
+
+Turning on Add check while the pointer was resting on an element drew no
+outline or label until the pointer moved. Pick mode reaches the page a moment
+after it is armed, and the page only drew the outline on a pointer move that
+arrived after that. Now the element under the last pointer position is
+outlined as soon as pick mode comes on. This was also why the root test *the
+pick outline and label are never in the crop of what was picked* sometimes
+timed out on CI with `last seen: 0` (#194).
+
 ### Fixed — unit tests that failed for no reason, and four things they found
 
 A review of all four unit suites (9,338 tests) cut them to 8,945 and made
