@@ -9,7 +9,7 @@
  * %LOCALAPPDATA%. It hands over everything through the environment — the
  * install folder, the project, the URL nothing is listening on yet — and gives
  * this VS Code a profile of its own: no Steptix settings at all; a machine
- * .env holding only SERVER_URL, so there is no machine key; a project with no
+ * .env holding only STEPTIX_SERVER_URL, so there is no machine key; a project with no
  * .env; and no STEPTIX_NODE, so steptix.cmd finds Node on PATH the way it does
  * on a user's machine.
  *
@@ -109,11 +109,11 @@ describe('Installed runtime, auto-started by the extension through steptix.cmd',
     // on its own.
     assert.equal(process.env.STEPTIX_NODE, undefined, 'STEPTIX_NODE must not be set: Node comes from PATH');
     assert.equal(process.env.STEPTIX_SERVER_API_KEY, undefined, 'no inherited API key');
-    assert.equal(process.env.SERVER_URL, undefined, 'no inherited SERVER_URL');
+    assert.equal(process.env.STEPTIX_SERVER_URL, undefined, 'no inherited STEPTIX_SERVER_URL');
     const machineEnv = path.join(required('LOCALAPPDATA'), 'steptix', '.env');
     assert.equal(
       fs.readFileSync(machineEnv, 'utf8').trim(),
-      `SERVER_URL=${serverUrl}`,
+      `STEPTIX_SERVER_URL=${serverUrl}`,
       'the machine .env names the server and holds no key yet — the started server must generate it',
     );
     assert.equal(

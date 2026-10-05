@@ -10,9 +10,9 @@ import {
  * One chain, the same shape as the API key's (stories/machine-key.md):
  *
  *   project `.env` (walk-up, `.env.<name>` laid over it)
- *     →  the `SERVER_URL` environment variable
- *     →  `SERVER_URL` in the user root's `.env`
- *     →  {@link DEFAULT_SERVER_URL}
+ *     →  the `STEPTIX_SERVER_URL` environment variable
+ *     →  `STEPTIX_SERVER_URL` in the user root's `.env`
+ *     →  {@link DEFAULT_STEPTIX_SERVER_URL}
  *
  * so a project needs no `.env` at all. The machine file is where a user who
  * runs the server somewhere other than the default says so once, for every
@@ -26,7 +26,7 @@ import {
 /** Where `steptix serve` listens by default — `server.host` and `server.port`
  *  in src/config/defaults.ts. Nothing links the two copies (the extension
  *  bundles separately from the framework), so change both together. */
-export const DEFAULT_SERVER_URL = 'http://127.0.0.1:3100';
+export const DEFAULT_STEPTIX_SERVER_URL = 'http://127.0.0.1:3100';
 
 export type ServerUrlOrigin =
   /** The project's `.env` or the active `.env.<name>` — `path` is the file. */
@@ -57,13 +57,13 @@ export function resolveServerUrl(
   if (project && fromProject) {
     return { serverUrl: fromProject, origin: { kind: 'project', path: project.path } };
   }
-  const fromEnvironment = (deps?.env ?? process.env)['SERVER_URL']?.trim();
+  const fromEnvironment = (deps?.env ?? process.env)['STEPTIX_SERVER_URL']?.trim();
   if (fromEnvironment) return { serverUrl: fromEnvironment, origin: { kind: 'environment' } };
   const fromMachine = readMachineServerUrl(deps);
   if (fromMachine) {
     return { serverUrl: fromMachine, origin: { kind: 'machine', path: userRootEnvPath(deps) } };
   }
-  return { serverUrl: DEFAULT_SERVER_URL, origin: { kind: 'default' } };
+  return { serverUrl: DEFAULT_STEPTIX_SERVER_URL, origin: { kind: 'default' } };
 }
 
 /** Where a URL came from, as the run log and STX004 name it. */
@@ -77,7 +77,7 @@ export function describeServerUrlOrigin(origin: ServerUrlOrigin, deps?: UserRoot
     case 'default':
       return (
         `the default — neither the project's .env, the environment nor ` +
-        `${userRootEnvPath(deps)} sets SERVER_URL`
+        `${userRootEnvPath(deps)} sets STEPTIX_SERVER_URL`
       );
   }
 }

@@ -1,6 +1,6 @@
 /**
  * The user root's `.env` (stories/machine-key.md in the Steptix repo): the
- * machine key, and the machine's `SERVER_URL`.
+ * machine key, and the machine's `STEPTIX_SERVER_URL`.
  *
  * READ-ONLY on purpose. Generation belongs to the processes that *start* the
  * Sessions API server (`steptix serve`, the MCP server's auto-start) — a key
@@ -22,7 +22,7 @@ import * as path from 'node:path';
 import { parseEnv } from './env-file.js';
 
 export const MACHINE_KEY_VAR = 'STEPTIX_SERVER_API_KEY';
-export const MACHINE_SERVER_URL_VAR = 'SERVER_URL';
+export const MACHINE_SERVER_URL_VAR = 'STEPTIX_SERVER_URL';
 
 /** Injection seam for tests — the path derives entirely from these. */
 export interface UserRootDeps {
@@ -84,7 +84,7 @@ export function readMachineKey(deps?: UserRootDeps): string | null {
 }
 
 /**
- * The machine's `SERVER_URL`, or null when there is none — the server every
+ * The machine's `STEPTIX_SERVER_URL`, or null when there is none — the server every
  * project on this machine talks to unless its own `.env` names another.
  */
 export function readMachineServerUrl(deps?: UserRootDeps): string | null {

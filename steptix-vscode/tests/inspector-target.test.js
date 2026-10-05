@@ -63,7 +63,7 @@ test('a non-loopback inspector host is refused, not dialled', () => {
   // `inspector` arrives in an UNAUTHENTICATED /health body, and `service` is
   // a self-declared string — not proof of anything. A responder that named a
   // remote host would otherwise have VS Code's debug adapter connect out and
-  // speak CDP to it. Tool step-into already requires a loopback SERVER_URL,
+  // speak CDP to it. Tool step-into already requires a loopback STEPTIX_SERVER_URL,
   // and a real Node inspector reports a local address, so nothing legitimate
   // is refused here.
   assert.equal(parseInspectorUrl('ws://attacker.example.com:9229/id'), null);

@@ -25,7 +25,7 @@
  * `browser.video: "on"`), so ONLY this run records and it writes under
  * templates/video-record/reports/ — the other live fixtures keep video off.
  *
- * Prereq: the api-server running on $LIVE_SERVER_URL (default
+ * Prereq: the api-server running on $LIVE_STEPTIX_SERVER_URL (default
  * http://localhost:3100), with templates/.env providing STEPTIX_SERVER_API_KEY +
  * AI_API_KEY. (Report location is now per-project, so the server's cwd no longer
  * matters for where this test's report lands.)
@@ -70,7 +70,7 @@ describe('Steptix live — server records, links, and saves a .webm per project'
     hooks = ext.exports?.__testHooks;
     assert.ok(hooks, '__testHooks missing — activation may have failed');
 
-    const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, {
         method: 'OPTIONS',

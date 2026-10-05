@@ -28,7 +28,7 @@
  * server executes is then a body line, so the evidence arrives before any
  * step has had a chance to fail for unrelated reasons.
  *
- * Prereq: the API server running on $LIVE_SERVER_URL (default :3100) with
+ * Prereq: the API server running on $LIVE_STEPTIX_SERVER_URL (default :3100) with
  * templates/.env providing STEPTIX_SERVER_API_KEY + AI_API_KEY.
  */
 const assert = require('node:assert/strict');
@@ -69,7 +69,7 @@ describe('Steptix live — inline sections expand server-side', function () {
     hooks = ext.exports?.__testHooks;
     assert.ok(hooks, '__testHooks missing — activation may have failed');
 
-    const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, { method: 'OPTIONS' });
       assert.ok(

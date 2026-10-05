@@ -59,7 +59,7 @@ Threat model, honestly stated:
 - The MCP server widens the blast radius over Steptix in two ways: it is
   spawned automatically by an agent host (no human watching the first
   connection), and one server serves *every* project pointing at that
-  `SERVER_URL`, so one squatter collects each project's `.env` in turn.
+  `STEPTIX_SERVER_URL`, so one squatter collects each project's `.env` in turn.
 
 ## Decision (for now)
 
@@ -98,7 +98,7 @@ and could land first.
 ## Revisit conditions
 
 Pick up when any of: (a) the framework is used on a shared or multi-user
-machine (CI runner, build agent, shared dev box); (b) `SERVER_URL` is ever
+machine (CI runner, build agent, shared dev box); (b) `STEPTIX_SERVER_URL` is ever
 pointed at a non-loopback address; (c) the MCP server is exposed over a
 transport other than stdio (the deferred Streamable HTTP option in
 [stories/mcp-server.md](../stories/mcp-server.md) "Out of scope"); or (d) any

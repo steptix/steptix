@@ -1474,7 +1474,7 @@ Kinds: **Low L1** tautological / tests the mock · **L2** cannot fail · **L3** 
 
 | Where | Test | Kind | Why | Action | Conf. | Batch |
 |---|---|---|---|---|---|---|
-| 79 | "nothing anywhere is the default serve listens on…" (line 79) | Defect | `assert.equal(DEFAULT_SERVER_URL, 'http://127.0.0.1:3100');` compares the constant with its own literal. The source names the real risk at server-url.ts:26-28: "Nothing links the two copies (the extension bundles separately from the framework), so change both… | rewrite the line as a parity check. Import or read `src/config/defaults.ts`'s `DEFAULT_CONFIG.server` (the root `dist/config/defaults.js` exists after pretest) and assert ``DEFAULT_SERVER_URL === `ht… | high | E01 |
+| 79 | "nothing anywhere is the default serve listens on…" (line 79) | Defect | `assert.equal(DEFAULT_STEPTIX_SERVER_URL, 'http://127.0.0.1:3100');` compares the constant with its own literal. The source names the real risk at server-url.ts:26-28: "Nothing links the two copies (the extension bundles separately from the framework), so change both… | rewrite the line as a parity check. Import or read `src/config/defaults.ts`'s `DEFAULT_CONFIG.server` (the root `dist/config/defaults.js` exists after pretest) and assert ``DEFAULT_STEPTIX_SERVER_URL === `ht… | high | E01 |
 
 ### `steptix-vscode/tests/set-step-mirrors.test.js`
 

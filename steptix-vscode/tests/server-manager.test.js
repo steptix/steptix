@@ -226,7 +226,7 @@ test('probe: a server that never answers is DOWN with a detail that says it time
   }
 });
 
-test('probe: a trailing slash on SERVER_URL does not produce //health', async () => {
+test('probe: a trailing slash on STEPTIX_SERVER_URL does not produce //health', async () => {
   let seen = null;
   const s = await stub((req, res) => {
     seen = req.url;
@@ -462,7 +462,7 @@ test('decide: down + localhost + configured ⇒ spawn', () => {
 
 test('decide: down + REMOTE url ⇒ skip, however configured', () => {
   // The rule the manual Start Server command used to be missing: starting a
-  // local server for a remote SERVER_URL produces one nothing will talk to.
+  // local server for a remote STEPTIX_SERVER_URL produces one nothing will talk to.
   const action = decideServerAction('http://build-box:3100', { kind: 'down', detail: 'refused' }, CONFIGURED);
   assert.equal(action.kind, 'skip');
   assert.match(action.reason, /not a localhost URL/);

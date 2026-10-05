@@ -116,7 +116,7 @@ function makeProject(overrides: Record<string, unknown> = {}): any {
     projectRoot: root,
     configPath: path.join(root, 'steptix.config.json'),
     env: {
-      SERVER_URL: 'http://localhost:3100',
+      STEPTIX_SERVER_URL: 'http://localhost:3100',
       STEPTIX_SERVER_API_KEY: 'project-key',
       AI_API_KEY: 'ai-secret',
     },
@@ -271,10 +271,10 @@ describe('ensureServerReady — probe arms', () => {
 });
 
 // ---------------------------------------------------------------------------
-// SERVER_URL validation
+// STEPTIX_SERVER_URL validation
 // ---------------------------------------------------------------------------
 
-describe('ensureServerReady — SERVER_URL validation', () => {
+describe('ensureServerReady — STEPTIX_SERVER_URL validation', () => {
   it('refuses a path-bearing URL before probing at all', async () => {
     const h = makeHarness();
     h.up = true;
@@ -317,7 +317,7 @@ describe('ensureServerReady — SERVER_URL validation', () => {
     expect(h.deps.spawn).not.toHaveBeenCalled();
   });
 
-  it('refuses a SERVER_URL that is not a URL at all', async () => {
+  it('refuses a STEPTIX_SERVER_URL that is not a URL at all', async () => {
     const h = makeHarness();
 
     const err = await failure(

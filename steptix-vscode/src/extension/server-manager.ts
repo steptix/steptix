@@ -80,7 +80,7 @@ export function normalizeBaseUrl(serverUrl: string): string {
 
 /**
  * True for a URL whose host is loopback — the only case auto-start fires for.
- * A remote SERVER_URL is somebody else's machine; starting a server here would
+ * A remote STEPTIX_SERVER_URL is somebody else's machine; starting a server here would
  * produce one that nothing is going to talk to.
  *
  * Lives here rather than in run-controller.ts so it is (a) reachable by the
@@ -480,7 +480,7 @@ const AUTO_START_IDLE_TIMEOUT_MINUTES = 60;
  * The command that starts `runtime`'s server on `serverUrl`'s port.
  *
  * `--port` because the URL is what the run is about to dial and the server's
- * own default (3100) need not be it — a `SERVER_URL` naming another port
+ * own default (3100) need not be it — a `STEPTIX_SERVER_URL` naming another port
  * would otherwise start a server where nobody is looking and time out.
  *
  * On Windows through `steptix.cmd`, which is how the installer means the
@@ -529,7 +529,7 @@ export type StartServerResult =
  * pre-run check and the manual Start Server command. When each made its own
  * triage they drifted immediately — the command path lost the "only auto-start
  * a LOCALHOST url" rule and would spawn a local server for a remote
- * SERVER_URL. Each caller now maps this union onto its own vocabulary
+ * STEPTIX_SERVER_URL. Each caller now maps this union onto its own vocabulary
  * (STX027/STX028 for a run, toasts for a command), which is the only part that
  * legitimately differs.
  */
@@ -698,7 +698,7 @@ export async function startServerAndWait(args: {
   // A blank cwd is refused rather than defaulted to the workspace folder.
   // The suggested command is cwd-relative (`dist/index.js`), so defaulting
   // would let a hostile repo decide WHAT the (user-scoped, workspace-unsettable)
-  // command actually resolves to: opening a repo whose SERVER_URL points at a
+  // command actually resolves to: opening a repo whose STEPTIX_SERVER_URL points at a
   // down localhost port would run that repo's dist/index.js. See §5.
   if (!config.cwd) {
     return {

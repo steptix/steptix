@@ -85,7 +85,7 @@ project, and no project resolved. Not a confusing failure three layers down.
 | --- | --- | --- |
 | Resolve a project from cwd / `project_root` / `STEPTIX_MCP_ROOTS` | ✅ shipped | [project.ts:444](../src/mcp/project.ts:444) |
 | Refuse when no `steptix.config.json` is found | ✅ shipped — and this is the blocker | [project.ts:489](../src/mcp/project.ts:489) |
-| `SERVER_URL` / `STEPTIX_SERVER_API_KEY` falling back to `process.env` | ✅ shipped | [project.ts:360](../src/mcp/project.ts:360) |
+| `STEPTIX_SERVER_URL` / `STEPTIX_SERVER_API_KEY` falling back to `process.env` | ✅ shipped | [project.ts:360](../src/mcp/project.ts:360) |
 | Prove browser ownership from disk, not memory | ✅ shipped | [cdp-registry.ts:240](../src/browser/cdp-registry.ts:240) |
 | Ownership scoped to exactly one root | ✅ shipped — and this is the second blocker | [cdp-registry.ts:156](../src/browser/cdp-registry.ts:156) |
 | Any tool working with no project at all | ❌ nothing | every tool goes through `resolveProject` |
@@ -101,7 +101,7 @@ Four unrelated things, fused into one path:
 
 | Supplies | Genuinely project-shaped? |
 | --- | --- |
-| `SERVER_URL`, `STEPTIX_SERVER_API_KEY` | No — already falls back to `process.env` |
+| `STEPTIX_SERVER_URL`, `STEPTIX_SERVER_API_KEY` | No — already falls back to `process.env` |
 | `.steptix/cdp-profiles/` — the browsers | **No** — personal and machine-scoped |
 | `skillsDir`, `toolsDir`, `.env` interpolation | Yes — these are the project's code |
 | `mcp.cdp.allowUnowned` | Yes — a human's decision about one project |
@@ -205,12 +205,12 @@ chain as they are, and widens the *directory* around them into a full root.
 
 What this story does add:
 
-- **`SERVER_URL` for project-less runs**, defaulted to loopback on a
+- **`STEPTIX_SERVER_URL` for project-less runs**, defaulted to loopback on a
   distinctive port, not 3100. Loopback it must be anyway — auto-start only
   ever spawns on a loopback host (§5 arm 4) — and a distinctive port avoids
   colliding with the project server people already run on 3100, which
   auto-start would refuse as an unrecognized service.
-- **The zero-file path stays open.** `SERVER_URL` and `STEPTIX_SERVER_API_KEY`
+- **The zero-file path stays open.** `STEPTIX_SERVER_URL` and `STEPTIX_SERVER_API_KEY`
   set in the MCP host config's `env` block (where `STEPTIX_MCP_ROOTS` lives
   today) are picked up by the `process.env` step with nothing on disk at
   all.

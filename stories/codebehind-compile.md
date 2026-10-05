@@ -277,7 +277,7 @@ means a different step would be silent and wrong.
 
 - **Before** — the run log names the server and checks it is there, exactly
   as a Run does (stories/server-lifecycle.md §5): `server http://localhost:3100
-  (SERVER_URL in C:\AITests\.env)`, then `server healthy at … (v0.9.1)` — or
+  (STEPTIX_SERVER_URL in C:\AITests\.env)`, then `server healthy at … (v0.9.1)` — or
   a spawn when `serverAutoStart` is configured and nothing answers, or a
   refusal (STX027) when the port belongs to something else. A compile that
   still cannot get through is reported in the catalogue's words with the

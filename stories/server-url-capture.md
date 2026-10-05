@@ -1,4 +1,4 @@
-# The server writes its own address — projects stop configuring SERVER_URL
+# The server writes its own address — projects stop configuring STEPTIX_SERVER_URL
 
 ## In plain terms
 
@@ -6,7 +6,7 @@
 story removes the *address*. When the Sessions API server starts, it writes
 the URL it actually bound to a well-known file in the user root; every client
 reads that file as its last resort. A project that says nothing about
-`SERVER_URL` just finds the machine's server — and if the server came up on a
+`STEPTIX_SERVER_URL` just finds the machine's server — and if the server came up on a
 different port, the file says so, because the server wrote it after binding.
 
 Steptix then needs exactly one piece of machine setup: **where the
@@ -29,11 +29,11 @@ Builds **after** [machine-key.md](machine-key.md), on top of its user root.
 > **Verification rule for this story.** "Done" means: (1) a bare `steptix serve`
 > writes the bound URL to the user-root pointer file after listen succeeds —
 > never before — and restarting on a different `--port` updates it; (2) a
-> Steptix run against a project whose `.env` has **no** `SERVER_URL`
+> Steptix run against a project whose `.env` has **no** `STEPTIX_SERVER_URL`
 > resolves the machine server and passes, in both variants; (3) every MCP
 > tool works against such a project; (4) `steptix stop` with no `--url` and no
 > config stops the machine server via the pointer; (5) a project `.env` that
-> sets `SERVER_URL` still wins, so a project-pinned server is untouched; (6)
+> sets `STEPTIX_SERVER_URL` still wins, so a project-pinned server is untouched; (6)
 > a stale pointer — server killed, file left behind — fails the probe and
 > auto-start self-heals it: the spawned server rewrites the pointer; (7) URL
 > capture never rewrites the user root's `.env` — the pointer is its own
@@ -45,7 +45,7 @@ Builds **after** [machine-key.md](machine-key.md), on top of its user root.
 
 ## Context
 
-Who resolves `SERVER_URL` today, and where each path dead-ends:
+Who resolves `STEPTIX_SERVER_URL` today, and where each path dead-ends:
 
 | Reader | Resolution today | Consequence |
 | --- | --- | --- |
@@ -82,7 +82,7 @@ credentials. Runtime state and human configuration get different files; the
 **One resolution order, explicit beating captured:**
 
 ```
-clients:  project .env SERVER_URL → process.env → user-root server.json
+clients:  project .env STEPTIX_SERVER_URL → process.env → user-root server.json
 serve:    --host/--port/config, exactly as today → then writes the pointer
 ```
 
@@ -115,7 +115,7 @@ identifies as ours — the same two-step CDP launch uses
   the user root's `.env` by hand for now; a settings surface comes later.
 - **Multiple concurrent machine servers.** The pointer names one server —
   last started wins, which is the machine-key philosophy applied to the
-  address. A project that wants its own server pins `SERVER_URL` in its
+  address. A project that wants its own server pins `STEPTIX_SERVER_URL` in its
   `.env` and never touches the pointer.
 - **OS-assigned ports (`--port 0`).** The pointer would make it possible —
   bind on 0, capture what the OS chose, exactly like CDP launch. Worth doing

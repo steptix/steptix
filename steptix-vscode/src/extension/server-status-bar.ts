@@ -27,7 +27,7 @@ export interface ServerTarget {
 }
 
 /**
- * SERVER_URL + STEPTIX_SERVER_API_KEY for out-of-run operations (story
+ * STEPTIX_SERVER_URL + STEPTIX_SERVER_API_KEY for out-of-run operations (story
  * server-lifecycle §6.2).
  *
  * There is no test file in play, so the walk-up-from-the-test-file `.env`
@@ -53,7 +53,7 @@ export async function resolveServerTarget(
     env = await readEnvFile(basePath);
   } catch {
     // No readable base `.env` is not the end of it — an overlay can supply
-    // SERVER_URL, and so can the rest of the chain.
+    // STEPTIX_SERVER_URL, and so can the rest of the chain.
   }
   const envName = EnvSelector.activeEnv();
   if (envName) {
@@ -61,7 +61,7 @@ export async function resolveServerTarget(
       const overlay = await readEnvOverlayFile(workspaceRoot, envName);
       if (overlay) {
         env = composeEnv(env, overlay);
-        if (overlay['SERVER_URL']?.trim()) {
+        if (overlay['STEPTIX_SERVER_URL']?.trim()) {
           serverUrlFile = path.join(workspaceRoot, `.env.${envName.trim()}`);
         }
       }
@@ -72,7 +72,7 @@ export async function resolveServerTarget(
   let serverUrl: string;
   let origin: ServerUrlOrigin;
   try {
-    ({ serverUrl, origin } = resolveServerUrl({ value: env['SERVER_URL'], path: serverUrlFile }));
+    ({ serverUrl, origin } = resolveServerUrl({ value: env['STEPTIX_SERVER_URL'], path: serverUrlFile }));
   } catch {
     // An unreadable machine .env is a run-time error (STX007), not a
     // status-bar one.
@@ -94,7 +94,7 @@ export async function resolveServerTarget(
  * Whether the status bar should show a server for this folder at all.
  *
  * Every window activates the extension, and every one would now resolve a
- * server — the chain ends in a default — so "is there a SERVER_URL" no longer
+ * server — the chain ends in a default — so "is there a STEPTIX_SERVER_URL" no longer
  * tells a Steptix project from any other folder. Showing (and polling) a
  * server item in every window open on unrelated code would be noise. So: a
  * folder whose own env names a server, or one with a `steptix.config.json`
@@ -110,7 +110,7 @@ export function showsServer(workspaceRoot: string, target: ServerTarget): boolea
  * Status-bar item reporting whether the Sessions API server is up (§6).
  *
  * Shown for a Steptix folder (`showsServer`) — in particular "no env
- * selected, SERVER_URL in the base .env" must still show it, which is the
+ * selected, STEPTIX_SERVER_URL in the base .env" must still show it, which is the
  * common case.
  */
 export class ServerStatusBar implements vscode.Disposable {
@@ -126,7 +126,7 @@ export class ServerStatusBar implements vscode.Disposable {
     private readonly workspaceRoot: string | undefined,
     /** Swappable so the integration harness's fake reaches the poll too — an
      *  un-injected status bar keeps issuing real fetches at the fixture's
-     *  SERVER_URL for the whole suite. */
+     *  STEPTIX_SERVER_URL for the whole suite. */
     private probe: HealthProbe = defaultHealthProbe,
   ) {
     this.item = vscode.window.createStatusBarItem(

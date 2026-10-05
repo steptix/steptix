@@ -2,7 +2,7 @@
  * Live end-to-end CDP tab focus (stories/cdp-tab-focus.md).
  *
  * Drives a REAL Chrome over CDP through the REAL Steptix Sessions API
- * server ($LIVE_SERVER_URL, default http://localhost:3100). Most of it needs no
+ * server ($LIVE_STEPTIX_SERVER_URL, default http://localhost:3100). Most of it needs no
  * AI and no session; the last scenario runs real steps to prove focusing does
  * not disturb them.
  *
@@ -280,7 +280,7 @@ describe('Steptix live — CDP tab focus (stories/cdp-tab-focus.md)', function (
     aiKey = resolveCredential(preferred, 'AI_API_KEY') || resolveCredential(projectEnv, 'AI_API_KEY');
     aiModel = readEnvValue(preferred, 'AI_MODEL') || readEnvValue(projectEnv, 'AI_MODEL');
 
-    serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/health`);
       assert.ok(res.ok, `Server at ${serverUrl} not healthy (status=${res.status})`);

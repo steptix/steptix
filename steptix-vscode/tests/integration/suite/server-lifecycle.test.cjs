@@ -275,8 +275,8 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
       const serverUrlLine = fs
         .readFileSync(path.join(FIXTURES_DIR, '.env'), 'utf-8')
         .split(/\r?\n/)
-        .find((l) => l.startsWith('SERVER_URL='));
-      assert.ok(serverUrlLine, 'fixtures/.env must carry SERVER_URL');
+        .find((l) => l.startsWith('STEPTIX_SERVER_URL='));
+      assert.ok(serverUrlLine, 'fixtures/.env must carry STEPTIX_SERVER_URL');
       fs.mkdirSync(PROJECT_DIR, { recursive: true });
       fs.writeFileSync(path.join(PROJECT_DIR, '.env'), `${serverUrlLine}\n`);
       fs.copyFileSync(path.join(FIXTURES_DIR, 'test-with-steps.md'), TEST_MD);
@@ -395,17 +395,17 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
   });
 
   // -------------------------------------------------------------------------
-  // Nothing configured: SERVER_URL and the server both come from the machine
+  // Nothing configured: STEPTIX_SERVER_URL and the server both come from the machine
   // -------------------------------------------------------------------------
 
-  /** SERVER_URL as the suite's fixture .env has it. */
+  /** STEPTIX_SERVER_URL as the suite's fixture .env has it. */
   function fixtureServerUrl() {
     const line = fs
       .readFileSync(path.join(FIXTURES_DIR, '.env'), 'utf-8')
       .split(/\r?\n/)
-      .find((l) => l.startsWith('SERVER_URL='));
-    assert.ok(line, 'fixtures/.env must carry SERVER_URL');
-    return line.slice('SERVER_URL='.length).trim();
+      .find((l) => l.startsWith('STEPTIX_SERVER_URL='));
+    assert.ok(line, 'fixtures/.env must carry STEPTIX_SERVER_URL');
+    return line.slice('STEPTIX_SERVER_URL='.length).trim();
   }
 
   /**
@@ -457,7 +457,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
       }
     });
 
-    it('down: starts the newest installed runtime, in its own folder, on SERVER_URL\'s port', async () => {
+    it('down: starts the newest installed runtime, in its own folder, on STEPTIX_SERVER_URL\'s port', async () => {
       probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
       spawnBringsServerUp = true;
       await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 10, useInstalledRuntime: true });
@@ -510,14 +510,14 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
   describe('a project .env that names no server', () => {
     const PROJECT_DIR = path.join(FIXTURES_DIR, 'no-url-project');
     const TEST_MD = path.join(PROJECT_DIR, 'no-url.md');
-    const userRoot = withUserRoot(['SERVER_URL']);
+    const userRoot = withUserRoot(['STEPTIX_SERVER_URL']);
     /** Every server URL a client was built for. */
     let urls;
 
     // Once, not per test — see 'no API key anywhere' for why.
     before(() => {
       fs.mkdirSync(PROJECT_DIR, { recursive: true });
-      // A key, so the run gets past resolveApiKey; no SERVER_URL.
+      // A key, so the run gets past resolveApiKey; no STEPTIX_SERVER_URL.
       fs.writeFileSync(path.join(PROJECT_DIR, '.env'), 'STEPTIX_SERVER_API_KEY=project-key\n');
       fs.copyFileSync(path.join(FIXTURES_DIR, 'test-with-steps.md'), TEST_MD);
     });
@@ -551,9 +551,9 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
     });
 
-    it('takes SERVER_URL from the machine .env', async () => {
+    it('takes STEPTIX_SERVER_URL from the machine .env', async () => {
       fs.mkdirSync(path.join(userRoot.base, 'steptix'), { recursive: true });
-      fs.writeFileSync(path.join(userRoot.base, 'steptix', '.env'), 'SERVER_URL=http://127.0.0.1:3299\n');
+      fs.writeFileSync(path.join(userRoot.base, 'steptix', '.env'), 'STEPTIX_SERVER_URL=http://127.0.0.1:3299\n');
 
       void vscode.commands.executeCommand('steptix.runAll');
       await waitFor('stream active', () => fake.hasActiveStream);

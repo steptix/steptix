@@ -55,7 +55,7 @@ All 407 tests were checked for the addendum mechanisms. Four risks were found, a
 | steptix-vscode/tests/lm-bridge-core.test.js | 75 | High | Byte-level OpenAI-shape contract and error-text tests. Error wording is a contract here, because PR #110 shows it in hovers. One redundant one-liner (`:563`). Half of `:624` cannot fail. |
 | steptix-vscode/tests/lm-bridge-env.test.js | 36 | High | `.env` rewriting that keeps other lines intact, masks the token in previews, preserves CRLF and handles the overlay. The comment-text assertions follow wording the stories require (copilot-lm-bridge.md:172-175, env-overlay-awareness.md:50/175), so they are medium, not L4. |
 | steptix-vscode/tests/server-manager.test.js | 53 | High | The probe's four outcomes over real loopback HTTP, then the spawn/poll policy, triage, runtime discovery, guard, settings and the manifest's machine-scope security check. Two flakiness risks (budgets of 1 s / 1000 ms). One tautological line and one L4 headline. |
-| steptix-vscode/tests/server-url.test.js | 5 | High | The four-link resolution chain with isolated env and user root. `:79` pins `DEFAULT_SERVER_URL` to its literal; parity with `src/config/defaults.ts` would be stronger. |
+| steptix-vscode/tests/server-url.test.js | 5 | High | The four-link resolution chain with isolated env and user root. `:79` pins `DEFAULT_STEPTIX_SERVER_URL` to its literal; parity with `src/config/defaults.ts` would be stronger. |
 | steptix-vscode/tests/live-shards.test.js | 22 | High | A sensible subject: tests/integration/liveShards.cjs, whose every tested export is used by runLiveTest.cjs. The workspace-copy, config-rebase and `.env`-pointing cases each match an incident CLAUDE.md describes. scheduleOrder and runPool are medium. |
 | steptix-vscode/tests/third-party-notices.test.js | 9 | High | A real licence guard: the build stops on a missing licence, a disallowed licence, or an asset that no source map accounts for, and carries NOTICE files. It also covers the CLI-through-a-junction regression. |
 
@@ -95,8 +95,8 @@ All 407 tests were checked for the addendum mechanisms. Four risks were found, a
 
 ### `steptix-vscode/tests/server-url.test.js:79` — "nothing anywhere is the default serve listens on…" (line 79)
 - Category: Defect (an assertion that cannot catch the drift it exists for; L5 on that line)
-- Evidence: `assert.equal(DEFAULT_SERVER_URL, 'http://127.0.0.1:3100');` compares the constant with its own literal. The source names the real risk at server-url.ts:26-28: "Nothing links the two copies (the extension bundles separately from the framework), so change both together", meaning `src/config/defaults.ts` `server: { host: '127.0.0.1', port: 3100 }`. If the server's default moves to 3200, this line stays green. The rest of the test is good.
-- Recommendation: rewrite the line as a parity check. Import or read `src/config/defaults.ts`'s `DEFAULT_CONFIG.server` (the root `dist/config/defaults.js` exists after pretest) and assert ``DEFAULT_SERVER_URL === `http://${host}:${port}` ``.
+- Evidence: `assert.equal(DEFAULT_STEPTIX_SERVER_URL, 'http://127.0.0.1:3100');` compares the constant with its own literal. The source names the real risk at server-url.ts:26-28: "Nothing links the two copies (the extension bundles separately from the framework), so change both together", meaning `src/config/defaults.ts` `server: { host: '127.0.0.1', port: 3100 }`. If the server's default moves to 3200, this line stays green. The rest of the test is good.
+- Recommendation: rewrite the line as a parity check. Import or read `src/config/defaults.ts`'s `DEFAULT_CONFIG.server` (the root `dist/config/defaults.js` exists after pretest) and assert ``DEFAULT_STEPTIX_SERVER_URL === `http://${host}:${port}` ``.
 - Confidence: high
 
 ### Systemic — steptix-vscode `pretest` does not build runner-core

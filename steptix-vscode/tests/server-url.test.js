@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  DEFAULT_SERVER_URL,
+  DEFAULT_STEPTIX_SERVER_URL,
   describeServerUrlOrigin,
   resolveServerUrl,
 } from '../src/extension/server-url.ts';
@@ -41,7 +41,7 @@ function machine(machineEnv, env = {}) {
 const PROJECT_ENV = path.resolve(path.sep, 'proj', '.env');
 
 test('the project .env wins over everything below it', () => {
-  const m = machine('SERVER_URL=http://127.0.0.1:3200\n', { SERVER_URL: 'http://127.0.0.1:3300' });
+  const m = machine('STEPTIX_SERVER_URL=http://127.0.0.1:3200\n', { STEPTIX_SERVER_URL: 'http://127.0.0.1:3300' });
   try {
     const resolved = resolveServerUrl({ value: ' http://localhost:3106 ', path: PROJECT_ENV }, m.deps);
     assert.deepEqual(resolved, {
@@ -54,7 +54,7 @@ test('the project .env wins over everything below it', () => {
 });
 
 test('the environment comes next, as it does for the key', () => {
-  const m = machine('SERVER_URL=http://127.0.0.1:3200\n', { SERVER_URL: 'http://127.0.0.1:3300' });
+  const m = machine('STEPTIX_SERVER_URL=http://127.0.0.1:3200\n', { STEPTIX_SERVER_URL: 'http://127.0.0.1:3300' });
   try {
     const resolved = resolveServerUrl({ value: '', path: PROJECT_ENV }, m.deps);
     assert.deepEqual(resolved, { serverUrl: 'http://127.0.0.1:3300', origin: { kind: 'environment' } });
@@ -63,8 +63,8 @@ test('the environment comes next, as it does for the key', () => {
   }
 });
 
-test('a project with no .env takes the machine .env\'s SERVER_URL', () => {
-  const m = machine('STEPTIX_SERVER_API_KEY=k\nSERVER_URL=http://127.0.0.1:3200\n');
+test('a project with no .env takes the machine .env\'s STEPTIX_SERVER_URL', () => {
+  const m = machine('STEPTIX_SERVER_API_KEY=k\nSTEPTIX_SERVER_URL=http://127.0.0.1:3200\n');
   try {
     const resolved = resolveServerUrl(null, m.deps);
     assert.deepEqual(resolved, {
@@ -82,7 +82,7 @@ test('nothing anywhere is the default serve listens on, and the log says where i
     const m = machine(machineEnv);
     try {
       const resolved = resolveServerUrl({ value: undefined, path: PROJECT_ENV }, m.deps);
-      assert.deepEqual(resolved, { serverUrl: DEFAULT_SERVER_URL, origin: { kind: 'default' } });
+      assert.deepEqual(resolved, { serverUrl: DEFAULT_STEPTIX_SERVER_URL, origin: { kind: 'default' } });
       assert.ok(describeServerUrlOrigin(resolved.origin, m.deps).includes(m.envPath));
     } finally {
       m.cleanup();
@@ -91,7 +91,7 @@ test('nothing anywhere is the default serve listens on, and the log says where i
 });
 
 test('the default is where the server\'s own defaults say serve listens', async (t) => {
-  // DEFAULT_SERVER_URL is a copy of `server.host`/`server.port` that nothing
+  // DEFAULT_STEPTIX_SERVER_URL is a copy of `server.host`/`server.port` that nothing
   // links — the extension bundles separately from the framework — so this is
   // the one place the two meet. Pinning the constant to its own literal would
   // stay green if serve moved to 3200 and every unconfigured run missed it.
@@ -101,7 +101,7 @@ test('the default is where the server\'s own defaults say serve listens', async 
   }
   const { DEFAULT_CONFIG } = await import(pathToFileURL(DEFAULTS_PATH).href);
   const { host, port } = DEFAULT_CONFIG.server;
-  assert.equal(DEFAULT_SERVER_URL, `http://${host}:${port}`);
+  assert.equal(DEFAULT_STEPTIX_SERVER_URL, `http://${host}:${port}`);
 });
 
 test('an unreadable machine .env throws rather than falling through to the default', () => {

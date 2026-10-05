@@ -239,13 +239,13 @@ beforeAll(async () => {
   if (typeof addr !== 'object' || addr === null) throw new Error('no port');
   const baseUrl = `http://127.0.0.1:${addr.port}`;
 
-  // Ordering matters: the project's .env carries SERVER_URL, and the port only
+  // Ordering matters: the project's .env carries STEPTIX_SERVER_URL, and the port only
   // exists once the server is listening. Writing the fixture first would bake
   // in a port nobody is on.
   tmpDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-seam-')));
   await fs.writeFile(
     path.join(tmpDir, '.env'),
-    `SERVER_URL=${baseUrl}\nSTEPTIX_SERVER_API_KEY=${API_KEY}\nAI_API_KEY=project-ai-key\nAI_MODEL=project-model\n`,
+    `STEPTIX_SERVER_URL=${baseUrl}\nSTEPTIX_SERVER_API_KEY=${API_KEY}\nAI_API_KEY=project-ai-key\nAI_MODEL=project-model\n`,
   );
   // The environment overlay, so `${env.GREETING}` has something to resolve to
   // — and resolving it is the evidence that `envName` survived the wire.

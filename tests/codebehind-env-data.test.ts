@@ -84,7 +84,7 @@ const UAT: EnvDataContext = {
     GITHUB_USERNAME: 'octocat',
     GITHUB_PASSWORD: 'hunter2-uat-secret',
     AI_API_KEY: 'sk-uat-key-value',
-    SERVER_URL: 'http://localhost:3100',
+    STEPTIX_SERVER_URL: 'http://localhost:3100',
   },
   data: {
     url: 'https://uat.example/',

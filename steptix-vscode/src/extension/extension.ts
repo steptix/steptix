@@ -433,7 +433,7 @@ class RunControllerRegistry implements vscode.Disposable {
       this.healthProbe = hooks.healthProbe;
       // The status bar polls independently of any run, so it needs the fake
       // too — otherwise the integration suite keeps issuing real fetches at
-      // the fixture's SERVER_URL for its whole duration.
+      // the fixture's STEPTIX_SERVER_URL for its whole duration.
       this.serverStatusBar?.setProbe(hooks.healthProbe);
     }
     if (hooks.spawnServer) this.spawnServer = hooks.spawnServer;
@@ -1378,7 +1378,7 @@ class RunControllerRegistry implements vscode.Disposable {
    *
    *  1. Local-server check: tool step-into requires a Node inspector
    *     reachable from this machine. Fail with a status-bar diagnostic
-   *     when the run is against a remote `SERVER_URL`.
+   *     when the run is against a remote `STEPTIX_SERVER_URL`.
    *  2. Resolve the inspector port + host from settings (defaults
    *     9229 / 127.0.0.1). If an attach is already in flight from a
    *     previous tool in the same session we just reuse it.
@@ -1409,7 +1409,7 @@ class RunControllerRegistry implements vscode.Disposable {
 
     if (!controller.isLocalServer()) {
       await ackAndExit(
-        `Tool step-into requires a local server (SERVER_URL must be 127.0.0.1) — running "${ev.toolName}" without a debugger attached`,
+        `Tool step-into requires a local server (STEPTIX_SERVER_URL must be 127.0.0.1) — running "${ev.toolName}" without a debugger attached`,
       );
       return;
     }
@@ -1451,7 +1451,7 @@ class RunControllerRegistry implements vscode.Disposable {
 
     if (!controller.isLocalServer()) {
       await ackAndExit(
-        'Code-behind step-into requires a local server (SERVER_URL must be 127.0.0.1) — running the entry without a debugger',
+        'Code-behind step-into requires a local server (STEPTIX_SERVER_URL must be 127.0.0.1) — running the entry without a debugger',
       );
       return;
     }
@@ -1573,7 +1573,7 @@ class RunControllerRegistry implements vscode.Disposable {
     // Same wrong-process gate as the F11 flows: a LOCAL attach for a REMOTE
     // server would land on some unrelated process holding the settings port.
     if (!isLoopbackUrl(info.serverUrl)) {
-      info.log('.steps.ts breakpoints set, but SERVER_URL is not local — not attaching a debugger');
+      info.log('.steps.ts breakpoints set, but STEPTIX_SERVER_URL is not local — not attaching a debugger');
       return;
     }
 

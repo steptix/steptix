@@ -78,7 +78,7 @@ export interface ErrorContextMap {
   STX024: { detail: string };
   STX025: Record<string, never>;
   STX026: Record<string, never>;
-  /** A foreign service answered SERVER_URL. `service` is what it called
+  /** A foreign service answered STEPTIX_SERVER_URL. `service` is what it called
    *  itself, verbatim — naming it is what turns "the run failed" into "you
    *  pointed at Grafana". */
   STX027: { serverUrl: string; service: string };
@@ -118,14 +118,14 @@ type Builder<C extends ErrorCode> = (ctx: ErrorContextMap[C]) => {
 const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   STX001: (ctx) => ({
     diagnosis: `No .env file found for this test. Searched: ${ctx.searchedDirs.join(', ')}, then fallback setting "steptix.defaultEnvFile" (=${ctx.fallbackSetting || 'unset'})`,
-    fix: 'Create the file "steptix.defaultEnvFile" names (or a .env next to this test), or clear the setting. A project needs no .env of its own: SERVER_URL and STEPTIX_SERVER_API_KEY both fall back to the machine .env.',
+    fix: 'Create the file "steptix.defaultEnvFile" names (or a .env next to this test), or clear the setting. A project needs no .env of its own: STEPTIX_SERVER_URL and STEPTIX_SERVER_API_KEY both fall back to the machine .env.',
     actions: [
       { label: 'Open Settings', command: 'workbench.action.openSettings', args: ['steptix.defaultEnvFile'] },
     ],
   }),
   STX002: (ctx) => ({
-    diagnosis: `SERVER_URL is missing from ${ctx.envPath}`,
-    fix: 'Add a line like SERVER_URL=http://localhost:3100 (full URL including scheme and port).',
+    diagnosis: `STEPTIX_SERVER_URL is missing from ${ctx.envPath}`,
+    fix: 'Add a line like STEPTIX_SERVER_URL=http://localhost:3100 (full URL including scheme and port).',
     actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
   STX003: (ctx) => ({
@@ -134,7 +134,7 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
     actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
   STX004: (ctx) => ({
-    diagnosis: `SERVER_URL in ${ctx.envPath} is not a valid URL: "${ctx.value}"`,
+    diagnosis: `STEPTIX_SERVER_URL in ${ctx.envPath} is not a valid URL: "${ctx.value}"`,
     fix: 'Use a full URL like http://localhost:3100 — include scheme, host, and port.',
     actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
@@ -155,7 +155,7 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   STX010: (ctx) => ({
     diagnosis: `Cannot reach the Steptix server at ${ctx.serverUrl} (${ctx.reason})`,
     fix:
-      "Start it with 'npx steptix serve' in your test project (or 'steptix serve' if the package is installed globally), then confirm SERVER_URL names the host and port it is listening on. " +
+      "Start it with 'npx steptix serve' in your test project (or 'steptix serve' if the package is installed globally), then confirm STEPTIX_SERVER_URL names the host and port it is listening on. " +
       'If it runs on another machine, check the firewall. ' +
       'To have Steptix start it for you, install the Steptix runtime, or set "steptix.serverAutoStart.command" and ".cwd" in your user settings.',
     actions: [{ label: 'Show Run Log', command: 'steptix.showRunLog' }],
@@ -211,7 +211,7 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   // would be worse than putting the pointer in `fix`, which IS rendered.
   STX027: (ctx) => ({
     diagnosis: `${ctx.serverUrl} responds, but it is not a Steptix server (it identifies as "${ctx.service}")`,
-    fix: 'Point SERVER_URL at the Steptix server, or stop the other process holding that port. Steptix will not start a server on top of one it does not recognise.',
+    fix: 'Point STEPTIX_SERVER_URL at the Steptix server, or stop the other process holding that port. Steptix will not start a server on top of one it does not recognise.',
   }),
   STX028: (ctx) => ({
     diagnosis:

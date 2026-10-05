@@ -9,6 +9,10 @@ top CHANGELOG entry for the full map. Resolved issues and older CHANGELOG
 entries keep the old names on purpose; read `aiui` there as `steptix` and
 `TB028` as `STX028`.
 
+The server address variable `SERVER_URL` became `STEPTIX_SERVER_URL` the same
+way, with no fallback, and the live tests' `LIVE_SERVER_URL` became
+`LIVE_STEPTIX_SERVER_URL`. Resolved issues keep the old names.
+
 The checkout folder was renamed from `ai-ui-automation` to `steptix` as well.
 Anything that stored the old absolute path went stale with the rename rather
 than failing loudly — notably the two `node_modules` junctions in the main
@@ -249,7 +253,7 @@ the script itself sits in — which is why it's the main checkout's copy you
 run, not the new worktree's — so the worktree is
 independent and safe if `package.json` diverges between branches. It then
 re-points the runner-core junction, builds `dist/` in all three projects, and
-rewrites `SERVER_URL` in the worktree's `.env` files to the port it allocated.
+rewrites `STEPTIX_SERVER_URL` in the worktree's `.env` files to the port it allocated.
 
 `-AutoPort` takes the lowest free port from 3101 up, treating a port any other
 registered worktree was seeded with as taken even when nothing is listening on
@@ -263,7 +267,7 @@ Other switches: `-SkipBuilds` copies only the env files (docs-only changes);
 `npm run test:integration` doesn't re-download it.
 
 To recall a worktree's port later, read it back off the file that decides it:
-`grep SERVER_URL .env`.
+`grep STEPTIX_SERVER_URL .env`.
 
 ### Which server does the worktree talk to?
 
@@ -348,7 +352,7 @@ Three things are per shard, and each one is load-bearing rather than tidy:
   just used. Grouping those conflicts onto one worker would put the five
   slowest suites back in a queue. So each worker copies `templates/` to
   `.live-shards/wN/templates` at the repo root (minus `reports/`, the caches
-  and any stray `.steps.ts`) and the copy's `.env` gets `SERVER_URL` rewritten
+  and any stray `.steps.ts`) and the copy's `.env` gets `STEPTIX_SERVER_URL` rewritten
   to that shard's port. That line, not any flag, is what decides which server
   the extension drives.
 
@@ -387,7 +391,7 @@ Three things are per shard, and each one is load-bearing rather than tidy:
 
 To drive a server you started yourself — for `--inspect`, or to watch one
 failure against the `src/` you are editing — pass `--server=<url>`, which
-`LIVE_SERVER_URL` still means too. Every shard then shares it, log cross-talk
+`LIVE_STEPTIX_SERVER_URL` still means too. Every shard then shares it, log cross-talk
 included, which is why `--shards=1` is the usual companion:
 
 ```powershell
@@ -414,8 +418,8 @@ and be current. That is the whole difference in ownership: the parallel path
 starts the servers so it builds them, this one does not so it does not.
 
 It is also the one mode that still has *two* independent notions of
-where the server is — the extension reads `SERVER_URL` by walking up from the
-test file to `templates/.env`, while the assertions read `LIVE_SERVER_URL` and
+where the server is — the extension reads `STEPTIX_SERVER_URL` by walking up from the
+test file to `templates/.env`, while the assertions read `LIVE_STEPTIX_SERVER_URL` and
 fall back to `:3100` regardless. Set only one and the tests assert against a
 different server than the extension is driving. The parallel path writes both
 from the same value, so it cannot drift.
@@ -539,7 +543,7 @@ npm run test:live -- --shards=1 --files=computer-use.test.cjs --server=http://lo
 `--server=<url>` is not optional here even though `--shards=1` defaults to
 `:3100`: the serial path is the one mode with two independent notions of where
 the server is (see above), so pass the same URL that this worktree's
-`templates/.env` carries as `SERVER_URL`.
+`templates/.env` carries as `STEPTIX_SERVER_URL`.
 
 **Start that server from a normal terminal or from VS Code**, not from a
 sandboxed tool runner. Measured 2026-09-23: a process started by the Claude

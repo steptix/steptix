@@ -1370,7 +1370,7 @@ tags: [codebehind]
   // ── Reaching the server (issue: "compile failed: fetch failed") ──────────
   //
   // A compile gets to the server the way a Run does — because it IS a run now:
-  // probe SERVER_URL first, auto-start it when that is configured, refuse a
+  // probe STEPTIX_SERVER_URL first, auto-start it when that is configured, refuse a
   // port that belongs to something else, and when the request still cannot get
   // through, say which URL was tried and why it did not answer, in the
   // catalogue's words with the fix attached, rather than echoing the client's

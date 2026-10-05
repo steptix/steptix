@@ -562,7 +562,7 @@ beforeAll(async () => {
   if (typeof addr !== 'object' || addr === null) throw new Error('no port');
   const baseUrl = `http://127.0.0.1:${addr.port}`;
 
-  const env = `SERVER_URL=${baseUrl}\nSTEPTIX_SERVER_API_KEY=${API_KEY}\n`;
+  const env = `STEPTIX_SERVER_URL=${baseUrl}\nSTEPTIX_SERVER_API_KEY=${API_KEY}\n`;
   tightDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-peek-tight-')));
   await fs.writeFile(path.join(tightDir, '.env'), env);
   await fs.writeFile(

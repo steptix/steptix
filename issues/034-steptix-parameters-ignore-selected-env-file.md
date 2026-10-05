@@ -2,7 +2,7 @@
 
 **Status:** open / high priority — **implemented (not yet committed); see [Implemented](#implemented)**
 **Area (extension, the bug):**
-[steptix-vscode/src/extension/run-controller.ts:920-924](../steptix-vscode/src/extension/run-controller.ts#L920-L924) (`resolveEnvFile`, no env name), [:941](../steptix-vscode/src/extension/run-controller.ts#L941) (`readEnvFile` — base `.env` only), [:955-970](../steptix-vscode/src/extension/run-controller.ts#L955-L970) (`SERVER_URL`/`STEPTIX_SERVER_API_KEY`), [:1008-1015](../steptix-vscode/src/extension/run-controller.ts#L1008-L1015) (`resolveSection` params + `resolveValue` config), [:1056-1057](../steptix-vscode/src/extension/run-controller.ts#L1056-L1057) (`effectiveEnvName` computed but only sent to server);
+[steptix-vscode/src/extension/run-controller.ts:920-924](../steptix-vscode/src/extension/run-controller.ts#L920-L924) (`resolveEnvFile`, no env name), [:941](../steptix-vscode/src/extension/run-controller.ts#L941) (`readEnvFile` — base `.env` only), [:955-970](../steptix-vscode/src/extension/run-controller.ts#L955-L970) (`STEPTIX_SERVER_URL`/`STEPTIX_SERVER_API_KEY`), [:1008-1015](../steptix-vscode/src/extension/run-controller.ts#L1008-L1015) (`resolveSection` params + `resolveValue` config), [:1056-1057](../steptix-vscode/src/extension/run-controller.ts#L1056-L1057) (`effectiveEnvName` computed but only sent to server);
 mirror in [testbench-monaco/src/extension/run-controller.ts:165-217](../testbench-monaco/src/extension/run-controller.ts#L165-L217) + [:234-239](../testbench-monaco/src/extension/run-controller.ts#L234-L239) (and the cheap close-path resolve at [:107-122](../testbench-monaco/src/extension/run-controller.ts#L107-L122)).
 **Area (the resolver primitives):** [runner-core/src/env-file.ts](../runner-core/src/env-file.ts) (`resolveEnvFile` is hard-wired to a file literally named `.env`, [:71](../runner-core/src/env-file.ts#L71); no `envName` param), [runner-core/src/test-meta.ts:75-88](../runner-core/src/test-meta.ts#L75-L88) (`resolveValueFromEnv`/`resolveSection` — used for `## Parameters`), [runner-core/src/errors.ts](../runner-core/src/errors.ts) (new STX006 code). NB: `## Config` `baseUrl`/`timeout` is resolved by a **controller-local** `resolveValue` (native [run-controller.ts:1608](../steptix-vscode/src/extension/run-controller.ts#L1608), monaco [:628](../testbench-monaco/src/extension/run-controller.ts#L628)), **not** the imported `resolveValueFromEnv` — but it reads the same `env` map, so overlaying `env` (below) covers it without touching that function.
 **Env selection source:** [steptix-vscode/src/extension/env-selector.ts:58-62](../steptix-vscode/src/extension/env-selector.ts#L58-L62) (`EnvSelector.activeEnv()` reads `steptix.activeEnv`; monaco reads `steptix.activeEnv`), discovers `.env.<name>` at the **workspace root** ([:144-154](../steptix-vscode/src/extension/env-selector.ts#L144-L154)).
@@ -33,7 +33,7 @@ string `$T2_ONLY_VAR` silently passes through and is shipped to the AI as the
 
 The same base-`.env`-only blind spot affects, in the extension:
 - `## Config` `baseUrl` / `timeout` ([run-controller.ts:1012-1015](../steptix-vscode/src/extension/run-controller.ts#L1012-L1015)) — and `baseUrl` (the app-under-test URL) is *exactly* the kind of value that differs per env.
-- `SERVER_URL` / `STEPTIX_SERVER_API_KEY` ([run-controller.ts:955-970](../steptix-vscode/src/extension/run-controller.ts#L955-L970)) — so `.env.t2` can't retarget the server either.
+- `STEPTIX_SERVER_URL` / `STEPTIX_SERVER_API_KEY` ([run-controller.ts:955-970](../steptix-vscode/src/extension/run-controller.ts#L955-L970)) — so `.env.t2` can't retarget the server either.
 
 The selected env name **is** transmitted correctly (`effectiveEnvName` →
 `envName` in the steps request → server), but it only feeds a *different*
@@ -74,7 +74,7 @@ test that locks this in, not new code.**
 2. **Scope — ALL client-side `$VAR` resolution in the extension.** Apply the
    overlaid map everywhere the run-controller resolves `$VAR` today:
    `## Parameters` (`resolveSection`), `## Config` `baseUrl`/`timeout`
-   (`resolveValue`), **and** `SERVER_URL`/`STEPTIX_SERVER_API_KEY`. This lets `.env.t2`
+   (`resolveValue`), **and** `STEPTIX_SERVER_URL`/`STEPTIX_SERVER_API_KEY`. This lets `.env.t2`
    retarget the app URL and even the server; where `.env.t2` is silent, base
    `.env` still wins, so it's strictly additive.
 3. **Missing selected `.env.<name>` — hard error (new STX006).** If an env is
@@ -164,7 +164,7 @@ existing `runner-core`/env-file import. (`EnvParseError`, `reportError`,
 `env` is declared `let` at [:939](../steptix-vscode/src/extension/run-controller.ts#L939),
 so the reassignment below is valid. After
 `env = await readEnvFile(envResolution.path)` ([:941](../steptix-vscode/src/extension/run-controller.ts#L941))
-and **before** the `SERVER_URL` validation at [:955](../steptix-vscode/src/extension/run-controller.ts#L955),
+and **before** the `STEPTIX_SERVER_URL` validation at [:955](../steptix-vscode/src/extension/run-controller.ts#L955),
 fold in the overlay:
 
 ```ts
@@ -191,7 +191,7 @@ if (activeEnvName) {
 }
 ```
 
-Everything downstream — `SERVER_URL`/`STEPTIX_SERVER_API_KEY` validation
+Everything downstream — `STEPTIX_SERVER_URL`/`STEPTIX_SERVER_API_KEY` validation
 ([:955-970](../steptix-vscode/src/extension/run-controller.ts#L955-L970)),
 `resolveSection(rawParameters, env)` ([:1010](../steptix-vscode/src/extension/run-controller.ts#L1010)),
 `resolveValue(baseUrl/timeout, env)` ([:1012-1015](../steptix-vscode/src/extension/run-controller.ts#L1012-L1015))
@@ -209,7 +209,7 @@ batch `envOverride` and the selector could disagree).
 Native has a third `readEnvFile` (base `.env` only) feeding the close /
 liveness / last-run client — it resolves no `$VAR` params, so it's not a bug
 for *this* issue. But since decision 2 lets `.env.<name>` retarget
-`SERVER_URL`, close/liveness could hit the **base** server while the run
+`STEPTIX_SERVER_URL`, close/liveness could hit the **base** server while the run
 targets the overlaid one. Either overlay there too (best-effort, never error)
 or document it as a known limitation. Monaco's close-path
 ([:107-122](../testbench-monaco/src/extension/run-controller.ts#L107-L122)) is
@@ -220,7 +220,7 @@ the same case.
 Mirror into [testbench-monaco/src/extension/run-controller.ts](../testbench-monaco/src/extension/run-controller.ts):
 add the `path` import (monaco doesn't import it either), then overlay after
 `readEnvFile` at [:187](../testbench-monaco/src/extension/run-controller.ts#L187),
-before the `SERVER_URL` check at [:202](../testbench-monaco/src/extension/run-controller.ts#L202)
+before the `STEPTIX_SERVER_URL` check at [:202](../testbench-monaco/src/extension/run-controller.ts#L202)
 and the `resolveSection` at [:236](../testbench-monaco/src/extension/run-controller.ts#L236).
 
 **Monaco's `runLines(lines)` has no `options` arg and no `envOverride`/batch
@@ -229,7 +229,7 @@ do **not** copy native's `options.envOverride` branch here; monaco uses
 `EnvSelector.activeEnv()` directly (reading `steptix.activeEnv`).
 
 The cheap session-close resolve at [:107-122](../testbench-monaco/src/extension/run-controller.ts#L107-L122)
-only needs `SERVER_URL`/`STEPTIX_SERVER_API_KEY` and is intentionally forgiving —
+only needs `STEPTIX_SERVER_URL`/`STEPTIX_SERVER_API_KEY` and is intentionally forgiving —
 leave it base-`.env`-only (or apply the overlay best-effort but never error
 there). Document the choice. (Native's analogue is `resolveClient()` —
 see the note in step 2.)
@@ -262,7 +262,7 @@ build/package/install-VSIX/reload loop for each.
 - **Extension (native + monaco):** with `activeEnv = t2` and `T2_ONLY_VAR` only
   in `.env.t2`, `## Parameters` `- token: $T2_ONLY_VAR` resolves to the
   `.env.t2` value (regression for the reported bug).
-- **Extension:** `## Config baseUrl: $APP_URL` and `SERVER_URL=$...`-style vars
+- **Extension:** `## Config baseUrl: $APP_URL` and `STEPTIX_SERVER_URL=$...`-style vars
   defined only in `.env.t2` are honored when `t2` is active (decision 2).
 - **Extension:** `activeEnv = nope` with no `.env.nope` → run fails with
   **STX006** (decision 3), not a silent base-`.env` run.

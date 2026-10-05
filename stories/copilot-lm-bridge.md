@@ -237,7 +237,7 @@ Costs to document rather than change:
   touching the `.env`. The setup command's summary says exactly this.
 - Remote Sessions API servers are out of scope by construction: the `.env`
   points at 127.0.0.1, which a remote server resolves to itself. The setup
-  command warns when `SERVER_URL` is non-local.
+  command warns when `STEPTIX_SERVER_URL` is non-local.
 
 ## Non-goals
 

@@ -164,7 +164,7 @@ test("copyWorkspace: brings the fixtures, leaves the per-run leftovers", () => {
   const src = path.join(root, "templates");
   const dest = path.join(root, "shard", "templates");
 
-  write(path.join(src, ".env"), "SERVER_URL=http://localhost:3100\n");
+  write(path.join(src, ".env"), "STEPTIX_SERVER_URL=http://localhost:3100\n");
   write(path.join(src, "init", "steptix.config.json"), "{}");
   write(path.join(src, "init", "tests", "example.md"), "## Steps\n");
   write(path.join(src, "init", "skills", "flows", "enter_email.md"), "skill\n");
@@ -202,7 +202,7 @@ test("copyWorkspace: replaces a previous shard's copy rather than merging into i
   const root = tmpDir();
   const src = path.join(root, "templates");
   const dest = path.join(root, "shard", "templates");
-  write(path.join(src, ".env"), "SERVER_URL=x\n");
+  write(path.join(src, ".env"), "STEPTIX_SERVER_URL=x\n");
   write(path.join(src, "keep.md"), "keep");
 
   copyWorkspace(src, dest);
@@ -228,7 +228,7 @@ function workspaceWithConfig(config, { at = ["init"] } = {}) {
   const original = path.join(root, "templates");
   const copy = path.join(root, "shard", "templates");
   write(path.join(original, ...at, "steptix.config.json"), JSON.stringify(config, null, 2));
-  write(path.join(original, ".env"), "SERVER_URL=x\n");
+  write(path.join(original, ".env"), "STEPTIX_SERVER_URL=x\n");
   // The out-of-tree target has to actually exist for the assertions to be
   // about paths rather than about existence.
   fs.mkdirSync(path.join(root, "fixtures", "tools", "src"), { recursive: true });
@@ -346,27 +346,27 @@ test("rebaseConfigPaths: reaches every config in the workspace, not just the top
 
 // ─── pointEnvAtServer ───────────────────────────────────────────────────────
 
-test("pointEnvAtServer: rewrites SERVER_URL in place, leaving the rest alone", () => {
+test("pointEnvAtServer: rewrites STEPTIX_SERVER_URL in place, leaving the rest alone", () => {
   const dir = tmpDir();
   const env = path.join(dir, ".env");
   write(
     env,
-    "AI_API_KEY=secret\nSERVER_URL=http://localhost:3100\nGITHUB_USERNAME=someone\n",
+    "AI_API_KEY=secret\nSTEPTIX_SERVER_URL=http://localhost:3100\nGITHUB_USERNAME=someone\n",
   );
 
   pointEnvAtServer(env, "http://localhost:3207");
 
   const text = fs.readFileSync(env, "utf8");
-  assert.match(text, /^SERVER_URL=http:\/\/localhost:3207$/m);
+  assert.match(text, /^STEPTIX_SERVER_URL=http:\/\/localhost:3207$/m);
   assert.match(text, /^AI_API_KEY=secret$/m);
   assert.match(text, /^GITHUB_USERNAME=someone$/m);
   // Rewritten, not appended: a duplicate key does not reliably resolve the
   // same way in every .env parser, and "it depends" is not a property a test
   // harness should have.
-  assert.equal(text.match(/^SERVER_URL=/gm).length, 1);
+  assert.equal(text.match(/^STEPTIX_SERVER_URL=/gm).length, 1);
 });
 
-test("pointEnvAtServer: appends SERVER_URL when the file has none", () => {
+test("pointEnvAtServer: appends STEPTIX_SERVER_URL when the file has none", () => {
   const dir = tmpDir();
   const env = path.join(dir, ".env");
   write(env, "AI_API_KEY=secret\n");
@@ -375,23 +375,23 @@ test("pointEnvAtServer: appends SERVER_URL when the file has none", () => {
 
   const text = fs.readFileSync(env, "utf8");
   assert.match(text, /^AI_API_KEY=secret$/m);
-  assert.match(text, /^SERVER_URL=http:\/\/localhost:3207$/m);
+  assert.match(text, /^STEPTIX_SERVER_URL=http:\/\/localhost:3207$/m);
 });
 
-test("pointEnvAtServer: a commented-out SERVER_URL is not mistaken for the real one", () => {
+test("pointEnvAtServer: a commented-out STEPTIX_SERVER_URL is not mistaken for the real one", () => {
   const dir = tmpDir();
   const env = path.join(dir, ".env");
-  write(env, "# SERVER_URL=http://localhost:9999\nAI_API_KEY=secret\n");
+  write(env, "# STEPTIX_SERVER_URL=http://localhost:9999\nAI_API_KEY=secret\n");
 
   pointEnvAtServer(env, "http://localhost:3207");
 
   const text = fs.readFileSync(env, "utf8");
-  assert.match(text, /^# SERVER_URL=http:\/\/localhost:9999$/m, "the comment survives");
-  assert.match(text, /^SERVER_URL=http:\/\/localhost:3207$/m, "a real line is added");
+  assert.match(text, /^# STEPTIX_SERVER_URL=http:\/\/localhost:9999$/m, "the comment survives");
+  assert.match(text, /^STEPTIX_SERVER_URL=http:\/\/localhost:3207$/m, "a real line is added");
 });
 
 test("pointEnvAtServer: a missing .env is an error, not a silent no-op", () => {
-  // Silence here would send the shard's extension at whatever SERVER_URL the
+  // Silence here would send the shard's extension at whatever STEPTIX_SERVER_URL the
   // walk-up found next — in practice the other checkout's server, testing the
   // wrong `src/` while reporting green.
   const dir = tmpDir();

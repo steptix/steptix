@@ -16,9 +16,9 @@ runner via a new `runner-core` package.
 - **Server is user-managed.** Extension never spawns or bundles `steptix`; it speaks HTTP+SSE to whatever server the user started
 - **Per-run `.env`**: extension reads the file, ships its parsed contents in the request body; server applies them to the per-session child process only (request env wins, no inheritance of secrets)
 - **`.env` resolution**: walk up from the test file to the nearest ancestor containing `.env`, stop at workspace root; on miss, fall back to `steptix.defaultEnvFile` setting; on miss, hard-fail in run log. Every resolution step logged to the "Steptix" output channel
-- **Required `.env` keys**: `SERVER_URL` (full URL incl. scheme/host/port), `STEPTIX_SERVER_API_KEY`. Other keys (e.g. `AI_API_KEY`, `AI_MODEL`) passed through as-is
+- **Required `.env` keys**: `STEPTIX_SERVER_URL` (full URL incl. scheme/host/port), `STEPTIX_SERVER_API_KEY`. Other keys (e.g. `AI_API_KEY`, `AI_MODEL`) passed through as-is
 - **Session ID** = absolute path of the test file. Same file across two VS Code windows reuses one server-side session
-- **Concurrency**: multiple `.env`s within one workspace, possibly pointing at different `SERVER_URL`s, are supported. Each run resolves independently
+- **Concurrency**: multiple `.env`s within one workspace, possibly pointing at different `STEPTIX_SERVER_URL`s, are supported. Each run resolves independently
 - **Step-only gutter affordances** (▶, status, breakpoints, run menu) only on numbered lines beneath the steps heading
 - **F5 on a non-step line** → nearest step at-or-below, else above, else status-bar no-op
 - **Right-click gutter on non-step line** → no menu
@@ -39,14 +39,14 @@ Every error reaches the user via two channels: **inline run-log** (red banner in
 
 | Code | Trigger | User-facing message (template) |
 |---|---|---|
-| `STX001` | Walk-up + fallback both miss | `STX001: No .env file found for this test. Searched: <list of dirs up to workspace root>, then fallback setting "steptix.defaultEnvFile" (=<value or "unset">). Fix: create a .env next to this test (or any ancestor folder up to workspace root) with SERVER_URL and STEPTIX_SERVER_API_KEY, or set "steptix.defaultEnvFile" in Settings. [Open Settings] [Create .env here]` |
-| `STX002` | `.env` found but `SERVER_URL` missing | `STX002: SERVER_URL is missing from <abs path to .env>. Fix: add a line like SERVER_URL=http://localhost:3100 (full URL including scheme and port). [Reveal .env]` |
+| `STX001` | Walk-up + fallback both miss | `STX001: No .env file found for this test. Searched: <list of dirs up to workspace root>, then fallback setting "steptix.defaultEnvFile" (=<value or "unset">). Fix: create a .env next to this test (or any ancestor folder up to workspace root) with STEPTIX_SERVER_URL and STEPTIX_SERVER_API_KEY, or set "steptix.defaultEnvFile" in Settings. [Open Settings] [Create .env here]` |
+| `STX002` | `.env` found but `STEPTIX_SERVER_URL` missing | `STX002: STEPTIX_SERVER_URL is missing from <abs path to .env>. Fix: add a line like STEPTIX_SERVER_URL=http://localhost:3100 (full URL including scheme and port). [Reveal .env]` |
 | `STX003` | `.env` found but `STEPTIX_SERVER_API_KEY` missing | `STX003: STEPTIX_SERVER_API_KEY is missing from <abs path to .env>. Fix: add STEPTIX_SERVER_API_KEY=<your-key>. The key must match what the Steptix server was started with. [Reveal .env]` |
-| `STX004` | `SERVER_URL` present but unparseable | `STX004: SERVER_URL in <abs path> is not a valid URL: "<value>". Fix: use a full URL like http://localhost:3100 — include scheme, host, and port. [Reveal .env]` |
+| `STX004` | `STEPTIX_SERVER_URL` present but unparseable | `STX004: STEPTIX_SERVER_URL in <abs path> is not a valid URL: "<value>". Fix: use a full URL like http://localhost:3100 — include scheme, host, and port. [Reveal .env]` |
 | `STX005` | `.env` parse error (malformed line) | `STX005: Could not parse <abs path> at line <n>: "<line>". Fix: each entry must be KEY=VALUE on its own line. Comments start with #. [Reveal .env]` |
-| `STX010` | Server unreachable (ECONNREFUSED, DNS, timeout) | `STX010: Cannot reach the Steptix server at <SERVER_URL> (<error kind>). Fix: start the server (`+`npm run server`+` in the Steptix repo) and confirm it's listening on <host:port>. If running on another machine, check firewall and that SERVER_URL uses the right host. [Show Run Log]` |
+| `STX010` | Server unreachable (ECONNREFUSED, DNS, timeout) | `STX010: Cannot reach the Steptix server at <STEPTIX_SERVER_URL> (<error kind>). Fix: start the server (`+`npm run server`+` in the Steptix repo) and confirm it's listening on <host:port>. If running on another machine, check firewall and that STEPTIX_SERVER_URL uses the right host. [Show Run Log]` |
 | `STX011` | 401 from server | `STX011: Server rejected the API key (401). Fix: STEPTIX_SERVER_API_KEY in <abs path to .env> must match the STEPTIX_SERVER_API_KEY the server was started with. [Reveal .env]` |
-| `STX012` | 404 / endpoint missing (server too old) | `STX012: Server at <SERVER_URL> does not support streaming (?stream=1 returned 404). Fix: update the Steptix server — this extension requires server build with SSE streaming.` |
+| `STX012` | 404 / endpoint missing (server too old) | `STX012: Server at <STEPTIX_SERVER_URL> does not support streaming (?stream=1 returned 404). Fix: update the Steptix server — this extension requires server build with SSE streaming.` |
 | `STX013` | 5xx from server | `STX013: Server returned <status> while starting the run. Detail in run log. Fix: check the server's terminal for a stack trace; this is a server-side bug or misconfiguration. [Show Run Log]` |
 | `STX014` | SSE stream dropped mid-run | `STX014: Connection to the server was lost mid-run (<reason>). The session may still be running on the server. Fix: check the server is still up and re-run; use "Steptix: Stop" to abort the orphaned session. [Show Run Log]` |
 | `STX020` | File opened in Steptix but no `## Steps` heading | `STX020: This file has no "## Steps" heading, so there's nothing to run. Fix: add a "## Steps" heading followed by a numbered list, or open as plain Markdown.` (The planned `[Reopen as Text]` action was removed: its command was never registered.) |
@@ -289,9 +289,9 @@ No code changes in this phase.
 
 - `run-controller.ts` — owns one run-per-editor. On `run` message:
   1. Resolve `.env` via `runner-core/env-file.resolveEnvFile`. Log the search to "Steptix" channel. On miss → `reportError('STX001', { searchedDirs, fallbackSetting })` and abort
-  2. Read+parse `.env`. Parse error → `STX005`. Missing `SERVER_URL` → `STX002`. Unparseable URL → `STX004`. Missing `STEPTIX_SERVER_API_KEY` → `STX003`. All include the absolute `.env` path
+  2. Read+parse `.env`. Parse error → `STX005`. Missing `STEPTIX_SERVER_URL` → `STX002`. Unparseable URL → `STX004`. Missing `STEPTIX_SERVER_API_KEY` → `STX003`. All include the absolute `.env` path
   3. Build session ID = `document.uri.fsPath`
-  4. Call `runner-core/api-client.streamSteps(...)`. Map transport failures to error codes: `ECONNREFUSED`/DNS/timeout → `STX010`, 401 → `STX011`, 404 → `STX012`, 5xx → `STX013`, mid-stream drop → `STX014`. All include `SERVER_URL`
+  4. Call `runner-core/api-client.streamSteps(...)`. Map transport failures to error codes: `ECONNREFUSED`/DNS/timeout → `STX010`, 401 → `STX011`, 404 → `STX012`, 5xx → `STX013`, mid-stream drop → `STX014`. All include `STEPTIX_SERVER_URL`
   5. Forward each SSE event to the webview; mirror to "Steptix" output channel
   6. On `stop` message → abort via `AbortController`
 

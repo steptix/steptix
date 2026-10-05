@@ -79,7 +79,7 @@ describe('Steptix live — the compile tail strip', function () {
     hooks = ext.exports?.__testHooks;
     assert.ok(hooks, '__testHooks missing — activation may have failed');
 
-    const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, { method: 'OPTIONS' });
       assert.ok(
