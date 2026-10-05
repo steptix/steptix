@@ -79,8 +79,12 @@ jobs:
 
       # Each suite runs even if an earlier one failed, so one run reports all
       # four. `npm test` keeps its pretest builds — several suites test dist/.
+      #
+      # Vitest starts CPUs - 1 workers outside watch mode, which is one on a
+      # 2-vCPU hosted runner: every file in turn. The root suite mostly waits
+      # on Chromium and child processes, so more workers than cores still pay.
       - name: Root
-        run: npm test
+        run: npm test -- --maxWorkers=4
       - name: runner-core
         if: ${{ !cancelled() }}
         run: npm test --prefix runner-core
