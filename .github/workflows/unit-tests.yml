@@ -5,10 +5,48 @@
 # are deliberately not here.
 name: Unit tests
 
+# A change that touches only these paths skips the run; one that also
+# touches anything else runs in full. Every entry is a document no unit test
+# reads. That is why `docs/` is listed piece by piece rather than whole:
+# tests/parser-control-flow.test.ts parses the examples in
+# docs/test-writing-handbook.md and docs/ai-test-authoring-guide.md, so
+# those two must still trigger a run. And it is why there is no `**/*.md`:
+# most of the repo's .md files are test fixtures. Before adding a path,
+# check that no test reads from it.
+#
+# The two lists must match. The run on main after a merge stays: it tests
+# what actually landed, and it saves the node_modules and Playwright caches
+# that every PR's first run restores from.
 on:
   pull_request:
+    paths-ignore:
+      - '*.md'
+      - 'docs/specs/**'
+      - 'docs/unit-test-review/**'
+      - 'docs/zip-project-prompt.md'
+      - 'ideas/**'
+      - 'issues/**'
+      - 'stories/**'
+      - 'steptix-vscode/*.md'
+      - 'steptix-vscode/docs/**'
+      - 'steptix-vscode/stories/**'
+      - 'flick-vscode/*.md'
+      - 'packaging/runtime/*.md'
   push:
     branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'docs/specs/**'
+      - 'docs/unit-test-review/**'
+      - 'docs/zip-project-prompt.md'
+      - 'ideas/**'
+      - 'issues/**'
+      - 'stories/**'
+      - 'steptix-vscode/*.md'
+      - 'steptix-vscode/docs/**'
+      - 'steptix-vscode/stories/**'
+      - 'flick-vscode/*.md'
+      - 'packaging/runtime/*.md'
   workflow_dispatch:
 
 permissions:
