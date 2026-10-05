@@ -68,5 +68,6 @@ jobs:
       - name: Build
         run: npm run build
 
+      # --maxWorkers as in unit-tests.yml; see the note on its Root step.
       - name: Root, shuffled (seed ${{ github.run_number }})
-        run: npx vitest run --config vitest.config.ts --sequence.shuffle --sequence.seed=${{ github.run_number }}
+        run: npx vitest run --config vitest.config.ts --maxWorkers=4 --sequence.shuffle --sequence.seed=${{ github.run_number }}

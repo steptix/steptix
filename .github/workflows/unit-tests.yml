@@ -5,10 +5,48 @@
 # are deliberately not here.
 name: Unit tests
 
+# A change that touches only these paths skips the run; one that also
+# touches anything else runs in full. Every entry is a document no unit test
+# reads. That is why `docs/` is listed piece by piece rather than whole:
+# tests/parser-control-flow.test.ts parses the examples in
+# docs/test-writing-handbook.md and docs/ai-test-authoring-guide.md, so
+# those two must still trigger a run. And it is why there is no `**/*.md`:
+# most of the repo's .md files are test fixtures. Before adding a path,
+# check that no test reads from it.
+#
+# The two lists must match. The run on main after a merge stays: it tests
+# what actually landed, and it saves the node_modules and Playwright caches
+# that every PR's first run restores from.
 on:
   pull_request:
+    paths-ignore:
+      - '*.md'
+      - 'docs/specs/**'
+      - 'docs/unit-test-review/**'
+      - 'docs/zip-project-prompt.md'
+      - 'ideas/**'
+      - 'issues/**'
+      - 'stories/**'
+      - 'steptix-vscode/*.md'
+      - 'steptix-vscode/docs/**'
+      - 'steptix-vscode/stories/**'
+      - 'flick-vscode/*.md'
+      - 'packaging/runtime/*.md'
   push:
     branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'docs/specs/**'
+      - 'docs/unit-test-review/**'
+      - 'docs/zip-project-prompt.md'
+      - 'ideas/**'
+      - 'issues/**'
+      - 'stories/**'
+      - 'steptix-vscode/*.md'
+      - 'steptix-vscode/docs/**'
+      - 'steptix-vscode/stories/**'
+      - 'flick-vscode/*.md'
+      - 'packaging/runtime/*.md'
   workflow_dispatch:
 
 permissions:
@@ -37,6 +75,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
+        id: node
         with:
           node-version: 24
           cache: npm
@@ -47,10 +86,27 @@ jobs:
             steptix-vscode/package-lock.json
             fixtures/tools/package-lock.json
 
+      # The five node_modules trees, keyed on all five lockfiles and the Node
+      # version, so a run whose dependencies haven't changed skips npm ci.
+      # The npm cache above only saves the downloads; npm ci still writes
+      # every file, which is the slow part on Windows.
+      - name: Restore node_modules
+        id: nm
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            node_modules
+            runner-core/node_modules
+            fixtures/tools/node_modules
+            flick-vscode/node_modules
+            steptix-vscode/node_modules
+          key: node-modules-${{ runner.os }}-node${{ steps.node.outputs.node-version }}-${{ hashFiles('package-lock.json', 'runner-core/package-lock.json', 'fixtures/tools/package-lock.json', 'flick-vscode/package-lock.json', 'steptix-vscode/package-lock.json') }}
+
       # Order matters: runner-core first (its `prepare` builds the dist/ that
       # steptix-vscode's file: dep links to), and the root before
       # fixtures/tools (its `steptix` dep is file:../..).
       - name: Install
+        if: steps.nm.outputs.cache-hit != 'true'
         shell: bash
         run: |
           npm ci
@@ -58,6 +114,41 @@ jobs:
           npm ci --prefix fixtures/tools
           npm ci --prefix flick-vscode
           npm ci --prefix steptix-vscode
+
+      # The two file: deps are junctions to ../runner-core and to the repo
+      # root. They stay out of the cache: archiving one would store a link
+      # to this runner's checkout, or a copy of what it points at — for
+      # fixtures/tools, the whole repo. Remove only the links, save, and
+      # make them fresh below on every run.
+      - name: Unlink file deps
+        if: steps.nm.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          [System.IO.Directory]::Delete("$PWD/steptix-vscode/node_modules/steptix-runner-core", $false)
+          [System.IO.Directory]::Delete("$PWD/fixtures/tools/node_modules/steptix", $false)
+
+      - name: Save node_modules
+        if: steps.nm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            node_modules
+            runner-core/node_modules
+            fixtures/tools/node_modules
+            flick-vscode/node_modules
+            steptix-vscode/node_modules
+          key: ${{ steps.nm.outputs.cache-primary-key }}
+
+      - name: Link file deps
+        shell: pwsh
+        run: |
+          New-Item -ItemType Junction -Path "$PWD/steptix-vscode/node_modules/steptix-runner-core" -Target "$PWD/runner-core" | Out-Null
+          New-Item -ItemType Junction -Path "$PWD/fixtures/tools/node_modules/steptix" -Target "$PWD" | Out-Null
+
+      # npm ci's `prepare` built runner-core's dist/; on a cache hit nothing did.
+      - name: Build runner-core
+        if: steps.nm.outputs.cache-hit == 'true'
+        run: npm run build --prefix runner-core
 
       # The root suite's real-browser tests launch Playwright's Chromium.
       # Cached per Playwright version so a run doesn't download it again;
@@ -78,15 +169,28 @@ jobs:
         run: npx playwright install chromium
 
       # Each suite runs even if an earlier one failed, so one run reports all
-      # four. `npm test` keeps its pretest builds — several suites test dist/.
+      # four. Several suites test dist/, so something must build it first —
+      # but only once. The root's `npm test` keeps its pretest build of the
+      # root dist/, and runner-core's dist/ was built by its `prepare` during
+      # Install. runner-core's and steptix-vscode's pretests would only
+      # rebuild those two (about 40 s), so they run with --ignore-scripts,
+      # which skips pre/post scripts but still runs `test`. That makes them
+      # depend on the Root step having built: if the root fails to compile,
+      # steptix-vscode fails too, and the root's error is the one to read.
+      #
+      # Vitest starts CPUs - 1 workers outside watch mode, which is one on a
+      # 2-vCPU hosted runner: every file in turn. The root suite mostly waits
+      # on Chromium and child processes, so more workers than cores still pay
+      # — up to a point: 6 was slower than 4, and its load pushed a
+      # wait-for-paint check in record-steps-toolbar past its 15 s ceiling.
       - name: Root
-        run: npm test
+        run: npm test -- --maxWorkers=4
       - name: runner-core
         if: ${{ !cancelled() }}
-        run: npm test --prefix runner-core
+        run: npm test --ignore-scripts --prefix runner-core
       - name: flick-vscode
         if: ${{ !cancelled() }}
         run: npm test --prefix flick-vscode
       - name: steptix-vscode
         if: ${{ !cancelled() }}
-        run: npm test --prefix steptix-vscode
+        run: npm test --ignore-scripts --prefix steptix-vscode
