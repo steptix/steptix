@@ -40,10 +40,10 @@ that already names a model in its `steptix.config.json` keeps that one.
 ### Changed — no built-in AI gateway
 
 Steptix no longer has a default gateway URL. Before, `ai.gatewayUrl` defaulted
-to `https://llm.corp.example`, and `aibroker/` models used it without being
-told to. Now `aibroker/` models refuse to run until `AI_GATEWAY_URL` is set, as
-`gateway/` models already did, and nothing is sent. To keep using the hosted
-broker, add this line to the project `.env`, or once to the machine `.env`
+to a hosted broker, and `aibroker/` models used it without being told to. Now
+`aibroker/` models refuse to run until `AI_GATEWAY_URL` is set, as `gateway/`
+models already did, and nothing is sent. To keep using a gateway, set its URL
+in the project `.env`, or once in the machine `.env`
 (`%LOCALAPPDATA%\steptix\.env`, `~/.steptix/.env` elsewhere):
 
 ```
