@@ -849,6 +849,35 @@ const SECTION_BODY_FIXTURE = [
   '',
 ].join('\n');
 
+// A narrowable section under an `[input:]` prompt, with NO data table — the
+// one shape in which a run can be BOTH "the prompt was cancelled" and "parked
+// at a breakpoint" at once.
+//
+// No table on purpose. A file with one was saved by accident: the row loop
+// rewrites its end reason to `paused` when the block it just ran will park, so
+// the park survived. Without a table there was no row, nothing rewrote the
+// reason, and `prompt-cancelled` won — dropping the narrowing while the yellow
+// ▶ and Continue were still on offer.
+//
+// line 7/8/9 the main flow (8 is the prompt, 9 the call); 11 the `### Log In`
+// heading, 12/13 its body.
+const INPUT_AND_BODY_FIXTURE = [
+  '# Prompt above a breakpoint',
+  '',
+  '## Config',
+  '- baseUrl: http://localhost:8787/',
+  '',
+  '## Steps',
+  '1. Navigate to the baseUrl',
+  '2. [input: code] Enter the code you were sent',
+  '3. Log In',
+  '',
+  '### Log In',
+  '1. Enter the email',
+  '2. Enter the password',
+  '',
+].join('\n');
+
 // A section body carrying a DECISION, for the one narrowing that cannot be
 // taken literally: an `Otherwise` shipped without its `If` is a body the
 // server's own parser refuses, in a message that blames the file.
@@ -910,6 +939,7 @@ const SELECTION_FIXTURES = {
   'data-rows-section.tmp.md': SECTION_ROWS_FIXTURE,
   'data-rows-bad-section.tmp.md': BAD_SECTION_FIXTURE,
   'data-rows-body.tmp.md': SECTION_BODY_FIXTURE,
+  'data-rows-body-input.tmp.md': INPUT_AND_BODY_FIXTURE,
   'data-rows-chain.tmp.md': CHAIN_BODY_FIXTURE,
   'data-rows-body-loop.tmp.md': ROWS_AND_BODY_FIXTURE,
   // Its own copy: the two suites above delete their fixtures in `after`.
@@ -951,6 +981,28 @@ describe('Steptix data-row selection', function () {
       );
     }
     ({ validateSectionEntry } = await import(url.pathToFileURL(validatorPath).href));
+    // Is the validator we just loaded one that knows about `runSteps`?
+    //
+    // `dist/` exists long before this feature does, and a validator that
+    // predates `runSteps` ignores the field instead of refusing it — so every
+    // `assertSectionsValid` below would pass while checking nothing about the
+    // half of the payload this suite is here for. `runTest.cjs` now builds the
+    // repo root before launching VS Code, and this is what says so out loud if
+    // that build was skipped (a hand-run `extensionTestsPath`, a stale
+    // checkout) rather than letting the suite prove less than it claims.
+    const canary = validateSectionEntry('log in', {
+      name: 'Log In',
+      headingLine: 1,
+      steps: ['a'],
+      stepLines: [1],
+      runSteps: [9],
+    });
+    assert.ok(
+      canary !== null && /runSteps/.test(canary),
+      `${validatorPath} accepted an out-of-range runSteps — it predates the ` +
+        'field, so this suite would validate nothing. Run `npm run build` at ' +
+        `the repo root. (got: ${canary})`,
+    );
     const ext = vscode.extensions.getExtension(EXT_ID);
     assert.ok(ext, `${EXT_ID} not loaded`);
     if (!ext.isActive) await ext.activate();
@@ -1571,8 +1623,11 @@ describe('Steptix data-row selection', function () {
    * in its own module so this can import the real thing.
    *
    * Loaded from the repo's built `dist/`, so `npm run build` at the repo root
-   * is a prerequisite of this suite — which the verify loop already runs, and
-   * which the message below says out loud if it has not.
+   * is a prerequisite of this suite. `runTest.cjs` runs it before launching VS
+   * Code (the live runner already did, for the same reason), and the `before`
+   * hook's canary catches the case where it was skipped and the built
+   * validator on disk predates `runSteps` — which would leave every call below
+   * passing while checking nothing.
    */
   const assertSectionsValid = (request, note = '') => {
     for (const [key, entry] of Object.entries(request.sections ?? {})) {
@@ -1624,7 +1679,7 @@ describe('Steptix data-row selection', function () {
 
     const output = outputSince(mark);
     assert.ok(
-      output.includes('Log In — running body steps 2 of 2'),
+      output.includes('Log In — running body step 2 of 2'),
       `expected the body narrowing to be logged. Got ${JSON.stringify(output)}`,
     );
     assert.ok(
@@ -1648,7 +1703,7 @@ describe('Steptix data-row selection', function () {
     assert.deepEqual(fake.requests[0].sourceLines, [7, 8]);
     assert.ok(
       outputSince(mark).includes(
-        'Log In — body steps 2 ignored: ' +
+        'Log In — body step 2 ignored: ' +
           'the step that calls this section is not in your selection',
       ),
       `expected the drop to be logged. Got ${JSON.stringify(outputSince(mark))}`,
@@ -1799,7 +1854,10 @@ describe('Steptix data-row selection', function () {
     assert.deepEqual(entry.runSteps, [0, 1, 2], 'the If comes with its Otherwise');
     const output = outputSince(mark);
     assert.ok(
-      output.includes('Log In — body step 1 kept with 2, 3: an Otherwise needs its If'),
+      // "kept with 2", not "with 2, 3": step 1 was kept for the `Otherwise` on
+      // step 2. Step 3 is in the run because the author picked it, and naming
+      // it in the reason described a link it has nothing to do with.
+      output.includes('Log In — body step 1 kept with 2: an Otherwise needs its If'),
       `the addition must not be silent. Got ${JSON.stringify(output)}`,
     );
     assert.ok(
@@ -1837,7 +1895,7 @@ describe('Steptix data-row selection', function () {
     assert.equal(fake.requests[0].sections['log in'].rowCount, 2);
     const first = outputSince(mark);
     assert.ok(
-      first.includes('Log In — running body steps 2 of 2'),
+      first.includes('Log In — running body step 2 of 2'),
       `Got ${JSON.stringify(first)}`,
     );
     assert.deepEqual(
@@ -1866,12 +1924,77 @@ describe('Steptix data-row selection', function () {
     assert.equal(fake.requests[1].sections['log in'].rowCount, 2);
     const resumed = outputSince(resumeMark);
     assert.ok(
-      resumed.includes('Log In — the narrowing still applies: body steps 2 of 2'),
+      resumed.includes('Log In — the narrowing still applies: body step 2 of 2'),
       `Got ${JSON.stringify(resumed)}`,
     );
     assert.ok(
       resumed.includes('Log In — the narrowing still applies: rows 2 of 2'),
       `the row half must say so too. Got ${JSON.stringify(resumed)}`,
+    );
+  });
+
+  it('keeps the narrowing when a cancelled prompt and a breakpoint land together', async () => {
+    // A run can be two things at once, and only one of them fits in the end
+    // reason. Cancelling the `[input:]` on line 8 sets it to `prompt-cancelled`
+    // and breaks the loop; the breakpoint on line 9 then parks the run, posts
+    // the yellow ▶ and offers Continue. The park was keyed off the REASON, so
+    // this dropped the narrowing — and the Continue, which rebuilds its lines
+    // from the pause point and holds no body lines, ran the whole body, painted
+    // the mark the selection excluded and disarmed the old-server warning on
+    // the way past.
+    //
+    // A file with a data table never showed it: the row loop rewrites the
+    // reason to `paused` when the block it just ran will park. This fixture has
+    // no table, which is why it is its own fixture.
+    const uri = await open('data-rows-body-input.tmp.md');
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(8, 0)), true),
+    ]);
+    const mark = hooks.hostMessageCount();
+    const editor = vscode.window.activeTextEditor;
+    editor.selections = [range(7, 9), range(13)];
+    queueScripts((f) => f.end());
+    void vscode.commands.executeCommand('steptix.runSelected');
+    await waitFor('the batch above the prompt is sent', () => fake.requests.length >= 1);
+
+    assert.deepEqual(fake.requests[0].sourceLines, [7], 'the prompt ends the batch');
+    assertSectionsValid(fake.requests[0], 'narrowed, under a prompt');
+    assert.deepEqual(
+      fake.requests[0].sections['log in'].runSteps,
+      [1],
+      'body step 2 only, decided before the prompt',
+    );
+
+    // Escape closes VS Code's own InputBox. Issued on every poll, as the
+    // sibling test does: closing a quick-open that is not there is a no-op.
+    await waitFor('the run ends when the prompt is dismissed', async () => {
+      await vscode.commands.executeCommand('workbench.action.closeQuickOpen');
+      return hooks.isRunning() === false;
+    });
+    assert.ok(
+      outputSince(mark).includes('Log In — running body step 2 of 2'),
+      `the narrowing was announced. Got ${JSON.stringify(outputSince(mark))}`,
+    );
+    // The run is parked, not over: the breakpoint on line 9 was never reached.
+    assert.equal(hooks.isParkedAtPause(uri), true, 'Continue is on offer');
+
+    const resumeMark = hooks.hostMessageCount();
+    queueScripts((f) => f.end());
+    void vscode.commands.executeCommand('steptix.continueRun');
+    await waitFor('a second request', () => fake.requests.length >= 2);
+    await waitFor('idle after the continue', () => hooks.isRunning() === false);
+
+    assertSectionsValid(fake.requests[1], 'the continuation after a cancelled prompt');
+    assert.deepEqual(
+      fake.requests[1].sections['log in'].runSteps,
+      [1],
+      'the continuation still carries the narrowing the cancelled prompt did not own',
+    );
+    assert.ok(
+      outputSince(resumeMark).includes(
+        'Log In — the narrowing still applies: body step 2 of 2',
+      ),
+      `and says so. Got ${JSON.stringify(outputSince(resumeMark))}`,
     );
   });
 
@@ -1916,10 +2039,11 @@ describe('Steptix data-row selection', function () {
   const LOOP_LINES = ROWS_AND_BODY_FIXTURE.split('\n');
 
   /**
-   * Run the two-row fixture with its body narrowed, edit the buffer to
+   * Run the three-row fixture with its body narrowed, edit the buffer to
    * `mutated` from inside row 1's stream, and let the loop reach row 2 — the
-   * two-block shape in which a mid-run edit re-points `runSteps` at whatever
-   * now sits in those positions.
+   * shape in which a mid-run edit re-points `runSteps` at whatever now sits in
+   * those positions. Three rows rather than two so row 3 can say whether the
+   * refusal ENDED the loop or the loop ground on (see the fixture's own note).
    *
    * The row loop rather than a breakpoint, because a Continue is not reachable
    * after an edit at all: changing a step's text changes the run signature, the

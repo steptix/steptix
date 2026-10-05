@@ -767,7 +767,7 @@ describe('Steptix live — a selection narrows a section\'s body', function () {
 
     // Both narrowings said out loud, in the same voice.
     assert.ok(
-      tap.output.includes('Log In — running body steps 2 of 2'),
+      tap.output.includes('Log In — running body step 2 of 2'),
       `expected the body narrowing line. Got:\n${tap.output
         .filter((l) => l.startsWith('Log In —'))
         .join('\n')}`,
