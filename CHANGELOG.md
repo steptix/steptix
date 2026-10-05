@@ -9,6 +9,26 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Changed — no built-in AI gateway
+
+Steptix no longer has a default gateway URL. Before, `ai.gatewayUrl` defaulted
+to `https://llm.corp.example`, and `aibroker/` models used it without being
+told to. Now `aibroker/` models refuse to run until `AI_GATEWAY_URL` is set, as
+`gateway/` models already did, and nothing is sent. To keep using the hosted
+broker, add this line to the project `.env`, or once to the machine `.env`
+(`%LOCALAPPDATA%\steptix\.env`, `~/.steptix/.env` elsewhere):
+
+```
+AI_GATEWAY_URL=https://llm.corp.example
+```
+
+Direct models (`openai/…`, `anthropic/…`, `bedrock/…`) are unaffected. They
+never used the gateway URL, and the default model is one of them. A session
+whose `.env` stops setting `AI_GATEWAY_URL` now drops it rather than keeping
+the last one. The request log names a direct model's provider
+(`POST openai (direct)`) rather than a gateway address the request never went
+to.
+
 ### Changed — runtime upgrades remove older versions, and wait while Steptix runs
 
 Installing a version of the Windows runtime now removes every installed

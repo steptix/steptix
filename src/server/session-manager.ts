@@ -2324,7 +2324,7 @@ export class SessionManager {
       // session recycle, and the run setting's model still beats it.
       const override = session.runSettings.model;
       const model = typeof override === 'string' && override.trim() !== '' ? override.trim() : desiredAi.model;
-      const change = session.aiClient.syncAuth(model, desiredAi.apiKey, desiredAi.gatewayUrl);
+      const change = session.aiClient.syncAuth(model, desiredAi.apiKey, desiredAi.gatewayUrl ?? null);
       if (change) logger.info(`Session "${session.id}": ${change} (Record Steps)`);
     }
     // `ai.sendScreenshots` as a batch would resolve it: server → project → the
@@ -3613,7 +3613,9 @@ export class SessionManager {
     const aiChange = session.aiClient.syncAuth(
       effectiveAiRoute.model,
       effectiveAiRoute.apiKey,
-      effectiveAiRoute.gatewayUrl,
+      // `null`, not `undefined`, when nothing sets one: there is no default to
+      // fall back to, so a project that stops setting AI_GATEWAY_URL clears it.
+      effectiveAiRoute.gatewayUrl ?? null,
     );
     if (aiChange) {
       logger.info(

@@ -153,6 +153,9 @@ function testConfig(reports: string): Config {
       ...DEFAULT_CONFIG.ai,
       apiKey: 'test-key',
       model: 'aibroker/test/model',
+      // An aibroker/ model needs a URL; the gateway above is scripted, so it is
+      // never contacted.
+      gatewayUrl: 'https://gateway.test',
       streamResponses: false,
       sendScreenshots: false,
       diagnoseFailures: false,

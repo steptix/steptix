@@ -1,7 +1,6 @@
 {
   "$schema": "./schema/steptix.config.schema.json",
   "ai": {
-    "gatewayUrl": "https://llm.corp.example",
     "maxInputTokens": 1000000,
     "streamResponses": false,
     "sendScreenshots": false

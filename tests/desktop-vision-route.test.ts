@@ -17,8 +17,6 @@ import {
   isImageInputUnsupported,
   type VisionRouteAi,
 } from '../src/desktop/vision-route.js';
-import { isCustomGatewayUrl } from '../src/ai/client.js';
-import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 
 const BRIDGE_URL = 'http://127.0.0.1:4891';
 
@@ -76,35 +74,19 @@ describe('checkVisionRoute — which routes are asked', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('a gateway model on the built-in default URL is not checked: no fetch', async () => {
-    const { fetch, calls } = fakeFetch(200, bridgeBody('strip', []));
-    const result = await checkVisionRoute(
-      { model: 'aibroker/openai/gpt-5.6-luna', gatewayUrl: DEFAULT_CONFIG.ai.gatewayUrl, apiKey: 'k' },
-      { fetch },
-    );
-    expect(result.ok).toBe(true);
-    expect(calls).toHaveLength(0);
-  });
-
-  it('uses the AI client\'s own notion of a custom gateway URL by default', async () => {
-    // A trailing slash is not a choice — the client says so, and so must this.
-    expect(isCustomGatewayUrl(`${DEFAULT_CONFIG.ai.gatewayUrl}/`)).toBe(false);
-    const { fetch, calls } = fakeFetch(200, bridgeBody('strip', []));
-    await checkVisionRoute(
-      { model: 'gateway/copilot/x', gatewayUrl: `${DEFAULT_CONFIG.ai.gatewayUrl}/`, apiKey: 'k' },
-      { fetch },
-    );
-    expect(calls).toHaveLength(0);
-  });
-
-  it('the injected custom-URL predicate is the one consulted', async () => {
-    const isCustom = vi.fn(() => false);
-    const { fetch, calls } = fakeFetch(200, bridgeBody('strip', []));
-    const result = await checkVisionRoute(BRIDGE_AI, { fetch, isCustomGatewayUrl: isCustom });
-    expect(isCustom).toHaveBeenCalledWith(BRIDGE_URL);
-    expect(result.ok).toBe(true);
-    expect(calls).toHaveLength(0);
-  });
+  it.each([undefined, '', '   '])(
+    'a gateway model with no URL (%j) is not checked: no fetch',
+    async (gatewayUrl) => {
+      // The client refuses that route itself, so there is nowhere to ask.
+      const { fetch, calls } = fakeFetch(200, bridgeBody('strip', []));
+      const result = await checkVisionRoute(
+        { model: 'gateway/copilot/x', gatewayUrl, apiKey: 'k' },
+        { fetch },
+      );
+      expect(result).toEqual({ ok: true, note: 'no gateway URL is set; not checked' });
+      expect(calls).toHaveLength(0);
+    },
+  );
 });
 
 describe('checkVisionRoute — the request', () => {
