@@ -254,12 +254,8 @@ one go and with no fallback to the old names:
 | folder `testbench-native/` | `steptix-vscode/` |
 
 The new extension ID is a different extension to VS Code: uninstall the old
-one, and move settings across. `scripts/migrate-to-steptix.ps1` does that and
-the rest of one machine's state (the user-root folder and its `.env`, user
-environment variables, VS Code settings, and each checkout's `.env` files,
-config file and `.aiui/` folders); run it with `-WhatIf` first. The Copilot
-bridge token lives in the old extension's secret storage, so run "Steptix: Use
-Copilot for AI" once more.
+one, and move settings across. The Copilot bridge token lives in the old
+extension's secret storage, so run "Steptix: Use Copilot for AI" once more.
 
 Entries below this one, and resolved issues, keep the names they were written
 with.
