@@ -23,7 +23,10 @@ There is no fallback to the old name. A `SERVER_URL` line is ignored: the VS
 Code extension then uses the default, `http://127.0.0.1:3100`, and the MCP
 server refuses a project with "No STEPTIX_SERVER_URL". Rename the line in
 each `.env`, `.env.<name>` and the machine `.env`, and rename a `SERVER_URL`
-environment variable if you set one.
+environment variable if you set one. `scripts/migrate-to-steptix.ps1` does
+all of that; run it with `-WhatIf` first. It copies a `SERVER_URL` user
+variable rather than moving it, since another tool may read that name, and
+leaves a worktree alone until it is named with `-ProjectsOnly -Path`.
 
 For the same reason, the live integration tests' `LIVE_SERVER_URL` is now
 `LIVE_STEPTIX_SERVER_URL`. Set the new name when you point a live run at a

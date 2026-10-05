@@ -13,8 +13,11 @@
                                          stats file on both sides is joined),
                                          its .aiui\ -> .steptix\, its
                                          aiui.config.json -> steptix.config.json,
-                                         AIUI_*/TESTBENCH_* .env keys -> STEPTIX_*
-    2. User environment variables       AIUI_* / TESTBENCH_* -> STEPTIX_*
+                                         AIUI_*/TESTBENCH_* .env keys -> STEPTIX_*,
+                                         SERVER_URL -> STEPTIX_SERVER_URL
+    2. User environment variables       AIUI_* / TESTBENCH_* -> STEPTIX_*;
+                                         SERVER_URL / LIVE_SERVER_URL copied to
+                                         STEPTIX_SERVER_URL / LIVE_STEPTIX_SERVER_URL
     3. VS Code user settings            "testbench-native.*" / "testbench.*"
                                          keys -> "steptix.*", and keybindings'
                                          command ids (backups beside them)
@@ -24,7 +27,9 @@
                                          .vscode-test are dropped instead when
                                          steptix-vscode\ already has its own
          old-name junctions             unlinked; npm install re-creates them
-         .env* files                    AIUI_* / TESTBENCH_* keys -> STEPTIX_*
+         .env* files                    AIUI_* / TESTBENCH_* keys -> STEPTIX_*,
+                                         SERVER_URL -> STEPTIX_SERVER_URL,
+                                         LIVE_SERVER_URL -> LIVE_STEPTIX_SERVER_URL
          aiui.config.json               -> steptix.config.json
          .aiui\, .testbench\            -> .steptix\ (merged)
          .aiui-profile (CDP profiles)   -> .steptix-profile
@@ -43,7 +48,10 @@
   -WhatIf shows the plan without touching anything.
 
   A checkout that has not pulled the rename yet is refused: renaming its
-  tracked aiui.config.json would make the pull fail.
+  tracked aiui.config.json would make the pull fail. So is one that has not
+  pulled the STEPTIX_SERVER_URL rename: its code still reads SERVER_URL.
+  Worktrees under .claude\worktrees are skipped unless named in -Path; merge
+  main into one first, then run with -ProjectsOnly -Path <worktree>.
 
 .EXAMPLE
   .\scripts\migrate-to-steptix.ps1 -WhatIf
@@ -52,7 +60,8 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-  [string[]] $Path = @('C:\Projects\vibe\ai-ui-automation'),
+  # The main checkout, wherever it lives, even when run from a worktree's copy.
+  [string[]] $Path = @(@(git -C $PSScriptRoot worktree list --porcelain)[0] -replace '^worktree ', ''),
   [switch] $UninstallOldExtension,
   # Only step 4, on -Path: for migrating another test project later.
   [switch] $ProjectsOnly
@@ -64,29 +73,41 @@ function Test-Link([string] $p) {
   return [bool]($item -and $item.LinkType)
 }
 
-# Renames AIUI_X= / TESTBENCH_X= lines to STEPTIX_X=, except where the file
-# already defines STEPTIX_X — that line stays, so the file never ends up with
-# two definitions of one key.
+# The new name of a renamed variable, or $null for one that kept its name.
+function Get-NewEnvKey([string] $key) {
+  if ($key -cmatch '^(AIUI|TESTBENCH)_(\w+)$') { return "STEPTIX_$($Matches[2])" }
+  if ($key -ceq 'SERVER_URL') { return 'STEPTIX_SERVER_URL' }
+  if ($key -ceq 'LIVE_SERVER_URL') { return 'LIVE_STEPTIX_SERVER_URL' }
+  return $null
+}
+
+# Renames AIUI_X= / TESTBENCH_X= lines to STEPTIX_X=, and SERVER_URL= /
+# LIVE_SERVER_URL= to STEPTIX_SERVER_URL= / LIVE_STEPTIX_SERVER_URL=, except
+# where the file already defines the new name — that line stays, so the file
+# never ends up with two definitions of one key.
 function Rename-EnvKeys([string] $file) {
   $lines = [IO.File]::ReadAllLines($file)
-  $keyRe = '^(\s*(?:export\s+)?)(AIUI|TESTBENCH)_(\w+)(\s*=)'
+  $keyRe = '^(\s*(?:export\s+)?)(\w+)(\s*=)'
   $defined = @{}
-  foreach ($l in $lines) { if ($l -match '^\s*(?:export\s+)?(STEPTIX_\w+)\s*=') { $defined[$Matches[1]] = $true } }
+  foreach ($l in $lines) { if ($l -match $keyRe) { $defined[$Matches[2]] = $true } }
   $changed = $false
   $out = foreach ($l in $lines) {
     if ($l -match $keyRe) {
-      $target = "STEPTIX_$($Matches[3])"
-      if ($defined.ContainsKey($target)) {
-        Write-Warning "$file already defines $target; left $($Matches[2])_$($Matches[3]) as it is"
+      $old = $Matches[2]
+      $target = Get-NewEnvKey $old
+      if (-not $target) {
+        $l
+      } elseif ($defined.ContainsKey($target)) {
+        Write-Warning "$file already defines $target; left $old as it is"
         $l
       } else {
         $defined[$target] = $true
         $changed = $true
-        $l -replace $keyRe, ('${1}' + $target + '${4}')
+        $l -replace $keyRe, ('${1}' + $target + '${3}')
       }
     } else { $l }
   }
-  if ($changed -and $PSCmdlet.ShouldProcess($file, 'rename AIUI_/TESTBENCH_ keys to STEPTIX_')) {
+  if ($changed -and $PSCmdlet.ShouldProcess($file, 'rename old-name keys')) {
     [IO.File]::WriteAllLines($file, [string[]]$out)
     Write-Host "  keys renamed: $file"
   }
@@ -257,11 +278,14 @@ if (-not $ProjectsOnly) {
 
   # 2. User environment variables. An expandable (REG_EXPAND_SZ) value is left
   # for a hand move: the .NET API would store it expanded, freezing any %VAR%.
+  # SERVER_URL and LIVE_SERVER_URL are copied, not moved: the names are
+  # generic enough that another tool may read them too.
   Write-Host '2. User environment variables'
   $envKey = Get-Item -LiteralPath 'HKCU:\Environment'
   foreach ($name in @($envKey.GetValueNames())) {
-    if ($name -notmatch '^(AIUI|TESTBENCH)_') { continue }
-    $target = $name -replace '^(AIUI|TESTBENCH)_', 'STEPTIX_'
+    $target = Get-NewEnvKey $name
+    if (-not $target) { continue }
+    $copy = $name -cnotmatch '^(AIUI|TESTBENCH)_'
     if ($null -ne $envKey.GetValue($target)) {
       Write-Warning "user variable $target already exists; left $name as it is"
       continue
@@ -270,10 +294,15 @@ if (-not $ProjectsOnly) {
       Write-Warning "user variable $name is not a plain string (expandable?); rename it by hand to $target"
       continue
     }
-    if ($PSCmdlet.ShouldProcess("user variable $name", "rename to $target")) {
+    if ($PSCmdlet.ShouldProcess("user variable $name", "$(if ($copy) { 'copy' } else { 'rename' }) to $target")) {
       [Environment]::SetEnvironmentVariable($target, $envKey.GetValue($name), 'User')
-      [Environment]::SetEnvironmentVariable($name, $null, 'User')
-      Write-Host "  $name -> $target (new terminals pick it up)"
+      if ($copy) {
+        Write-Host "  $name copied to $target (new terminals pick it up)"
+        Write-Warning "user variable $name was kept; Steptix no longer reads it. Remove it if nothing else does."
+      } else {
+        [Environment]::SetEnvironmentVariable($name, $null, 'User')
+        Write-Host "  $name -> $target (new terminals pick it up)"
+      }
     }
   }
 
@@ -307,6 +336,14 @@ foreach ($given in $Path) {
   $newExt = Join-Path $p 'steptix-vscode'
   if (Test-Path -LiteralPath (Join-Path $oldExt 'package.json')) {
     Write-Warning "$p has not pulled the rename yet (testbench-native\package.json is still tracked there). Pull first, then re-run."
+    continue
+  }
+  # Renaming SERVER_URL in a checkout whose code still reads it would send its
+  # runs to the default server without a word.
+  $userRoot = Join-Path $p 'runner-core\src\user-root.ts'
+  if ((Test-Path -LiteralPath $userRoot) -and
+      -not (Select-String -LiteralPath $userRoot -Pattern 'STEPTIX_SERVER_URL' -SimpleMatch -Quiet)) {
+    Write-Warning "$p has not pulled the STEPTIX_SERVER_URL rename yet (its runner-core still reads SERVER_URL). Pull first, then re-run."
     continue
   }
 
