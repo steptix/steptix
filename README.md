@@ -1280,6 +1280,11 @@ To avoid that:
 - headed mode uses `windowSize`
 - headless mode uses `viewport`
 
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) says how to set up a clone, run the tests,
+and send a pull request.
+
 ## Security
 
 To report a vulnerability, use GitHub's private reporting rather than a public
