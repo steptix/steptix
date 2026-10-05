@@ -11,10 +11,10 @@
  * The copy is the Windows choice (steptix.cmd is one of its launch files), so
  * it is compared with findInstalledRuntime(dir, 'win32') on every platform.
  */
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { createRequire } from 'node:module';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { compareVersions, findInstalledRuntime } from '../src/extension/server-manager.ts';
@@ -24,9 +24,18 @@ const onPath = require('../../packaging/runtime/bin/run-newest-runtime.cjs');
 
 const LAUNCH_FILES = ['runtime-launcher.cjs', 'server/dist/index.js', 'steptix.cmd'];
 
+/** Temp dirs, removed when the file is done. `maxRetries`: on Windows
+ *  antivirus or the indexer can still hold a file written moments ago, and
+ *  `force` does not cover EBUSY/EPERM. */
+const made = [];
+after(() => {
+  for (const dir of made) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+});
+
 /** A runtimes folder: each name maps to the launch files its folder holds. */
 function runtimesFolder(folders) {
   const dir = mkdtempSync(path.join(tmpdir(), 'steptix-path-runtimes-'));
+  made.push(dir);
   for (const [name, files] of Object.entries(folders)) {
     mkdirSync(path.join(dir, name), { recursive: true });
     for (const file of files) {

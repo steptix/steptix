@@ -7,10 +7,10 @@
  * two to the same answers. The "blocking" cases run real processes from a
  * runtime folder. Windows only, like the installer.
  */
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,9 +22,24 @@ const script = fileURLToPath(new URL('../../packaging/runtime/runtime-scan.ps1',
 /** The files that make a folder an installed runtime, in the script's terms. */
 const INSTALLED = ['runtime-launcher.cjs', 'server/dist/index.js', 'steptix.cmd', '.steptix-runtime-install', 'Uninstall.exe'];
 
-/** A runtimes folder: each name maps to the files its folder holds. */
+/** A fresh temp dir, removed when the file is done. `maxRetries`: on Windows
+ *  antivirus or the indexer can still hold a file written moments ago, and
+ *  `force` does not cover EBUSY/EPERM. */
+const made = [];
+function tempDir() {
+  const dir = mkdtempSync(path.join(tmpdir(), 'steptix-scan-'));
+  made.push(dir);
+  return dir;
+}
+after(() => {
+  for (const dir of made) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+});
+
+/** A runtimes folder, in a temp dir of its own: each name maps to the files its
+ *  folder holds. */
 function runtimesFolder(folders) {
-  const dir = mkdtempSync(path.join(tmpdir(), 'steptix-scan-runtimes-'));
+  const dir = path.join(tempDir(), 'runtimes');
+  mkdirSync(dir);
   for (const [name, files] of Object.entries(folders)) {
     mkdirSync(path.join(dir, name), { recursive: true });
     for (const file of files) {
@@ -49,8 +64,9 @@ function scan(...args) {
   return lines.slice(0, -1);
 }
 
+/** The folder names the "older" scan lists, written beside the runtimes folder. */
 function older(runtimes, version) {
-  const out = path.join(runtimes, '..', `${path.basename(runtimes)}-older.txt`);
+  const out = path.join(path.dirname(runtimes), `older-than-${version}.txt`);
   assert.deepEqual(scan('-Mode', 'older', '-RuntimesDir', runtimes, '-Version', version, '-Out', out), []);
   const text = readFileSync(out).toString('utf16le');
   return text.split(/\r?\n/).filter((line) => line !== '').map((line) => path.basename(line)).sort();
@@ -77,7 +93,7 @@ test('older: only folders this installer made are counted', { skip }, () => {
 });
 
 test('older: no runtimes folder at all is nothing to remove', { skip }, () => {
-  assert.deepEqual(older(path.join(tmpdir(), 'steptix-no-such-runtimes-dir'), '1.0.0'), []);
+  assert.deepEqual(older(path.join(tempDir(), 'runtimes'), '1.0.0'), []);
 });
 
 test('blocking: node running a file from an older runtime, or a named folder, blocks; a newer one and a shell do not', { skip }, async () => {
