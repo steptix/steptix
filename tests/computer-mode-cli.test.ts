@@ -988,9 +988,10 @@ describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surf
 
     expect(report.status).toBe('failed');
     expect(report.steps[1]!.status).toBe('failed');
-    expect(report.steps[1]!.error).toBe(
-      `[tool: open_calculator] was not run: the runner did not dispatch it as a tool call. ${ACTED_OUT}`,
+    expect(report.steps[1]!.error).toMatch(
+      /^\[tool: open_calculator\] was not run: the runner did not dispatch it as a tool call\./,
     );
+    expect(report.steps[1]!.error).toContain(ACTED_OUT);
     expect(report.steps[1]!.surface).toBe('computer');
     expect(report.steps[1]!.turns).toHaveLength(0);
     expect(report.steps).toHaveLength(2);

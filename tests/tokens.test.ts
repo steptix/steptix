@@ -36,21 +36,10 @@ describe('TokenTracker per-run accounting', () => {
     expect(t.total).toBe(401_200);
   });
 
-  it('counts only post-mark usage when a run adds some tokens after the mark', () => {
-    // The realistic server shape: run 1 spent real tokens, then markRunStart,
-    // then run 2 spends *some* (e.g. a few steps not yet compiled). The report for
-    // run 2 must show run 2's usage only, not the session-cumulative figure.
-    const t = new TokenTracker();
-    t.addUsage(400_000, 1_200); // run 1 (cold)
-    t.markRunStart();
-    t.addUsage(2_000, 40); // run 2 (mostly code-behind, two AI steps)
-    expect(t.runInputTotal).toBe(2_000);
-    expect(t.runOutputTotal).toBe(40);
-    expect(t.runTotal).toBe(2_040);
-    expect(t.total).toBe(403_240);
-  });
-
   it('markRunStart isolates each run when usage is added between marks', () => {
+    // The realistic server shape: run 1 spends real tokens, then markRunStart,
+    // then run 2 spends *some* (e.g. a few steps not yet compiled). The report
+    // for run 2 must show run 2's usage only, not the session-cumulative figure.
     const t = new TokenTracker();
     t.markRunStart();
     t.addUsage(100, 10); // run 1

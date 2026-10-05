@@ -178,7 +178,7 @@ describe('multi-env integration: same test, two envs', () => {
     ).rejects.toThrow(/Unknown data path 'users.admin.emial'.*broken\.md/);
   });
 
-  it('frontmatter env: pins a test to a specific env when no CLI flag', async () => {
+  it('frontmatter `env:` is parsed, and a re-parse with that env\'s bundle resolves', async () => {
     const pinnedFile = path.join(tmpRoot, 'pinned.md');
     writeFileSync(
       pinnedFile,
@@ -190,7 +190,11 @@ env: staging
 1. Hit \${env.BASE_URL}
 `,
     );
-    // Simulate CLI behaviour: parse first to read frontmatter, then re-parse with that env's bundle.
+    // The two halves the CLI's pin is built from: parse to read the
+    // frontmatter, then re-parse with that env's bundle. The pin DECISION —
+    // frontmatter applies only when no `--env` was given (src/cli/commands/run.ts)
+    // — is not run here; the Electron path's version of it is driven for real
+    // in ui-runner-adapter-env-data.test.ts.
     const initial = await parseTestFile(pinnedFile);
     expect(initial.frontmatter.env).toBe('staging');
 

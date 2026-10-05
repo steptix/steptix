@@ -29,7 +29,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } 
 import type { MockInstance } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { Express } from 'express';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Config } from '../src/config/types.js';
@@ -464,7 +464,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(projectRoot, { recursive: true, force: true });
+  // The `sessionManager` spies (`fakeRun`, `closeSession`, `sessionStatus`)
+  // are restored here rather than at the end of each test: a failed assertion
+  // would skip an inline restore and leave every later test running against
+  // the spy, one failure turning into a cascade.
+  vi.restoreAllMocks();
+  rmSync(projectRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 describe('the compile stream', () => {
@@ -662,12 +667,6 @@ describe('recording in the caller\'s session', () => {
       expect.stringMatching(/^Recording to .*smoke\.recording$/),
     );
     expect(outputs(events)).toContainEqual({ kind: 'info', msg: 'Recording in session editor-session (opening it).' });
-    run.mockRestore();
-    close.mockRestore();
-  });
-
-  it('keeps nothing of a run on the session — there is no last run to reuse', () => {
-    expect((sessionManager as unknown as { lastRunDetails?: unknown }).lastRunDetails).toBeUndefined();
   });
 
   it('streams every event of a Record and a Replay inside compile:run, with the round', async () => {
@@ -727,12 +726,10 @@ describe('recording in the caller\'s session', () => {
     expect(events.at(-1)!.data.status).toBe('partial');
     expect(events.at(-1)!.data.summary.writtenOffAi).toEqual([2]);
     expect(events.at(-1)!.data.summary.recordingDir).toBe('/x/.steptix-codebehind-cache/smoke.recording');
-    run.mockRestore();
-    close.mockRestore();
   });
 
   it('refuses to record in a session with a run in flight', async () => {
-    const status = vi.spyOn(sessionManager, 'sessionStatus').mockReturnValue('executing');
+    vi.spyOn(sessionManager, 'sessionStatus').mockReturnValue('executing');
     const run = vi.spyOn(sessionManager, 'executeSteps');
     compileTestMock.mockImplementationOnce(async (options) => {
       core.calls.push(options);
@@ -750,8 +747,6 @@ describe('recording in the caller\'s session', () => {
     const error = outputs(events).find((o) => o.kind === 'error');
     expect(error?.msg).toContain('busy-session is busy');
     expect(events.at(-1)!.data.status).toBe('failed');
-    status.mockRestore();
-    run.mockRestore();
   });
 
   it('records in a session of its own when no session is named', async () => {
@@ -765,8 +760,6 @@ describe('recording in the caller\'s session', () => {
     expect(sessionId).toMatch(/^compile:/);
     expect(request.captureStepContext).toBe(true);
     expect(close).toHaveBeenCalledWith(sessionId);
-    run.mockRestore();
-    close.mockRestore();
   });
 });
 
@@ -807,7 +800,7 @@ describe('the parameters a compile\'s runs start from', () => {
 
   it('starts each run from the map the core resolved, not the parsed test\'s raw values', async () => {
     const run = fakeRun([stepWithContext(1), stepWithContext(2), stepWithContext(3)]);
-    const close = vi.spyOn(sessionManager, 'closeSession').mockResolvedValue(undefined);
+    vi.spyOn(sessionManager, 'closeSession').mockResolvedValue(undefined);
     compileTestMock.mockImplementationOnce(async (options) => {
       core.calls.push(options);
       await options.runner!({
@@ -828,8 +821,6 @@ describe('the parameters a compile\'s runs start from', () => {
 
     const [, request] = run.mock.calls[0]!;
     expect(request.parameters).toEqual({ username: 'alice', stage: 'x' });
-    run.mockRestore();
-    close.mockRestore();
   });
 
   it('carries a note from the core as an output frame', async () => {
@@ -990,7 +981,10 @@ describe('the server never writes the real .steps.ts', () => {
     const events = await compileStream({ testFilePath: testFile('smoke.md'), dryRun: false });
 
     expect(optionsAt(0).dryRun).toBe(true);
-    expect(events.at(-1)!.data.summary.written).toEqual([]);
-    expect(Object.keys(events.at(-1)!.data.files)).toEqual([testFile('smoke.steps.ts')]);
+    // The core is faked, so its own `written` and `files` say nothing about
+    // the server. What the server could still do is write the proposed file
+    // itself on the way to the stream — and it did not.
+    expect(events.at(-1)!.event).toBe('compile:result');
+    expect(existsSync(testFile('smoke.steps.ts'))).toBe(false);
   });
 });

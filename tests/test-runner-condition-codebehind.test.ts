@@ -173,7 +173,7 @@ beforeEach(() => {
 });
 
 afterAll(async () => {
-  if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true });
+  if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

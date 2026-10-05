@@ -37,7 +37,6 @@ import {
   modelSelectorAttempts,
   modelsListBody,
   parseImageDataUrl,
-  qualifiedModelId,
   routeFor,
   streamFrames,
   stripJsonFence,
@@ -560,10 +559,6 @@ test('a stray leading or trailing slash does not produce an empty vendor', () =>
   ]);
 });
 
-test('the qualified id is what .env carries after gateway/', () => {
-  assert.equal(qualifiedModelId({ vendor: 'copilot', id: 'gpt-4.1' }), 'copilot/gpt-4.1');
-});
-
 // ---------------------------------------------------------------------------
 // json_object emulation
 // ---------------------------------------------------------------------------
@@ -621,20 +616,17 @@ test('the non-streaming body is a complete OpenAI chat.completion', () => {
   assert.deepEqual(body.usage, usage);
 });
 
-test('neither builder hands out a reference to the usage it was given', () => {
+test('chatCompletionBody does not hand out a reference to the usage it was given', () => {
   // ZERO_USAGE is a module-level singleton and every fallback spreads it. If a
   // builder aliased instead of copying, one consumer mutating `body.usage`
   // would poison that constant for the extension host's lifetime — so the
   // mutation has to be applied to what came OUT and checked against what went
   // IN. (Mutating a second body built from a different object proves nothing:
-  // that passes against an aliasing implementation too.)
+  // that passes against an aliasing implementation too.) streamFrames is not
+  // checked: it hands out strings, which cannot alias anything.
   const body = chatCompletionBody(shape);
   body.usage.prompt_tokens = 999;
   assert.equal(shape.usage.prompt_tokens, 41);
-
-  const finish = JSON.parse(streamFrames(shape)[1].replace(/^data: /, ''));
-  finish.usage.completion_tokens = 999;
-  assert.equal(shape.usage.completion_tokens, 7);
 });
 
 test('ZERO_USAGE cannot be mutated by a consumer that forgets to copy', () => {

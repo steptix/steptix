@@ -26,6 +26,7 @@ import {
   stepBoxValue,
   toolbarButtonAt,
   until,
+  watchStatus,
 } from './record-toolbar-cdp.js';
 
 /** Every page listens to everything it can, the way apps with keyboard
@@ -155,7 +156,14 @@ afterAll(async () => {
 }, 60_000);
 
 function newRecorder(
-  opts: { toolbar?: boolean; sendScreenshots?: boolean; checkInMs?: number; windows?: number } = {},
+  opts: {
+    toolbar?: boolean;
+    sendScreenshots?: boolean;
+    checkInMs?: number;
+    windows?: number;
+    endShowMs?: number;
+    now?: () => number;
+  } = {},
 ): StepRecorder {
   return new StepRecorder({
     browser: session,
@@ -167,6 +175,8 @@ function newRecorder(
     onToolbar: (c) => commands.push(c),
     ...(opts.checkInMs !== undefined && { checkInMs: opts.checkInMs }),
     ...(opts.windows !== undefined && { typedNavigationWindowMs: opts.windows, historyCausedWindowMs: opts.windows }),
+    ...(opts.endShowMs !== undefined && { endShowMs: opts.endShowMs }),
+    ...(opts.now !== undefined && { now: opts.now }),
   });
 }
 
@@ -241,7 +251,7 @@ describe('the toolbar is in the page', () => {
     expect(first.height).toBeLessThan(120);
     const bar = await readToolbar(page);
     expect(bar?.shadowType).toBe('closed');
-    expect(bar?.status).toMatch(/^REC 00:0\d · 0 actions$/);
+    expect(bar?.status).toMatch(/^REC \d\d:\d\d · 0 actions$/);
     expect(bar?.sub).toContain('No steps yet');
     // The page cannot look in.
     expect(await page.evaluate(() => document.querySelector('steptix-recorder')!.shadowRoot)).toBeNull();
@@ -449,10 +459,15 @@ describe('screenshots paint the toolbar out', () => {
     await recorder.start();
     recorder.armPick();
     await page.mouse.move(40, 660);
-    // The outline is drawn — blue, round the green button.
-    await sleep(300);
-    const shot = await page.screenshot({ type: 'png' });
-    expect(await pixelsNear(shot, [0x2e, 0x9b, 0xff], 20)).toBeGreaterThan(50);
+    // The outline is drawn — blue, round the green button. Wait for it to be
+    // painted rather than for a fixed time: on a loaded runner 300 ms was
+    // not always enough, and the crop below proves nothing until it is there.
+    await until(
+      async () => pixelsNear(await page.screenshot({ type: 'png' }), [0x2e, 0x9b, 0xff], 20),
+      (blue) => blue > 50,
+      'the pick outline to be painted',
+      15_000,
+    );
     await page.mouse.down();
     await page.mouse.up();
     const [check] = await until(async () => actions, (a) => a.length === 1 && a[0]!.crop !== undefined, 'the check with its crop');
@@ -466,7 +481,11 @@ describe('screenshots paint the toolbar out', () => {
 
 describe('pause and resume', () => {
   it('records nothing while paused — not a click, not typing, not an address or a Back — and the next action says so', async () => {
-    await startOn('/app.html', { windows: 100 });
+    // The recorder's clock is the real one plus `away`, which the test moves
+    // on an hour while paused: the author's time away, without the wait.
+    const HOUR = 3_600_000;
+    let away = 0;
+    await startOn('/app.html', { windows: 100, now: () => Date.now() + away });
     await page.evaluate(`document.getElementById('to-other').addEventListener('click', (e) => e.preventDefault())`);
     await page.click('#to-other');
     await until(async () => actions.length, (n) => n === 1, 'the first click');
@@ -486,8 +505,10 @@ describe('pause and resume', () => {
     await page.goto(`${origin}/other.html`);
     await page.click('#other-button');
     await page.goBack();
+    // Time for any of that to arrive, were it going to be recorded.
     await sleep(1_300);
     expect(actions).toHaveLength(3);
+    away = HOUR;
 
     await clickToolbar(page, 'pause'); // Resume
     await until(async () => recorder.isPaused, (p) => !p, 'resumed');
@@ -496,8 +517,9 @@ describe('pause and resume', () => {
     await until(async () => actions.length, (n) => n === 4, 'the click after resume');
     const after = actions[3]!;
     expect(after).toMatchObject({ kind: 'click', afterPause: true });
-    // The paused time is not in the clock: the gap is well under the 1.3 s+ paused.
-    expect(after.atMs - beforePause).toBeLessThan(1_000);
+    // The paused time is not in the clock: the hour spent paused is not in
+    // the gap, however slow the real seconds around it were.
+    expect(after.atMs - beforePause).toBeLessThan(HOUR);
     // The history was re-read at resume: a Forward now is a forward.
     await sleep(250);
     await page.goForward();
@@ -618,11 +640,6 @@ describe('a strict Content-Security-Policy', () => {
       await page.keyboard.press('Enter');
       await until(async () => commands, (c) => c.some((x) => x.kind === 'step'), 'the step');
       expect(commands).toContainEqual({ kind: 'step', text: 'Click Continue' });
-      console.log(
-        `[strict CSP, ${name}] toolbar ${Math.round(box.w)}×${Math.round(box.h)} at (${Math.round(box.x)}, ${Math.round(box.y)}), ` +
-          `top layer ${host.topLayer}, graphite ${(100 * graphite / (box.w * box.h)).toFixed(0)}% of its box; ` +
-          `page body ${page0.body}, inline div width ${page0.inlineWidth}px`,
-      );
     }, 30_000);
   }
 });
@@ -738,8 +755,18 @@ describe('a page busy at load (finding 2)', () => {
     await startOn('/app.html');
     let mode: 'refuse' | 'hang' | 'pass' = 'refuse';
     interfere('toolbar', () => mode);
+    // Read off a log of every status the page renders, not by polling: the
+    // PAUSED it shows ahead of the answer lasts only until the refusal, or
+    // with no answer the page's own few seconds, and a poll can land after.
+    // (A refusal and no answer take the same way back in the page; this
+    // checks that each is taken back, not how fast.)
+    const pausedThenRec = (log: string[]): boolean => {
+      const at = log.findIndex((s) => s.startsWith('PAUSED'));
+      return at >= 0 && log.slice(at + 1).some((s) => s.startsWith('REC'));
+    };
+    const refused = await watchStatus(page);
     await page.keyboard.press('Alt+Shift+P');
-    await sleep(400);
+    await until(refused, pausedThenRec, 'PAUSED shown, then taken back on the refusal');
     expect(recorder.isPaused).toBe(false);
     expect((await readToolbar(page))!.status).toMatch(/^REC/);
     // …and the page records again: a click is an action.
@@ -747,9 +774,9 @@ describe('a page busy at load (finding 2)', () => {
     await until(async () => actions.length, (n) => n === 1, 'the click after the refused pause');
 
     mode = 'hang';
+    const unanswered = await watchStatus(page);
     await page.keyboard.press('Alt+Shift+P');
-    await until(() => readToolbar(page), (t) => t !== null && t.status.startsWith('PAUSED'), 'PAUSED at once', 2_000);
-    await until(() => readToolbar(page), (t) => t !== null && t.status.startsWith('REC'), 'taken back: no answer came', 8_000);
+    await until(unanswered, pausedThenRec, 'PAUSED at once, then taken back: no answer came');
     expect(recorder.isPaused).toBe(false);
   }, 45_000);
 
@@ -817,15 +844,30 @@ describe('"Typing hidden" (finding 4)', () => {
 describe('after the recording (finding 6)', () => {
   it('the bar lets clicks through to the page as soon as it is not recording — bar its Close button', async () => {
     await page.goto(`${origin}/wide.html`);
-    recorder = newRecorder();
+    // The done bar stays for as long as the test takes: with its own six
+    // seconds, a click that waited for the bar to leave would pass too.
+    recorder = newRecorder({ endShowMs: 120_000 });
     await recorder.start();
     await until(() => hostState(page), (s) => s.present && s.width > 300, 'the toolbar');
+    // The full-width button's middle is under the bar. What the page hit-tests
+    // there decides where a click goes — read directly, not by whether a
+    // Playwright click gets through in time.
+    const wide = (await page.locator('#wide').boundingBox())!;
+    const middle = { x: wide.x + wide.width / 2, y: wide.y + wide.height / 2 };
+    const hit = (): Promise<string> =>
+      page.evaluate(({ x, y }) => {
+        const el = document.elementFromPoint(x, y);
+        return el ? el.id || el.localName : '';
+      }, middle);
+    // The control: recording, the bar takes that point.
+    expect(await hit()).toBe('steptix-recorder');
     recorder.setToolbar({ ...VIEW, phase: 'done', endKind: 'done', endText: 'Done · 1 step written to t.md' });
     await recorder.stop();
     await recorder.flushToolbar();
     await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Done'), 'the done state');
-    // The full-width button's middle is under the bar: clicked at once.
-    await page.click('#wide', { timeout: 1_500 });
+    // Done: the point is the button's, and a click there is the page's.
+    expect(await hit()).toBe('wide');
+    await page.mouse.click(middle.x, middle.y);
     expect(await page.evaluate('window.wideClicks')).toBe(1);
     expect((await hostState(page)).present).toBe(true);
     // Close still works.
@@ -1094,21 +1136,17 @@ describe('the Steps so far drawer', () => {
       expect(box.y + box.height).toBeLessThanOrEqual(b.host.y + b.host.height + 1);
     }
     recorder.setToolbar({ ...WITH_STEPS, dock: 'tl' });
-    await sleep(250);
-    b = (await barBoxes(page))!;
+    b = (await until(() => barBoxes(page), (x) => x !== null && x.host.y < 40, 'the bar docked top left'))!;
     expect(b.drawer.y).toBeGreaterThanOrEqual(b.main.y + b.main.height - 1);
-    expect(b.host.y).toBeLessThan(40);
     // A long draft scrolls inside the drawer rather than growing past it.
     recorder.setToolbar({
       ...WITH_STEPS,
       dock: 'tl',
       steps: Array.from({ length: 30 }, (_x, i) => ({ id: `d${i + 10}`, text: `Step number ${i + 1}`, yours: false })),
     });
-    await sleep(250);
+    await until(() => drawerAt(page, 'd39', null), (at) => at !== null, 'the long draft shown');
     b = (await barBoxes(page))!;
     expect(b.drawer.height).toBeLessThan(260);
-    const last = await drawerAt(page, 'd39', null);
-    expect(last).not.toBeNull();
   }, 30_000);
 
   it('works under a strict Content-Security-Policy with Trusted Types', async () => {
@@ -1333,7 +1371,10 @@ describe('the Steps so far drawer', () => {
       return at;
     };
     const x = await dbl('s1', 'row-delete');
-    await sleep(400);
+    // The delete is waited for; the spell after it is for a second command
+    // the double-click's other half must not have made.
+    await until(async () => commands.length, (n) => n >= 1, 'the delete');
+    await sleep(300);
     expect(commands).toEqual([{ kind: 'delete-step', id: 's1' }]);
     expect((await readDrawer(page))!.rows[1]).toMatchObject({ id: 's1', kind: 'deleted' });
     // A click there without moving still does nothing…
@@ -1385,7 +1426,10 @@ describe('the Steps so far drawer', () => {
     await page.keyboard.down('Enter'); // the key repeating
     await page.keyboard.down('Enter');
     await page.keyboard.up('Enter');
-    await sleep(400);
+    // The save is waited for; the spell after it is for anything the
+    // repeats must not have done.
+    await until(async () => commands.length, (n) => n >= 1, 'the edit');
+    await sleep(300);
     expect(commands).toEqual([{ kind: 'edit-step', id: 'd1', text: 'Click Reports in the main menu now' }]);
     expect(actions.slice(before)).toEqual([]);
     expect(await heardKeys()).toEqual([]);

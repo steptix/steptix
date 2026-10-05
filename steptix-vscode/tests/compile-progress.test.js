@@ -17,10 +17,11 @@ import {
   quickPickLabel,
   statusBarText,
   statusBarTooltip,
-  stripDetail,
   stripFraction,
-  stripHeadline,
 } from "../src/extension/compile-progress-core.ts";
+// The strip's headline and detail line are drawn only by the webview, so
+// their wording is pinned on the copy the panel renders.
+import { stripDetailInline, stripHeadlineInline } from "../src/webview/lib/compile-strip-inline.js";
 
 /** A tail mid-generation, with counts. */
 const generating = {
@@ -42,34 +43,34 @@ const reviewing = { file: "securebank.md", done: 8, total: 8, phase: "review" };
 
 test("the headline names the count and what follows it", () => {
   assert.equal(
-    stripHeadline(generating),
+    stripHeadlineInline(generating),
     "Compiling code-behind — 5 of 8 entries generated · review next",
   );
 });
 
 test("a 'steps' compile promises no review — that path runs none", () => {
   const { reviewPending, ...steps } = generating;
-  assert.equal(stripHeadline(steps), "Compiling code-behind — 5 of 8 entries generated");
+  assert.equal(stripHeadlineInline(steps), "Compiling code-behind — 5 of 8 entries generated");
 });
 
 test("with no counts the strip says only that it is working", () => {
   // The version-skew case: a new client on an older server. Inventing a
   // position for the bar would be a lie, and saying nothing is the state this
   // story exists to remove.
-  assert.equal(stripHeadline(indeterminate), "Compiling code-behind…");
+  assert.equal(stripHeadlineInline(indeterminate), "Compiling code-behind…");
   assert.equal(stripFraction(indeterminate), null);
-  assert.equal(stripDetail(indeterminate), null);
+  assert.equal(stripDetailInline(indeterminate), null);
 });
 
 test("Review speaks for the file, not for a step", () => {
-  assert.match(stripHeadline(reviewing), /reviewing the generated file/);
-  assert.match(stripDetail(reviewing), /whole file/);
+  assert.match(stripHeadlineInline(reviewing), /reviewing the generated file/);
+  assert.match(stripDetailInline(reviewing), /whole file/);
 });
 
 test("the detail line names the step being generated right now", () => {
-  assert.equal(stripDetail(generating), "Generating step 6 — line 22");
+  assert.equal(stripDetailInline(generating), "Generating step 6 — line 22");
   const { line, ...noLine } = generating;
-  assert.equal(stripDetail(noLine), "Generating step 6");
+  assert.equal(stripDetailInline(noLine), "Generating step 6");
 });
 
 test("the bar's fraction stays inside 0..1 whatever the counts say", () => {

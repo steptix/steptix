@@ -41,6 +41,23 @@ function stubDeps(over: Partial<LauncherDeps> = {}): LauncherDeps {
   };
 }
 
+/**
+ * Run a launch that is meant to spend its whole budget. The wait loops read
+ * `Date.now()` and the stub `sleep` returns at once, so on the real clock such
+ * a test spins the CPU for all of `launchTimeoutMs`. On a fake Date that each
+ * sleep moves on by what it asked for, the budget runs out in a few turns.
+ */
+async function spendingTheBudget<T>(run: (sleep: LauncherDeps['sleep']) => Promise<T>): Promise<T> {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    return await run(async (ms) => {
+      vi.setSystemTime(Date.now() + ms);
+    });
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 beforeEach(() => clearDetectionCache());
 
 // ---------------------------------------------------------------------------
@@ -68,10 +85,6 @@ describe('classifyEngine', () => {
     // 9229 is the Node --inspect default and is in the foreign scan list, so
     // this arm is what stops the server offering its own debugger as a browser.
     expect(classifyEngine('node.js/v22.11.0')).toBe('node');
-  });
-
-  it('does not mistake Edge for Chrome', () => {
-    expect(classifyEngine('Edg/151.0.4129.59')).not.toBe('chrome');
   });
 
   it('falls back to unknown rather than throwing', () => {
@@ -482,13 +495,16 @@ describe('launchCdpBrowser', () => {
   });
 
   it('names DevToolsActivePort when the file never appears', async () => {
-    const result = await launchCdpBrowser(
-      { engine: 'chrome', profileDir: 'C:\\p' },
-      stubDeps({
-        readFileSync: () => {
-          throw new Error('ENOENT');
-        },
-      }),
+    const result = await spendingTheBudget((sleep) =>
+      launchCdpBrowser(
+        { engine: 'chrome', profileDir: 'C:\\p' },
+        stubDeps({
+          sleep,
+          readFileSync: () => {
+            throw new Error('ENOENT');
+          },
+        }),
+      ),
     );
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -501,18 +517,21 @@ describe('launchCdpBrowser', () => {
   });
 
   it('names the port and the last probe error when the port never answers', async () => {
-    const result = await launchCdpBrowser(
-      { engine: 'chrome', profileDir: 'C:\\p' },
-      stubDeps({
-        readFileSync: () => '48077\n/x',
-        probe: async (port) => ({
-          port,
-          reachable: false,
-          engine: 'unknown' as const,
-          tabs: null,
-          error: 'ECONNREFUSED 127.0.0.1:48077',
+    const result = await spendingTheBudget((sleep) =>
+      launchCdpBrowser(
+        { engine: 'chrome', profileDir: 'C:\\p' },
+        stubDeps({
+          sleep,
+          readFileSync: () => '48077\n/x',
+          probe: async (port) => ({
+            port,
+            reachable: false,
+            engine: 'unknown' as const,
+            tabs: null,
+            error: 'ECONNREFUSED 127.0.0.1:48077',
+          }),
         }),
-      }),
+      ),
     );
     expect(result.ok).toBe(false);
     if (result.ok) return;

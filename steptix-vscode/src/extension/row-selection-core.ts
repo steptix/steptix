@@ -433,14 +433,6 @@ export function allRowsOfTable(text: string, section: string | null): number[] {
   return table.scan.rows.map((_, index) => index + 1);
 }
 
-/** Every data-row line in the document, ascending — the array the gutter menu's
- *  `when` clause tests with `editorLineNumber in ...`. */
-export function dataRowLinesOf(text: string): number[] {
-  const lines: number[] = [];
-  for (const { scan } of scanTables(text)) lines.push(...scan.rowLines);
-  return [...new Set(lines)].sort((a, b) => a - b);
-}
-
 /** `"k=v, k=v"` with secrets masked — the same text the Output banner, the
  *  panel and the gutter hover use, so no surface can word a row differently.
  *

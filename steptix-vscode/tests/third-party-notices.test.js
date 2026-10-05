@@ -23,7 +23,10 @@ after(() => {
       const p = path.join(dir, name);
       if (fs.lstatSync(p).isSymbolicLink()) fs.unlinkSync(p);
     }
-    fs.rmSync(dir, { recursive: true, force: true });
+    // maxRetries: on Windows antivirus or the indexer can still hold a file a
+    // child just wrote (THIRD-PARTY-NOTICES.txt), and `force` does not cover
+    // EBUSY/EPERM — a throw here would fail the file for a cleanup reason.
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 

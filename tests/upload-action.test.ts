@@ -8,16 +8,14 @@
  * control, and that a missing file fails before any selector is evaluated.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
-import { spawn, type ChildProcess } from 'node:child_process';
-import net from 'node:net';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { executeAction } from '../src/browser/actions.js';
 import { logger } from '../src/utils/logger.js';
 import type { AIAction } from '../src/ai/types.js';
+import { startFixtureServer, type FixtureServer } from './fixture-server.js';
 
 const repoRoot = path.resolve(__dirname, '..');
-const serverPath = path.join(repoRoot, 'fixtures', 'test-app', 'server.ts');
 /** The base an "Upload file ..." step resolves against in these tests. */
 const testDir = path.join(repoRoot, 'fixtures', 'tests');
 const uploadPaths = { baseDir: testDir, projectRoot: repoRoot };
@@ -25,40 +23,11 @@ const LOGO = 'attachments/logo.png';
 const RECEIPT_1 = 'attachments/receipt-1.png';
 const RECEIPT_2 = 'attachments/receipt-2.png';
 
-let serverProc: ChildProcess;
+let server: FixtureServer | undefined;
 let browser: Browser;
 let context: BrowserContext;
 let page: Page;
 let baseUrl: string;
-
-async function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.unref();
-    srv.on('error', reject);
-    srv.listen(0, () => {
-      const addr = srv.address();
-      if (addr && typeof addr === 'object') {
-        const p = addr.port;
-        srv.close(() => resolve(p));
-      } else {
-        srv.close(() => reject(new Error('port allocation failed')));
-      }
-    });
-  });
-}
-
-async function waitForHttp(url: string, timeoutMs = 15_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url);
-      if (res.status < 500) return;
-    } catch { /* not ready */ }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error(`Timed out waiting for ${url}`);
-}
 
 /** Run one action the way the step executor does. */
 function act(
@@ -80,15 +49,8 @@ async function rowNames(): Promise<string[]> {
 }
 
 beforeAll(async () => {
-  const port = await getFreePort();
-  baseUrl = `http://127.0.0.1:${port}`;
-  serverProc = spawn(process.execPath, ['--import', 'tsx', serverPath], {
-    cwd: repoRoot,
-    env: { ...process.env, PORT: String(port) },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  serverProc.stderr?.on('data', (b: Buffer) => process.stderr.write(`[test-app] ${b.toString()}`));
-  await waitForHttp(`${baseUrl}/api/documents`);
+  server = await startFixtureServer();
+  baseUrl = server.baseUrl;
 
   browser = await chromium.launch({ headless: true });
   context = await browser.newContext();
@@ -98,11 +60,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   try { await browser?.close(); } catch { /* noop */ }
-  if (serverProc && !serverProc.killed) {
-    serverProc.kill('SIGTERM');
-    await new Promise((r) => setTimeout(r, 50));
-    if (!serverProc.killed) serverProc.kill('SIGKILL');
-  }
+  await server?.stop();
 }, 60_000);
 
 // ─── The three real uploaders on the fixture page ────────────────────────────
@@ -111,7 +69,10 @@ describe('upload against the SecureBank Documents page', () => {
   beforeEach(async () => {
     await fetch(`${baseUrl}/api/documents`, { method: 'DELETE' });
     await page.goto(`${baseUrl}/documents`, { waitUntil: 'domcontentloaded' });
-    await page.locator('#documents-empty').waitFor();
+    // The page's first render from the server, not the static empty row: that
+    // row is in the markup before the list arrives, and the arriving render
+    // replaces the table — wiping a row a test uploaded before it landed.
+    await page.locator('#documents-body[data-loaded="true"]').waitFor({ state: 'attached' });
   });
 
   it('the minimum case: a visible file field, one file', async () => {
@@ -319,28 +280,25 @@ describe('upload target selection', () => {
 // ─── Paths: resolved before anything touches the page ────────────────────────
 
 describe('upload paths', () => {
-  beforeEach(async () => {
-    await page.goto(`${baseUrl}/documents`, { waitUntil: 'domcontentloaded' });
-  });
-
-  it('fails a missing file BEFORE evaluating the selector', async () => {
-    // The selector does not exist either. If paths were resolved after the
-    // prelude, this would report a selector failure (and burn the 10s budget);
-    // resolving first means the file is what it complains about.
-    const started = Date.now();
-    const result = await act({
-      action: 'upload',
-      selector: '#no-such-element',
-      filePath: 'attachments/missing.png',
-    });
+  // Each of the resolver's refusals (their wording is pinned in
+  // upload-paths.test.ts) reaches the step as it is, and before the selector:
+  // the selector does not exist either, so had paths been resolved after the
+  // prelude this would report a selector failure (and burn the 10s budget).
+  // None needs a page.
+  it.each([
+    ['a missing file', { filePath: 'attachments/missing.png' }, 'Upload file not found'],
+    ['a path that escapes the project', { filePath: '../../../../../../etc/passwd' }, 'outside the project folder'],
+    ['an upload carrying no path at all', {}, 'requires "filePath" or "filePaths"'],
+  ] as const)('refuses %s BEFORE evaluating the selector, for good', async (_what, paths, says) => {
+    const result = await act({ action: 'upload', selector: '#no-such-element', ...paths });
     expect(result.success).toBe(false);
-    expect(result.error).toContain('Upload file not found');
+    expect(result.error).toContain(says);
     expect(result.error).not.toMatch(/timeout|not visible/i);
+    // No re-planning makes a file appear.
     expect(result.retryable).toBe(false);
     // No match count either — the retry prompt must not claim "No elements
     // matched this selector" about a file that simply is not there.
     expect(result.matchCount).toBeUndefined();
-    expect(Date.now() - started).toBeLessThan(3_000);
   }, 30_000);
 
   it('fails before the selector under measurement too', async () => {
@@ -355,6 +313,7 @@ describe('upload paths', () => {
   it('accepts the backslash spelling the executor sees after interpolation', async () => {
     // A `{{param}}` path is substituted AFTER the parser normalised the action,
     // so the executor is the layer that has to cope with `\attachments\...`.
+    await page.goto(`${baseUrl}/documents`, { waitUntil: 'domcontentloaded' });
     const BS = String.fromCharCode(92);
     const result = await act({
       action: 'upload',
@@ -362,22 +321,5 @@ describe('upload paths', () => {
       filePath: `${BS}attachments${BS}logo.png`,
     });
     expect(result.success, result.error).toBe(true);
-  }, 30_000);
-
-  it('refuses a path that escapes the project', async () => {
-    const result = await act({
-      action: 'upload',
-      selector: '#statement-file',
-      filePath: '../../../../../../etc/passwd',
-    });
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('outside the project folder');
-    expect(result.retryable).toBe(false);
-  }, 30_000);
-
-  it('refuses an upload action carrying no path at all', async () => {
-    const result = await act({ action: 'upload', selector: '#statement-file' });
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('requires "filePath" or "filePaths"');
   }, 30_000);
 });

@@ -6,7 +6,11 @@ import { createMcpServer } from '../src/mcp/server.js';
 import { createApiClient as realCreateApiClient } from '../src/mcp/api-client.js';
 import { resetRegistry } from '../src/mcp/registry.js';
 import { ApiHttpError, PreflightFailure, type ApiClient, type McpDeps, type ProjectContext, type RunEvent, type StreamResult } from '../src/mcp/types.js';
-import { preflightError } from '../src/mcp/errors.js';
+import {
+  NO_BROWSER_LAUNCHED_WIRE_MESSAGE,
+  pageContentNoBrowserYet,
+  preflightError,
+} from '../src/mcp/errors.js';
 
 // ---------------------------------------------------------------------------
 // The tools, driven through a real MCP client over a real transport, with only
@@ -45,6 +49,9 @@ interface Scripted {
   streamDropped?: boolean;
   /** Delay before the stream resolves, so a test can cancel mid-run. */
   holdMs?: number;
+  /** Called once the hold has begun and is listening for the abort — the
+   *  moment a cancelling test should abort, rather than after a guessed delay. */
+  onHold?: (signal: AbortSignal | undefined) => void;
 }
 
 interface Harness {
@@ -106,11 +113,23 @@ async function connect(opts: {
       const script = scripts.shift() ?? { events: [] };
       if (script.holdMs) {
         await new Promise((resolve, reject) => {
-          const timer = setTimeout(resolve, script.holdMs);
-          signal?.addEventListener('abort', () => {
-            clearTimeout(timer);
+          // An already-aborted signal never fires 'abort' again. The real
+          // client checks for it, so the fake must too — or a cancel that
+          // landed first would sit out the whole hold.
+          if (signal?.aborted) {
             reject(signal.reason as Error);
-          });
+            return;
+          }
+          const timer = setTimeout(resolve, script.holdMs);
+          signal?.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              reject(signal.reason as Error);
+            },
+            { once: true },
+          );
+          script.onHold?.(signal);
         });
       }
       for (const event of script.events) onEvent?.(event);
@@ -402,46 +421,20 @@ describe('run_steps', () => {
     expect(first?.text).toContain('PASSED');
   });
 
-  it('counts the steps a return skipped, instead of reporting them as a shortfall', async () => {
+  it('counts the steps a return skipped, over the REAL client and a real socket', async () => {
     // stories/step-flow-control.md. The line counted `status === 'passed'`
     // over every row, so a run that RETURNED came back as
     // `PASSED — 2/4 steps passed` — which to an agent reading only the text
     // half reads as two failures on a green run, with nothing saying the other
     // two were skipped on purpose.
-    const { client } = await connect({
-      script: {
-        events: [
-          { type: 'step:start', line: 1 },
-          { type: 'step:pass', line: 1 },
-          { type: 'step:start', line: 2 },
-          { type: 'step:pass', line: 2, output: 'Ended the run' },
-          { type: 'step:skip', line: 3, reason: 'Not run: step 2 ended the run — Stop' },
-          { type: 'step:skip', line: 4, reason: 'Not run: step 2 ended the run — Stop' },
-          { type: 'done', status: 'passed' },
-        ],
-      },
-    });
-
-    const res = await client.callTool({
-      name: 'run_steps',
-      arguments: {
-        steps: ['open it', 'Stop', 'click sign out', 'check the form'],
-        project_root: PROJECT_ROOT,
-      },
-    });
-
-    const first = (res.content as { type: string; text?: string }[])[0];
-    expect(first?.text).toContain('PASSED — 2 passed, 2 skipped (a step returned early) of 4');
-    expect(first?.text).not.toContain('2/4 steps passed');
-  });
-
-  it('counts a returned run the same way over the REAL client and a real socket', async () => {
-    // The composition the fake above cannot see. Every layer is the shipping
-    // one — SseParser, its event whitelist, `consumeRunStream`, `foldRun`,
-    // `stepTally`, the tool handler, the MCP transport — and only the server
-    // answering is a fixture. With `step:skip` missing from the whitelist this
-    // returns `PASSED — 2/4 steps passed` plus two "unrecognised event"
-    // warnings, and `structuredContent.steps` holds two rows instead of four.
+    //
+    // Over the real composition rather than a fake client, because a fake
+    // cannot see half of it. Every layer is the shipping one — SseParser, its
+    // event whitelist, `consumeRunStream`, `foldRun`, `stepTally`, the tool
+    // handler, the MCP transport — and only the server answering is a fixture.
+    // With `step:skip` missing from the whitelist this returns
+    // `PASSED — 2/4 steps passed` plus two "unrecognised event" warnings, and
+    // `structuredContent.steps` holds two rows instead of four.
     const client = await connectOverSse(
       sseFrames(
         { type: 'step:start', line: 1 },
@@ -504,6 +497,7 @@ describe('run_steps', () => {
     expect(structured.warnings).toEqual([]);
     const first = (res.content as { type: string; text?: string }[])[0];
     expect(first?.text).toContain('PASSED — 2 passed, 2 skipped (a step returned early) of 4');
+    expect(first?.text).not.toContain('2/4 steps passed');
   });
 
   it('says which KIND of skip happened, and says both when a run had both', async () => {
@@ -906,32 +900,10 @@ describe('get_page_content', () => {
     });
   });
 
-  // The bug this guards: the page used to live ONLY in structuredContent, so a
-  // client that surfaces just the content blocks handed the model
-  // "Invoices — text, 2995 chars" — a description of the page instead of the
-  // page, with no error and a plausible count to make it look like success.
-  it('puts the page in the content blocks, not only in structuredContent', async () => {
-    const { client } = await connect({
-      pageContent: { content: 'You have 3 unpaid invoices. Invoice #2024-11 is overdue.' },
-    });
-
-    const res = await client.callTool({
-      name: 'get_page_content',
-      arguments: { session_id: 'mcp:a', project_root: PROJECT_ROOT },
-    });
-
-    const blocks = (res.content as { type: string; text: string }[]).map((c) => c.text).join('\n');
-    expect(blocks).toContain('You have 3 unpaid invoices.');
-    expect(blocks).toContain('Invoice #2024-11 is overdue.');
-    // The summary stays — it carries the counts and the truncation warning,
-    // which the raw page cannot tell you about itself.
-    expect(blocks).toContain('chars');
-    // And structured output is still there for clients that use it.
-    expect(res.structuredContent).toMatchObject({
-      content: 'You have 3 unpaid invoices. Invoice #2024-11 is overdue.',
-    });
-  });
-
+  // That the page itself rides in the content blocks, not only in
+  // structuredContent, is pinned for every tool at once in
+  // mcp-content-blocks.test.ts (and "exactly once" for this one). What is left
+  // here is the part only this tool's summary says.
   it('carries a truncation warning in the content blocks too', async () => {
     const { client } = await connect({
       pageContent: { content: 'x'.repeat(50), truncated: true, returnedChars: 50, availableChars: 900 },
@@ -942,10 +914,25 @@ describe('get_page_content', () => {
       arguments: { session_id: 'mcp:a', project_root: PROJECT_ROOT },
     });
 
+    // The handler copies these with defaults (false, 0, 0) for an older
+    // server; the server's own values must win over them.
+    expect(res.structuredContent).toMatchObject({ truncated: true, returnedChars: 50, availableChars: 900 });
     const blocks = (res.content as { type: string; text: string }[]).map((c) => c.text).join('\n');
     // A client showing only content blocks must still learn it got a fragment.
     expect(blocks).toContain('900');
     expect(blocks).toContain('narrow with a selector');
+  });
+
+  it('passes a running session\'s status through, so the agent knows the page may be moving', async () => {
+    const { client } = await connect({ pageContent: { status: 'executing' } });
+
+    const res = await client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'mcp:a', project_root: PROJECT_ROOT },
+    });
+
+    // Not the handler's 'active' default for a server that omits it.
+    expect(res.structuredContent).toMatchObject({ status: 'executing' });
   });
 
   it('sends format, selector and max_chars through to the server', async () => {
@@ -984,23 +971,6 @@ describe('get_page_content', () => {
       selector: undefined,
       maxChars: undefined,
     });
-  });
-
-  it('tells the agent a truncated result was truncated', async () => {
-    const { client } = await connect({
-      pageContent: { truncated: true, returnedChars: 20_000, availableChars: 91_234 },
-    });
-
-    const res = await client.callTool({
-      name: 'get_page_content',
-      arguments: { session_id: 'mcp:a', project_root: PROJECT_ROOT },
-    });
-
-    expect(res.structuredContent).toMatchObject({ truncated: true, availableChars: 91_234 });
-    // Also in the text summary, which is all a host that ignores structured
-    // content will show.
-    expect(JSON.stringify(res.content)).toContain('20000');
-    expect(JSON.stringify(res.content)).toContain('selector');
   });
 
   // The point of this workstream. A developer's session may be driving a CDP
@@ -1098,15 +1068,35 @@ describe('get_page_content', () => {
     expect(JSON.stringify(res.content)).not.toContain('peek_tab');
   });
 
-  it('warns that the page may be moving during a run', async () => {
-    const { client } = await connect({ pageContent: { status: 'executing' } });
+  it('answers the no-browser-yet 409 with "run a browser step", and only that 409', async () => {
+    // SPEC-use-computer.md §4.6. The route answers 409 for two opposite
+    // reasons — no browser yet (stop retrying, run a step) and a read that lost
+    // to a navigation (retry) — and this side tells them apart by the server's
+    // sentence. mcp-no-browser-yet.test.ts pins the sentence; this pins that the
+    // tool actually routes on it. The route sends the tracker's message as-is.
+    const answer = (result: unknown) =>
+      (result as { content: { text?: string }[] }).content.map((c) => c.text ?? '').join('\n');
 
-    const res = await client.callTool({
-      name: 'get_page_content',
-      arguments: { session_id: 'mcp:a', project_root: PROJECT_ROOT },
+    const fresh = await connect({
+      pageContentError: new ApiHttpError(409, NO_BROWSER_LAUNCHED_WIRE_MESSAGE),
     });
+    const res = await fresh.client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'mcp:fresh', project_root: PROJECT_ROOT },
+    });
+    expect(res.isError).toBe(true);
+    expect(answer(res)).toBe(pageContentNoBrowserYet('mcp:fresh').content[0]!.text);
 
-    expect(res.structuredContent).toMatchObject({ status: 'executing' });
+    const raced = await connect({
+      pageContentError: new ApiHttpError(409, 'the page navigated while it was being read'),
+    });
+    const lost = await raced.client.callTool({
+      name: 'get_page_content',
+      arguments: { session_id: 'mcp:fresh', project_root: PROJECT_ROOT },
+    });
+    expect(lost.isError).toBe(true);
+    expect(answer(lost)).not.toBe(pageContentNoBrowserYet('mcp:fresh').content[0]!.text);
+    expect(answer(lost)).toContain('the page navigated while it was being read');
   });
 });
 
@@ -1810,27 +1800,42 @@ describe('cancellation', () => {
     // back to the report is get_last_run — and the session and its browser
     // stay up, because closing them is close_session's job, not a side effect
     // of giving up on one call.
+    let streamSignal: AbortSignal | undefined;
+    let markHolding!: () => void;
+    const holding = new Promise<void>((resolve) => (markHolding = resolve));
     const harness = await connect({
-      script: { events: [{ type: 'done', status: 'passed' }], holdMs: 5_000 },
+      script: {
+        events: [{ type: 'done', status: 'passed' }],
+        // Longer than the test may run: only the cancellation reaching the
+        // server's own stream can end this hold.
+        holdMs: 60_000,
+        onHold: (signal) => {
+          streamSignal = signal;
+          markHolding();
+        },
+      },
     });
 
     const controller = new AbortController();
-    setTimeout(() => controller.abort(), 40);
+    const call = harness.client.callTool(
+      { name: 'run_steps', arguments: { steps: ['slow'], project_root: PROJECT_ROOT } },
+      undefined,
+      { signal: controller.signal },
+    );
+    // Abort once the server is inside the stream, not after a guessed delay: a
+    // cancel that beat the handler there would exercise a different path.
+    await holding;
+    controller.abort();
+    await expect(call).rejects.toThrow();
 
-    await expect(
-      harness.client.callTool(
-        { name: 'run_steps', arguments: { steps: ['slow'], project_root: PROJECT_ROOT } },
-        undefined,
-        { signal: controller.signal },
-      ),
-    ).rejects.toThrow();
-
-    // The session lock must not be left held, or the next call would hang.
+    // The session lock must not be left held, or the next call would hang —
+    // and with that hold, the lock is free only because the abort reached it.
     const after = await harness.client.callTool({
       name: 'run_steps',
       arguments: { steps: ['after'], project_root: PROJECT_ROOT },
     });
     expect(after.isError).toBeFalsy();
+    expect(streamSignal?.aborted).toBe(true);
   }, 30_000);
 });
 

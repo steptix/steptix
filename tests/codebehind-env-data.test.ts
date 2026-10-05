@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { Page, BrowserContext, Browser } from 'playwright';
 import type { AiClient } from '../src/ai/client.js';
 import type { ChatMessage } from '../src/ai/types.js';
@@ -37,6 +36,7 @@ import {
 } from '../src/codebehind/compile.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import type { StepResult } from '../src/report/types.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * Code-behind reads `${data.*}` / `${env.*}` / `${<source>.*}`
@@ -51,8 +51,13 @@ import type { StepResult } from '../src/report/types.js';
  * name, at run time and in the prompt.
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-env-data');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
+
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('codebehind-env-data');
+});
 
 let counter = 0;
 let dir: string;
@@ -63,7 +68,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await removeScratchBase(tmpBase);
 });
 
 async function write(rel: string, contents: string): Promise<string> {

@@ -97,6 +97,46 @@ export function readToolbar(page: Page): Promise<ToolbarSnapshot | null> {
   });
 }
 
+/** Run `fn` with `this` the bar's closed shadow root, and answer its result. */
+function inBarRoot<T>(page: Page, fn: string): Promise<T> {
+  return withCdp(page, async (cdp, root) => {
+    const shadow = hostOf(root)?.shadowRoots?.[0];
+    if (!shadow) throw new Error('the page has no toolbar');
+    const { object } = (await cdp.send('DOM.resolveNode', { nodeId: shadow.nodeId })) as { object: { objectId: string } };
+    const { result } = (await cdp.send('Runtime.callFunctionOn', {
+      objectId: object.objectId,
+      functionDeclaration: fn,
+      returnByValue: true,
+    })) as { result: { value: T } };
+    return result.value;
+  });
+}
+
+/**
+ * Log every status the bar shows from now on (REC…, PAUSED…), and answer a
+ * reader for the log. A MutationObserver in the bar's own root writes it as
+ * the page renders, so a status the page shows for a moment — a Pause it
+ * shows ahead of the server's answer, and takes back when none comes — is in
+ * the log however late the test gets to read it. `readToolbar` sees only what
+ * shows at the instant its read lands.
+ */
+export async function watchStatus(page: Page): Promise<() => Promise<string[]>> {
+  await inBarRoot<void>(
+    page,
+    `function () {
+      const root = this;
+      const now = () => ((root.querySelector('.status') || {}).textContent || '').replace(/\\s+/g, ' ').trim();
+      const log = [now()];
+      root.__statusLog = log;
+      new MutationObserver(() => {
+        const s = now();
+        if (s !== log[log.length - 1]) log.push(s);
+      }).observe(root, { subtree: true, childList: true, characterData: true, attributes: true });
+    }`,
+  );
+  return () => inBarRoot<string[]>(page, 'function () { return this.__statusLog || []; }');
+}
+
 /** Where a toolbar button (`data-cmd`) is on screen, or null. */
 export function toolbarButtonAt(page: Page, cmd: string): Promise<{ x: number; y: number } | null> {
   return withCdp(page, async (cdp, root) => {

@@ -168,24 +168,30 @@ describe('executeAction — read multiple over a real page', () => {
     expect(result.capturedValues).toBeUndefined();
   });
 
-  // Page-content-replacing tests live at the bottom because Playwright's
-  // setContent swaps the DOM and earlier `.s1 …` selectors no longer match.
+  // Its own page: the tests above all read the three sections `beforeAll`
+  // put on the shared one, so swapping that DOM here would turn them red
+  // whenever this test ran first (a shuffle, `-t`, a test added below).
   it('caps capture at READ_MULTIPLE_MAX (500) when the selector matches more', async () => {
-    const links = Array.from({ length: 600 }, (_, i) => `<a href="/n${i}">n${i}</a>`).join('');
-    await page.setContent(`<html><body><div id="bulk">${links}</div></body></html>`);
-    const result = await executeAction(page, {
-      action: 'read',
-      selector: '#bulk a',
-      attribute: 'href',
-      as: 'links',
-      multiple: true,
-      description: 'Capture all (capped)',
-    });
-    expect(result.success).toBe(true);
-    expect(result.capturedValues).toHaveLength(500);
-    // Captured slice is the first 500 in DOM order, so the boundary indices
-    // must be exact rather than approximate.
-    expect(result.capturedValues?.[0]).toBe('/n0');
-    expect(result.capturedValues?.[499]).toBe('/n499');
+    const bulk = await browser.newPage();
+    try {
+      const links = Array.from({ length: 600 }, (_, i) => `<a href="/n${i}">n${i}</a>`).join('');
+      await bulk.setContent(`<html><body><div id="bulk">${links}</div></body></html>`);
+      const result = await executeAction(bulk, {
+        action: 'read',
+        selector: '#bulk a',
+        attribute: 'href',
+        as: 'links',
+        multiple: true,
+        description: 'Capture all (capped)',
+      });
+      expect(result.success).toBe(true);
+      expect(result.capturedValues).toHaveLength(500);
+      // Captured slice is the first 500 in DOM order, so the boundary indices
+      // must be exact rather than approximate.
+      expect(result.capturedValues?.[0]).toBe('/n0');
+      expect(result.capturedValues?.[499]).toBe('/n499');
+    } finally {
+      await bulk.close();
+    }
   });
 });

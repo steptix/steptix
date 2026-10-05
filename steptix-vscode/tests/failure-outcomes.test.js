@@ -66,8 +66,11 @@ test('a later pass does not repaint an amber ✗ green', () => {
 // ── Hover ──────────────────────────────────────────────────────────────────
 
 test('the amber ✗ hover opens by naming the tail, then fences the error', () => {
-  const hover = toleratedHoverMessage({ error: WARNING });
-  assert.equal(hover, `${TOLERATED_HOVER_OPENING}\n\n${fenced(WARNING)}`);
+  // No author warning here: this is the plain shape every warning case below
+  // builds on, and it must stay byte-identical to what it always was.
+  const error = 'the title did not contain "Peanuts"';
+  const hover = toleratedHoverMessage({ error });
+  assert.equal(hover, `${TOLERATED_HOVER_OPENING}\n\n${fenced(error)}`);
   // An amber ✗ on a green run reads as a tool bug until something names the tail.
   assert.match(hover, /otherwise continue/);
 });
@@ -87,10 +90,6 @@ test('a tolerated failure after a heal names BOTH errors', () => {
   assert.match(hover, /locator resolved to 2 elements/);
   assert.match(hover, /still no build number/);
   assert.match(hover, /booking\.steps\.ts/);
-});
-
-test('with no warning the hover is byte-identical to what it always was', () => {
-  assert.equal(toleratedHoverMessage({ error: 'x' }), `${TOLERATED_HOVER_OPENING}\n\n${fenced('x')}`);
 });
 
 test('the hover clips like the fail hover does', () => {
@@ -222,19 +221,14 @@ test('skipped and tolerated read as two clauses, in that order', () => {
   );
 });
 
-test('a run with no tolerated step renders the byte-identical string it always did', () => {
-  assert.equal(stepsSummaryText(summaryOf('pass', 'pass')), '2/2 passed');
-  assert.equal(stepsSummaryText(summaryOf('pass', 'skip')), '1/2 passed, 1 skipped');
-});
-
 test('the run log tally names it too', () => {
   assert.equal(tally({ passed: 7, tolerated: 1 }), '✓ 7 passed, 1 tolerated');
   assert.equal(
     tally({ passed: 7, skipped: 2, tolerated: 1, codeBehind: 3 }),
     '✓ 7 passed (3 code-behind), 2 skipped, 1 tolerated',
   );
-  // And a run that tolerated nothing is unchanged.
-  assert.equal(tally({ passed: 7 }), '✓ 7 passed');
+  // A run that tolerated nothing renders as before — step-skip.test.js owns
+  // that wording.
 });
 
 // ── What a compile SAYS about a run its own text ended ─────────────────────

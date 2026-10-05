@@ -34,7 +34,9 @@ afterEach(() => {
     if (!(key in originalEnv)) delete process.env[key];
   }
   Object.assign(process.env, originalEnv);
-  for (const dir of created.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of created.splice(0)) {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 });
 
 function userRoot(): string {
@@ -69,15 +71,17 @@ describe('resolveProjectRoot', () => {
   });
 
   it('a file outside the user root never triggers the boundary', async () => {
-    // No marker anywhere above this tmp file (up to the fs root) — apart from
-    // machines that happen to have one, which the walk has always honoured.
-    // The pin here is narrower: the user-root boundary must not fire for a
-    // path that is not under it, so the walk proceeds past LOCALAPPDATA's
-    // sibling levels exactly as before.
-    const elsewhere = makeTmp();
-    mkdirSync(path.join(elsewhere, 'deep'), { recursive: true });
-    writeFileSync(path.join(elsewhere, 'steptix.config.json'), '{}');
+    // The user root's NEIGHBOUR is the path a sloppy boundary misfires on:
+    // `<LOCALAPPDATA>/steptix-other` starts with `<LOCALAPPDATA>/steptix` as a
+    // string, so a prefix check (rather than a whole-directory comparison)
+    // would stop the walk there and return a root with no marker in it. The
+    // marker sits one level further up, in LOCALAPPDATA itself, so only a walk
+    // that carries on past the neighbour finds it.
+    const localAppData = path.dirname(userRoot());
+    const neighbour = path.join(localAppData, `${path.basename(userRoot())}-other`);
+    mkdirSync(path.join(neighbour, 'deep'), { recursive: true });
+    writeFileSync(path.join(localAppData, 'steptix.config.json'), '{}');
 
-    expect(await resolveProjectRoot(path.join(elsewhere, 'deep', 'x.md'))).toBe(elsewhere);
+    expect(await resolveProjectRoot(path.join(neighbour, 'deep', 'x.md'))).toBe(localAppData);
   });
 });

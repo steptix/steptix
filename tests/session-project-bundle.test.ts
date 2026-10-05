@@ -59,10 +59,14 @@ describe('SessionManager.resolveProjectBundle', () => {
 
   beforeEach(() => {
     tmp = mkdtempSync(path.join(tmpdir(), 'steptix-pb-'));
+    // loadConfig reads the user root's .env for the machine AI floor: keep it
+    // in tmp, so this machine's real one never enters a bundle.
+    process.env['LOCALAPPDATA'] = tmp;
+    process.env['XDG_CONFIG_HOME'] = tmp;
     mgr = new SessionManager(structuredClone(DEFAULT_CONFIG));
   });
   afterEach(() => {
-    rmSync(tmp, { recursive: true, force: true });
+    rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     for (const k of Object.keys(process.env)) {
       if (!(k in originalEnv)) delete process.env[k];
     }
@@ -137,19 +141,18 @@ describe('SessionManager.resolveProjectBundle', () => {
     expect(second).toBe(first); // cached: identical object, no re-read
   });
 
-  it('falls back to defaults when no steptix.config.json is found above the test file', async () => {
-    // A bare temp dir with no config anywhere up to the fs root.
-    const stray = mkdtempSync(path.join(tmpdir(), 'steptix-noconfig-'));
-    try {
-      const bundle = await resolveBundle(mgr, path.join(stray, 't.md'), 'uat');
-      expect(bundle.projectRoot).toBeNull();
-      // Defaults config (startup) is used; env bundle is the baseline + empty data.
-      expect(bundle.config.tests.dataDir).toBe(DEFAULT_CONFIG.tests.dataDir);
-      expect(bundle.envBundle?.envName).toBe('uat');
-      expect(bundle.envBundle?.data).toEqual({});
-    } finally {
-      rmSync(stray, { recursive: true, force: true });
-    }
+  it('falls back to defaults when there is no project root', async () => {
+    // No test file, so no root — the same null a walk that finds no
+    // steptix.config.json returns, and the same fallback. Not a bare temp dir
+    // instead: its ancestors (%LOCALAPPDATA%, the home directory) belong to
+    // the machine, and a config anywhere up there makes it a project, which
+    // the walk honours on purpose. The walk is server-project-root.test.ts.
+    const bundle = await resolveBundle(mgr, undefined, 'uat');
+    expect(bundle.projectRoot).toBeNull();
+    // Defaults config (startup) is used; env bundle is the baseline + empty data.
+    expect(bundle.config.tests.dataDir).toBe(DEFAULT_CONFIG.tests.dataDir);
+    expect(bundle.envBundle?.envName).toBe('uat');
+    expect(bundle.envBundle?.data).toEqual({});
   });
 
   it('throws on a malformed project steptix.config.json (fails only this request)', async () => {
@@ -227,12 +230,20 @@ describe('SessionManager.resolveProjectBundle', () => {
  */
 describe("resolveProjectBundle — browser.ambiguousTarget", () => {
   let tmp: string;
+  const originalEnv = { ...process.env };
 
   beforeEach(() => {
     tmp = mkdtempSync(path.join(tmpdir(), 'steptix-amb-'));
+    // The user root in tmp, as in the block above.
+    process.env['LOCALAPPDATA'] = tmp;
+    process.env['XDG_CONFIG_HOME'] = tmp;
   });
   afterEach(() => {
-    rmSync(tmp, { recursive: true, force: true });
+    rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    for (const k of Object.keys(process.env)) {
+      if (!(k in originalEnv)) delete process.env[k];
+    }
+    Object.assign(process.env, originalEnv);
   });
 
   /** A SessionManager whose STARTUP config is the server's, not the project's. */
@@ -305,16 +316,13 @@ describe("resolveProjectBundle — browser.ambiguousTarget", () => {
   });
 
   it('falls back to the server startup config when there is no project root', async () => {
-    // No steptix.config.json anywhere above the file: the server's own value is
-    // the only one there is, which is the documented null-project fallback.
-    const stray = mkdtempSync(path.join(tmpdir(), 'steptix-amb-noconfig-'));
-    try {
-      const bundle = await resolveBundle(managerWith('fail'), path.join(stray, 't.md'), null);
-      expect(bundle.projectRoot).toBeNull();
-      expect(bundle.ambiguousTarget).toBe('fail');
-    } finally {
-      rmSync(stray, { recursive: true, force: true });
-    }
+    // No project root: the server's own value is the only one there is, which
+    // is the documented null-project fallback. Reached with no test file
+    // rather than a bare temp dir, whose ancestors the machine owns — see
+    // 'falls back to defaults when there is no project root' above.
+    const bundle = await resolveBundle(managerWith('fail'), undefined, null);
+    expect(bundle.projectRoot).toBeNull();
+    expect(bundle.ambiguousTarget).toBe('fail');
   });
 
   it("normalises anything that is not 'fail' to 'first'", async () => {

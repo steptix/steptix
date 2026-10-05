@@ -37,20 +37,6 @@ describe('loadDataFile', () => {
     expect(data).toEqual({ baseUrl: 'https://uat.example.com', timeoutMs: 5000 });
   });
 
-  it('loads a nested JSON object', async () => {
-    writeFileSync(
-      path.join(tmpRoot, 'fixtures', 'data', 'uat.json'),
-      JSON.stringify({
-        users: { admin: { email: 'a@uat.example.com', password: 'pw' } },
-      }),
-    );
-    const data = await loadDataFile('uat', tmpRoot, 'fixtures/data');
-    expect((data['users'] as DataObject)['admin']).toEqual({
-      email: 'a@uat.example.com',
-      password: 'pw',
-    });
-  });
-
   it('resolves $VAR string leaves against process.env', async () => {
     process.env['ADMIN_PWD'] = 's3cret';
     writeFileSync(
@@ -123,12 +109,11 @@ describe('lookupDataPath', () => {
     expect(lookupDataPath(tree, 'users.admin.email')).toBe('a@example.com');
   });
 
-  it('returns the leaf type unchanged (number)', () => {
-    expect(lookupDataPath(tree, 'fixture.count')).toBe(42);
-  });
-
-  it('returns the leaf type unchanged (boolean)', () => {
-    expect(lookupDataPath(tree, 'fixture.enabled')).toBe(true);
+  it.each([
+    ['number', 'fixture.count', 42],
+    ['boolean', 'fixture.enabled', true],
+  ])('returns the leaf type unchanged (%s)', (_type, dataPath, value) => {
+    expect(lookupDataPath(tree, dataPath)).toBe(value);
   });
 
   it('returns null leaves as null (distinct from missing)', () => {

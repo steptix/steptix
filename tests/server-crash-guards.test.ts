@@ -17,7 +17,6 @@ import { addLogCallback, type LogLevel } from '../src/utils/logger.js';
 function fakeProcess(): {
   target: CrashGuardTarget;
   fire: (event: 'unhandledRejection' | 'uncaughtException', reason: unknown) => void;
-  registered: () => string[];
 } {
   const handlers = new Map<string, (reason: unknown) => void>();
   const target: CrashGuardTarget = {
@@ -29,7 +28,6 @@ function fakeProcess(): {
   return {
     target,
     fire: (event, reason) => handlers.get(event)?.(reason),
-    registered: () => [...handlers.keys()],
   };
 }
 
@@ -46,14 +44,9 @@ function withLogs<T>(work: () => T): { result: T; lines: string[] } {
 }
 
 describe('installCrashGuards', () => {
-  it('registers both guards', () => {
-    const proc = fakeProcess();
-    installCrashGuards(proc.target);
-    expect(proc.registered()).toEqual(
-      expect.arrayContaining(['unhandledRejection', 'uncaughtException']),
-    );
-  });
-
+  // No separate "registers both guards" check: each test below fires its event
+  // through the fake, which does nothing for an event with no handler — so an
+  // unregistered guard already fails the log assertion there.
   it('logs an unhandled rejection with its stack and does not rethrow', () => {
     const proc = fakeProcess();
     installCrashGuards(proc.target);

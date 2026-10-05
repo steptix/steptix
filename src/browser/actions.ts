@@ -1820,37 +1820,16 @@ const SCROLL_DEADLINE_MARGIN_MS = 500;
  *  on the glide and letting `scrollIntoViewIfNeeded` do the work alone. */
 const SCROLL_BOX_TIMEOUT_MS = 5_000;
 
-/**
- * Duration of an eased scroll across `distancePx`, in milliseconds.
- *
- * A pure Node-side mirror of the formula the browser-side animator computes for
- * itself. It has to be a mirror rather than a shared call: `page.evaluate`
- * serializes its callback, so the animator cannot reach back into this module.
- * Exported so tests can pin the cap and the distance scaling without a browser
- * — keep the two in step.
- */
-export function scrollDurationMs(distancePx: number): number {
-  return Math.min(SCROLL_MAX_MS, SCROLL_BASE_MS + Math.abs(distancePx) / SCROLL_PX_PER_MS);
-}
-
-/**
- * Ease-out cubic: fast off the mark, decelerating into the stop.
- *
- * Same mirroring caveat as `scrollDurationMs` — the animator carries its own
- * inline copy of this one line. Exported so the deceleration property can be
- * asserted as arithmetic instead of by watching a video.
- */
-export function easeOutCubic(t: number): number {
-  return 1 - Math.pow(1 - t, 3);
-}
-
 /** Where an absolute scroll is aimed. A `deltaY` is relative to the scroller's
  *  position when the animation starts (used to bring an element into view). */
 type ScrollTargetSpec = 'top' | 'bottom' | { deltaY: number };
 
 /**
  * Drive `document.scrollingElement` to a target with an ease-out curve, and
- * resolve only once motion has ended.
+ * resolve only once motion has ended. The duration and the curve are computed
+ * in the page, inside the callback — `page.evaluate` serializes it, so it
+ * cannot call back into this module (tests/scroll-action.test.ts runs this very
+ * callback against a fake scroller and frame loop to pin both).
  *
  * Neither `behavior: "smooth"` nor `behavior: "instant"` would do. Smooth
  * cannot be awaited — completion needs the `scrollend` event, which WebKit

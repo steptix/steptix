@@ -23,49 +23,16 @@ describe('ApiResponseStore', () => {
     store = new ApiResponseStore();
   });
 
+  // `add`, `hasResponses` and `formatForContext` are the whole surface the
+  // executor uses; what a stored response looks like is asserted through the
+  // context block below, which is the only place it is ever read back.
   it('starts empty', () => {
     expect(store.hasResponses()).toBe(false);
-    expect(store.getAll()).toHaveLength(0);
   });
 
   it('stores a response', () => {
     store.add(makeResponse());
     expect(store.hasResponses()).toBe(true);
-    expect(store.getAll()).toHaveLength(1);
-  });
-
-  it('stores multiple responses', () => {
-    store.add(makeResponse({ stepNumber: 1 }));
-    store.add(makeResponse({ stepNumber: 2, endpoint: '/api/delegates/del-001', method: 'PUT' }));
-    expect(store.getAll()).toHaveLength(2);
-  });
-
-  it('retrieves response by step number', () => {
-    store.add(makeResponse({ stepNumber: 3 }));
-    const found = store.getForStep(3);
-    expect(found).toBeDefined();
-    expect(found?.stepNumber).toBe(3);
-  });
-
-  it('returns undefined for missing step', () => {
-    store.add(makeResponse({ stepNumber: 1 }));
-    expect(store.getForStep(99)).toBeUndefined();
-  });
-
-  it('clears all responses', () => {
-    store.add(makeResponse());
-    store.add(makeResponse({ stepNumber: 2 }));
-    store.clear();
-    expect(store.hasResponses()).toBe(false);
-    expect(store.getAll()).toHaveLength(0);
-  });
-
-  it('getAll returns a copy (not the internal array)', () => {
-    store.add(makeResponse());
-    const all = store.getAll();
-    all.push(makeResponse({ stepNumber: 99 }));
-    // Internal store should not be affected
-    expect(store.getAll()).toHaveLength(1);
   });
 
   describe('formatForContext', () => {

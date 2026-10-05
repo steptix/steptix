@@ -37,8 +37,9 @@ import * as path from 'node:path';
 import { parseParameters, parseUseAiStep, parseUseStep, USE_SURFACES } from 'steptix-runner-core';
 
 /**
- * Extensions a tool file may carry, in the order the registry probes them.
- * Mirrors `TOOL_FILE_EXTS` in src/tools/registry.ts.
+ * Extensions a tool file may carry. Mirrors the set `TOOL_FILE_EXTS` in
+ * src/tools/registry.ts indexes (membership only — the registry has no order);
+ * the order here is the one F12 probes them in.
  */
 export const TOOL_FILE_EXTS = ['.ts', '.mts', '.js', '.mjs'] as const;
 

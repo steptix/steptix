@@ -409,11 +409,20 @@ describe('classifyOutcome against a live Chromium page', () => {
     return p;
   }
 
-  /** What `executeClick` does, with a short budget instead of its 10 s. */
-  async function clickError(selector: string): Promise<string> {
+  /**
+   * What `executeClick` does, with a short budget instead of its 10 s.
+   *
+   * `blocked` and `ambiguous` need Playwright to have RESOLVED the element
+   * inside the budget — "intercepts pointer events" is only logged once it has.
+   * So for a target that exists, wait for it to be attached first and give the
+   * click 2 s, and run the probes one after another: six at once with 500 ms
+   * each came back as plain timeouts on a loaded runner.
+   */
+  async function clickError(selector: string, { exists = true } = {}): Promise<string> {
     const p = await page();
     try {
-      await p.locator(selector).locator('visible=true').first().click({ timeout: 500 });
+      if (exists) await p.locator(selector).first().waitFor({ state: 'attached', timeout: 10_000 });
+      await p.locator(selector).locator('visible=true').first().click({ timeout: exists ? 2_000 : 500 });
       return 'no error';
     } catch (err) {
       return (err as Error).message;
@@ -423,12 +432,13 @@ describe('classifyOutcome against a live Chromium page', () => {
   }
 
   it('reproduces each headline outcome from what Playwright says today', async () => {
-    const [textIs, blocked, strict, invalid, gate, nav] = await Promise.all([
-      clickError('[role="option"]:text-is("Mr")'),
-      clickError('#covered'),
-      page().then(async (p) => {
+    const probes: Array<() => Promise<string>> = [
+      () => clickError('[role="option"]:text-is("Mr")', { exists: false }),
+      () => clickError('#covered'),
+      () => page().then(async (p) => {
         try {
-          await p.locator('button.dup').click({ timeout: 500 });
+          await p.locator('button.dup').first().waitFor({ state: 'attached', timeout: 10_000 });
+          await p.locator('button.dup').click({ timeout: 2_000 });
           return 'no error';
         } catch (err) {
           return (err as Error).message;
@@ -436,12 +446,12 @@ describe('classifyOutcome against a live Chromium page', () => {
           await p.close();
         }
       }),
-      page().then(async (p) => {
+      () => page().then(async (p) => {
         const result = await executeAction(p, { action: 'click', selector: 'nav role=link[name="New"]', description: 'x' });
         await p.close();
         return result.error ?? 'no error';
       }),
-      page().then(async (p) => {
+      () => page().then(async (p) => {
         const result = await executeAction(
           p,
           { action: 'click', selector: 'button.dup', description: 'x' },
@@ -452,7 +462,7 @@ describe('classifyOutcome against a live Chromium page', () => {
         await p.close();
         return result.error ?? 'no error';
       }),
-      page().then(async (p) => {
+      () => page().then(async (p) => {
         try {
           await p.goto(hangUrl, { timeout: 500 });
           return 'no error';
@@ -462,7 +472,10 @@ describe('classifyOutcome against a live Chromium page', () => {
           await p.close();
         }
       }),
-    ]);
+    ];
+    const results: string[] = [];
+    for (const probe of probes) results.push(await probe());
+    const [textIs, blocked, strict, invalid, gate, nav] = results;
 
     expect(classifyOutcome(sub({ action: 'click', selector: '[role="option"]:text-is("Mr")' }, textIs))).toBe('no-match');
     expect(classifyOutcome(sub({ action: 'click', selector: '#covered' }, blocked))).toBe('blocked');

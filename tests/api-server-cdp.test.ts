@@ -112,6 +112,23 @@ vi.mock('../src/browser/screenshot.js', async (importOriginal) => {
   };
 });
 
+// REAL config loading, counted. The launch route reads the root's
+// steptix.config.json and then looks up its single-flight slot with no await
+// in between, so a finished read is the one observable moment a request has
+// reached the slot — which is what the single-flight test releases on.
+let configLoadsFinished = 0;
+vi.mock('../src/config/loader.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/config/loader.js')>();
+  return {
+    ...actual,
+    loadConfig: async (...args: Parameters<typeof actual.loadConfig>) => {
+      const config = await actual.loadConfig(...args);
+      configLoadsFinished += 1;
+      return config;
+    },
+  };
+});
+
 const { createApiServer } = await import('../src/server/api-server.js');
 const { userRootDir } = await import('../src/env/user-root.js');
 
@@ -184,6 +201,11 @@ async function listenOnRandomPort(app: Express): Promise<{ server: Server; baseU
 
 const auth = { 'x-api-key': API_KEY };
 
+/** A ceiling, not a budget: every `vi.waitFor` here ends the moment its
+ *  condition holds, and only a broken route waits this long. The 1 s default
+ *  is a budget under a loaded parallel run, where one request can take that. */
+const WAIT = { timeout: 10_000 } as const;
+
 function get(qs: string, headers: Record<string, string> = auth) {
   return fetch(`${baseUrl}/cdp/browsers?${qs}`, { headers });
 }
@@ -223,7 +245,20 @@ const dormantProfile = (over: Record<string, unknown> = {}) => ({
 let errandLocks: import('../src/server/errand-locks.js').ErrandLocks;
 let sessionManager: import('../src/server/session-manager.js').SessionManager;
 
+// The routes always sweep the machine-wide user root, and the launch route
+// reads that root's steptix.config.json when asked to launch into it. Pointed
+// at an empty dir of the suite's own, so the developer's real
+// %LOCALAPPDATA%\steptix (or ~/.steptix) — a malformed config there answers
+// 400 config_invalid — cannot decide what these tests see.
+let userRootTmp: string;
+const preservedUserRoot: Record<string, string | undefined> = {};
+
 beforeAll(async () => {
+  userRootTmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'steptix-cdp-user-root-'));
+  for (const key of ['LOCALAPPDATA', 'XDG_CONFIG_HOME'] as const) {
+    preservedUserRoot[key] = process.env[key];
+    process.env[key] = userRootTmp;
+  }
   const created = createApiServer(testConfig);
   errandLocks = created.errandLocks;
   // The navigate route asks this instance who is driving a tab; the suite has
@@ -234,6 +269,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+  for (const [key, value] of Object.entries(preservedUserRoot)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  await fsp.rm(userRootTmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 beforeEach(() => {
@@ -380,42 +420,9 @@ const closedTab = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-// ---------------------------------------------------------------------------
-// Auth
-// ---------------------------------------------------------------------------
-
-describe('auth', () => {
-  it('both routes require the api key', async () => {
-    expect((await get(`projectRoot=${encodeURIComponent(PROJECT)}`, {})).status).toBe(401);
-    expect((await post({ projectRoot: PROJECT, engine: 'edge' }, {})).status).toBe(401);
-  });
-
-  it('an authenticated request bumps the idle monitor', async () => {
-    // These routes sit behind auth deliberately, so they count as activity.
-    // Safe only because nothing polls them — a polling caller here would make
-    // the idle timeout dead code.
-    const { app, idleMonitor } = createApiServer(testConfig);
-    const local = await listenOnRandomPort(app);
-    try {
-      // Go quiet for long enough that an un-bumped clock is unmistakable,
-      // then assert the clock is well inside that window. Comparing against
-      // a "before" reading plus the sleep is too tight — the reading is taken
-      // after the bump but includes response transit, so a slow machine
-      // fails a working implementation.
-      const QUIET_MS = 250;
-      await new Promise((r) => setTimeout(r, QUIET_MS));
-      expect(idleMonitor.idleFor()).toBeGreaterThanOrEqual(QUIET_MS);
-
-      await fetch(`${local.baseUrl}/cdp/browsers?projectRoot=${encodeURIComponent(PROJECT)}`, {
-        headers: auth,
-      });
-
-      expect(idleMonitor.idleFor()).toBeLessThan(QUIET_MS);
-    } finally {
-      await new Promise<void>((res, rej) => local.server.close((e) => (e ? rej(e) : res())));
-    }
-  });
-});
+// Auth and its idle bump are one global middleware, not these routes' own:
+// tests/api-server.test.ts walks every registered route for the 401, and
+// proves the bump on an injected clock.
 
 // ---------------------------------------------------------------------------
 // GET — the three lists
@@ -588,7 +595,7 @@ describe('user-root sweep', () => {
       profile: 'default',
       profileDir: path.join(userRoot(), '.steptix', 'cdp-profiles', 'chrome-default'),
       port: 52000,
-      binary: 'C:\\chrome.exe',
+      binary: path.resolve(path.sep, 'chrome'),
       tabs: [],
       outcome: 'launched_into_new_profile',
       warnings: [],
@@ -618,7 +625,7 @@ describe('POST /cdp/browsers', () => {
     profile: 'default',
     profileDir: path.join(PROJECT, '.steptix', 'cdp-profiles', 'edge-default'),
     port: 51000,
-    binary: 'C:\\msedge.exe',
+    binary: path.resolve(path.sep, 'msedge'),
     tabs: [],
     outcome,
     warnings: [],
@@ -633,21 +640,32 @@ describe('POST /cdp/browsers', () => {
     expect(startCdpBrowserMock).not.toHaveBeenCalled();
   });
 
-  // Four arms, one test each: the arm is what the agent tells the user, and a
-  // wrong one is a silent lie about sign-in state.
-  for (const outcome of [
-    'launched_into_new_profile',
-    'launched_into_existing_profile',
-    'reused_running_browser',
-    'launched_after_reset',
-  ]) {
-    it(`returns outcome: ${outcome}`, async () => {
-      startCdpBrowserMock.mockResolvedValue(ok(outcome));
-      const body = await (await post({ projectRoot: PROJECT, engine: 'edge' })).json();
-      expect(body.outcome).toBe(outcome);
-      expect(body.port).toBe(51000);
+  it('answers with exactly what the registry launched, outcome and warnings included', async () => {
+    // The outcome arm is what the agent tells the user, and a wrong one is a
+    // silent lie about sign-in state. The route has no per-arm logic — it
+    // copies the registry's answer — so one whole-body check pins every field
+    // it copies, where one test per arm would only re-read the stub's value.
+    // Which arm the registry picks is cdp-registry.test.ts's to prove.
+    startCdpBrowserMock.mockResolvedValue(
+      ok('launched_after_reset', {
+        tabs: [{ targetId: 'T1', title: 'Orders', url: 'https://shop/orders' }],
+        warnings: ['trash left behind'],
+      }),
+    );
+    const res = await post({ projectRoot: PROJECT, engine: 'edge' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      engine: 'edge',
+      profile: 'default',
+      port: 51000,
+      profileDir: path.join(PROJECT, '.steptix', 'cdp-profiles', 'edge-default'),
+      binary: path.resolve(path.sep, 'msedge'),
+      tabs: [{ targetId: 'T1', title: 'Orders', url: 'https://shop/orders' }],
+      outcome: 'launched_after_reset',
+      warnings: ['trash left behind'],
+      scope: 'project',
     });
-  }
+  });
 
 describe('browser.cdp.hideAutomation comes from the launch root\'s own steptix.config.json', () => {
     // A real directory, because the point is that the SERVER reads the file of
@@ -659,7 +677,7 @@ describe('browser.cdp.hideAutomation comes from the launch root\'s own steptix.c
       startCdpBrowserMock.mockResolvedValue(ok('launched_into_new_profile'));
     });
     afterEach(async () => {
-      await fsp.rm(root, { recursive: true, force: true });
+      await fsp.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     });
 
     it('is off when the root has no config file', async () => {
@@ -716,7 +734,7 @@ describe('browser.cdp.hideAutomation comes from the launch root\'s own steptix.c
       engine: 'chrome',
       profile: 'default',
       reset: true,
-      // No steptix.config.json at C:\proj, so the launch setting is its default.
+      // No steptix.config.json at PROJECT, so the launch setting is its default.
       hideAutomation: false,
     });
   });
@@ -733,12 +751,21 @@ describe('browser.cdp.hideAutomation comes from the launch root\'s own steptix.c
       return ok('launched_into_new_profile');
     });
 
+    configLoadsFinished = 0;
     const both = Promise.all([
       post({ projectRoot: PROJECT, engine: 'edge' }),
       post({ projectRoot: PROJECT, engine: 'edge' }),
     ]);
-    await new Promise((r) => setTimeout(r, 20));
-    release();
+    try {
+      // Released only once BOTH requests have reached the slot — two finished
+      // config reads, each followed synchronously by the lookup. Released any
+      // earlier, the first launch could settle and free the slot before the
+      // second request arrived, and the second launch that follows would be
+      // the test's timing, not the route's.
+      await vi.waitFor(() => expect(configLoadsFinished).toBe(2), WAIT);
+    } finally {
+      release();
+    }
     const [a, b] = await both;
 
     expect(startCdpBrowserMock).toHaveBeenCalledTimes(1);
@@ -764,9 +791,14 @@ describe('browser.cdp.hideAutomation comes from the launch root\'s own steptix.c
       post({ projectRoot: PROJECT, engine: 'edge', profile: 'admin' }),
       post({ projectRoot: PROJECT, engine: 'edge', profile: 'user' }),
     ]);
-    await new Promise((r) => setTimeout(r, 20));
-    expect(started).toBe(2);
-    release();
+    try {
+      // Both launches parked on the gate at once. A serialising key would hold
+      // the second behind the first, which never finishes until released, so
+      // this wait would fail at its ceiling.
+      await vi.waitFor(() => expect(started).toBe(2), WAIT);
+    } finally {
+      release();
+    }
     await both;
   });
 
@@ -777,6 +809,9 @@ describe('browser.cdp.hideAutomation comes from the launch root\'s own steptix.c
     expect(startCdpBrowserMock).toHaveBeenCalledTimes(2);
   });
 
+  // The kind → status table is one shared function, walked whole by the DELETE
+  // suite below. Here, two kinds with different statuses are enough to show
+  // this route maps through it rather than answering one fixed code.
   it('maps a bad profile name to 400 and surfaces the message', async () => {
     startCdpBrowserMock.mockResolvedValue({
       ok: false,
@@ -786,28 +821,6 @@ describe('browser.cdp.hideAutomation comes from the launch root\'s own steptix.c
     const res = await post({ projectRoot: PROJECT, engine: 'edge', profile: '../../secrets' });
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain('not usable');
-  });
-
-  it('maps a state refusal to 409', async () => {
-    startCdpBrowserMock.mockResolvedValue({
-      ok: false,
-      kind: 'refused',
-      error: 'a browser is running on it (port 51000)',
-    });
-    const res = await post({ projectRoot: PROJECT, engine: 'edge', reset: true });
-    expect(res.status).toBe(409);
-    expect((await res.json()).error).toContain('51000');
-  });
-
-  it('maps a launch failure to 500 and keeps its remediation text', async () => {
-    startCdpBrowserMock.mockResolvedValue({
-      ok: false,
-      kind: 'launch_failed',
-      error: 'Edge is not installed…\nInstall Edge, or use the other engine.',
-    });
-    const res = await post({ projectRoot: PROJECT, engine: 'edge' });
-    expect(res.status).toBe(500);
-    expect((await res.json()).error).toContain('use the other engine');
   });
 
   it('forwards the registry reason onto the body, not just the status', async () => {
@@ -839,12 +852,6 @@ describe('browser.cdp.hideAutomation comes from the launch root\'s own steptix.c
     expect((await post({ projectRoot: PROJECT, engine: 'edge' })).status).toBe(500);
     expect((await post({ projectRoot: PROJECT, engine: 'edge' })).status).toBe(200);
   });
-
-  it('passes warnings through', async () => {
-    startCdpBrowserMock.mockResolvedValue(ok('launched_after_reset', { warnings: ['trash left behind'] }));
-    const body = await (await post({ projectRoot: PROJECT, engine: 'edge' })).json();
-    expect(body.warnings).toEqual(['trash left behind']);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -852,10 +859,6 @@ describe('browser.cdp.hideAutomation comes from the launch root\'s own steptix.c
 // ---------------------------------------------------------------------------
 
 describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
-  it('requires the api key', async () => {
-    expect((await del(51000, 'T1', '', {})).status).toBe(401);
-  });
-
   it('closes a tab and echoes what went', async () => {
     closeCdpTabMock.mockResolvedValue(closedTab());
     const res = await del(51000, 'T1');
@@ -999,19 +1002,27 @@ describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
   it('does not serialise closes against DIFFERENT browsers', async () => {
     // The queue is per browser. Two browsers are independent, and sharing one
     // chain would make an unrelated close wait behind a slow one.
+    //
+    // Each close parks on a gate, so the overlap is held open rather than
+    // hoped for inside a short sleep: one shared chain would keep the second
+    // close behind the first, which never finishes until released, and the
+    // wait would fail at its ceiling.
     let inFlight = 0;
-    let maxConcurrent = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
     closeCdpTabMock.mockImplementation(async () => {
       inFlight++;
-      maxConcurrent = Math.max(maxConcurrent, inFlight);
-      await new Promise((r) => setTimeout(r, 30));
-      inFlight--;
+      await gate;
       return closedTab();
     });
 
-    await Promise.all([del(51000, 'T1'), del(51001, 'T2')]);
-
-    expect(maxConcurrent).toBe(2);
+    const both = Promise.all([del(51000, 'T1'), del(51001, 'T2')]);
+    try {
+      await vi.waitFor(() => expect(inFlight).toBe(2), WAIT);
+    } finally {
+      release();
+    }
+    expect((await both).map((r) => r.status)).toEqual([200, 200]);
   });
 
   it('a failed close does not poison the queue for the next caller', async () => {
@@ -1117,32 +1128,6 @@ describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
 // ---------------------------------------------------------------------------
 
 describe('POST /cdp/browsers/:port/tabs/:targetId/focus', () => {
-  it('requires the api key', async () => {
-    expect((await focus(51000, 'T1', '', {})).status).toBe(401);
-  });
-
-  it('an authenticated focus bumps the idle monitor', async () => {
-    // Same reasoning as the listing's: these routes sit behind auth, so they
-    // count as activity. Safe only because nothing polls them.
-    const { app, idleMonitor } = createApiServer(testConfig);
-    const local = await listenOnRandomPort(app);
-    try {
-      const QUIET_MS = 250;
-      await new Promise((r) => setTimeout(r, QUIET_MS));
-      expect(idleMonitor.idleFor()).toBeGreaterThanOrEqual(QUIET_MS);
-
-      focusCdpTabMock.mockResolvedValue(focusedTab());
-      await fetch(
-        `${local.baseUrl}/cdp/browsers/51000/tabs/T1/focus?projectRoot=${encodeURIComponent(PROJECT)}`,
-        { method: 'POST', headers: auth },
-      );
-
-      expect(idleMonitor.idleFor()).toBeLessThan(QUIET_MS);
-    } finally {
-      await new Promise<void>((res, rej) => local.server.close((e) => (e ? rej(e) : res())));
-    }
-  });
-
   it('focuses a tab and echoes the title and url it brought forward', async () => {
     focusCdpTabMock.mockResolvedValue(focusedTab());
     const res = await focus(51000, 'T1');
@@ -1186,12 +1171,13 @@ describe('POST /cdp/browsers/:port/tabs/:targetId/focus', () => {
     expect(focusCdpTabMock.mock.calls[0]![0]).toMatchObject({ allowUnowned: true });
   });
 
-  it('maps the four failure kinds onto their status codes', async () => {
+  it('maps registry failures through the shared kind → status table', async () => {
+    // The whole table is walked by the DELETE suite above; it is one function.
+    // Two kinds with different statuses show this route maps through it
+    // rather than answering one fixed code.
     for (const [kind, status] of [
       ['not_found', 404],
       ['refused', 409],
-      ['launch_failed', 500],
-      ['invalid_input', 400],
     ] as const) {
       focusCdpTabMock.mockResolvedValue({ ok: false, kind, error: `${kind} happened` });
       const res = await focus(51000, 'T1');
@@ -1227,26 +1213,59 @@ describe('POST /cdp/browsers/:port/tabs/:targetId/focus', () => {
     // outcome — two at once simply mean the second wins, which is what "focus"
     // means. Copying the neighbour's queue would be cargo-culting, and this is
     // the assertion that says so out loud.
+    //
+    // All three park on one gate, so the overlap is held open rather than
+    // hoped for inside a short sleep: a queue would keep the later two behind
+    // the first, which never finishes until released, and the wait would fail
+    // at its ceiling.
     let inFlight = 0;
-    let maxConcurrent = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
     focusCdpTabMock.mockImplementation(async () => {
       inFlight++;
-      maxConcurrent = Math.max(maxConcurrent, inFlight);
-      await new Promise((r) => setTimeout(r, 30));
-      inFlight--;
+      await gate;
       return focusedTab();
     });
 
-    await Promise.all([focus(51000, 'T1'), focus(51000, 'T2'), focus(51000, 'T3')]);
-
-    expect(maxConcurrent).toBe(3);
+    const all = Promise.all([focus(51000, 'T1'), focus(51000, 'T2'), focus(51000, 'T3')]);
+    try {
+      await vi.waitFor(() => expect(inFlight).toBe(3), WAIT);
+    } finally {
+      release();
+    }
+    expect((await all).map((r) => r.status)).toEqual([200, 200, 200]);
   });
 
-  it('does not close anything, or create a session', async () => {
-    // Verification rule (5), at the layer this suite can reach: the focus route
-    // must not touch the close path at all.
-    focusCdpTabMock.mockResolvedValue(focusedTab());
-    await focus(51000, 'T1');
+  it('changes nothing else: closes no tab, creates no session, starts no run (rule 5)', async () => {
+    // Verification rule (5), at the layer this suite can reach. Read from
+    // INSIDE the focus, held open, the way the peek's item (1) check is: a
+    // session or run created and dropped around the call is invisible from
+    // outside the request, and is exactly what would re-bind a live tab.
+    const sessionsBefore = await (await fetch(`${baseUrl}/sessions`, { headers: auth })).json();
+    const runsBefore = await runsInFlight();
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let during: { sessions: unknown; runs: number } | null = null;
+    focusCdpTabMock.mockImplementation(async () => {
+      during = {
+        sessions: await (await fetch(`${baseUrl}/sessions`, { headers: auth })).json(),
+        runs: await runsInFlight(),
+      };
+      await gate;
+      return focusedTab();
+    });
+
+    const inflight = focus(51000, 'T1');
+    try {
+      await vi.waitFor(() => expect(during).not.toBeNull(), WAIT);
+    } finally {
+      release();
+    }
+    expect((await inflight).status).toBe(200);
+
+    expect(during).toEqual({ sessions: sessionsBefore, runs: runsBefore });
+    expect(await (await fetch(`${baseUrl}/sessions`, { headers: auth })).json()).toEqual(sessionsBefore);
     expect(closeCdpTabMock).not.toHaveBeenCalled();
   });
 });
@@ -1330,7 +1349,7 @@ describe('GET /cdp/browsers/:port/tabs/:targetId/content', () => {
 
     const inflight = peek(51000, 'T1');
     // The read above happens inside the extraction; release once it has landed.
-    await vi.waitFor(() => expect(duringExtraction).toBeGreaterThanOrEqual(0));
+    await vi.waitFor(() => expect(duringExtraction).toBeGreaterThanOrEqual(0), WAIT);
     release();
     expect((await inflight).status).toBe(200);
 
@@ -1380,7 +1399,7 @@ describe('GET /cdp/browsers/:port/tabs/:targetId/content', () => {
     });
 
     const inflight = peek(51000, 'T1');
-    await vi.waitFor(() => expect(duringExtraction).not.toBe('never read'));
+    await vi.waitFor(() => expect(duringExtraction).not.toBe('never read'), WAIT);
     release();
     expect((await inflight).status).toBe(200);
 
@@ -1534,12 +1553,6 @@ describe('GET /cdp/browsers/:port/tabs/:targetId/content', () => {
     // into accepting different ports for the same browser.
     expect((await peek('not-a-port', 'T1')).status).toBe(400);
     expect((await peek(70000, 'T1')).status).toBe(400);
-    expect(launchBrowserMock).not.toHaveBeenCalled();
-  });
-
-  it('is behind the api key', async () => {
-    // Page content is the most sensitive thing this server hands out.
-    expect((await peek(51000, 'T1', '', {})).status).toBe(401);
     expect(launchBrowserMock).not.toHaveBeenCalled();
   });
 
@@ -1882,11 +1895,6 @@ describe('POST /cdp/browsers/:port/navigate', () => {
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain('absolute');
   });
-
-  it('is behind the api key', async () => {
-    expect((await navigate({ url: 'https://example.com/' }, 51000, {})).status).toBe(401);
-    expect(launchBrowserMock).not.toHaveBeenCalled();
-  });
 });
 
 // Tab → session join on the listing (stories/cdp-tabs.md §1)
@@ -1905,6 +1913,33 @@ describe('GET /cdp/browsers reports which session drives each tab', () => {
       url: 'https://shop/orders',
       sessionId: null,
     });
+  });
+
+  it('names the session on each tab it holds, looked up on that browser\'s port', async () => {
+    // The positive half. With no sessions every tab reads null, and so would a
+    // route that hard-coded `sessionId: null` — the join is only proved by a
+    // tab that IS held, beside one that is not, on the port the browser is on.
+    knownProfilesMock.mockResolvedValue([
+      liveProfile({
+        tabs: [
+          { targetId: 'T1', title: 'Orders', url: 'https://shop/orders' },
+          { targetId: 'T2', title: 'Basket', url: 'https://shop/basket' },
+        ],
+      }),
+    ]);
+    const spy = vi
+      .spyOn(sessionManager, 'sessionsByTarget')
+      .mockResolvedValue({ byTarget: new Map([['T1', 'mcp:steps-9']]), complete: true });
+    try {
+      const body = await (await get(`projectRoot=${encodeURIComponent(PROJECT)}`)).json();
+      expect(spy).toHaveBeenCalledWith(51000);
+      expect(body.running[0].tabs.map((t: { sessionId: unknown }) => t.sessionId)).toEqual([
+        'mcp:steps-9',
+        null,
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('leaves foreign tabs alone — we have no sessions on a browser we did not start', async () => {

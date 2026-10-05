@@ -11,7 +11,6 @@ import {
   defaultStatsQuery,
   listCostly,
   listFailures,
-  reportAnchor,
   reportHref,
   selectStatsLines,
   stepKey,
@@ -659,17 +658,6 @@ describe('--costly', () => {
     expect(list.entries[1]!.report).toEqual({ state: 'pending' });
     expect(list.entries[2]).toMatchObject({ estimated: false, firstTry: true });
     expect(listCostly(select(lines), { limit: 1, reportExists: everyReport })).toMatchObject({ total: 3, entries: [{ tokens: 30500 }] });
-  });
-});
-
-describe('reportAnchor (§8.3)', () => {
-  it('step-N, row-R-step-N in a data-row report, and a hook step by scope and place', () => {
-    expect(reportAnchor({ step: 11 })).toBe('step-11');
-    expect(reportAnchor({ step: 11, row: 3 })).toBe('row-3-step-11');
-    expect(reportAnchor({ step: 5, hook: 'beforeEach', hookIndex: 2 })).toBe('hook-beforeEach-2-step-5');
-    expect(reportAnchor({ step: 0, row: 3, hook: 'before', hookIndex: 1 })).toBe('row-3-hook-before-1-step-0');
-    // A line written before hookIndex existed still gets the scope's plain id.
-    expect(reportAnchor({ step: 0, hook: 'before' })).toBe('hook-before-step-0');
   });
 });
 

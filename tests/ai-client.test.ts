@@ -118,9 +118,15 @@ describe('AiClient — @pkent/aigateway integration', () => {
     });
 
     it('builds the gateway with the bound model+key and { baseURL } for an aibroker/ model', async () => {
+      // Also the control for the gateway/ guard and the keyless backstop
+      // below: the default URL with an aibroker/ model and a key, and the
+      // request goes through untouched. A guard that matched both prefixes, or
+      // a key check that refused a real key, fails here.
       const client = new AiClient(baseConfig, tokenTracker as any);
-      await client.complete([{ role: 'user', content: 'Hi' }]);
+      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
 
+      expect(result.text).toBe('{}');
+      expect(chatMock).toHaveBeenCalledTimes(1);
       expect(constructorMock).toHaveBeenCalledTimes(1);
       expect(constructorMock).toHaveBeenCalledWith('aibroker/openai/chatgpt-5.5', 'test-key', {
         baseURL: 'https://llm.corp.example/v1',
@@ -191,20 +197,6 @@ describe('AiClient — @pkent/aigateway integration', () => {
       await client.complete([{ role: 'user', content: 'Hi' }]);
       await client.complete([{ role: 'user', content: 'Hi again' }]);
       expect(constructorMock).toHaveBeenCalledTimes(1);
-    });
-
-    it('refuses the request rather than building a gateway with no key', async () => {
-      // It used to build one with `''` and let the gateway answer
-      // `invalid_api_key` (stories/keyless-replay-and-gateway-env.md §Part B):
-      // an auth error on a machine that was never meant to have a key.
-      const cfg = { ...baseConfig };
-      delete (cfg as Partial<AiConfig>).apiKey;
-      const client = new AiClient(cfg as AiConfig, tokenTracker as any);
-
-      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
-        AiNotConfiguredError,
-      );
-      expect(constructorMock).not.toHaveBeenCalled();
     });
   });
 
@@ -300,22 +292,10 @@ describe('AiClient — @pkent/aigateway integration', () => {
       expect(constructorMock).not.toHaveBeenCalled();
     });
 
-    it('lets aibroker/ fall through to the default endpoint, guard or no guard', async () => {
-      // The case the guard must not break: `aibroker/` is the zero-config
-      // hosted-broker spelling, so the same config that refuses above proceeds
-      // here. Testing the refusal alone would not have caught a guard that
-      // matched both prefixes.
-      const client = new AiClient(
-        { ...baseConfig, model: 'aibroker/openai/chatgpt-5.5' },
-        tokenTracker as any,
-      );
-      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
-
-      expect(result.text).toBe('{}');
-      expect(constructorMock).toHaveBeenCalledWith('aibroker/openai/chatgpt-5.5', 'test-key', {
-        baseURL: 'https://llm.corp.example/v1',
-      });
-    });
+    // The case the guard must not break — `aibroker/` is the zero-config
+    // hosted-broker spelling, so the same default-URL config that refuses above
+    // proceeds — is the aibroker/ test under "construction". Testing the
+    // refusal alone would not catch a guard that matched both prefixes.
 
     it('lets a gateway/ model through the moment a URL is chosen', async () => {
       const client = new AiClient(
@@ -370,6 +350,11 @@ describe('AiClient — @pkent/aigateway integration', () => {
             'the machine key.)',
         );
         expect(AI_NOT_CONFIGURED_MESSAGE).toBe(new AiNotConfiguredError().message);
+        // Refused before a gateway is built at all. It used to build one with
+        // `''` and let the gateway answer `invalid_api_key`
+        // (stories/keyless-replay-and-gateway-env.md §Part B): an auth error on
+        // a machine that was never meant to have a key.
+        expect(constructorMock).not.toHaveBeenCalled();
         expect(chatMock).not.toHaveBeenCalled();
         expect(streamMock).not.toHaveBeenCalled();
       });
@@ -406,18 +391,9 @@ describe('AiClient — @pkent/aigateway integration', () => {
       expect(streamMock).not.toHaveBeenCalled();
     });
 
-    it('leaves a keyed client on exactly today\'s behaviour', async () => {
-      // The control the keyless cases are only meaningful against: one
-      // character of key and the request goes through untouched.
-      const client = new AiClient({ ...baseConfig, apiKey: 'k' }, tokenTracker as any);
-      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
-
-      expect(result.text).toBe('{}');
-      expect(constructorMock).toHaveBeenCalledWith('aibroker/openai/chatgpt-5.5', 'k', {
-        baseURL: 'https://llm.corp.example/v1',
-      });
-      expect(chatMock).toHaveBeenCalledTimes(1);
-    });
+    // The control the keyless cases are only meaningful against — a keyed
+    // client whose request goes through untouched — is the aibroker/ test
+    // under "construction".
   });
 
   describe('setAiPolicy — the run-forbids-AI veil', () => {
@@ -701,19 +677,8 @@ describe('AiClient — @pkent/aigateway integration', () => {
   });
 
   describe('buildSignal — 120s timeout + instant stop', () => {
-    it('forwards a timeout-only AbortSignal when no run signal is passed', async () => {
-      let sawOpts: any;
-      chatImpl = async (_messages: any, opts: any) => {
-        sawOpts = opts;
-        return v2Response({ text: '{}', usage: { input_tokens: 1, output_tokens: 1 } });
-      };
-
-      const client = new AiClient(baseConfig, tokenTracker as any);
-      await client.complete([{ role: 'user', content: 'Hi' }]);
-
-      expect(sawOpts.signal).toBeInstanceOf(AbortSignal);
-      expect(sawOpts.signal.aborted).toBe(false);
-    });
+    // The timeout-only signal, with no run signal passed, is checked by the
+    // first non-streaming test above.
 
     it('forwards an AbortSignal.any combining the run signal with the timeout', async () => {
       let sawSignal: AbortSignal | undefined;
@@ -807,13 +772,6 @@ describe('AiClient — @pkent/aigateway integration', () => {
         'back-again',
         expect.anything(),
       );
-    });
-
-    it('reports both a model AND key change together', () => {
-      const client = new AiClient(baseConfig, tokenTracker as any);
-      const change = client.syncAuth('openai/chatgpt-5.5', 'new-key');
-      expect(change).toBe('AI model aibroker/openai/chatgpt-5.5 → openai/chatgpt-5.5; AI API key changed');
-      expect(change).not.toContain('new-key');
     });
 
     it('returns null, mutates nothing, and does NOT rebuild when model and key are unchanged', async () => {

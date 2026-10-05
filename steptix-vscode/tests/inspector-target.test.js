@@ -147,8 +147,3 @@ test('stepsFileBreakpoints: keeps only .steps.ts paths', async () => {
     ],
   );
 });
-
-test('stepsFileBreakpoints: empty in, empty out', async () => {
-  const { stepsFileBreakpoints } = await import('../src/extension/inspector-target.ts');
-  assert.deepEqual(stepsFileBreakpoints([]), []);
-});

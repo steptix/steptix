@@ -131,22 +131,15 @@ describe('fixtures/tests/sections-demo.md', () => {
 /**
  * The file `steptix init` scaffolds into every new project. It is self-contained
  * — a section is defined and called twice, with no skill dependency — so a
- * fresh project can run it immediately. These assertions pin the exact shape
- * users receive: if an edit to the template breaks parsing or provenance,
- * every new project's `steptix run` would break silently, and this catches it.
+ * fresh project can run it immediately. These assertions pin that shape, not
+ * the template's wording or line numbers: if an edit to the template breaks
+ * parsing or provenance, every new project's `steptix run` would break
+ * silently, and this catches it. Rewording a step does not trip it.
  *
  * Deliberately mirrors nothing from the fixture above: the two files diverge
  * on purpose (see the header comment), so they need independent guards.
  */
 describe('templates/init/tests/sections-demo.md (the file `steptix init` ships)', () => {
-  const signInBody = [
-    'Navigate to the login page',
-    'Enter "{{email}}" in the email field',
-    'Enter "{{password}}" in the password field',
-    'Click the Sign In button',
-    'Assert the dashboard is visible',
-  ];
-
   it('parses self-contained (no skillsDir needed) into one section called twice', async () => {
     // Pass no skillsDir at all — the demo must resolve without one.
     const parsed = await parseTestFile(shippedDemoFile, {});
@@ -155,47 +148,30 @@ describe('templates/init/tests/sections-demo.md (the file `steptix init` ships)'
     expect(parsed.sections['sign in']!.steps).toHaveLength(5);
   });
 
-  it('expands the section body at both call sites, leaving no skill tags', async () => {
+  it('runs the whole body at each of the two call sites, leaving no skill tags', async () => {
+    // Structure, not wording: the template's prose and line numbers are free
+    // to change. What a new project relies on is the body running in full,
+    // in order, at both calls, with every other step left to the main flow.
     const parsed = await parseTestFile(shippedDemoFile, {});
-    expect(parsed.steps).toEqual([
-      ...signInBody,
-      'Open the account settings page',
-      'Change the display name to "Demo User" and save',
-      'Sign out',
-      ...signInBody,
-      'Assert the display name shows "Demo User"',
-    ]);
-    // Self-contained: nothing came from a skill.
-    expect(parsed.sourceSkills.every((s) => s === null)).toBe(true);
-  });
+    const body = parsed.sections['sign in']!.steps;
 
-  it('tags body steps with the section and leaves main-flow steps untagged', async () => {
-    const parsed = await parseTestFile(shippedDemoFile, {});
-    // First five are the body of the first call.
-    expect(parsed.sourceSections.slice(0, 5)).toEqual([
-      'Sign in',
-      'Sign in',
-      'Sign in',
-      'Sign in',
-      'Sign in',
-    ]);
-    // Index 5 is the first main-flow step after the call ('Open the account…').
-    expect(parsed.sourceSections[5]).toBeNull();
-  });
+    // Body steps report their call's line, so grouping by line separates the
+    // two calls even if an edit put them next to each other.
+    const byCall = new Map<number, string[]>();
+    parsed.steps.forEach((step, i) => {
+      if (parsed.sourceSections[i] !== 'Sign in') return;
+      const line = parsed.stepLines[i]!;
+      byCall.set(line, [...(byCall.get(line) ?? []), step]);
+    });
+    expect([...byCall.values()]).toEqual([body, body]);
 
-  it('points every expanded step back at its call site in the file', async () => {
-    const parsed = await parseTestFile(shippedDemoFile, {});
-    // Both calls sit on their own line (25 and 29); the body reports the call.
-    const [callA, callB] = [25, 29];
-    expect(parsed.stepLines).toEqual([
-      callA, callA, callA, callA, callA,
-      26,
-      27,
-      28,
-      callB, callB, callB, callB, callB,
-      30,
-    ]);
-    // A clean parse leaves no dead-section or duplicate residue.
+    const main = parsed.steps.filter((_, i) => parsed.sourceSections[i] === null);
+    expect(main.length).toBeGreaterThan(0);
+    expect(parsed.steps).toHaveLength(2 * body.length + main.length);
+
+    // Self-contained: nothing came from a skill. And a clean parse leaves no
+    // dead-section or duplicate residue.
+    expect(parsed.sourceSkills.every((tag) => tag === null)).toBe(true);
     expect(parsed.skipHooks).toHaveLength(parsed.steps.length);
     expect(parsed.skipHooks.every((v) => v === false)).toBe(true);
   });

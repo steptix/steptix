@@ -361,6 +361,8 @@ describe('[use computer] as step 1 (acceptance 2)', () => {
 
 describe('the four preconditions each fail the step with their own message', () => {
   it('desktop.enabled: false refuses it (acceptance 7)', async () => {
+    // No testFilePath, so this is also the case where the server's own config
+    // is the only answer there is.
     const manager = makeManager(configWith({ enabled: false }));
 
     const response = await manager.executeSteps('s-off', {
@@ -1085,14 +1087,9 @@ describe('desktop.enabled comes from the test file project, not the server', () 
     expect(existsSync(lockPath)).toBe(false);
   });
 
-  it('with no testFilePath the server own answer still decides', async () => {
-    const manager = makeManager(configWith({ enabled: false }));
-
-    const response = await manager.executeSteps('s-no-file', { steps: ['[use computer]'] });
-
-    expect(response.status).toBe('failed');
-    expect(response.results[0]!.reasoning).toBe(COMPUTER_DISABLED_MESSAGE);
-  });
+  // With no testFilePath the server's own answer decides: refused when it is
+  // off ("desktop.enabled: false refuses it" above sends no testFilePath), and
+  // allowed when it is on, as every run in this file without a project is.
 });
 
 describe('the §5.10 values reach the step loop from the project', () => {

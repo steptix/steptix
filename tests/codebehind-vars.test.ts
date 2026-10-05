@@ -1,13 +1,13 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { Page, BrowserContext, Browser } from 'playwright';
 import { parseTestFile } from '../src/parser/markdown.js';
 import { clearSkillCache } from '../src/skills/expander.js';
 import { buildCodeBehindRegistry, type CodeBehindBinding } from '../src/codebehind/loader.js';
 import { runCodeBehindEntry } from '../src/codebehind/execute.js';
 import type { CodeBehindContext } from '../src/codebehind/types.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * Frame-aware variables (stories/step-codebehind.md, "Skill variables").
@@ -19,8 +19,13 @@ import type { CodeBehindContext } from '../src/codebehind/types.js';
  * the expander interpolated straight into the text.
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-vars');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
+
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('codebehind-vars');
+});
 
 const noPage = {} as unknown as Page;
 const noContext = {} as unknown as BrowserContext;
@@ -36,7 +41,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await removeScratchBase(tmpBase);
 });
 
 async function write(rel: string, contents: string): Promise<string> {

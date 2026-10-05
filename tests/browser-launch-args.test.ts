@@ -66,7 +66,8 @@ function fakePage() {
   };
 }
 
-function launchFake(): void {
+/** A fake browser, returned by every launch — and handed back for a CDP attach. */
+function launchFake() {
   const pages: ReturnType<typeof fakePage>[] = [];
   const context = {
     pages: () => pages,
@@ -88,6 +89,7 @@ function launchFake(): void {
   };
   stealthLaunch.mockResolvedValue(browser);
   launch.mockResolvedValue(browser);
+  return browser;
 }
 
 /** The `args` array the browser was actually launched with. */
@@ -146,20 +148,24 @@ describe('browser.launchArgs', () => {
   // §5.10: not for CDP. An attached browser was started by someone else and
   // its command line is theirs; `connectOverCDP` takes no args at all.
   it('is not passed to a CDP attach', async () => {
-    connectOverCDP.mockRejectedValue(new Error('no browser on that port'));
-
-    await expect(
-      launchBrowser(
-        baseConfig({ launchArgs: ['--disable-print-preview'] }),
-        { port: 9222 },
-      ),
-    ).rejects.toThrow();
+    // The attach succeeds, so the connect below is really reached. Its
+    // preflight probes /json/version first: answered here, as the sibling
+    // browser-manager files do, rather than by whatever this machine happens
+    // to have listening on the port.
+    connectOverCDP.mockResolvedValue(launchFake());
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200 })) as unknown as typeof fetch;
+    try {
+      await launchBrowser(baseConfig({ launchArgs: ['--disable-print-preview'] }), { port: 9222 });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
 
     expect(launch).not.toHaveBeenCalled();
     expect(stealthLaunch).not.toHaveBeenCalled();
-    // Whatever connectOverCDP was handed, it was not our args array.
-    const arg = connectOverCDP.mock.calls[0]?.[0];
-    expect(JSON.stringify(arg ?? '')).not.toContain('--disable-print-preview');
+    // Whatever connectOverCDP was handed, it was not our args.
+    expect(connectOverCDP).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(connectOverCDP.mock.calls[0])).not.toContain('--disable-print-preview');
   });
 
   it('applies to firefox and webkit too', async () => {

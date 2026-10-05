@@ -154,12 +154,6 @@ async function failure(promise: Promise<unknown>): Promise<unknown> {
   );
 }
 
-/** Let a start that outlived its caller (a cancellation) run to completion,
- *  so it settles inside the test that created it rather than the next one. */
-async function drain(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 25));
-}
-
 let userRootTmp: string;
 const savedUserRoot: Record<string, string | undefined> = {};
 
@@ -615,8 +609,23 @@ describe('ensureServerReady — single-flight', () => {
     expect(String((err as Error).message)).not.toContain('did not become healthy');
 
     // The shared start is meant to outlive its cancelled caller; let it finish
-    // here rather than in whatever test runs next.
+    // here rather than in whatever test runs next, where its cleanup would
+    // delete that test's in-flight entry. Join it rather than wait a while: a
+    // caller with no signal is handed the shared promise itself, which settles
+    // only after the registry has dropped the entry. The joiner's own first
+    // probe must still see `down`, or it returns at once without joining —
+    // and its probe and its lookup of the in-flight entry are all microtasks,
+    // so one macrotask turn has it joined before the server is seen to be up.
+    const joined = ensureServerReadyWith(makeProject(), undefined, h.deps);
+    let joinedSettled = false;
+    void joined.finally(() => (joinedSettled = true)).catch(() => undefined);
+    await new Promise((resolve) => setImmediate(resolve));
+    // Still waiting on the shared start — it joined rather than answering
+    // from its own probe.
+    expect(joinedSettled).toBe(false);
     h.up = true;
-    await drain();
+    await expect(joined).resolves.toBeUndefined();
+    // Joined, not started afresh: one spawn between the two callers.
+    expect(h.spawns).toHaveLength(1);
   });
 });

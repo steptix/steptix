@@ -36,7 +36,10 @@ import { envReferenceFor } from './write-steps.js';
 
 /** Test-only knobs: the recorder's, and the draft engine's settle window. */
 export type RecordStepsTestKnobs = Partial<
-  Pick<StepRecorderOptions, 'typedNavigationWindowMs' | 'historyCausedWindowMs' | 'tap' | 'maxCrops' | 'checkInMs'>
+  Pick<
+    StepRecorderOptions,
+    'typedNavigationWindowMs' | 'historyCausedWindowMs' | 'tap' | 'maxCrops' | 'checkInMs' | 'endShowMs'
+  >
 > & { draftSettleMs?: number };
 
 /** Everything a recording needs from the session it belongs to. */

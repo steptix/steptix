@@ -66,7 +66,9 @@ async function resolve(sel: string): Promise<{ count: number; text: string }> {
 describe('measurement — what the runtime found', () => {
   // The failure the story opens with: a visible link in the page and a second
   // copy inside a drawer that never renders. The AI was right; the generated
-  // entry would have thrown on the second match.
+  // entry would have thrown on the second match. The hidden copy is counted
+  // because the measurement asks the document, not the DOM snapshot — which
+  // strips a hidden element's attributes and truncates at 100k.
   it('records both counts and a verified handle for a hidden duplicate', async () => {
     const result = await executeAction(
       page,
@@ -172,26 +174,6 @@ describe('measurement — what the runtime found', () => {
     expect((await resolve(resolved!)).count).toBe(1);
   });
 
-  // The measurement does not read the DOM snapshot — which strips a hidden
-  // element's attributes and truncates at 100k — it asks the document.
-  it('counts a hidden duplicate the DOM snapshot cannot show', async () => {
-    const snapshotHides = await page.evaluate(`(() => {
-      const all = document.querySelectorAll('a[href="transactions.html"]');
-      return { total: all.length, hidden: all[0].offsetParent === null };
-    })()`) as { total: number; hidden: boolean };
-    expect(snapshotHides.total).toBe(2);
-    expect(snapshotHides.hidden).toBe(true);
-
-    const result = await executeAction(
-      page,
-      { action: 'hover', selector: 'a[href="transactions.html"]', description: 'Hover statements' },
-      undefined,
-      undefined,
-      { measure: true },
-    );
-    expect(result.targeting?.matchCount).toBe(2);
-  });
-
   // Measuring cold at T0 would say "0 elements matched" for a step whose
   // element renders a moment later and whose click then succeeds — a confident
   // lie. The wait is hoisted precisely so the number is taken after it.
@@ -249,19 +231,79 @@ describe('measurement — what the runtime found', () => {
 });
 
 describe('measurement — when it cannot happen', () => {
+  /**
+   * `page`, with every locator it hands out recording the options its
+   * `waitFor` and `click` were called with. `waitFor` then runs with a short
+   * REAL timeout, so a wait that cannot succeed still fails the Playwright way,
+   * in milliseconds: what is under test is the budget the action asks for, not
+   * how long a loaded machine takes to spend it.
+   */
+  function budgetRecorder(waitForTimeoutMs: number) {
+    const waits: Array<Record<string, unknown>> = [];
+    const clicks: Array<Record<string, unknown>> = [];
+    const wrap = (loc: object): object =>
+      new Proxy(loc, {
+        get(target, prop, recv) {
+          const value = Reflect.get(target, prop, recv);
+          if (typeof value !== 'function') return value;
+          if (prop === 'waitFor') {
+            return (opts: Record<string, unknown> = {}) => {
+              waits.push({ ...opts });
+              return value.call(target, { ...opts, timeout: waitForTimeoutMs });
+            };
+          }
+          if (prop === 'click') {
+            return (opts: Record<string, unknown> = {}) => {
+              clicks.push({ ...opts });
+              return value.call(target, opts);
+            };
+          }
+          // Keep recording down a `.locator(…).first()` chain.
+          return (...args: unknown[]) => {
+            const out = (value as (...a: unknown[]) => unknown).apply(target, args);
+            const isLocator = typeof (out as { waitFor?: unknown } | null)?.waitFor === 'function';
+            return isLocator ? wrap(out as object) : out;
+          };
+        },
+      });
+    const recording = new Proxy(page, {
+      get(target, prop, recv) {
+        const value = Reflect.get(target, prop, recv);
+        if (prop === 'locator' && typeof value === 'function') {
+          return (...args: unknown[]) =>
+            wrap((value as (...a: unknown[]) => object).apply(target, args));
+        }
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as Page;
+    return { page: recording, waits, clicks };
+  }
+
   // "Wait times out — zero elements" is not a measurement outcome at all: the
   // hoisted wait throws exactly as the action's own wait would have, and the
   // sub-action is recorded WITH an error, which `actionsOf` filters out.
-  it('contributes no targeting when the wait times out', async () => {
-    const started = Date.now();
+  it('contributes no targeting when the wait times out, inside the click`s one budget', async () => {
+    // The budget a click spends on its own when nothing is measured...
+    const plain = budgetRecorder(500);
+    const clicked = await executeAction(plain.page, {
+      action: 'click',
+      selector: '[data-testid="save-preferences"]',
+      description: 'Save preferences',
+    });
+    expect(clicked.success).toBe(true);
+    expect(plain.waits).toEqual([]);
+    expect(plain.clicks).toHaveLength(1);
+    const clickBudget = plain.clicks[0]!['timeout'];
+    expect(clickBudget).toBeGreaterThan(0);
+
+    const ghost = budgetRecorder(500);
     const result = await executeAction(
-      page,
+      ghost.page,
       { action: 'click', selector: '#never-appears', description: 'Click a ghost' },
       undefined,
       undefined,
       { measure: true },
     );
-    const elapsed = Date.now() - started;
 
     expect(result.success).toBe(false);
     expect(result.targeting).toBeUndefined();
@@ -269,11 +311,13 @@ describe('measurement — when it cannot happen', () => {
     // The existing failure path still reports the count it always did.
     expect(result.matchCount).toBe(0);
 
-    // The hoisted wait borrows the click's 10s budget rather than adding a
-    // second one: a selector that never appears fails in about 10s, not 20s.
-    expect(elapsed).toBeGreaterThan(8_000);
-    expect(elapsed).toBeLessThan(16_000);
-  }, 40_000);
+    // ...is the whole budget a measured click gets. The hoisted wait borrows
+    // it rather than adding a second one, and once it runs out nothing else
+    // waits — so a selector that never appears fails in one click budget
+    // (~10 s), not two.
+    expect(ghost.waits).toEqual([{ state: 'visible', timeout: clickBudget }]);
+    expect(ghost.clicks).toEqual([]);
+  });
 
   // Measurement is strictly additive telemetry: anything that throws inside it
   // leaves `targeting` absent and the action behaving byte-identically.

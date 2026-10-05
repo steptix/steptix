@@ -272,9 +272,23 @@ describe('the parser keeps an unknown type, so the transcript can show it', () =
   });
 
   it('still normalises the aliases — a convenience that now saves a retry', () => {
+    // Written out by hand, unlike the folding test below, which reads
+    // ACTION_TYPE_ALIASES itself and so cannot notice a spelling removed from
+    // it. Each row is a spelling a model reaches for; dropping one costs a retry.
     for (const [raw, canonical] of [
-      ['goBack', 'back'], ['refresh', 'reload'], ['dragAndDrop', 'drag'],
-      ['api', 'api_call'], ['attachFile', 'upload'], ['switchTab', 'switchPage'],
+      ['goBack', 'back'], ['api', 'api_call'], ['attachFile', 'upload'],
+      ['press', 'keyboard'],
+      ['attach', 'upload'], ['attach_file', 'upload'], ['file_upload', 'upload'],
+      ['setInputFiles', 'upload'],
+      ['refresh', 'reload'], ['reloadPage', 'reload'], ['browserRefresh', 'reload'],
+      ['dragTo', 'drag'], ['dragAndDrop', 'drag'], ['drag_and_drop', 'drag'], ['dragDrop', 'drag'],
+      ['open_page', 'openPage'], ['openTab', 'openPage'], ['open_tab', 'openPage'],
+      ['openWindow', 'openPage'], ['open_window', 'openPage'], ['newTab', 'openPage'],
+      ['new_tab', 'openPage'], ['newWindow', 'openPage'], ['new_window', 'openPage'],
+      ['closeTab', 'closePage'], ['close_tab', 'closePage'], ['close_page', 'closePage'],
+      ['closeWindow', 'closePage'], ['close_window', 'closePage'],
+      ['switch_page', 'switchPage'], ['switchTab', 'switchPage'], ['switch_tab', 'switchPage'],
+      ['switchWindow', 'switchPage'], ['switch_window', 'switchPage'],
     ] as const) {
       expect(parseAIResponse(JSON.stringify({ action: raw, description: 'x' })).actions[0]!.action, raw)
         .toBe(canonical);

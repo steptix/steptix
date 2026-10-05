@@ -63,20 +63,52 @@ try {
 
 describe.runIf(hasGit)('scripts/build-info.mjs', () => {
   let tmp: string;
+  /** An empty home for git, outside `tmp` (itself a repository here). */
+  let gitHome: string;
+  /**
+   * Every git in this block — the helper's and the script's — runs with no
+   * system config and an empty global one, so this machine's own never reaches
+   * these throwaway repositories: a global hook (git-secrets, a corporate
+   * pre-commit) can fail or prompt on the commit, and a global
+   * `status.showUntrackedFiles=no` or excludes file would hide the untracked
+   * file the script is asked about. `GIT_CONFIG_GLOBAL` needs git 2.32; an
+   * older git reads the global file from `HOME` (and `XDG_CONFIG_HOME`).
+   */
+  let gitEnv: NodeJS.ProcessEnv;
 
   beforeEach(() => {
     tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-build-info-')));
+    gitHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-build-info-home-')));
+    fs.writeFileSync(path.join(gitHome, '.gitconfig'), '');
+    fs.mkdirSync(path.join(gitHome, 'hooks'));
+    gitEnv = {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: path.join(gitHome, '.gitconfig'),
+      HOME: gitHome,
+      XDG_CONFIG_HOME: gitHome,
+    };
   });
 
   afterEach(() => {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    fs.rmSync(gitHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   function git(cwd: string, ...args: string[]): string {
-    return execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...args], {
-      cwd,
-      encoding: 'utf-8',
-    }).trim();
+    return execFileSync(
+      'git',
+      [
+        '-c', 'user.name=t',
+        '-c', 'user.email=t@t',
+        '-c', 'commit.gpgsign=false',
+        // Belt and braces over the isolated config: no hooks, no template.
+        '-c', `core.hooksPath=${path.join(gitHome, 'hooks')}`,
+        '-c', 'init.templateDir=',
+        ...args,
+      ],
+      { cwd, encoding: 'utf-8', env: gitEnv },
+    ).trim();
   }
 
   /** A package root holding a copy of the script, as `scripts/build-info.mjs`. */
@@ -87,7 +119,7 @@ describe.runIf(hasGit)('scripts/build-info.mjs', () => {
   }
 
   function stamp(root: string): unknown {
-    execFileSync(process.execPath, [path.join(root, 'scripts', 'build-info.mjs')], { stdio: 'ignore' });
+    execFileSync(process.execPath, [path.join(root, 'scripts', 'build-info.mjs')], { stdio: 'ignore', env: gitEnv });
     return JSON.parse(fs.readFileSync(path.join(root, 'dist', 'build-info.json'), 'utf-8'));
   }
 
@@ -133,7 +165,7 @@ describe.runIf(hasGit)('scripts/build-info.mjs', () => {
     // repository the machine's temp folder happens to sit in.
     execFileSync(process.execPath, [path.join(tmp, 'scripts', 'build-info.mjs')], {
       stdio: 'ignore',
-      env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(tmp) },
+      env: { ...gitEnv, GIT_CEILING_DIRECTORIES: path.dirname(tmp) },
     });
     expect(JSON.parse(fs.readFileSync(path.join(tmp, 'dist', 'build-info.json'), 'utf-8'))).toEqual({
       commit: null,

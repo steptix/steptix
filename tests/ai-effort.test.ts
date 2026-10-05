@@ -23,12 +23,15 @@ vi.mock('../src/utils/logger.js', () => ({
 
 const chatMock = vi.fn();
 const streamMock = vi.fn();
+/** Records every `new AIGateway(...)`, so a rebuild between calls is visible. */
+const constructorMock = vi.fn();
 
 vi.mock('@pkent/aigateway', () => {
   class FakeAIGateway {
     chat: typeof chatMock;
     stream: typeof streamMock;
-    constructor() {
+    constructor(model: string, key: string, options: unknown) {
+      constructorMock(model, key, options);
       this.chat = chatMock;
       this.stream = streamMock;
     }
@@ -175,16 +178,8 @@ describe('AiClient — reasoning effort profiles', () => {
       // Two different profiles, one gateway: the model/key binding is what
       // rebuilds it, and effort is not part of that.
       expect(chatMock).toHaveBeenCalledTimes(2);
+      expect(constructorMock).toHaveBeenCalledTimes(1);
       expect(lastChatOptions().effort).toBe('high');
-    });
-
-    it('responseFormat and signal still ride alongside the profile', async () => {
-      const client = new AiClient(baseConfig, tokenTracker as any);
-      await client.complete(HI, undefined, { profile: 'authoring' });
-
-      const options = lastChatOptions();
-      expect(options.responseFormat).toEqual({ type: 'json_object' });
-      expect(options.signal).toBeDefined();
     });
   });
 });

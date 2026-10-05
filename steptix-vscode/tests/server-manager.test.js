@@ -8,10 +8,12 @@
  * is what an older Steptix server whose Express 404s /health looks like — must
  * proceed on the legacy path instead.
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { createServer } from 'node:http';
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, statSync } from 'node:fs';
+import { createServer as createTcpServer, connect } from 'node:net';
+import { once } from 'node:events';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -30,6 +32,19 @@ import {
   HEALTH_SERVICE_ID,
 } from '../src/extension/server-manager.ts';
 
+/** A fresh temp dir, removed when the file is done. `maxRetries`: on Windows
+ *  antivirus or the indexer can still hold a file written moments ago, and
+ *  `force` does not cover EBUSY/EPERM. */
+const made = [];
+function tempDir(prefix) {
+  const dir = mkdtempSync(path.join(tmpdir(), prefix));
+  made.push(dir);
+  return dir;
+}
+after(() => {
+  for (const dir of made) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+});
+
 /** Stand up a throwaway http server; returns { url, close }. */
 async function stub(handler) {
   const server = createServer((req, res) => {
@@ -40,6 +55,34 @@ async function stub(handler) {
   return {
     url: `http://127.0.0.1:${server.address().port}`,
     close: () => new Promise((r) => server.close(() => r())),
+  };
+}
+
+/**
+ * A loopback URL that refuses connections for as long as it is held: the local
+ * end of a client connection to a throwaway server. Nothing listens on that
+ * port, so a probe gets a genuine ECONNREFUSED — and unlike a port a stub just
+ * let go of, it stays in use until `release()`, so another listener cannot be
+ * handed it mid-test and answer in its place.
+ */
+async function refusingPort() {
+  const accepted = new Set();
+  const server = createTcpServer((socket) => {
+    socket.on('error', () => {});
+    accepted.add(socket);
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const client = connect(server.address().port, '127.0.0.1');
+  client.on('error', () => {});
+  await once(client, 'connect');
+  return {
+    url: `http://127.0.0.1:${client.localPort}`,
+    port: client.localPort,
+    release: async () => {
+      client.destroy();
+      for (const socket of accepted) socket.destroy();
+      await new Promise((r) => server.close(() => r()));
+    },
   };
 }
 
@@ -65,11 +108,19 @@ const json = (res, status, body) => {
 // defaultHealthProbe
 // ---------------------------------------------------------------------------
 
+/** The per-probe budget for every test that is not about the timeout. A
+ *  loopback round trip takes milliseconds, but the first `fetch` in the
+ *  process pays for undici's start-up and a loaded box can stall past a
+ *  second — and a budget that fires turns every arm below into `down`. It
+ *  only bounds a wait that ends early; the timeout itself is pinned at 50 ms
+ *  in its own test. */
+const PROBE_MS = 10_000;
+
 test('probe: our server reads as healthy and carries the inspector url', async () => {
   const s = await stub((_req, res) => json(res, 200, healthJson()));
   try {
-    const result = await defaultHealthProbe(s.url, 1000);
-    assert.equal(result.kind, 'healthy');
+    const result = await defaultHealthProbe(s.url, PROBE_MS);
+    assert.equal(result.kind, 'healthy', result.detail);
     assert.equal(result.health.inspector, 'ws://127.0.0.1:53012/abc');
     assert.equal(result.health.version, '1.2.3');
   } finally {
@@ -82,8 +133,8 @@ test('probe: inspector null survives as null, not undefined', async () => {
   // undefined means "no health data, use the settings".
   const s = await stub((_req, res) => json(res, 200, healthJson({ inspector: null })));
   try {
-    const result = await defaultHealthProbe(s.url, 1000);
-    assert.equal(result.kind, 'healthy');
+    const result = await defaultHealthProbe(s.url, PROBE_MS);
+    assert.equal(result.kind, 'healthy', result.detail);
     assert.equal(result.health.inspector, null);
   } finally {
     await s.close();
@@ -93,8 +144,8 @@ test('probe: inspector null survives as null, not undefined', async () => {
 test('probe: a different service is FOREIGN (never spawn on top of it)', async () => {
   const s = await stub((_req, res) => json(res, 200, JSON.stringify({ service: 'grafana' })));
   try {
-    const result = await defaultHealthProbe(s.url, 1000);
-    assert.equal(result.kind, 'foreign');
+    const result = await defaultHealthProbe(s.url, PROBE_MS);
+    assert.equal(result.kind, 'foreign', result.detail);
     assert.equal(result.service, 'grafana');
   } finally {
     await s.close();
@@ -104,8 +155,8 @@ test('probe: a different service is FOREIGN (never spawn on top of it)', async (
 test('probe: a 404 is UNKNOWN, not foreign — that is what an older Steptix server looks like', async () => {
   const s = await stub((_req, res) => json(res, 404, JSON.stringify({ error: 'Not Found' })));
   try {
-    const result = await defaultHealthProbe(s.url, 1000);
-    assert.equal(result.kind, 'unknown');
+    const result = await defaultHealthProbe(s.url, PROBE_MS);
+    assert.equal(result.kind, 'unknown', result.detail);
     assert.match(result.detail, /404/);
   } finally {
     await s.close();
@@ -118,41 +169,41 @@ test('probe: non-JSON and JSON-without-service are both UNKNOWN', async () => {
     res.end('<html>hi</html>');
   });
   try {
-    assert.equal((await defaultHealthProbe(s1.url, 1000)).kind, 'unknown');
+    const result = await defaultHealthProbe(s1.url, PROBE_MS);
+    assert.equal(result.kind, 'unknown', result.detail);
   } finally {
     await s1.close();
   }
 
   const s2 = await stub((_req, res) => json(res, 200, JSON.stringify({ ok: true })));
   try {
-    const result = await defaultHealthProbe(s2.url, 1000);
-    assert.equal(result.kind, 'unknown');
+    const result = await defaultHealthProbe(s2.url, PROBE_MS);
+    assert.equal(result.kind, 'unknown', result.detail);
     assert.match(result.detail, /service/);
   } finally {
     await s2.close();
   }
 });
 
-test('probe: nothing listening is DOWN', async () => {
-  const s = await stub(() => {});
-  await s.close();
-  const result = await defaultHealthProbe(s.url, 1000);
-  assert.equal(result.kind, 'down');
+test('probe: nothing listening is DOWN', async (t) => {
+  const gone = await refusingPort();
+  t.after(() => gone.release());
+  const result = await defaultHealthProbe(gone.url, PROBE_MS);
+  assert.equal(result.kind, 'down', result.detail);
 });
 
-test('probe: a DOWN detail names the refusal, not just "fetch failed"', async () => {
+test('probe: a DOWN detail names the refusal, not just "fetch failed"', async (t) => {
   // Node reports every transport failure as `TypeError: fetch failed` and
   // hides the reason on `cause`. The detail is what the run log prints for
   // "server down at <url> (<detail>)", so it has to carry the cause — the
   // port that refused — or the reader is left guessing which URL was tried
   // and why it did not answer.
-  const s = await stub(() => {});
-  await s.close();
-  const port = new URL(s.url).port;
-  const result = await defaultHealthProbe(s.url, 1000);
-  assert.equal(result.kind, 'down');
+  const gone = await refusingPort();
+  t.after(() => gone.release());
+  const result = await defaultHealthProbe(gone.url, PROBE_MS);
+  assert.equal(result.kind, 'down', result.detail);
   assert.match(result.detail, /ECONNREFUSED/);
-  assert.match(result.detail, new RegExp(`:${port}`));
+  assert.match(result.detail, new RegExp(`:${gone.port}`));
 });
 
 test('probe: a server that never answers is DOWN with a detail that says it timed out', async () => {
@@ -182,7 +233,7 @@ test('probe: a trailing slash on SERVER_URL does not produce //health', async ()
     json(res, 200, healthJson());
   });
   try {
-    await defaultHealthProbe(`${s.url}/`, 1000);
+    await defaultHealthProbe(`${s.url}/`, PROBE_MS);
     assert.equal(seen, '/health');
   } finally {
     await s.close();
@@ -210,10 +261,29 @@ test('probe: a caller abort ends it without needing AbortSignal.any', async () =
 // ---------------------------------------------------------------------------
 
 const noSleep = async () => {};
+/**
+ * Time that only the injected sleep moves, for the tests that are not about
+ * the budget. Wall time then plays no part — a loaded box that takes seconds
+ * over three probes cannot run the budget out — yet a loop that stopped
+ * ending on its answer would still use up the fake budget and fail. (A clock
+ * frozen at 0 would spin that loop forever on microtasks, past any test
+ * timeout.)
+ */
+function fakeTime() {
+  let clock = 0;
+  return {
+    sleep: async (ms) => {
+      clock += ms;
+    },
+    now: () => clock,
+  };
+}
 const config = (over = {}) => ({
   command: 'node server.js',
   cwd: '/repo',
-  readyTimeoutSeconds: 1,
+  // Far more polls than any test here needs, so the budget is never what
+  // ends a test that is not about it.
+  readyTimeoutSeconds: 60,
   ...over,
 });
 
@@ -261,7 +331,7 @@ test('start: spawns with the configured command/cwd/log and reports ready', asyn
         : { kind: 'healthy', health: { service: HEALTH_SERVICE_ID, inspector: 'ws://x:1/y' } };
     },
     spawn: (args) => calls.push(args),
-    sleep: noSleep,
+    ...fakeTime(),
   });
 
   assert.deepEqual(calls, [{ command: 'node server.js', cwd: '/repo', logPath: '/tmp/server.log' }]);
@@ -284,7 +354,7 @@ test('start: an unknown response keeps polling rather than giving up', async () 
         : { kind: 'healthy', health: { service: HEALTH_SERVICE_ID } };
     },
     spawn: () => {},
-    sleep: noSleep,
+    ...fakeTime(),
   });
   assert.equal(result.kind, 'ready');
   assert.ok(probes >= 3);
@@ -297,14 +367,14 @@ test('start: a foreign service taking the port mid-start stops the attempt', asy
     logPath: '/tmp/server.log',
     probe: async () => ({ kind: 'foreign', service: 'grafana' }),
     spawn: () => {},
-    sleep: noSleep,
+    ...fakeTime(),
   });
   assert.equal(result.kind, 'foreign');
   assert.equal(result.service, 'grafana');
 });
 
 test('start: a never-healthy server times out and quotes the log tail', async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'tb-log-'));
+  const dir = tempDir('tb-log-');
   const logPath = path.join(dir, 'server.log');
   writeFileSync(logPath, 'booting\nError: Cannot find module dist/index.js\n');
 
@@ -460,7 +530,7 @@ test('decide: a healthy server costs no runtime scan, and a REMOTE url never sta
 /** A runtimes folder holding `versions`, each with the files named (default:
  *  everything a startable runtime has on any platform). */
 function runtimesFolder(versions, files = ['runtime-launcher.cjs', 'server/dist/index.js', 'steptix.cmd']) {
-  const dir = mkdtempSync(path.join(tmpdir(), 'steptix-runtimes-'));
+  const dir = tempDir('steptix-runtimes-');
   for (const version of versions) {
     for (const file of files) {
       const full = path.join(dir, version, ...file.split('/'));
@@ -650,7 +720,7 @@ test('settings: everything unset means no command, and the installed runtime is 
 });
 
 test('log tail: reads only the end of a large file', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'tb-log2-'));
+  const dir = tempDir('tb-log2-');
   const logPath = path.join(dir, 'server.log');
   // 3 MB of noise plus a distinctive final line — the tail must not depend on
   // reading the whole file, which can be 5 MB by design.
@@ -660,7 +730,7 @@ test('log tail: reads only the end of a large file', () => {
 });
 
 test('log tail: a missing or empty log yields undefined, never a throw', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'tb-log3-'));
+  const dir = tempDir('tb-log3-');
   assert.equal(readLogTail(path.join(dir, 'nope.log')), undefined);
   const empty = path.join(dir, 'empty.log');
   writeFileSync(empty, '');
@@ -692,12 +762,11 @@ test('the serverAutoStart settings are machine-scoped in contributes.configurati
 });
 
 test('log tail: does not include the whole file when it is short', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'tb-log4-'));
+  const dir = tempDir('tb-log4-');
   const logPath = path.join(dir, 'server.log');
   writeFileSync(logPath, ['a', 'b', 'c', 'd', 'e', 'f', 'g'].join('\n'));
   const tail = readLogTail(logPath);
-  assert.equal(tail, 'c | d | e | f | g'); // last 5 lines
-  assert.equal(readFileSync(logPath, 'utf8').includes('a'), true);
+  assert.equal(tail, 'c | d | e | f | g'); // last 5 lines; a and b are dropped
 });
 
 test('describeServerVersion: the commit after the version, and modified for uncommitted changes', () => {
@@ -715,5 +784,9 @@ test('describeHealth: the headline names the build', () => {
     kind: 'healthy',
     health: { service: HEALTH_SERVICE_ID, version: '1.0.0-beta.1', commit: 'b700473', modified: true },
   });
-  assert.equal(headline, `Steptix server on ${LOCAL} — v1.0.0-beta.1 (b700473, modified)`);
+  // The build as describeServerVersion spells it (all four forms are pinned
+  // above), and the URL it was found on. The words around them are free to
+  // change: no doc or spec quotes this sentence.
+  assert.match(headline, /v1\.0\.0-beta\.1 \(b700473, modified\)/);
+  assert.ok(headline.includes(LOCAL), headline);
 });

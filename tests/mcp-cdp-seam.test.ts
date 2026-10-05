@@ -300,21 +300,6 @@ describe('list_cdp_browsers', () => {
     expect(text(result)).toContain('0 available');
   });
 
-  it('auto-starts the server so a first "what browsers do I have?" answers', async () => {
-    // Reversed from the original design (stories/mcp-no-project.md follow-up):
-    // "what browsers do I have?" is often an agent's FIRST call, and against a
-    // stopped server the old report-only path failed on a bare connect error.
-    // Listing browsers needs the server, so bringing it up to answer is the
-    // right move — the same auto-start every non-probe tool now gets.
-    // (server_status / get_run_settings keep the report-only path and can still
-    // answer "nothing running".)
-    const h = await connect();
-
-    await h.client.callTool({ name: 'list_cdp_browsers', arguments: {} });
-
-    expect(h.readiness).toEqual(['ensure']);
-  });
-
   it('does NOT ask for foreign tabs without the opt-in', async () => {
     // Not asking IS the withholding. The server honours whatever it is asked,
     // because it cannot tell an agent from a human — Steptix and flick are
@@ -373,20 +358,6 @@ describe('start_cdp_browser', () => {
     // The outcome must reach the text summary too: it is what the agent
     // relays, and "may already be signed in" is the point of that arm.
     expect(text(result)).toContain('launched_into_existing_profile');
-  });
-
-  it('auto-starts a stopped server rather than failing on connect', async () => {
-    // Regression: this tool reached `withProject` with the probes' default and
-    // inherited a rule written for read-only tools ("asking what is running
-    // must not cause a server to exist"). Its entire purpose is to make
-    // something exist, so against a stopped server it died on a bare
-    // ECONNREFUSED — while `run_test_file` from the same agent, one second
-    // earlier, would have started the server for itself.
-    const h = await connect();
-
-    await h.client.callTool({ name: 'start_cdp_browser', arguments: { engine: 'edge' } });
-
-    expect(h.readiness).toEqual(['ensure']);
   });
 
   it('omits reset entirely unless it is true', async () => {
@@ -872,13 +843,16 @@ describe('close_cdp_tab', () => {
     expect(text(result)).toContain('close_session');
   });
 
-  it('maps every output field through as structured content', async () => {
+  it('maps every output field through as structured content, backfilling scope', async () => {
+    // `toEqual`, like the focus twin below: the spread-through fields are the
+    // fake's own, so what this pins is that nothing is dropped or invented —
+    // and the one field the handler derives for this server, `scope`.
     const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
     const result = await h.client.callTool({
       name: 'close_cdp_tab',
       arguments: { profile: 'default', target_id: 'A1B2C3' },
     });
-    expect(structured(result)).toMatchObject({
+    expect(structured(result)).toEqual({
       closed: true,
       targetId: 'A1B2C3',
       title: 'OpenRouter — Docs',
@@ -888,6 +862,11 @@ describe('close_cdp_tab', () => {
       port: 51000,
       remainingTabs: 7,
       browserExited: false,
+      owned: true,
+      // The fake server predates `scope`, so the tool backfills it from the
+      // profile resolution — an unlabelled entry can only be project scope.
+      scope: 'project',
+      warnings: [],
     });
   });
 
@@ -1123,15 +1102,6 @@ describe('close_cdp_tab', () => {
     });
     expect(result.isError).toBeFalsy();
     expect(h.closeCalls[0]).toMatchObject({ port: 9222 });
-  });
-
-  it('auto-starts a stopped server, like the other tools that act', async () => {
-    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
-    await h.client.callTool({
-      name: 'close_cdp_tab',
-      arguments: { profile: 'default', target_id: 'A1B2C3' },
-    });
-    expect(h.readiness).toEqual(['ensure']);
   });
 
   it('tells the agent to match the tab itself, and warns about the last tab', async () => {
@@ -1378,15 +1348,6 @@ describe('focus_cdp_tab', () => {
     expect(h.focusCalls[0]).not.toHaveProperty('allowUnowned');
   });
 
-  it('auto-starts a stopped server, like the other tools that act', async () => {
-    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
-    await h.client.callTool({
-      name: 'focus_cdp_tab',
-      arguments: { profile: 'default', target_id: 'A1B2C3' },
-    });
-    expect(h.readiness).toEqual(['ensure']);
-  });
-
   it('passes a real 404 through as prose, not as a transport complaint', async () => {
     // The server's own message names the id, both readings and the call that
     // refreshes the list. Wrapping it in "rejected the request (HTTP 404)"
@@ -1482,6 +1443,42 @@ describe('focus_cdp_tab', () => {
     expect(output).toMatch(/accepted the request/i);
     expect(output).toMatch(/OS-level window-focus tool/i);
     expect(output).toMatch(/taskbar/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auto-start: every CDP tool brings a stopped server up
+// ---------------------------------------------------------------------------
+
+describe('auto-start', () => {
+  // One table rather than one copy per tool's describe — the twin of
+  // mcp-seam.test.ts's `%s auto-starts a stopped server` table, kept here
+  // because this harness is the one that fakes the CDP routes and records
+  // WHICH readiness check ran rather than only how many.
+  //
+  // `list_cdp_browsers` was reversed from the original design
+  // (stories/mcp-no-project.md follow-up): "what browsers do I have?" is often
+  // an agent's FIRST call, and against a stopped server the old report-only
+  // path failed on a bare connect error. Only server_status / get_run_settings
+  // keep that path, because they must be able to answer "nothing running".
+  //
+  // `start_cdp_browser` is a regression: it reached `withProject` with the
+  // probes' default and inherited a rule written for read-only tools ("asking
+  // what is running must not cause a server to exist"). Its entire purpose is
+  // to make something exist, so against a stopped server it died on a bare
+  // ECONNREFUSED — while `run_test_file` from the same agent, one second
+  // earlier, would have started the server for itself.
+  it.each([
+    ['list_cdp_browsers', {}],
+    ['start_cdp_browser', { engine: 'edge' }],
+    ['close_cdp_tab', { profile: 'default', target_id: 'A1B2C3' }],
+    ['focus_cdp_tab', { profile: 'default', target_id: 'A1B2C3' }],
+  ] as const)('%s auto-starts a stopped server rather than failing on connect', async (name, args) => {
+    const h = await connect({ browsers: { running: RUNNING_WITH_TABS } });
+
+    await h.client.callTool({ name, arguments: args });
+
+    expect(h.readiness).toEqual(['ensure']);
   });
 });
 

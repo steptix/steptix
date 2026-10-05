@@ -39,7 +39,7 @@ const READ_ACTION: RecordedAction = {
 
 function bindingFor(source: string, overrides: Partial<CodeBehindBinding> = {}): CodeBehindBinding {
   return {
-    file: path.join('C:', 'nowhere', 'x.steps.ts'),
+    file: path.resolve(path.sep, 'nowhere', 'x.steps.ts'),
     source,
     occurrence: 0,
     scope: { renames: {}, inputs: {} },

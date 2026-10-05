@@ -91,6 +91,23 @@ function execWith(overrides: Partial<Config['execution']>): Config {
   });
 }
 
+/**
+ * A clock that moves only when the step sleeps. The wait budget is charged in
+ * elapsed time, so on the real clock a budget of a few hundred milliseconds is
+ * spent by whatever else the machine is doing: on a loaded run a 200 ms
+ * wait_window took over 300 ms, and the next wait was refused before it could
+ * time out. On this clock each wait costs exactly what it asked for.
+ */
+function virtualClock(): { now: () => number; sleep: (ms: number) => Promise<void> } {
+  let t = 0;
+  return {
+    now: () => t,
+    sleep: async (ms) => {
+      t += ms;
+    },
+  };
+}
+
 function makeOpts(
   adapter: FakeDesktopAdapter,
   client: AiClient,
@@ -1083,14 +1100,19 @@ describe('a repeated window action is answered with a note, not a pass (A3)', ()
 });
 
 describe('Stop reaches a computer step (A5)', () => {
-  it('ends a wait_window promptly, without spinning on the window list', async () => {
+  it('ends a wait_window at its next look, without spinning on the window list', async () => {
     const adapter = new FakeDesktopAdapter({ ...GRAB, windows: [] });
     const controller = new AbortController();
+    // Stop is pressed while the wait is looking at the window list — on cue,
+    // not on a timer, so the look it lands in is always the first one.
+    const look = adapter.windows.bind(adapter);
+    adapter.windows = async () => {
+      controller.abort();
+      return look();
+    };
     const { client } = scripted(
       '{"action":"wait_window","title":"Never","state":"open","timeoutMs":1500,"description":"Wait"}',
     );
-    setTimeout(() => controller.abort(), 100);
-    const started = Date.now();
 
     const result = await executeComputerStep(
       1,
@@ -1101,10 +1123,9 @@ describe('Stop reaches a computer step (A5)', () => {
 
     expect(result.status).toBe('failed');
     expect(result.error).toBe('Aborted by client');
-    expect(Date.now() - started).toBeLessThan(900);
     // Measured before the fix: millions of window-list calls, spun until the
-    // model's own timeout ran out.
-    expect(adapter.callsOf('windows').length).toBeLessThanOrEqual(3);
+    // model's own timeout ran out. The look Stop landed in is the last one.
+    expect(adapter.callsOf('windows')).toHaveLength(1);
   });
 
   it('performs nothing the model answered after Stop was pressed', async () => {
@@ -1309,6 +1330,7 @@ describe('a wait that never comes costs one attempt, within a budget (D2)', () =
           maxImageWidth: MAX_IMAGE_WIDTH,
           reportScreenshots: true,
           waitBudgetMs: 200,
+          ...virtualClock(),
         } as ComputerStepOptions['computer'],
       }),
     );
@@ -1338,6 +1360,7 @@ describe('a wait that never comes costs one attempt, within a budget (D2)', () =
           maxImageWidth: MAX_IMAGE_WIDTH,
           reportScreenshots: true,
           waitBudgetMs: 800,
+          ...virtualClock(),
         } as ComputerStepOptions['computer'],
       }),
     );
@@ -1400,6 +1423,7 @@ describe('a wait that never comes costs one attempt, within a budget (D2)', () =
           maxImageWidth: MAX_IMAGE_WIDTH,
           reportScreenshots: true,
           waitBudgetMs: 300,
+          ...virtualClock(),
         } as ComputerStepOptions['computer'],
       }),
     );
@@ -1429,6 +1453,7 @@ describe('a wait that never comes costs one attempt, within a budget (D2)', () =
           maxImageWidth: MAX_IMAGE_WIDTH,
           reportScreenshots: true,
           waitBudgetMs: 300,
+          ...virtualClock(),
         } as ComputerStepOptions['computer'],
       }),
     );
@@ -1616,27 +1641,9 @@ describe('image_input_unsupported fails the step at once (§15.4)', () => {
     expect(calls).toBe(2);
   });
 
-  it('the §5.6 condition judge fails the same way: the bridge\'s message, one call', async () => {
-    const { evaluateConditions } = await import('../src/runner/step-executor.js');
-    const adapter = new FakeDesktopAdapter(GRAB);
-    let calls = 0;
-    const client = {
-      complete: async () => {
-        calls++;
-        throw bridgeRejection(BRIDGE_REJECTION);
-      },
-    } as unknown as AiClient;
-
-    const judged = evaluateConditions(['a window titled "Save As" is open'], makeOpts(adapter, client));
-
-    await expect(judged).rejects.toThrow(BRIDGE_REJECTION);
-    await judged.catch((err: unknown) => {
-      expect((err as Error).message).toBe(BRIDGE_REJECTION);
-      expect((err as { retryable?: boolean }).retryable).toBe(false);
-    });
-    expect(calls).toBe(1);
-  });
-
+  // The §5.6 condition judge's own rethrow — the bridge's message, unretryable,
+  // one call — is computer-conditions.test.ts's "keeps the unretryable
+  // rethrow…". This is the guard layer above it.
   it('an `If` guard on the computer surface fails with the bridge\'s message', async () => {
     // The layer every run loop shares: `evaluateGuard` turns a judge throw
     // into a failed guard carrying the judge's words, with no re-ask.
@@ -1679,12 +1686,10 @@ describe('undispatchedDirectiveError — what may not reach the computer-surface
   const all = { toolsLoaded: true, skillsDirSupplied: true };
 
   it('names the missing toolsDir, and how to supply one', () => {
-    expect(undispatchedDirectiveError('[tool: open_calculator]', none)).toBe(
-      '[tool: open_calculator] was not run: this request carried no tools directory (toolsDir), ' +
-        "so no tool is loaded — declare tests.toolsDir in the project's steptix.config.json so the " +
-        'client sends one. In computer mode a tool line is never handed to the model, because it ' +
-        'would act it out on the real screen.',
-    );
+    const message = undispatchedDirectiveError('[tool: open_calculator]', none)!;
+    expect(message).toMatch(/^\[tool: open_calculator\] was not run: this request carried no tools directory \(toolsDir\)/);
+    expect(message).toContain('declare tests.toolsDir');
+    expect(message).toContain('In computer mode a tool line is never handed to the model');
   });
 
   it('reads a tool line the way the dispatcher does: labelled, colonless, with arguments', () => {

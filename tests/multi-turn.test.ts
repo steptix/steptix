@@ -3,8 +3,8 @@
  * - `count` action parsing
  * - `needs_reeval` field parsing
  * - continuation prompt generation
- * - multi-turn loop safeguards (cycle detection, iteration cap)
- * - turn badge tagging in AI interactions
+ * - turn numbering and the iteration cap, through the real executeStep
+ * - a switched-to or opened tab brought to the front (cdp-tab-focus.md §4)
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { parseAIResponse } from '../src/ai/action-parser.js';
@@ -275,107 +275,6 @@ describe('buildContinuationMessage', () => {
   });
 });
 
-// ─── tagAiResponses logic (tested via step-executor behaviour) ───────────────
-// These tests validate the turn-tagging semantics directly without a full
-// Page/browser context.  We re-implement the helper logic inline to keep the
-// tests self-contained.
-
-describe('turn badge tagging semantics', () => {
-  /** Mirrors the tagAiResponses helper in step-executor.ts */
-  function tagAiResponses(
-    buffer: Array<{ interaction: { purpose: string; attemptNumber?: number }; turn: number }>,
-    isMultiTurn: boolean,
-  ) {
-    return buffer.map(({ interaction, turn }) =>
-      isMultiTurn ? { ...interaction, turnNumber: turn } : interaction,
-    );
-  }
-
-  it('single-turn: no turnNumber on interactions', () => {
-    const buffer = [
-      { interaction: { purpose: 'action-plan', attemptNumber: 1 }, turn: 1 },
-    ];
-    const result = tagAiResponses(buffer, false);
-    expect(result[0]).not.toHaveProperty('turnNumber');
-  });
-
-  it('multi-turn: all interactions get turnNumber', () => {
-    const buffer = [
-      { interaction: { purpose: 'action-plan', attemptNumber: 1 }, turn: 1 },
-      { interaction: { purpose: 'action-plan', attemptNumber: 1 }, turn: 2 },
-    ];
-    const result = tagAiResponses(buffer, true);
-    expect(result[0]).toHaveProperty('turnNumber', 1);
-    expect(result[1]).toHaveProperty('turnNumber', 2);
-  });
-
-  it('assertion interaction on last turn gets correct turnNumber', () => {
-    const buffer = [
-      { interaction: { purpose: 'action-plan', attemptNumber: 1 }, turn: 1 },
-      { interaction: { purpose: 'action-plan', attemptNumber: 1 }, turn: 2 },
-      { interaction: { purpose: 'assertion', attemptNumber: 1 }, turn: 2 },
-    ];
-    const result = tagAiResponses(buffer, true);
-    expect(result[2]).toHaveProperty('turnNumber', 2);
-    expect(result[2]).toHaveProperty('purpose', 'assertion');
-  });
-
-  it('preserves existing fields when tagging', () => {
-    const buffer = [
-      { interaction: { purpose: 'action-plan', attemptNumber: 2 }, turn: 1 },
-    ];
-    const result = tagAiResponses(buffer, true);
-    expect(result[0]).toHaveProperty('purpose', 'action-plan');
-    expect(result[0]).toHaveProperty('attemptNumber', 2);
-    expect(result[0]).toHaveProperty('turnNumber', 1);
-  });
-});
-
-// ─── Cycle detection logic ────────────────────────────────────────────────────
-
-describe('cycle detection logic', () => {
-  /** Mirrors the cycle detection condition in step-executor.ts */
-  function wouldDetectCycle(urlHistory: string[], currentUrl: string): boolean {
-    return urlHistory.length >= 2 && currentUrl === urlHistory[urlHistory.length - 2];
-  }
-
-  it('no detection on first turn (empty history)', () => {
-    expect(wouldDetectCycle([], 'https://app.example.com/')).toBe(false);
-  });
-
-  it('no detection on second turn (history has 1 entry)', () => {
-    expect(wouldDetectCycle(['https://app.example.com/'], 'https://app.example.com/portfolio')).toBe(false);
-  });
-
-  it('detects cycle on third turn when URL matches turn 1', () => {
-    const history = ['https://app.example.com/', 'https://app.example.com/portfolio'];
-    expect(wouldDetectCycle(history, 'https://app.example.com/')).toBe(true);
-  });
-
-  it('no false positive when turn 3 URL is different from turn 1', () => {
-    const history = ['https://app.example.com/', 'https://app.example.com/portfolio'];
-    expect(wouldDetectCycle(history, 'https://app.example.com/accounts')).toBe(false);
-  });
-
-  it('detects cycle on turn 4 when URL matches turn 2', () => {
-    const history = [
-      'https://app.example.com/',
-      'https://app.example.com/portfolio',
-      'https://app.example.com/accounts',
-    ];
-    expect(wouldDetectCycle(history, 'https://app.example.com/portfolio')).toBe(true);
-  });
-
-  it('no cycle when all URLs are distinct', () => {
-    const history = [
-      'https://app.example.com/',
-      'https://app.example.com/portfolio',
-      'https://app.example.com/accounts',
-    ];
-    expect(wouldDetectCycle(history, 'https://app.example.com/transactions')).toBe(false);
-  });
-});
-
 // ─── Continuation prompt: exploration results ───────────────────────────────
 
 describe('buildContinuationMessage — exploration results', () => {
@@ -530,10 +429,7 @@ function makeConfig(maxTurns = 5): Config {
 }
 
 /** Build a mock Page that returns a fixed URL and empty DOM */
-function makeMockPage(urlOrFn: string | (() => string) = 'https://app.example.com'): Page {
-  // Allow tests to inject a URL factory so each call returns a different value
-  const urlFn = typeof urlOrFn === 'function' ? urlOrFn : () => urlOrFn;
-
+function makeMockPage(url = 'https://app.example.com'): Page {
   // Build a chainable locator mock with all the action methods used by executeAction
   const mockLocator: Record<string, unknown> = {};
   mockLocator['locator'] = vi.fn().mockReturnValue(mockLocator);
@@ -548,7 +444,7 @@ function makeMockPage(urlOrFn: string | (() => string) = 'https://app.example.co
   mockLocator['setInputFiles'] = vi.fn().mockResolvedValue(undefined);
 
   return {
-    url: vi.fn().mockImplementation(urlFn),
+    url: vi.fn().mockReturnValue(url),
     content: vi.fn().mockResolvedValue('<html><body></body></html>'),
     screenshot: vi.fn().mockResolvedValue(Buffer.from('fakepng')),
     viewportSize: vi.fn().mockReturnValue({ ...DEFAULT_BROWSER_DIMENSIONS }),
@@ -581,7 +477,7 @@ function makeAiClient(responses: string[]): AiClient {
 }
 
 describe('executeStep — multi-turn integration', () => {
-  it('single-turn step: no turnNumber on AI responses', async () => {
+  it('single-turn step produces exactly one turn', async () => {
     const page = makeMockPage();
     const aiResponse = JSON.stringify({
       actions: [{ action: 'click', selector: '#btn', description: 'Click' }],
@@ -607,11 +503,8 @@ describe('executeStep — multi-turn integration', () => {
     expect(result.turns[0]!.turnNumber).toBe(1);
   });
 
-  it('two-turn step: interactions tagged with turn numbers', async () => {
-    // Use a URL factory: turn 1 = /home, turn 2 = /portfolio (distinct — no cycle possible)
-    let urlCallCount = 0;
-    const turnUrls = ['https://app.example.com/', 'https://app.example.com/portfolio'];
-    const page = makeMockPage(() => turnUrls[Math.min(urlCallCount++, turnUrls.length - 1)] ?? turnUrls[0]!);
+  it('two-turn step: each turn is numbered and carries its own AI interaction', async () => {
+    const page = makeMockPage();
 
     // Turn 1: navigate, requests reeval
     const turn1 = JSON.stringify({
@@ -652,11 +545,8 @@ describe('executeStep — multi-turn integration', () => {
   });
 
   it('multi-turn: count result stored in resolvedParameters', async () => {
-    // Use distinct URLs to avoid cycle detection
-    let urlCallCount = 0;
-    const turnUrls = ['https://app.example.com/', 'https://app.example.com/portfolio'];
-    const page = makeMockPage(() => turnUrls[Math.min(urlCallCount++, turnUrls.length - 1)] ?? turnUrls[0]!);
     // page.locator().count() returns 3 via the mock
+    const page = makeMockPage();
 
     const turn1 = JSON.stringify({
       actions: [{ action: 'navigate', url: '/portfolio', description: 'Navigate' }],
@@ -690,14 +580,7 @@ describe('executeStep — multi-turn integration', () => {
   });
 
   it('fails when multi-turn limit is reached', async () => {
-    // Use 3 distinct URLs so cycle detection never fires (only same URL 2-turns-ago triggers it)
-    const distinctUrls = [
-      'https://app.example.com/page1',
-      'https://app.example.com/page2',
-      'https://app.example.com/page3',
-    ];
-    let urlIdx = 0;
-    const page = makeMockPage(() => distinctUrls[urlIdx++ % distinctUrls.length] ?? distinctUrls[0]!);
+    const page = makeMockPage();
 
     // AI always returns needs_reeval: true — will hit the cap
     const infiniteReeval = JSON.stringify({
@@ -722,7 +605,6 @@ describe('executeStep — multi-turn integration', () => {
     expect(result.error).toContain('multi-turn limit reached');
     expect(result.error).toContain('3 turns');
   });
-
 });
 
 // ─── switchPage / openPage bring the tab forward (cdp-tab-focus.md §4) ───────
@@ -1004,5 +886,43 @@ describe('executeStep — a switched-to tab is brought to the front (§4)', () =
     expect(
       (opened[0] as unknown as { bringToFront: ReturnType<typeof vi.fn> }).bringToFront,
     ).not.toHaveBeenCalled();
+  });
+
+  it('names an opened tab by its `as`, which is how a later step switches back to it', async () => {
+    const opened: Page[] = [];
+    const context = makeContext(opened);
+    const main = makeSwitchablePage('https://shop.example/', 'Shop', context);
+    const pageTracker = new PageTracker(main);
+    // What the context's 'page' listener does in a real run: track the new tab.
+    const newPage = context['newPage'] as () => Promise<Page>;
+    context['newPage'] = async () => {
+      const p = await newPage();
+      pageTracker.addPage(p);
+      return p;
+    };
+
+    const result = await executeStep(1, 1, 'open the docs in a new tab called docs', {
+      page: main,
+      config: makeConfig(),
+      aiClient: makeAiClient([JSON.stringify({
+        actions: [
+          { action: 'openPage', url: 'https://shop.example/new', as: 'docs', description: 'Open the docs tab' },
+        ],
+        reasoning: 'The step names the new tab.',
+        needs_reeval: false,
+      })]),
+      contextContent: '',
+      testName: 'test',
+      conversationHistory: [],
+      csrfTokens: {},
+      pageTracker,
+    });
+
+    expect(result.status).toBe('passed');
+    expect(pageTracker.getActive()).toBe(opened[0]);
+    expect(await pageTracker.switchToAsync('main')).toBe(main);
+    // Neither its URL nor its title says "docs": only the label finds it.
+    expect(await pageTracker.switchToAsync('docs')).toBe(opened[0]);
+    expect(await pageTracker.switchToAsync('page:2')).toBeNull();
   });
 });

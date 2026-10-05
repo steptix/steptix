@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { Page } from 'playwright';
 import type { AiClient } from '../src/ai/client.js';
 import type { ChatMessage } from '../src/ai/types.js';
@@ -12,6 +11,7 @@ import { clearSkillCache } from '../src/skills/expander.js';
 import { executeStep } from '../src/runner/step-executor.js';
 import { buildCodeBehindRegistry, type CodeBehindRegistry } from '../src/codebehind/loader.js';
 import { countStepOrigins, renderStep, CODE_BEHIND_MARK } from '../src/report/generator.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * The end-to-end behaviours the stories name, driven through the real
@@ -28,8 +28,13 @@ import { countStepOrigins, renderStep, CODE_BEHIND_MARK } from '../src/report/ge
  * does, and the point is the executor's decision order.
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-integration');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
+
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('codebehind-integration');
+});
 
 let counter = 0;
 let dir: string;
@@ -41,7 +46,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await removeScratchBase(tmpBase);
 });
 
 async function write(rel: string, contents: string): Promise<string> {

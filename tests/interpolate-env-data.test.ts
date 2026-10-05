@@ -10,7 +10,6 @@ import {
   ENV_DATA_REF_SOURCE,
   envDataRefsIn,
   interpolateEnvData,
-  interpolateEnvDataDeep,
   type EnvDataContext,
 } from '../src/parser/interpolate-env-data.js';
 
@@ -104,48 +103,6 @@ describe('interpolateEnvData — interaction with other syntax', () => {
   it('returns input unchanged when no ${...} markers present', () => {
     expect(interpolateEnvData('Plain step text', ctx())).toBe('Plain step text');
   });
-
-  it('mixes env + data refs in one step', () => {
-    expect(
-      interpolateEnvData(
-        'POST ${env.BASE_URL}/api/users with ${data.users.admin.email}',
-        ctx(),
-      ),
-    ).toBe('POST https://uat.example.com/api/users with a@uat.example.com');
-  });
-});
-
-describe('interpolateEnvDataDeep', () => {
-  it('walks a nested object and substitutes every string leaf', () => {
-    const out = interpolateEnvDataDeep(
-      {
-        outer: {
-          url: '${env.BASE_URL}/x',
-          count: 7,
-          inner: { who: '${data.users.admin.email}' },
-        },
-      },
-      ctx(),
-    );
-    expect(out).toEqual({
-      outer: {
-        url: 'https://uat.example.com/x',
-        count: 7,
-        inner: { who: 'a@uat.example.com' },
-      },
-    });
-  });
-
-  it('walks arrays', () => {
-    const out = interpolateEnvDataDeep(['${env.REGION}', '${env.BASE_URL}'], ctx());
-    expect(out).toEqual(['au', 'https://uat.example.com']);
-  });
-
-  it('returns primitives unchanged', () => {
-    expect(interpolateEnvDataDeep(42, ctx())).toBe(42);
-    expect(interpolateEnvDataDeep(true, ctx())).toBe(true);
-    expect(interpolateEnvDataDeep(null, ctx())).toBe(null);
-  });
 });
 
 describe('interpolateEnvData — extra namespaces (dataSources)', () => {
@@ -197,12 +154,6 @@ describe('interpolateEnvData — extra namespaces (dataSources)', () => {
     expect(
       interpolateEnvData('See ${vip.users.x}', ctx()),
     ).toBe('See ${vip.users.x}');
-  });
-
-  it('still resolves env/data when extras are registered', () => {
-    expect(
-      interpolateEnvData('${data.fixtures.currency} ${env.REGION}', withExtra()),
-    ).toBe('AUD au');
   });
 });
 

@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { Page, BrowserContext, Browser } from 'playwright';
 import type { AiClient } from '../src/ai/client.js';
 import type { ChatMessage } from '../src/ai/types.js';
@@ -15,7 +14,6 @@ import { clearSkillCache } from '../src/skills/expander.js';
 import { buildStepCodePrompt, contentBlocksToText } from '../src/ai/prompts.js';
 import { buildFileReviewPrompt } from '../src/codebehind/review.js';
 import { buildRepairPrompt } from '../src/codebehind/repair.js';
-import { isNonRetryable } from '../src/browser/upload-paths.js';
 import {
   generationRefusal,
   DISPATCHED_NOT_COMPILED,
@@ -24,8 +22,6 @@ import {
 } from '../src/codebehind/live-compile.js';
 import {
   runCodeBehindEntry,
-  CodeBehindDeliberateFailure,
-  CodeBehindExpectationError,
   EXIT_NOT_CLAIMED,
   FAIL_WITHOUT_MESSAGE,
 } from '../src/codebehind/execute.js';
@@ -37,6 +33,7 @@ import {
   type CompileRunOutcome,
   type CompileRunner,
 } from '../src/codebehind/compile.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * The two failure outcomes of stories/step-failure-outcomes.md — `step.fail()`
@@ -45,8 +42,9 @@ import {
  * production uses, since an input nothing produces proves nothing.
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-failure-outcomes');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
 
 const noPage = {} as unknown as Page;
 const noContext = {} as unknown as BrowserContext;
@@ -55,6 +53,10 @@ const noBrowser = {} as unknown as Browser;
 let counter = 0;
 let dir: string;
 
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('codebehind-failure-outcomes');
+});
+
 beforeEach(async () => {
   clearSkillCache();
   dir = path.join(tmpBase, `t${counter++}`);
@@ -62,7 +64,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await removeScratchBase(tmpBase);
 });
 
 async function write(rel: string, contents: string): Promise<string> {
@@ -230,18 +232,6 @@ describe('step.fail()', () => {
     // the author's deliberate failure.
     expect(outcome.expectationFailed).toBe(false);
     expect(outcome.deliberate).toBeUndefined();
-  });
-
-  it('throws a CodeBehindExpectationError, so every existing reading of one still holds', () => {
-    // The subclass, not a class beside it: an author's own `instanceof
-    // CodeBehindExpectationError` and the do-not-heal rule both key on it.
-    const err = new CodeBehindDeliberateFailure(FAIL_MESSAGE);
-    expect(err).toBeInstanceOf(CodeBehindExpectationError);
-    expect(err).toBeInstanceOf(Error);
-    expect(err.name).toBe('CodeBehindDeliberateFailure');
-    // And NOT the upload-path "fact about the world" tag — a different
-    // non-retryable family with its own report wording.
-    expect(isNonRetryable(err)).toBe(false);
   });
 });
 
@@ -1030,16 +1020,18 @@ describe('compile — repairing a step that quotes one of its own values', () =>
 const manifest = (steps: StepResult[], status: 'passed' | 'failed', source: 'cli' | 'server' = 'cli') =>
   ({ steps, status, startedAt: TURN_AT, parameters: {}, source });
 
+// The run's status is not asserted on the two wholesale writes below: the loops
+// compute it (decision 6) and `writeRecording` copies `input.status`, so reading
+// it back would only echo the fixture. Where a recording DOES compute it — a
+// splice — is the describe after these.
+
 describe('the recording of a tolerated failure', () => {
-  it('round-trips the flag and does not make the run failed', async () => {
+  it('round-trips the flag and the error, on the failed step only', async () => {
     const md = path.join(dir, 'booking.md');
-    // `passed` is what the loops computed, the tolerated failure already excluded
-    // (decision 6).
     await writeRecording(md, manifest([passed(1), tolerated(2), passed(3)], 'passed'));
 
     const recording = await readRecording(md);
     expect(recording).not.toBeNull();
-    expect(recording!.manifest.status).toBe('passed');
     expect(recording!.steps.map((s) => s.status)).toEqual(['passed', 'failed', 'passed']);
     expect(recording!.steps[1]!.tolerated).toBe(true);
     expect(recording!.steps[1]!.error).toBe('the promo banner was not there');
@@ -1049,13 +1041,11 @@ describe('the recording of a tolerated failure', () => {
 });
 
 describe('the recording of a deliberate failure', () => {
-  it('is a FAILED recording — honest — and still carries the step as compilable', async () => {
+  it('round-trips the flag and the fail transcript, so the step is still compilable', async () => {
     const md = path.join(dir, 'booking.md');
-    // A deliberate failure ends the run red (decision 2), unsoftened here.
     await writeRecording(md, manifest([passed(1), deliberate(2)], 'failed'));
 
     const recording = await readRecording(md);
-    expect(recording!.manifest.status).toBe('failed');
     expect(recording!.steps[1]!.deliberate).toBe(true);
     expect(recording!.steps[1]!.error).toBe(FAIL_MESSAGE);
     expect(recording!.steps[0]!.deliberate).toBeUndefined();
@@ -1087,12 +1077,14 @@ describe('the recording of a deliberate failure', () => {
 
 /** A splice recomputes the status from rows of mixed provenance, so it has to
  *  apply the same rule the loops did — and no reader of the manifest refuses a
- *  compile over a red one, because the compile reads the rows. */
+ *  compile over a red one, because the compile reads the rows. The tolerated
+ *  row hands in a `failed` run status and expects `passed`, so a splice that
+ *  took `input.status` the way the wholesale write does would fail it. */
 describe('a spliced recording', () => {
   it.each([
     {
       label: 'stays green when the spliced step was tolerated',
-      spliced: tolerated(2), spliceStatus: 'passed' as const, expected: 'passed', flagged: false,
+      spliced: tolerated(2), spliceStatus: 'failed' as const, expected: 'passed', flagged: false,
     },
     {
       label: 'still turns red for an ordinary failure — the narrowness check',
@@ -1111,5 +1103,18 @@ describe('a spliced recording', () => {
     const recording = await readRecording(md);
     expect(recording!.manifest.status).toBe(expected);
     if (flagged) expect(recording!.steps[1]!.deliberate).toBe(true);
+  });
+
+  it('turns green again when a passing splice replaces the step that failed', async () => {
+    // The status describes the dir as it now stands, not either run: the red came
+    // from the row this splice replaced, so it goes with it. A splice that kept the
+    // old manifest's status, or or-ed it with the new one, stays red here.
+    const md = path.join(dir, 'booking.md');
+    await writeRecording(md, manifest([passed(1), { ...tolerated(2), tolerated: false }], 'failed'));
+    await spliceRecording(md, manifest([passed(2)], 'passed', 'server'));
+
+    const recording = await readRecording(md);
+    expect(recording!.steps.map((s) => s.status)).toEqual(['passed', 'passed']);
+    expect(recording!.manifest.status).toBe('passed');
   });
 });

@@ -716,10 +716,12 @@
       }
     }
     if ((view.phase === 'done' || view.phase === 'ended') && !tbLocal.removeTimer) {
+      // `endShowMs` is a test's override (the recorder's option of that name).
+      var showFor = typeof view.endShowMs === 'number' && view.endShowMs > 0 ? view.endShowMs : END_SHOW_MS;
       tbLocal.removeTimer = setTimeout(function () {
         tbLocal.removeTimer = 0;
         tbRemove();
-      }, END_SHOW_MS);
+      }, showFor);
     }
     var notice = view.notice && typeof view.notice === 'object' ? view.notice : null;
     if (notice) {

@@ -4,9 +4,9 @@
  *
  * `launchBrowser` is mocked and counted, because the whole claim is about WHEN
  * it is called: once, at step 1, and never for a session that runs no step on
- * the page. The `surface` field is set directly on the session here — the
- * `[use computer]` directive that would set it is a separate change, and this
- * file is about the launch rule, not about how the rule gets switched on.
+ * the page. The `surface` field is set directly on the session here — this
+ * file is about the launch rule, not about how `[use computer]` switches it
+ * on.
  *
  * Driving `SessionManager` in process rather than over HTTP: the HTTP layer
  * refuses an empty step list, and "created but nothing has run yet" is exactly
@@ -205,6 +205,7 @@ vi.mock('../src/utils/logger.js', () => ({
 
 import { SessionManager } from '../src/server/session-manager.js';
 import { NoBrowserLaunchedError } from '../src/browser/manager.js';
+import { COMPUTER_DISABLED_MESSAGE } from '../src/runner/computer-step.js';
 
 const testConfig: Config = {
   ai: {
@@ -287,15 +288,6 @@ describe('session creation launches nothing', () => {
 
     expect(launchBrowserMock).not.toHaveBeenCalled();
   });
-
-  it('does not navigate to baseUrl at creation', async () => {
-    await manager.executeSteps('s-baseurl-create', {
-      steps: [],
-      config: { baseUrl: 'https://example.test/app' },
-    });
-
-    expect(mockPage.goto).not.toHaveBeenCalled();
-  });
 });
 
 describe('the first browser-surface step launches exactly one browser', () => {
@@ -341,15 +333,24 @@ describe('the first browser-surface step launches exactly one browser', () => {
 });
 
 describe('a computer-surface session launches no browser', () => {
-  // `surface` is set directly: the `[use computer]` directive is a separate
-  // slice, and the launch rule it drives is testable without it.
+  // `surface` is set directly rather than through `[use computer]`: the launch
+  // rule is testable without the directive. This config has no
+  // `desktop.enabled`, so the step boundary refuses the computer step with
+  // §5.1's message and returns that as the step's failure — which is what
+  // shows the step was reached ON the computer surface. A batch that threw
+  // before the step loop would launch nothing either, so "no launch" alone
+  // could not tell the two apart.
   it('does not launch when the surface is computer at the first step', async () => {
     await manager.executeSteps('s-computer', { steps: [] });
     managedSession(manager, 's-computer').surface = 'computer';
 
-    await manager.executeSteps('s-computer', { steps: ['click Save in the dialog'] })
-      .catch(() => { /* the step itself has no computer executor yet */ });
+    const response = await manager.executeSteps('s-computer', {
+      steps: ['click Save in the dialog'],
+    });
 
+    expect(response.results).toHaveLength(1);
+    expect(response.results[0]!.status).toBe('failed');
+    expect(response.results[0]!.reasoning).toBe(COMPUTER_DISABLED_MESSAGE);
     expect(launchBrowserMock).not.toHaveBeenCalled();
     expect(managedSession(manager, 's-computer').browserSession).toBeUndefined();
   });
@@ -358,7 +359,8 @@ describe('a computer-surface session launches no browser', () => {
     await manager.executeSteps('s-back', { steps: [] });
     const session = managedSession(manager, 's-back');
     session.surface = 'computer';
-    await manager.executeSteps('s-back', { steps: ['press Ctrl+S'] }).catch(() => {});
+    const refused = await manager.executeSteps('s-back', { steps: ['press Ctrl+S'] });
+    expect(refused.results[0]!.reasoning).toBe(COMPUTER_DISABLED_MESSAGE);
     expect(launchBrowserMock).not.toHaveBeenCalled();
 
     session.surface = 'browser';

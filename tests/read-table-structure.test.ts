@@ -66,12 +66,15 @@ async function mappingRefusal(
   columns: TableReadColumn[],
   mapping: TableReadMapping,
 ): Promise<string> {
-  try {
-    const result = await mapped(selector, columns, mapping);
-    throw new Error(`expected a refusal, got ${JSON.stringify(result.records)}`);
-  } catch (err) {
-    return (err as Error).message;
-  }
+  // The sentinel is thrown from the fulfilment handler, so it escapes rather
+  // than being caught and returned as if it were the refusal text — a caller
+  // that only checks `.toContain(...)` must not pass on a read that succeeded.
+  return mapped(selector, columns, mapping).then(
+    (result) => {
+      throw new Error(`expected a refusal, got ${JSON.stringify(result.records)}`);
+    },
+    (err: unknown) => (err as Error).message,
+  );
 }
 
 // ── §5.9.1: headings written as <td> in the first body row ──────────────────

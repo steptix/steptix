@@ -1201,39 +1201,3 @@ export function formatFindResults(result: DomSearchResult, query: string, contai
 export function formatExpandResult(content: string, selector: string): string {
   return `### expand "${selector}"\n\`\`\`html\n${content}\n\`\`\``;
 }
-
-/**
- * Clean a raw HTML string into a simplified representation.
- * Used in unit tests where a real browser is not available.
- */
-export function cleanHtmlString(html: string): string {
-  // Parse in Node environment using basic regex-based extraction
-  // (Full DOM parsing requires a browser — this is the unit-test-friendly version)
-  return extractInteractiveElements(html);
-}
-
-/**
- * Simple regex-based HTML element extractor for unit testing.
- * Not as thorough as the browser-based version but works without a DOM.
- */
-function extractInteractiveElements(html: string): string {
-  const INTERACTIVE = ['input', 'button', 'a', 'select', 'textarea', 'label', 'form'];
-  const lines: string[] = [];
-
-  for (const tag of INTERACTIVE) {
-    const regex = new RegExp(`<${tag}[^>]*>([^<]*)<\/${tag}>|<${tag}[^>]*\/?>`, 'gi');
-    let match: RegExpExecArray | null;
-
-    while ((match = regex.exec(html)) !== null) {
-      const element = match[0];
-      // Skip hidden elements
-      if (/display:\s*none|visibility:\s*hidden/i.test(element)) continue;
-      // Skip elements in script/style context
-      if (/type="hidden"/i.test(element)) continue;
-
-      lines.push(element.replace(/\s+/g, ' ').trim());
-    }
-  }
-
-  return lines.join('\n');
-}

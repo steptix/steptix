@@ -313,6 +313,10 @@ export interface StepRecorderOptions {
   isStopping?: () => boolean;
   /** Override {@link TOOLBAR_CHECK_IN_MS} — tests only. */
   checkInMs?: number;
+  /** Override how long the toolbar's done / ended message stays before the
+   *  bar leaves (the page's `END_SHOW_MS`) — tests only, so a test about the
+   *  done bar is not racing its six seconds. */
+  endShowMs?: number;
 }
 
 interface BindingSource {
@@ -1114,6 +1118,7 @@ export class StepRecorder {
         running: recording && !this.paused,
         typingHidden: recording && this.typingHidden(),
         checkInMs: this.checkInMs,
+        ...(this.opts.endShowMs !== undefined && { endShowMs: this.opts.endShowMs }),
       };
     }
     return state;

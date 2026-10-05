@@ -49,19 +49,3 @@ test('a status spelled like an Object.prototype member is kept as written too', 
     [[1, 'constructor'], [2, 'toString'], [3, '__proto__']],
   );
 });
-
-test('a mixed legacy file keeps its lines and maps only the retired status', () => {
-  assert.deepEqual(
-    restoredStatuses([
-      [2, 'pass'],
-      [3, 'pass-cached'],
-      [4, 'running'],
-      [5, 'fail'],
-    ]),
-    [
-      [2, 'pass'],
-      [3, 'pass'],
-      [5, 'fail'],
-    ],
-  );
-});

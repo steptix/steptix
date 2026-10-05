@@ -22,7 +22,7 @@ runner via a new `runner-core` package.
 - **Step-only gutter affordances** (▶, status, breakpoints, run menu) only on numbered lines beneath the steps heading
 - **F5 on a non-step line** → nearest step at-or-below, else above, else status-bar no-op
 - **Right-click gutter on non-step line** → no menu
-- **Commands**: `runSelected` (F5), `runAll`, `stop`, `toggleBreakpoint`, `reopenAsText`, `revealEnvFile`, `showRunLog`
+- **Commands**: `runSelected` (F5), `runAll`, `stop`, `toggleBreakpoint`, `reopenAsText` (never registered; since removed), `revealEnvFile`, `showRunLog`
 - **Repo strategy**: extension lives at `steptix/steptix/` (sibling of `flick/`, `src/`). Shared client code lives in a new top-level package `steptix/runner-core/`. Both `steptix/` and `src/ui/` (Electron) consume `runner-core` via `file:` link
 - **VS Code engine** `^1.85.0`
 - **Electron runner is preserved** and migrated onto `runner-core`. It gains breakpoint UI as part of this work
@@ -49,7 +49,7 @@ Every error reaches the user via two channels: **inline run-log** (red banner in
 | `STX012` | 404 / endpoint missing (server too old) | `STX012: Server at <SERVER_URL> does not support streaming (?stream=1 returned 404). Fix: update the Steptix server — this extension requires server build with SSE streaming.` |
 | `STX013` | 5xx from server | `STX013: Server returned <status> while starting the run. Detail in run log. Fix: check the server's terminal for a stack trace; this is a server-side bug or misconfiguration. [Show Run Log]` |
 | `STX014` | SSE stream dropped mid-run | `STX014: Connection to the server was lost mid-run (<reason>). The session may still be running on the server. Fix: check the server is still up and re-run; use "Steptix: Stop" to abort the orphaned session. [Show Run Log]` |
-| `STX020` | File opened in Steptix but no `## Steps` heading | `STX020: This file has no "## Steps" heading, so there's nothing to run. Fix: add a "## Steps" heading followed by a numbered list, or open as plain Markdown. [Reopen as Text]` |
+| `STX020` | File opened in Steptix but no `## Steps` heading | `STX020: This file has no "## Steps" heading, so there's nothing to run. Fix: add a "## Steps" heading followed by a numbered list, or open as plain Markdown.` (The planned `[Reopen as Text]` action was removed: its command was never registered.) |
 | `STX021` | F5 with no resolvable target step | `STX021: No step at or below the cursor to run. Fix: place the cursor on a numbered step under "## Steps", or use "Steptix: Run All".` |
 | `STX030` | Workspace not open (single-file mode) | `STX030: Steptix needs an open folder so it can resolve .env. Fix: File → Open Folder and pick the folder containing your tests.` |
 | `STX031` | Two windows hold the same session and one issues stop | `STX031: This session is also active in another VS Code window. Stopping here will stop it everywhere. [Stop Anyway] [Cancel]` |

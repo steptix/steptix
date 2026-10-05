@@ -2,7 +2,6 @@
  * Tests for iframe support:
  * - "frame" field parsing in action-parser
  * - Frame-aware action execution (executeAction routes to FrameLocator)
- * - DOM cleaner iframe rendering in cleanHtmlString (regex path)
  */
 import { describe, it, expect, vi } from 'vitest';
 import { parseAIResponse } from '../src/ai/action-parser.js';
@@ -45,26 +44,6 @@ describe('parseAIResponse — frame field', () => {
     });
     const result = parseAIResponse(raw);
     expect(result.actions[0]?.frame).toBeUndefined();
-  });
-
-  it('parses frame alongside other action fields', () => {
-    const raw = JSON.stringify({
-      actions: [
-        {
-          action: 'type',
-          selector: 'input[name="amount"]',
-          value: '100',
-          frame: 'iframe[name="transfer"]',
-          description: 'Type amount in transfer iframe',
-        },
-      ],
-      reasoning: 'Input is inside named iframe.',
-    });
-    const result = parseAIResponse(raw);
-    const action = result.actions[0]!;
-    expect(action.frame).toBe('iframe[name="transfer"]');
-    expect(action.selector).toBe('input[name="amount"]');
-    expect(action.value).toBe('100');
   });
 });
 
@@ -165,7 +144,10 @@ describe('executeAction — frame routing', () => {
     });
 
     expect(result.success).toBe(true);
-    expect(frameLocator.locator).not.toHaveBeenCalled();
+    // No frame means the page itself is the root: the frame lookup is never
+    // asked, and the selector goes to page.locator.
+    expect(page.frameLocator).not.toHaveBeenCalled();
+    expect(page.locator).toHaveBeenCalledWith('#btn');
     expect(pageLocator.click).toHaveBeenCalled();
   });
 

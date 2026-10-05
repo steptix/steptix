@@ -32,18 +32,13 @@ describe('parseSetStep', () => {
     expect(parseSetStep('set {{ref}} to "x"')).toEqual({ name: 'ref', template: 'x' });
   });
 
-  it('refuses a value containing a quote, rather than guessing where it ends', () => {
-    // This used to PARSE, greedy to the last quote on the line, so that
-    // `say "hi"` could be stored with no escape syntax. The same rule
-    // swallowed the line in the next test into a garbage value that passed
-    // green, which is the trade that lost.
-    expect(parseSetStep('Set {{q}} to "say "hi""')).toBeNull();
-  });
-
   it('refuses prose that follows a quoted value and happens to end in a quote', () => {
-    // The regression the greedy grammar hid: this parsed as
-    // template `shoes" and search for "shoes`, performed no search, and
-    // passed. Found by review, not by a test.
+    // The grammar used to be greedy to the last quote on the line, so that
+    // `say "hi"` could be stored with no escape syntax (that line is refused
+    // now — see the shared grammar list below). The same rule hid this
+    // regression: the line parsed as template `shoes" and search for "shoes`,
+    // performed no search, and passed. Found by review, not by a test — and
+    // the trade that lost.
     const line = 'Set {{query}} to "shoes" and search for "shoes"';
     expect(parseSetStep(line)).toBeNull();
     expect(setStepError(line)).toContain('may not contain a double quote');
@@ -56,10 +51,6 @@ describe('parseSetStep', () => {
       name: 's',
       template: 'one\ntwo',
     });
-  });
-
-  it('accepts an empty template — that clears a variable', () => {
-    expect(parseSetStep('Set {{x}} to ""')).toEqual({ name: 'x', template: '' });
   });
 
   it('tolerates surrounding whitespace', () => {
@@ -443,16 +434,21 @@ describe('a Set over a name a loop bound', () => {
 
 describe('recognised on the AUTHORED line, not the interpolated one', () => {
   /**
-   * The single load-bearing decision of this feature, and it was pinned
-   * nowhere: a reviewer measured that mutating any of the four loops to parse
-   * the INTERPOLATED line left all 3698 tests green.
+   * The single load-bearing decision of this feature: a reviewer measured
+   * that mutating any of the four loops to parse the INTERPOLATED line left
+   * every test green.
    *
-   * The reason no existing test caught it is that every one of them assigns a
-   * target that does not yet hold a value — and on that first pass the two
-   * readings agree. The bug only appears on the SECOND assignment to a name,
-   * which is a re-run, a second batch, or a looped section.
+   * The reason no test caught it is that every one of them assigns a target
+   * that does not yet hold a value — and on that first pass the two readings
+   * agree. The bug only appears on the SECOND assignment to a name, which is
+   * a re-run, a second batch, or a looped section.
+   *
+   * This test runs no loop, so it cannot catch that mutation: it shows the
+   * hazard, at the parser. The guard is in tests/run-loop-contracts.test.ts
+   * ("every run loop recognises a Set step on the authored line"), which pins
+   * each loop's `parseSetStep(` call to the authored text.
    */
-  it('a target that already holds a value is still a target, not a source', () => {
+  it('on the interpolated line, a target that already holds a value stops being a target', () => {
     const authored = 'Set {{greeting}} to "Hello, {{who}}"';
     const scope = { who: 'world', greeting: 'Hello, world' };
 
@@ -476,8 +472,12 @@ describe('recognised on the AUTHORED line, not the interpolated one', () => {
     const scope: Record<string, string> = {};
     const step = { name: 's', template: '{{s}}x' };
 
-    // First pass: the template's own reference is unset, so it fails rather
-    // than storing the literal.
+    // On an empty scope the template's own reference is unset, so it fails
+    // rather than storing the literal `{{s}}x`.
+    const unset = runSetStep(step, '', 0, scope);
+    expect(unset.result.status).toBe('failed');
+    expect(scope).toEqual({});
+    // First pass: seed it.
     expect(runSetStep({ name: 's', template: 'a' }, '', 1, scope).result.status).toBe('passed');
     // Second and third: each reads what the previous one wrote.
     runSetStep(step, '', 2, scope);

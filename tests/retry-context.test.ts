@@ -180,7 +180,7 @@ describe('buildRetryContext — page state assessment', () => {
     expect(result).not.toContain('Current page state assessment');
   });
 
-  it('includes loading indicators when present', () => {
+  it('a loading page gets both the assessment and the wait instruction', () => {
     const diagnostics: RetryDiagnostics = {
       failures: [baseFailure],
       pageState: {
@@ -191,19 +191,11 @@ describe('buildRetryContext — page state assessment', () => {
       attemptNumber: 2,
     };
     const result = buildRetryContext(diagnostics);
+    // The assessment: what is on the page.
     expect(result).toContain('Current page state assessment');
     expect(result).toContain('Loading indicators are visible');
     expect(result).toContain('<div.spinner>');
-    expect(result).toContain('wait');
-  });
-
-  it('includes loading instruction when page is loading', () => {
-    const diagnostics: RetryDiagnostics = {
-      failures: [baseFailure],
-      pageState: { ...cleanPageState, isLoading: true, loadingIndicators: ['<div.spinner>'] },
-      attemptNumber: 2,
-    };
-    const result = buildRetryContext(diagnostics);
+    // The instruction: what to do about it.
     expect(result).toContain('Loading indicators are present');
     expect(result).toContain('"wait" action first');
   });

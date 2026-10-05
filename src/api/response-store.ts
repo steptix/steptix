@@ -11,14 +11,6 @@ export class ApiResponseStore {
     this.responses.push(response);
   }
 
-  getAll(): StoredResponse[] {
-    return [...this.responses];
-  }
-
-  getForStep(stepNumber: number): StoredResponse | undefined {
-    return this.responses.find((r) => r.stepNumber === stepNumber);
-  }
-
   hasResponses(): boolean {
     return this.responses.length > 0;
   }
@@ -41,10 +33,6 @@ export class ApiResponseStore {
         return `Step ${r.stepNumber} (API): ${r.method} ${r.endpoint} → ${r.status} ${statusText}${requestPreview}\nResponse summary: ${bodyPreview}`;
       })
       .join('\n\n');
-  }
-
-  clear(): void {
-    this.responses.length = 0;
   }
 }
 

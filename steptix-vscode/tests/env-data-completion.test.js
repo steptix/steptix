@@ -408,41 +408,32 @@ const CAPTURES = [
 ].join('\n');
 
 test('every capture form in scope is offered, pre-hooks first then execution order', () => {
-  // Cursor on step 8 — 1-based line 21, so 0-based 20.
+  // Cursor on step 8 — 1-based line 21, so 0-based 20. The list is exact, so
+  // each name the fixture plants as a must-NOT-count shape is checked by its
+  // absence here:
+  //   - `mid_line` (18): `INPUT_STEP_PATTERN` / `OUTPUT_STEP_PATTERN` match at
+  //     the instruction's start only, so a marker later in the step binds
+  //     nothing at run time.
+  //   - `prose_total` (19): `store it as {{x}}` only makes the runner send a
+  //     richer DOM snapshot; the AI names the capture itself unless the step
+  //     carries [store as: name].
+  //   - `not a name` (20): `out.k="not a name"` is a real capture the run
+  //     performs; it just has no `{{...}}` form, so completing it would author
+  //     an unresolvable reference.
+  //   - `fm_ignored` (3), `prose_ignored` (6), `after_ignored` (10): outside
+  //     the executed flow — frontmatter, prose above ## Steps, and an `after`
+  //     hook that runs later.
   assert.deepEqual(
     captureNamesBefore(CAPTURES, 20).map((c) => [c.name, c.marker, c.line]),
     [
       ['sid', 'as', 9], // `before` hook — runs ahead of step 1
       ['username', 'input', 14],
-      ['balance', 'output', 15],
+      ['balance', 'output', 15], // anchored [output:] binds
       ['code', 'as', 16],
       ['order_id', 'as', 17],
       ['session', 'out-alias', 20],
     ],
   );
-});
-
-test('an out-alias {{}} cannot express is not offered', () => {
-  // `out.k="not a name"` is a real capture the run performs; it just has no
-  // `{{...}}` form, so completing it would author an unresolvable reference.
-  const names = captureNamesBefore(CAPTURES, 20).map((c) => c.name);
-  assert.ok(names.includes('session'));
-  assert.ok(!names.includes('not a name'));
-});
-
-test('[input:] / [output:] only count anchored, where the runner honours them', () => {
-  // `INPUT_STEP_PATTERN` / `OUTPUT_STEP_PATTERN` match at the instruction's
-  // start only, so a marker later in the step binds nothing at run time.
-  const names = captureNamesBefore(CAPTURES, 20).map((c) => c.name);
-  assert.ok(names.includes('balance'), 'anchored [output:] binds');
-  assert.ok(!names.includes('mid_line'), 'a mid-instruction [output:] does not');
-});
-
-test('prose storage names nothing — the runtime binds no name from it', () => {
-  // `store it as {{x}}` only makes the runner send a richer DOM snapshot; the
-  // AI names the capture itself unless the step carries [store as: name].
-  const names = captureNamesBefore(CAPTURES, 20).map((c) => c.name);
-  assert.ok(!names.includes('prose_total'));
 });
 
 test('captures on the cursor line and below are not offered', () => {
@@ -458,13 +449,6 @@ test('captures on the cursor line and below are not offered', () => {
     ['sid', 'username'],
   );
   assert.ok(!captureNamesBefore(CAPTURES, 20).some((c) => c.name === 'too_late'));
-});
-
-test('markers outside the executed flow are not captures', () => {
-  const names = captureNamesBefore(CAPTURES, 21).map((c) => c.name);
-  assert.ok(!names.includes('fm_ignored')); // frontmatter
-  assert.ok(!names.includes('prose_ignored')); // prose above ## Steps
-  assert.ok(!names.includes('after_ignored')); // `after` hook runs later
 });
 
 test('a name captured twice lists once, at its first write', () => {

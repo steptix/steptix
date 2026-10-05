@@ -22,7 +22,7 @@
  * assumed, because that leak is exactly what would condition the bug out of
  * the test path.
  */
-import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -177,7 +177,16 @@ import { readLastRun } from '../src/codebehind/last-run.js';
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-keyless-diagnosis');
+/**
+ * In-repo, because the compiled `.steps.ts` imports `steptix/codebehind` and
+ * package self-resolution needs a path under this checkout. Unique per run, so
+ * a killed run's leftovers are never read as this run's input, and two runs in
+ * one checkout cannot delete each other's files.
+ */
+let tmpBase: string;
+beforeAll(async () => {
+  tmpBase = await fs.mkdtemp(path.join(repoRoot, 'tests', '.tmp-keyless-diagnosis-'));
+});
 
 function makeInstance(steps: string[], filePath: string): TestInstance {
   const test: ParsedTest = {
@@ -281,7 +290,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  if (tmpBase) await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 // ─── The diagnosis gate ─────────────────────────────────────────────────────

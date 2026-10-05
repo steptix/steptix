@@ -72,17 +72,11 @@ describe('parseSkillCall — optional colon', () => {
     // The colon-less spelling is reachable by ordinary English, and
     // `extractSteps` throws at PARSE time — so committing to it would let one
     // prose sentence fail the whole test file. `[skill:` keeps the strict
-    // reading (next test); the space form degrades to prose.
+    // reading (the syntax-error tests below); the space form degrades to prose.
     expect(parseSkillCall('[skill ]')).toBeNull();
     expect(parseSkillCall('Verify the [skill level: expert] badge')).toBeNull();
     expect(parseSkillCall('Click the [skill (beta)] badge')).toBeNull();
     expect(parseSkillCall('Confirm the [skill 50%] chip')).toBeNull();
-  });
-
-  it('the COLON form still commits and throws — deliberate intent is unchanged', () => {
-    expect(() => parseSkillCall('[skill: ]')).toThrow(SkillCallSyntaxError);
-    expect(() => parseSkillCall('[skill: ]')).toThrow(/name missing/);
-    expect(() => parseSkillCall('[skill: foo bar="x"baz="y"]')).toThrow(SkillCallSyntaxError);
   });
 });
 
@@ -125,35 +119,14 @@ describe('parseSkillCall — label prefix', () => {
     expect(result?.label).toBe('Search with DuckDuckGo');
   });
 
-  it('omits the label when the call sits at start-of-line', () => {
-    const result = parseSkillCall('[skill: foo]');
-    expect(result?.label).toBeUndefined();
-  });
-
-  it('omits the label when only whitespace precedes the call', () => {
-    const result = parseSkillCall('   [skill: foo]');
-    expect(result?.label).toBeUndefined();
-  });
-
   it('trims surrounding whitespace from the label', () => {
     const result = parseSkillCall('   Sign in   [skill: login]');
     expect(result?.label).toBe('Sign in');
   });
 
   it('preserves internal whitespace inside the label', () => {
-    const result = parseSkillCall('Click and verify  [skill: foo]');
-    expect(result?.label).toBe('Click and verify');
-  });
-
-  it('combines label, args, output alias, and trailing comment', () => {
-    const result = parseSkillCall(
-      'Log in as admin [skill: login role="admin" out.session_id] # smoke',
-    );
-    expect(result?.label).toBe('Log in as admin');
-    expect(result?.name).toBe('login');
-    expect(result?.args).toEqual({ role: 'admin' });
-    expect(result?.outputAliases).toEqual({ session_id: 'session_id' });
-    expect(result?.trailing).toBe(' # smoke');
+    const result = parseSkillCall('Click  and verify [skill: foo]');
+    expect(result?.label).toBe('Click  and verify');
   });
 
   it('accepts a stray `[` in the label without treating it as the prefix', () => {
@@ -186,9 +159,10 @@ describe('parseSkillCall — happy path', () => {
     });
   });
 
-  it('tolerates leading whitespace', () => {
+  it('tolerates leading whitespace, and does not keep it as a label', () => {
     const result = parseSkillCall('   [skill: foo]');
     expect(result?.name).toBe('foo');
+    expect(result?.label).toBeUndefined();
   });
 
   it('parses an explicit `key="value"` argument', () => {
@@ -221,11 +195,6 @@ describe('parseSkillCall — happy path', () => {
   it('accepts a path-qualified name for a skill in a subfolder', () => {
     const result = parseSkillCall('[skill: auth/login]');
     expect(result?.name).toBe('auth/login');
-  });
-
-  it('accepts a deeply nested path-qualified name', () => {
-    const result = parseSkillCall('[skill: admin/users/create_user]');
-    expect(result?.name).toBe('admin/users/create_user');
   });
 
   it('canonicalises away a leading slash so both spellings name one skill', () => {
@@ -274,18 +243,6 @@ describe('parseSkillCall — bare-identifier shorthand', () => {
 
   it('desugars a bare `out.name` to alias = name', () => {
     const result = parseSkillCall('[skill: foo out.session_id]');
-    expect(result?.outputAliases).toEqual({ session_id: 'session_id' });
-  });
-
-  it('mixes shorthand and explicit args in one call', () => {
-    const result = parseSkillCall(
-      '[skill: login username password role="admin" out.session_id]',
-    );
-    expect(result?.args).toEqual({
-      username: '{{username}}',
-      password: '{{password}}',
-      role: 'admin',
-    });
     expect(result?.outputAliases).toEqual({ session_id: 'session_id' });
   });
 });

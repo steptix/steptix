@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv from 'ajv';
+import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { loadConfig } from '../src/config/loader.js';
 import { logger } from '../src/utils/logger.js';
 
@@ -52,14 +53,22 @@ async function writeUserRootEnv(content: string): Promise<void> {
 }
 
 describe('loadConfig — INTERACTIVE_ON_FAILURE env handling', () => {
-  beforeEach(() => {
+  // The project root is an empty tmp dir, not the cwd: auto-discovery from the
+  // cwd would read this repo's own steptix.config.json, and a setting added
+  // there would change these answers. Which strings count as true or false is
+  // parseBoolEnv's vocabulary, tested in env-loader.test.ts; what is tested
+  // here is only that the loader applies its answer.
+  let projectRoot: string;
+
+  beforeEach(async () => {
+    projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-iof-'));
     for (const key of ENV_KEYS) {
       preserved[key] = process.env[key];
       delete process.env[key];
     }
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     for (const key of ENV_KEYS) {
       if (preserved[key] === undefined) {
         delete process.env[key];
@@ -67,36 +76,32 @@ describe('loadConfig — INTERACTIVE_ON_FAILURE env handling', () => {
         process.env[key] = preserved[key];
       }
     }
+    await fs.rm(projectRoot, { recursive: true, force: true });
   });
 
   it('defaults to false when env var is absent', async () => {
-    const config = await loadConfig();
+    const config = await loadConfig(undefined, projectRoot);
     expect(config.execution.interactiveOnFailure).toBe(false);
   });
 
   it('sets execution.interactiveOnFailure=true when INTERACTIVE_ON_FAILURE=true', async () => {
     process.env['INTERACTIVE_ON_FAILURE'] = 'true';
-    const config = await loadConfig();
+    const config = await loadConfig(undefined, projectRoot);
     expect(config.execution.interactiveOnFailure).toBe(true);
   });
 
-  it('sets execution.interactiveOnFailure=false when INTERACTIVE_ON_FAILURE=false', async () => {
+  it('INTERACTIVE_ON_FAILURE=false beats a config file that set it true', async () => {
+    // The default is already false, so only a `true` underneath can tell
+    // "the loader read false" from "the loader ignored the variable".
+    await fs.writeFile(
+      path.join(projectRoot, 'steptix.config.json'),
+      JSON.stringify({ execution: { interactiveOnFailure: true } }),
+      'utf8',
+    );
+    expect((await loadConfig(undefined, projectRoot)).execution.interactiveOnFailure).toBe(true);
+
     process.env['INTERACTIVE_ON_FAILURE'] = 'false';
-    const config = await loadConfig();
-    expect(config.execution.interactiveOnFailure).toBe(false);
-  });
-
-  it('accepts 1/yes/on as truthy', async () => {
-    for (const value of ['1', 'yes', 'on']) {
-      process.env['INTERACTIVE_ON_FAILURE'] = value;
-      const config = await loadConfig();
-      expect(config.execution.interactiveOnFailure).toBe(true);
-    }
-  });
-
-  it('ignores garbage values and falls through to default', async () => {
-    process.env['INTERACTIVE_ON_FAILURE'] = 'banana';
-    const config = await loadConfig();
+    const config = await loadConfig(undefined, projectRoot);
     expect(config.execution.interactiveOnFailure).toBe(false);
   });
 });
@@ -138,19 +143,6 @@ describe('loadConfig — steptix.config.json loading + deep merge', () => {
     // the recursive merge fixes — the old 2-level merge dropped height).
     expect(config.browser.viewport.width).toBe(800);
     expect(config.browser.viewport.height).toBeGreaterThan(0);
-  });
-
-  it('deep-merges a single domNoiseReduction flag, keeping the other six', async () => {
-    const file = await writeConfig({
-      browser: { domNoiseReduction: { dropUnstableIds: true } },
-    });
-    const config = await loadConfig(file);
-    const dnr = config.browser.domNoiseReduction!;
-    expect(dnr.dropUnstableIds).toBe(true);
-    // Siblings preserved from defaults rather than dropped to undefined.
-    expect(dnr.collapseRepetitiveDom).toBe(true);
-    expect(dnr.compactSvg).toBe(true);
-    expect(dnr.hideHiddenInputs).toBe(true);
   });
 
   it("tables.structure defaults to 'ask' and merges to 'strict'", async () => {
@@ -381,7 +373,7 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
   it('no machine values leaves the built-in default model untouched', async () => {
     const config = await loadConfig(await writeConfig({}));
 
-    expect(config.ai.model).toBe('openai/gpt-5.6-luna');
+    expect(config.ai.model).toBe(DEFAULT_CONFIG.ai.model);
     expect(config.ai.apiKey).toBeUndefined();
   });
 
@@ -390,7 +382,7 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
     const config = await loadConfig(await writeConfig({}));
 
     expect(config.ai.apiKey).toBeUndefined();
-    expect(config.ai.model).toBe('openai/gpt-5.6-luna');
+    expect(config.ai.model).toBe(DEFAULT_CONFIG.ai.model);
   });
 
   // -------------------------------------------------------------------------
@@ -420,7 +412,7 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
 
     process.env['AI_GATEWAY_URL'] = '   ';
     expect((await loadConfig(await writeConfig({}))).ai.gatewayUrl).toBe(
-      'https://llm.corp.example',
+      DEFAULT_CONFIG.ai.gatewayUrl,
     );
   });
 
@@ -457,7 +449,7 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
     await writeUserRootEnv('AI_GATEWAY_URL=   \n');
     const config = await loadConfig(await writeConfig({}));
 
-    expect(config.ai.gatewayUrl).toBe('https://llm.corp.example');
+    expect(config.ai.gatewayUrl).toBe(DEFAULT_CONFIG.ai.gatewayUrl);
   });
 });
 

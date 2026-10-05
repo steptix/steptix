@@ -238,6 +238,21 @@ describe('every run loop writes a pass"s bindings through the helper', () => {
  * step would quietly run as ordinary prose.
  */
 /**
+ * A `Set {{name}} to "…"` step is recognised on the AUTHORED line in all four
+ * loops — never on the interpolated one, where a target that already holds a
+ * value has been replaced by that value and the line is no longer an
+ * assignment (tests/set-step.test.ts "on the interpolated line…" shows the
+ * hazard). A reviewer measured that mutating any loop to parse the
+ * interpolated line left every test green, because a first assignment reads
+ * the same either way; this is the pin that fails on that mutation.
+ */
+describe('every run loop recognises a Set step on the authored line', () => {
+  it.each([...RUN_LOOPS, 'src/server/errand-runner.ts'])('%s', (file) => {
+    expect(source(file)).toMatch(/const setStep = parseSetStep\((raw|original)[A-Za-z]*\)/);
+  });
+});
+
+/**
  * `[use ai] <step>` is dispatched by ONE runner in all four loops
  * (stories/use-ai-step.md, decision 8), read off the AUTHORED line — the
  * `Set` rule — and never interpolated first. Each loop's own suite asserts the
@@ -530,15 +545,38 @@ describe('every run loop warns about a multi-segment reference on a control line
     expect(body).toMatch(/warnMultiSegment\(guardText\)/);
   });
 
-  it.each(['src/server/session-manager.ts', 'src/ui/main/runner-adapter.ts'])(
-    '%s gets it from interpolate, which it runs on every line',
-    (file) => {
+  it.each([
+    // The loop body's own call.
+    ['src/server/session-manager.ts', /interpolate\(envInterpolated,[^)]*controlLineDefines\(/],
+    // Through `resolveStepText`, whose body is the interpolate call (below).
+    ['src/ui/main/runner-adapter.ts', /this\.resolveStepText\(rawInstruction\)/],
+  ] as const)(
+    '%s gets it from interpolate, which it runs on every line before the control dispatch',
+    (file, resolveCall) => {
       // Not a second call site: these two resolve the text of EVERY step,
       // control lines included, before the dispatch — which is why they never
-      // had the gap. The pin is that they still resolve every line.
-      expect(source(file)).toMatch(/interpolate\(/);
+      // had the gap. The pin is the ORDER: `interpolate(` merely being in the
+      // file (substitution-sites.test.ts counts those) would survive moving
+      // the call after the dispatch, which is the CLI's gap all over again.
+      const body = source(file);
+      const resolveAt = body.search(resolveCall);
+      const dispatchAt = body.indexOf('const controlRecord = hasControls ? (controls[i] ?? null) : null;');
+      expect(resolveAt).toBeGreaterThan(-1);
+      expect(dispatchAt).toBeGreaterThan(-1);
+      expect(resolveAt).toBeLessThan(dispatchAt);
     },
   );
+
+  it('src/ui/main/runner-adapter.ts: resolveStepText is that interpolate call', () => {
+    // LF-normalised: a CRLF checkout (CI's) would otherwise miss the end marker.
+    const body = source('src/ui/main/runner-adapter.ts').replace(/\r\n/g, '\n');
+    const start = body.indexOf('private resolveStepText(');
+    // To the method's closing brace, at its own two-space indent.
+    const end = body.indexOf('\n  }\n', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(body.slice(start, end)).toMatch(/return interpolate\(/);
+  });
 });
 
 describe('every run loop tells interpolate what a control line DEFINES', () => {

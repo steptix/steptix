@@ -339,7 +339,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((r, e) => server.close((err) => (err ? e(err) : r())));
-  await fs.rm(projectRoot, { recursive: true, force: true });
+  await fs.rm(projectRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 beforeEach(() => {

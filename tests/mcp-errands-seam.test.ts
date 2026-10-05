@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../src/mcp/server.js';
 import { resetRegistry } from '../src/mcp/registry.js';
+import { matchTabsByName } from '../src/mcp/cdp.js';
 import {
   errandDidNotAttach,
   errandTabHeldByErrand,
@@ -249,24 +250,20 @@ describe('run_errand refuses what it cannot do, naming what can', () => {
     expect(h.errands).toEqual([]);
   });
 
-  it('treats an empty session_id as absent — a serializer the model cannot control sends ""', async () => {
-    // Measured live (OpenCode + gpt-5.6-luna, 2026-08-13): the provider layer
-    // serializes every declared optional as "", so "call again without
-    // session_id" is an instruction the model physically cannot follow.
-    // Refusing on presence turned the wrong-door redirect into a livelock;
-    // the refusal now fires on a non-empty VALUE only.
-    const h = await connect();
-    const result = await errand(h, { session_id: '' });
-    expect(result.isError).toBeFalsy();
-    expect(h.errands).toHaveLength(1);
-  });
-
-  it('treats a whitespace session_id the same as empty', async () => {
-    const h = await connect();
-    const result = await errand(h, { session_id: '  ' });
-    expect(result.isError).toBeFalsy();
-    expect(h.errands).toHaveLength(1);
-  });
+  it.each(['', '  '])(
+    'treats an empty or whitespace session_id (%j) as absent — a serializer the model cannot control sends ""',
+    async (sessionId) => {
+      // Measured live (OpenCode + gpt-5.6-luna, 2026-08-13): the provider layer
+      // serializes every declared optional as "", so "call again without
+      // session_id" is an instruction the model physically cannot follow.
+      // Refusing on presence turned the wrong-door redirect into a livelock;
+      // the refusal now fires on a non-empty VALUE only.
+      const h = await connect();
+      const result = await errand(h, { session_id: sessionId });
+      expect(result.isError).toBeFalsy();
+      expect(h.errands).toHaveLength(1);
+    },
+  );
 
   it('declares session_id only to warn about it', async () => {
     // The schema description is the only place a model reads before deciding to
@@ -365,53 +362,49 @@ describe('run_errand refuses what it cannot do, naming what can', () => {
 // ---------------------------------------------------------------------------
 
 describe('the tab matcher', () => {
-  it('takes targetId: exactly', async () => {
+  // The matching rules themselves, once, on the pure `matchTabsByName` that
+  // both `run_errand` and `peek_tab` call (src/mcp/cdp.ts). Driving each rule
+  // through a tool, per tool, wrote the same table out twice; what each tool
+  // adds on top — an exact id on the wire, a port from the profile, refusals
+  // in its own words — is pinned per tool below and in mcp-peek-seam.test.ts,
+  // whose "feeds run_errand and peek_tab the SAME candidate list" proves the
+  // two really do share this function.
+  it.each<[spec: string, ids: string[], rule: string]>([
+    ['targetId:T-ACT', ['T-ACT'], 'an exact target id'],
+    ['targetId:t-act', [], 'a target id is opaque, so case-sensitive'],
+    ['activity |', ['T-ACT'], 'a bare string against the title'],
+    // The union is the point: a user naming "the shop tab" may be repeating
+    // what they read in the tab strip or what they know the site to be.
+    ['shop.example', ['T-CART'], 'a bare string against the url as well'],
+    ['INBOX', ['T-MAIL'], 'a name case-insensitively'],
+    ['title~inbox', ['T-MAIL'], 'title~ against titles'],
+    ['TITLE~inbox', ['T-MAIL'], 'the prefix case-insensitively'],
+    ['url~folder/1', ['T-MAIL'], 'url~ against urls'],
+    // …and each really does exclude the other half: these substrings are in
+    // the other field only, so narrowed they match nothing.
+    ['title~mail.example', [], 'title~ never against the url'],
+    ['url~inbox', [], 'url~ never against the title'],
+    ['openrouter', ['T-DOCS', 'T-ACT'], 'every tab a name fits, not the first'],
+    ['the invoices tab', [], 'nothing, when nothing fits'],
+  ])('%s → %j (%s)', (spec, ids) => {
+    expect(matchTabsByName(spec, TABS).map((tab) => tab.targetId)).toEqual(ids);
+  });
+
+  it('sends the wire an exact target id, and the port from the profile', async () => {
     const h = await connect();
 
-    const result = await errand(h, { tab: 'targetId:T-ACT' });
-
-    expect(result.isError).toBeFalsy();
+    const exact = await errand(h, { tab: 'targetId:T-ACT' });
+    expect(exact.isError).toBeFalsy();
     expect(h.errands[0]?.targetId).toBe('T-ACT');
     // The port came from the browser resolution, not from the caller — there is
     // no `port` argument on this tool at all.
     expect(h.errands[0]?.port).toBe(51000);
-  });
 
-  it('matches a bare string against the title', async () => {
-    const h = await connect();
-    await errand(h, { tab: 'activity |' });
-    expect(h.errands[0]?.targetId).toBe('T-ACT');
-  });
-
-  it('matches a bare string against the url as well as the title', async () => {
-    // The union is the point: a user naming "the shop tab" may be repeating
-    // what they read in the tab strip or what they know the site to be.
-    const h = await connect();
-    await errand(h, { tab: 'shop.example' });
-    expect(h.errands[0]?.targetId).toBe('T-CART');
-  });
-
-  it('matches case-insensitively', async () => {
-    const h = await connect();
-    await errand(h, { tab: 'INBOX' });
-    expect(h.errands[0]?.targetId).toBe('T-MAIL');
-  });
-
-  it('narrows to titles with title~ and to urls with url~', async () => {
-    const byTitle = await connect();
-    await errand(byTitle, { tab: 'title~inbox' });
-    expect(byTitle.errands[0]?.targetId).toBe('T-MAIL');
-
-    const byUrl = await connect();
-    await errand(byUrl, { tab: 'url~folder/1' });
-    expect(byUrl.errands[0]?.targetId).toBe('T-MAIL');
-
-    // …and each really does exclude the other half: this substring is in the
-    // url only, so as a title it matches nothing.
-    const narrowed = await connect();
-    const refused = await errand(narrowed, { tab: 'title~mail.example' });
-    expect(refused.isError).toBe(true);
-    expect(narrowed.errands).toEqual([]);
+    // A NAME never reaches the wire: it is resolved to the one tab's id first,
+    // so the server's own first-match-wins resolver is never asked to arbitrate.
+    const named = await errand(h, { tab: 'activity |' });
+    expect(named.isError).toBeFalsy();
+    expect(h.errands[1]?.targetId).toBe('T-ACT');
   });
 
   it('refuses a name that matches nothing, listing what IS open', async () => {

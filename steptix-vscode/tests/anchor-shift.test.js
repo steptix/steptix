@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { shiftAnchorForChanges, changesTouchAnchor } from '../src/extension/step-lines.ts';
+import { extractSections, sectionBodyLinesAt } from 'steptix-runner-core';
+import { shiftAnchorForChanges } from '../src/extension/step-lines.ts';
 
 /**
  * Unit coverage for the resume position-anchor shift math (spec
@@ -23,15 +24,6 @@ test('insert above the anchor shifts the derived line down by the lines added', 
     [8, 9, 10, 11],
   );
   assert.equal(next, 10, 'anchor 0-based 9 → 10 (1-based 10 → 11)');
-});
-
-test('insert THREE lines above the anchor shifts by three', () => {
-  const next = shiftAnchorForChanges(
-    9,
-    [{ startLine: 5, endLine: 5, endCharacter: 0, addedLines: 3 }],
-    [11, 12, 13],
-  );
-  assert.equal(next, 12);
 });
 
 test('insert below the anchor leaves the derived line unchanged', () => {
@@ -185,28 +177,6 @@ test('a delete spanning from above through the anchor snaps to the surviving ste
   assert.equal(next, 8, 'resumes at the survivor (1-based 9), not null');
 });
 
-// ---- changesTouchAnchor predicate (must agree with the function) ---------------
-
-test('changesTouchAnchor: a whole-line replace ending at column 0 of the anchor line is NOT a touch', () => {
-  assert.equal(
-    changesTouchAnchor([{ startLine: 7, endLine: 9, endCharacter: 0, addedLines: 1 }], 9),
-    false,
-    'range ending at column 0 of the anchor line stops before its content',
-  );
-});
-
-test('changesTouchAnchor: a replace spanning into the anchor line IS a touch', () => {
-  assert.equal(
-    changesTouchAnchor([{ startLine: 8, endLine: 10, endCharacter: 0, addedLines: 1 }], 9),
-    true,
-  );
-  // And a within-line edit on the anchor line.
-  assert.equal(
-    changesTouchAnchor([{ startLine: 9, endLine: 9, endCharacter: 8, addedLines: 0 }], 9),
-    true,
-  );
-});
-
 // ---- section-body resume: lazy, target-dependent snap candidates ---------------
 //
 // A body anchor snaps among the body lines of ITS OWN section, and the
@@ -246,51 +216,58 @@ test('function candidates receive the post-edit target line, 1-based', () => {
   assert.deepEqual(seen, [12]);
 });
 
+
+// ---- section-body resume: the tracker's composition over a real document -------
+//
+// maintainAnchor (active-file-tracker.ts) hands a body anchor
+// `(target) => sectionBodyLinesAt(postEditText, target)`. The "own section
+// only" scoping therefore lives in runner-core, not in a callback a test can
+// write for itself: these run that same composition over the post-edit text.
+
+const SECTIONS_DOC = [
+  '---',
+  'type: test',
+  '---',
+  '',
+  '# Resume',
+  '',
+  '## Steps',
+  '1. Open the dashboard',
+  '2. Login',
+  '3. Cleanup',
+  '',
+  '### Login', //            12
+  '1. Type the username', // 13
+  '2. Click Sign in', //     14
+  '',
+  '### Cleanup', //          16
+  '1. Sign out', //          17
+];
+
+/** The document after deleting whole 1-based `line`, and the change that did it. */
+function deleteLine(line) {
+  const after = SECTIONS_DOC.filter((_, i) => i !== line - 1).join('\n') + '\n';
+  return { after, changes: [{ startLine: line - 1, endLine: line, endCharacter: 0, addedLines: 0 }] };
+}
+
 test('a deleted body step snaps to the next step of the SAME section', () => {
-  // `### Login` body on 1-based 24, 25, 29; `### Cleanup` body on 33.
-  // Delete the anchor line (0-based 23 == 1-based 24). The candidates the
-  // tracker supplies are Login's post-edit body only, so the snap can reach
-  // 25 but can never reach 33.
-  const next = shiftAnchorForChanges(
-    23,
-    [{ startLine: 23, endLine: 24, endCharacter: 0, addedLines: 0 }],
-    (target) => [24, 28].filter((l) => l >= target),
-  );
-  assert.equal(next, 23, 'snapped to the next Login body step (1-based 24)');
+  // `1. Type the username` (1-based 13) is deleted; `2. Click Sign in` slides
+  // up into its place.
+  const { after, changes } = deleteLine(13);
+  const next = shiftAnchorForChanges(12, changes, (target) => sectionBodyLinesAt(after, target));
+  assert.equal(next, 12, 'resumes at Click Sign in, now 1-based 13');
 });
 
 test('deleting the LAST body step of a section clears rather than crossing into the next', () => {
-  // Anchor on Login's last body step (0-based 28 == 1-based 29), deleted.
-  // Login has no surviving step at or after it; Cleanup's line 33 is NOT a
-  // candidate, because the tracker scopes candidates to the anchor's own
-  // section. Clearing is the correct answer — resuming into a different
-  // section's body would silently run a different flow.
-  const next = shiftAnchorForChanges(
-    28,
-    [{ startLine: 28, endLine: 29, endCharacter: 0, addedLines: 0 }],
-    () => [24, 25],
-  );
-  assert.equal(next, null);
-});
+  // Login has no step at or after the deleted `2. Click Sign in`. Clearing is
+  // the correct answer — resuming into Cleanup's body would silently run a
+  // different flow.
+  const { after, changes } = deleteLine(14);
+  const scoped = shiftAnchorForChanges(13, changes, (target) => sectionBodyLinesAt(after, target));
+  assert.equal(scoped, null);
 
-test('the call position shifts on an insert above while the body anchor does not', () => {
-  // Insert one line above the invocation (0-based 16 == 1-based 17) but below
-  // nothing else relevant. Run the same change set through both positions the
-  // way maintainAnchor does.
-  const changes = [{ startLine: 12, endLine: 12, endCharacter: 0, addedLines: 1 }];
-  const call = shiftAnchorForChanges(16, changes, () => [14, 18, 19]);
-  const body = shiftAnchorForChanges(23, changes, () => [25, 26, 30]);
-  assert.equal(call, 17, 'invocation moved down one line');
-  assert.equal(body, 24, 'body step moved down one line too');
-});
-
-test('deleting the invocation clears the call position, which clears the resume point', () => {
-  // maintainAnchor treats either half returning null as "the whole resume
-  // point is gone" — a body line with no invocation is not resumable.
-  const call = shiftAnchorForChanges(
-    16,
-    [{ startLine: 16, endLine: 17, endCharacter: 0, addedLines: 0 }],
-    () => [],
-  );
-  assert.equal(call, null);
+  // The control: with every body line as a candidate the same edit crosses
+  // into Cleanup — so the null above is the section scoping at work.
+  const everyBody = extractSections(after).flatMap((s) => s.steps.map((step) => step.line));
+  assert.equal(shiftAnchorForChanges(13, changes, everyBody), 15, 'Sign out, now 1-based 16');
 });

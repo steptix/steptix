@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -203,7 +203,7 @@ vi.mock('../src/utils/logger.js', () => ({
 // Import after mocks
 // ---------------------------------------------------------------------------
 
-import { SessionManager } from '../src/server/session-manager.js';
+import { SessionManager, type SessionListItem } from '../src/server/session-manager.js';
 import { executeStep, executeBranchedStep } from '../src/runner/step-executor.js';
 import { generateReport } from '../src/report/generator.js';
 import type { TestReport } from '../src/report/types.js';
@@ -399,29 +399,8 @@ describe('SessionManager', () => {
       expect(response.status).toBe('passed');
       expect(response.stepsCompleted).toBe(1);
       expect(response.stepsTotal).toBe(1);
-    });
-
-    it('returns proper StepResponse structure', async () => {
-      const response = await manager.executeSteps('session-1', {
-        steps: ['Click the button'],
-      });
-
-      expect(response).toHaveProperty('sessionId');
-      expect(response).toHaveProperty('status');
-      expect(response).toHaveProperty('stepsCompleted');
-      expect(response).toHaveProperty('stepsTotal');
-      expect(response).toHaveProperty('results');
-      expect(response).toHaveProperty('outputs');
-      expect(response).toHaveProperty('error');
       expect(response.error).toBeNull();
-      expect(Array.isArray(response.results)).toBe(true);
       expect(response.results).toHaveLength(1);
-      expect(response.results[0]).toHaveProperty('step');
-      expect(response.results[0]).toHaveProperty('status');
-      expect(response.results[0]).toHaveProperty('actions');
-      expect(response.results[0]).toHaveProperty('screenshot');
-      expect(response.results[0]).toHaveProperty('reasoning');
-      expect(response.results[0]).toHaveProperty('outputs');
     });
 
     it('accumulates outputs across multiple executeSteps calls', async () => {
@@ -570,10 +549,14 @@ describe('SessionManager', () => {
         steps: ['[output: myVar] Capture a value'],
       });
 
-      // Second call: provide the same variable as a request parameter
+      // Second call: provide the same variable as a request parameter.
+      // Record what the executor saw and assert it out here: an `expect`
+      // inside the mock throws into `executeStep`, which SessionManager
+      // catches and turns into an `error` result — so a failure in there
+      // could never fail this test.
+      let seen: string | undefined;
       vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, instruction, opts) => {
-        // resolvedParameters should have the overridden value
-        expect(opts.resolvedParameters!['myVar']).toBe('override-value');
+        seen = opts.resolvedParameters?.['myVar'];
         return {
           index: 1,
           instruction,
@@ -584,10 +567,14 @@ describe('SessionManager', () => {
         };
       });
 
-      await manager.executeSteps('session-1', {
+      const response = await manager.executeSteps('session-1', {
         steps: ['Use the variable'],
         parameters: { myVar: 'override-value' },
       });
+
+      expect(response.status).toBe('passed');
+      expect(seen).toBe('override-value');
+      expect(response.outputs).toHaveProperty('myVar', 'override-value');
     });
 
     it('errors when config is sent on non-first request', async () => {
@@ -1351,9 +1338,11 @@ describe('SessionManager', () => {
     });
 
     it('handles steps with no output prefixes', async () => {
+      // Recorded, not asserted in the mock: SessionManager catches whatever
+      // `executeStep` throws, so an `expect` in there fails nothing.
+      let seen: string | undefined;
       vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, instruction) => {
-        // Instruction should be passed through unchanged
-        expect(instruction).toBe('Click the login button');
+        seen = instruction;
         return {
           index: 1,
           instruction,
@@ -1368,6 +1357,9 @@ describe('SessionManager', () => {
         steps: ['Click the login button'],
       });
 
+      expect(response.status).toBe('passed');
+      // Passed through unchanged: no `[store as:]` appended.
+      expect(seen).toBe('Click the login button');
       expect(response.results[0]!.outputs).toEqual({});
     });
 
@@ -1653,13 +1645,38 @@ type: skill
       });
     }
 
+    // The budget is the production 1.5 s, spent on a fake clock: `briefly`
+    // (real code, in the mock above) races a `setTimeout` the clock owns, so
+    // nothing here waits it for real — and how long a listing took is a fact
+    // of the fake clock, not of how busy the machine is.
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Run the listing to completion on the fake clock, and say how much
+     *  fake time it took. A listing that hangs never settles, and the test
+     *  times out — the same failure an unbounded read gave before. */
+    async function listOnFakeClock(): Promise<{ listed: SessionListItem[]; took: number }> {
+      const started = Date.now();
+      let took = -1;
+      const listing = manager.getActiveSessionsWithTitles().then((listed) => {
+        took = Date.now() - started;
+        return listed;
+      });
+      await vi.runAllTimersAsync();
+      return { listed: await listing, took };
+    }
+
     it('does not hang on a page whose title never resolves', async () => {
       // `page.title()` carries no timeout of its own — the runner races it for
       // exactly this reason. Unbounded here, any non-MCP caller (Steptix,
       // flick, curl) waits forever.
       wedgeSession('mcp:wedged', { title: true });
 
-      const listed = await manager.getActiveSessionsWithTitles();
+      const { listed } = await listOnFakeClock();
 
       expect(listed).toHaveLength(1);
       expect(listed[0]!.pageTitle).toBe('');
@@ -1670,7 +1687,7 @@ type: skill
     it('does not hang on a target-id lookup that never resolves', async () => {
       wedgeSession('mcp:wedged', { targetId: true });
 
-      const listed = await manager.getActiveSessionsWithTitles();
+      const { listed } = await listOnFakeClock();
 
       expect(listed[0]!.tab).toBeNull();
       expect(listed[0]!.pageTitle).toBe('Fine');
@@ -1683,17 +1700,18 @@ type: skill
       // Three sessions on one CDP browser is the arrangement this feature
       // actively encourages.
       wedgeSession('mcp:a', { title: true });
+      const one = await listOnFakeClock();
+
       wedgeSession('mcp:b', { title: true });
       wedgeSession('mcp:c', { title: true });
+      const three = await listOnFakeClock();
 
-      const started = Date.now();
-      const listed = await manager.getActiveSessionsWithTitles();
-      const elapsed = Date.now() - started;
-
-      expect(listed).toHaveLength(3);
-      // One budget's worth, not three. Generous bound so this is not a
-      // timing-flaky test; the sequential version took ~4.5s here.
-      expect(elapsed).toBeLessThan(3_000);
+      expect(three.listed).toHaveLength(3);
+      // One budget's worth, not three: exactly what one wedged session costs,
+      // measured rather than restated, so this holds whatever the budget is.
+      // Sequentially it was three times this.
+      expect(one.took).toBeGreaterThan(0);
+      expect(three.took).toBe(one.took);
     });
   });
 

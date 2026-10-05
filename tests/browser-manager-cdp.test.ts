@@ -474,10 +474,15 @@ describe('PageTracker.resolvedTargetIds', () => {
     tracker.addPage(wedged as any);
 
     vi.useFakeTimers();
-    const pending = tracker.resolvedTargetIds();
-    await vi.advanceTimersByTimeAsync(2_500);
-    const sweep = await pending;
-    vi.useRealTimers();
+    let sweep: Awaited<ReturnType<typeof tracker.resolvedTargetIds>>;
+    try {
+      const pending = tracker.resolvedTargetIds();
+      await vi.advanceTimersByTimeAsync(2_500);
+      sweep = await pending;
+    } finally {
+      // Never leak a fake clock into the next test, whatever happened above.
+      vi.useRealTimers();
+    }
 
     expect(sweep.ids).toEqual(['AAA']);
     expect(sweep.complete).toBe(false);

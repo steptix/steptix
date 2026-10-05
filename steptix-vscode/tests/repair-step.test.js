@@ -36,7 +36,6 @@ const manifest = JSON.parse(
 
 const COMMAND = "steptix.repairStep";
 const COMPILE_STEP = "steptix.compileStepCodeBehind";
-const STALE_LINES_KEY = "steptix.staleStepLines";
 
 /** Menu rows contributed for one command id, in one menu. */
 const rowsFor = (menu, command) =>
@@ -58,24 +57,12 @@ test("the gutter offers it on a stale line, by asking the stale-lines key", () =
   assert.match(when, /editorLineNumber\s+in\s+steptix\.staleStepLines/);
   // Still a Steptix file, like every other row in this menu.
   assert.match(when, /steptix\.activeFile/);
-});
-
-test("a step with no entry, or a passing one, is not offered Repair", () => {
-  // Stated as the absence of any OTHER condition that could turn it on: the
-  // clause admits a line only via the stale-lines array, so a `</>` or plain
-  // step — never in that array — cannot match. The failure this guards is
-  // someone widening the clause to `activeFile` alone (which is what Compile
-  // This Step has, and is right for it) and quietly putting Repair on every
-  // line in the file.
-  const [row] = rowsFor("editor/lineNumber/context", COMMAND);
-  const compile = rowsFor("editor/lineNumber/context", COMPILE_STEP);
-  assert.equal(compile.length, 1);
-  assert.notEqual(
-    row.when,
-    compile[0].when,
-    "Repair must not inherit Compile This Step's every-line visibility",
-  );
-  assert.ok(row.when.includes(STALE_LINES_KEY));
+  // …and the stale-lines test is REQUIRED, not one way in among others: a
+  // `</>` or plain step, never in that array, must not match. The failure
+  // this guards is the clause widened to admit `activeFile` alone (what
+  // Compile This Step has, and is right for it) — `activeFile || …` would
+  // still contain the stale-lines test, and put Repair on every line.
+  assert.doesNotMatch(when, /\|\|/, `Repair's clause must be a plain conjunction: ${when}`);
 });
 
 test("nothing in the clause gates on where the session is parked", () => {

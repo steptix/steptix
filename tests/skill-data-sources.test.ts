@@ -50,45 +50,7 @@ dataSources:
     expect(result.steps).toEqual(['Navigate to http://localhost:8787/dashboard']);
   });
 
-  it('routes ${envName} in a path string to the matching JSON file', async () => {
-    await writeFile(
-      'data/local-endpoints.json',
-      JSON.stringify({ api: { url: 'http://localhost:8787' } }),
-    );
-    await writeFile(
-      'data/staging-endpoints.json',
-      JSON.stringify({ api: { url: 'https://stg.example' } }),
-    );
-    await writeFile(
-      'skills/open.md',
-      `---
-type: skill
-dataSources:
-  endpoints: ../data/\${envName}-endpoints.json
----
-# open
-## Steps
-1. Navigate to \${endpoints.api.url}/
-`,
-    );
-
-    const localRes = await expandSkills(
-      ['[skill: open]'],
-      path.join(tmpDir, 'skills'),
-      { env: {}, envName: 'local' },
-    );
-    expect(localRes.steps).toEqual(['Navigate to http://localhost:8787/']);
-
-    clearSkillCache();
-    const stagingRes = await expandSkills(
-      ['[skill: open]'],
-      path.join(tmpDir, 'skills'),
-      { env: {}, envName: 'staging' },
-    );
-    expect(stagingRes.steps).toEqual(['Navigate to https://stg.example/']);
-  });
-
-  it('skill cache key includes envName so the same skill returns env-correct content', async () => {
+  it('routes ${envName} in a path string to the matching JSON file, and the skill cache key includes envName', async () => {
     await writeFile(
       'data/local-endpoints.json',
       JSON.stringify({ api: { url: 'http://localhost:8787' } }),
@@ -122,8 +84,8 @@ dataSources:
       { env: {}, envName: 'staging' },
     );
 
-    expect(localRes.steps[0]).toContain('http://localhost:8787');
-    expect(stagingRes.steps[0]).toContain('https://stg.example');
+    expect(localRes.steps).toEqual(['Navigate to http://localhost:8787/']);
+    expect(stagingRes.steps).toEqual(['Navigate to https://stg.example/']);
   });
 
   it('rejects ${data.X} inside a dataSources path string', async () => {

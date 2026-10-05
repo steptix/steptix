@@ -1,6 +1,17 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { ALL_ERROR_CODES, reportError } from '../dist/errors.js';
+
+/** The extension that renders these payloads, and owns their commands. */
+const STEPTIX_PACKAGE = JSON.parse(
+  readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'steptix-vscode', 'package.json'),
+    'utf-8',
+  ),
+);
 
 const SAMPLE_CONTEXTS = {
   STX001: { searchedDirs: ['/ws/a/b', '/ws/a', '/ws'], fallbackSetting: '' },
@@ -48,19 +59,11 @@ test('every code in catalogue has a sample context (audit)', () => {
   assert.deepEqual(missing, []);
 });
 
-test('every code produces a payload with code + non-empty message + non-empty fix', () => {
+test('every code has a message led by its code, a diagnosis, and a fix sentence that ends with a period', () => {
   for (const code of ALL_ERROR_CODES) {
     const payload = reportError(code, SAMPLE_CONTEXTS[code]);
-    assert.equal(payload.code, code, `${code}: round-trips code`);
-    assert.ok(payload.message.startsWith(`${code}:`), `${code}: message starts with code`);
+    assert.ok(payload.message.startsWith(`${code}: `), `${code}: message starts with "${code}: " — got "${payload.message}"`);
     assert.ok(payload.diagnosis.length > 0, `${code}: has diagnosis`);
-    assert.ok(payload.fix.length > 0, `${code}: has fix`);
-  }
-});
-
-test('every fix sentence ends with a period', () => {
-  for (const code of ALL_ERROR_CODES) {
-    const payload = reportError(code, SAMPLE_CONTEXTS[code]);
     assert.ok(payload.fix.endsWith('.'), `${code}: fix ends with period — got "${payload.fix}"`);
   }
 });
@@ -168,12 +171,21 @@ test('STX028 for the installed runtime names its folder and what usually breaks 
   assert.ok(payload.fix.endsWith('.'));
 });
 
-test('actions reference real-looking command ids', () => {
+test('every action runs a VS Code built-in or a command the extension contributes', () => {
+  // A button whose command nobody registers fails with "command not found" at
+  // the moment the user reaches for help — the one time it must work.
+  const contributed = new Set(STEPTIX_PACKAGE.contributes.commands.map((c) => c.command));
+  let checked = 0;
   for (const code of ALL_ERROR_CODES) {
     const payload = reportError(code, SAMPLE_CONTEXTS[code]);
     for (const action of payload.actions) {
       assert.ok(action.label.length > 0, `${code}: action label non-empty`);
-      assert.ok(action.command.length > 0, `${code}: action command non-empty`);
+      assert.ok(
+        action.command.startsWith('workbench.') || contributed.has(action.command),
+        `${code}: "${action.command}" is neither a workbench.* built-in nor in steptix-vscode/package.json contributes.commands`,
+      );
+      checked++;
     }
   }
+  assert.ok(checked > 0, 'no action was checked');
 });

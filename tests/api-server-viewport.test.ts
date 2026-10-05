@@ -278,11 +278,9 @@ describe('config.viewport reaching the launch', () => {
     expect(launchBrowserMock).toHaveBeenCalledTimes(1);
     expect(launchedBrowserConfig().fixedViewport).toEqual({ width: 390, height: 844 });
   });
-
-  it('resolves the explicit form too', async () => {
-    await run(sessionId('explicit'), { config: { viewport: '767x1024' } });
-    expect(launchedBrowserConfig().fixedViewport).toEqual({ width: 767, height: 1024 });
-  });
+  // Every spelling the resolver accepts reaches the launch by this one seam;
+  // which spellings it accepts (the explicit `767x1024` among them) is
+  // tests/viewport-config.test.ts's to pin.
 
   it('leaves every other browser setting exactly as the server has it', async () => {
     // The merge must be complete, or a per-test viewport quietly blanks the
@@ -378,21 +376,20 @@ describe('a session without the key', () => {
 // ---------------------------------------------------------------------------
 
 describe('an invalid value', () => {
-  it('fails the batch with the §1 error and launches NOTHING', async () => {
-    const { status, body } = await run(sessionId('bad'), { config: { viewport: '390' } });
+  // Both refusal kinds, malformed and out of range, take the same throw out of
+  // the resolver; the no-launch half is shown for each. What each message
+  // says is tests/viewport-config.test.ts's to pin.
+  it.each([
+    ['malformed', '390'],
+    ['out of range', '50x50'],
+  ])('fails the batch with the §1 error and launches NOTHING (%s)', async (_kind, viewport) => {
+    const { status, body } = await run(sessionId('bad'), { config: { viewport } });
 
     expect(status).toBe(500);
-    expect(String(body['error'])).toContain("Invalid '## Config: viewport: 390'");
+    expect(String(body['error'])).toContain(`Invalid '## Config: viewport: ${viewport}'`);
     expect(String(body['error'])).toContain('mobile | tablet | desktop');
     // The half that only this test can see: validation runs BEFORE the launch,
     // so a rejected edit leaves no window behind.
-    expect(launchBrowserMock).not.toHaveBeenCalled();
-  });
-
-  it('refuses an out-of-range size, naming it', async () => {
-    const { status, body } = await run(sessionId('bounds'), { config: { viewport: '50x50' } });
-    expect(status).toBe(500);
-    expect(String(body['error'])).toContain('50x50');
     expect(launchBrowserMock).not.toHaveBeenCalled();
   });
 

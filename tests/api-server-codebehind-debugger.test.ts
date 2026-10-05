@@ -225,7 +225,7 @@ export default defineSteps([
 
 afterAll(async () => {
   await new Promise<void>((r, e) => server.close((err) => err ? e(err) : r()));
-  await fs.rm(projectDir, { recursive: true, force: true });
+  await fs.rm(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 async function* sseEvents(
@@ -488,7 +488,7 @@ export default defineSteps([
       expect(events.filter((e) => e.type === 'codebehind:awaiting-debugger')).toHaveLength(0);
       expect(events.find((e) => e.type === 'done')?.status).toBe('passed');
     } finally {
-      await fs.rm(aiDir, { recursive: true, force: true });
+      await fs.rm(aiDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -535,6 +535,9 @@ export default defineSteps([
     const sessionId = 'cb-debug-abort-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
     const ac = new AbortController();
+    // Without this the gesture could go unexercised: a run that never parked
+    // would play out to `done`, never abort, and leave nothing to notice.
+    let sawPause = false;
 
     try {
       for await (const ev of sseEvents(
@@ -549,13 +552,19 @@ export default defineSteps([
       )) {
         // Abort as soon as the run parks for the debugger — the Stop-mid-pause
         // gesture. No ack is ever sent.
-        if (ev.type === 'codebehind:awaiting-debugger') ac.abort();
+        if (ev.type === 'codebehind:awaiting-debugger') {
+          sawPause = true;
+          ac.abort();
+        }
       }
     } catch {
       // The abort surfaces as a fetch/stream error; that is the point.
     }
+    expect(sawPause).toBe(true);
 
-    // A fresh run on the same session must not inherit the pause.
+    // A fresh run on the same session must not inherit the pause — and must
+    // actually run: a session wedged by the abandoned pause would answer
+    // with no `done` at all, which a check for the absent event alone passes.
     const events: any[] = [];
     for await (const ev of sseEvents(url, {
       steps: [BOUND_STEP],
@@ -566,6 +575,7 @@ export default defineSteps([
       if (ev.type === 'done') break;
     }
     expect(events.filter((e) => e.type === 'codebehind:awaiting-debugger')).toHaveLength(0);
+    expect(events.find((e) => e.type === 'done')?.status).toBe('passed');
   });
 
 });

@@ -19,6 +19,7 @@ import { PageTracker, type BrowserSession } from '../src/browser/manager.js';
 import { StepRecorder, classifyHistoryMove, classifyNavigation, historyBehind, type KnownSecret } from '../src/recorder/step-recorder.js';
 import type { Box, RecordedAction } from '../src/recorder/types.js';
 import { addLogCallback } from '../src/utils/logger.js';
+import { until } from './record-toolbar-cdp.js';
 
 const PAGES: Record<string, string> = {
   '/board.html': `<!doctype html><html><head><title>Board</title></head><body>
@@ -285,6 +286,23 @@ async function actionsReach(n: number, timeoutMs = 5_000): Promise<RecordedActio
   return actions;
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Add check, and wait until the page has it. `armPick` tells the page without
+ * waiting (its state push is fire-and-forget), so a click that lands first is
+ * an ordinary click and the test would be about something else. Armed, the
+ * page shows a crosshair everywhere.
+ */
+async function armPick(): Promise<void> {
+  expect(recorder.armPick()).toBe(true);
+  await until(
+    () => page.evaluate(() => getComputedStyle(document.body).cursor),
+    (cursor) => cursor === 'crosshair',
+    'the page to show pick mode',
+  );
+}
+
 describe('the page script — one described action per gesture', () => {
   it('describes a click on a link by role, name and the landmark it sits in', async () => {
     recorder = newRecorder();
@@ -438,7 +456,7 @@ describe('pick mode (Add check)', () => {
   it('swallows the click — the page\'s own handler never runs — and reports a check', async () => {
     recorder = newRecorder();
     await recorder.start();
-    expect(recorder.armPick()).toBe(true);
+    await armPick();
     await page.click('#pm-text');
     const [check] = await actionsReach(1);
     expect(check).toMatchObject({ kind: 'check' });
@@ -447,7 +465,7 @@ describe('pick mode (Add check)', () => {
     expect(picks).toEqual([true, false]);
 
     // The next click is an ordinary one again — and a picked BUTTON never ran.
-    recorder.armPick();
+    await armPick();
     await page.click('#panel-button');
     await actionsReach(2);
     expect(await page.evaluate('window.panelClicked === true')).toBe(false);
@@ -700,9 +718,13 @@ describe('the browser\'s Back, Forward and Refresh (Chromium: read off the tab\'
     await recorder.start();
     await page.click('#to-redirect');
     await page.waitForURL(/land\.html$/);
-    await new Promise((r) => setTimeout(r, 600));
     // One read when recording started and one per commit — not a loop of
-    // them waiting for a change the last read already had.
+    // them waiting for a change the last read already had. The reads queue
+    // one behind another, each 150 ms late, so wait for the third rather than
+    // for a time; then a quiet spell longer than a read and a retry, in which
+    // a loop would have read again.
+    await until(async () => history.reads, (n) => n >= 3, 'the history reads');
+    await sleep(500);
     expect(history.reads).toBe(3);
     await page.goBack();
     await actionsReach(2);
@@ -717,7 +739,9 @@ describe('the browser\'s Back, Forward and Refresh (Chromium: read off the tab\'
     await recorder.start();
     await page.click('#to-error');
     await page.waitForURL(/^chrome-error:/).catch(() => {}); // Playwright may report the failed address instead
-    await new Promise((r) => setTimeout(r, 800));
+    // As above: the third read, then a spell in which a loop would read again.
+    await until(async () => history.reads, (n) => n >= 3, 'the history reads');
+    await sleep(500);
     expect(history.reads).toBe(3);
     expect(actions.map((a) => a.kind)).toEqual(['click']);
   }, 30_000);
@@ -728,8 +752,13 @@ describe('the browser\'s Back, Forward and Refresh (Chromium: read off the tab\'
     recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
     await recorder.start();
     await page.click('#push3');
-    await new Promise((r) => setTimeout(r, 400));
-    expect(history.reads).toBe(4); // one when recording started, one per pushState
+    // One when recording started, one per pushState. They run one after
+    // another in the recorder's action chain, each answered 150 ms late, so
+    // the fourth is waited for, not timed; then a spell in which a loop
+    // waiting for a change would have read again.
+    await until(async () => history.reads, (n) => n >= 4, 'the history reads');
+    await sleep(500);
+    expect(history.reads).toBe(4);
     await page.goBack();
     await actionsReach(2);
     await new Promise((r) => setTimeout(r, 400));
@@ -755,15 +784,17 @@ describe('the browser\'s Back, Forward and Refresh (Chromium: read off the tab\'
    * after the author's Forward has started holds it — taken as the earlier
    * commit's, the Forward then shows no move and is recorded as a back. The
    * reads are rigged: the `location.replace` commit's first read answers with
-   * the history from before it, and each read again answers a second later,
-   * with the real history only if a newer navigation has started by then. The
-   * author's Forward lands inside that second.
+   * the history from before it, and the read again is held until the
+   * author's Forward has started, then answered with the real history — which
+   * by then holds the Forward. The test starts the Forward only once that
+   * read is waiting, so the order is the rig's, not the machine's speed.
    */
   it("a read answered after the author's next move started is not taken: a Forward during a retry is a forward", async () => {
     await page.goto(`${origin}/rep.html`);
     await page.goto(`${origin}/fwd.html`);
     await page.goBack(); // at rep.html, with fwd.html ahead
     const realSession = context.newCDPSession.bind(context);
+    let retryWaiting = false;
     context.newCDPSession = (async (target: Page) => {
       const cdp = await realSession(target);
       const send = cdp.send.bind(cdp) as (method: string, params?: object) => Promise<unknown>;
@@ -771,9 +802,16 @@ describe('the browser\'s Back, Forward and Refresh (Chromium: read off the tab\'
       let lastRead: unknown = null;
       let rig: 'waiting' | 'armed' | 'retrying' | 'over' = 'waiting';
       let newerStarted = false;
+      let started!: () => void;
+      const newerStart = new Promise<void>((resolve) => (started = resolve));
+      // Registered before the recorder's own listeners on this session, so by
+      // the time the held read is answered the recorder has heard the start.
       cdp.on('Page.frameStartedNavigating', (e: { loaderId?: string; navigationType?: string }) => {
         if (e.loaderId && e.navigationType) types.set(e.loaderId, e.navigationType);
-        if (rig === 'retrying') newerStarted = true;
+        if (rig === 'retrying') {
+          newerStarted = true;
+          started();
+        }
       });
       cdp.on('Page.frameNavigated', (e: { frame: { parentId?: string; loaderId?: string } }) => {
         if (e.frame.parentId) return;
@@ -787,7 +825,9 @@ describe('the browser\'s Back, Forward and Refresh (Chromium: read off the tab\'
           return lastRead; // the history from before the commit
         }
         if (rig === 'retrying') {
-          await new Promise((r) => setTimeout(r, 1_000));
+          retryWaiting = true;
+          // The ceiling only keeps a broken test from hanging the read forever.
+          await Promise.race([newerStart, sleep(15_000)]);
           return newerStarted ? send(method, params) : lastRead;
         }
         lastRead = await send(method, params);
@@ -800,9 +840,13 @@ describe('the browser\'s Back, Forward and Refresh (Chromium: read off the tab\'
     await recorder.start();
     await page.click('#replace');
     await page.waitForURL(/land\.html$/);
-    await new Promise((r) => setTimeout(r, 300));
+    await until(async () => retryWaiting, Boolean, 'the commit to be read again');
+    // Past the history-caused window after the click, so the Forward is the
+    // author's. The read stays held however long this takes.
+    await sleep(300);
     await page.goForward();
-    await new Promise((r) => setTimeout(r, 2_500));
+    await actionsReach(2);
+    await sleep(300);
     expect(actions.map((a) => a.kind)).toEqual(['click', 'forward']);
   }, 30_000);
 
@@ -836,8 +880,13 @@ describe('the browser\'s Back, Forward and Refresh (Chromium: read off the tab\'
       await page.goBack({ waitUntil: 'commit' }); // a restored page fires no load
       await actionsReach(2);
       await new Promise((r) => setTimeout(r, 200));
-      // Without a restore from the cache this test would prove nothing.
-      expect(restores).toContain('BackForwardCacheRestore');
+      // Without a restore from the cache this test would prove nothing. Whether
+      // Chromium restores is its own decision (memory, page features), so a
+      // failure here is the precondition, not the recorder — said so by name.
+      expect(
+        restores,
+        'precondition: Chromium did not restore the page from its back/forward cache, so the case under test never arose',
+      ).toContain('BackForwardCacheRestore');
       expect(actions.map((a) => a.kind)).toEqual(['click', 'back']);
     } finally {
       await recorder?.cancel().catch(() => {});
@@ -952,8 +1001,6 @@ describe('classifyNavigation', () => {
 
 // ── The fix round (review of the server half) ─────────────────────────────
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
 describe('a secret field stays secret for the life of the document (review, finding 1)', () => {
   beforeEach(async () => {
     await page.goto(`${origin}/eye.html`);
@@ -974,8 +1021,7 @@ describe('a secret field stays secret for the life of the document (review, find
     await page.keyboard.type('!');
     await page.keyboard.press('Tab');
     // And an Add check on it.
-    recorder.armPick();
-    await sleep(100);
+    await armPick();
     await page.click('#mw');
     await actionsReach(8);
     const done = await recorder.stop();
@@ -1106,8 +1152,7 @@ describe('Add check reports the typing before it (review, finding 11)', () => {
     await recorder.start();
     await page.focus('#email');
     await page.keyboard.type('a@b.test');
-    recorder.armPick();
-    await sleep(100);
+    await armPick();
     await page.click('#pm-text');
     await actionsReach(2);
     expect(actions.map((a) => a.kind)).toEqual(['type', 'check']);
@@ -1198,8 +1243,7 @@ describe('masked, then clipped (review, finding 8)', () => {
     }, secret);
     recorder = newRecorder();
     await recorder.start();
-    recorder.armPick();
-    await sleep(100);
+    await armPick();
     await page.click('#long');
     const [check] = await actionsReach(1);
     expect(check!.kind).toBe('check');
@@ -1264,8 +1308,7 @@ describe('a secret typed on the page is remembered by its VALUE (review 2, findi
     await page.click('#reveal');
     expect(await page.textContent('#shown')).toBe('hunter2-REVEAL');
     await page.click('#near3');
-    recorder.armPick();
-    await sleep(100);
+    await armPick();
     await page.click('#shown');
     await actionsReach(5);
     const done = await recorder.stop();
@@ -1300,8 +1343,7 @@ describe('value memory stays with real secrets (review 2, finding 1 — the comp
     recorder = newRecorder({ sendScreenshots: true });
     await recorder.start();
     await page.fill('#kw', 'shoes');
-    recorder.armPick();
-    await sleep(100);
+    await armPick();
     await page.click('#results');
     await actionsReach(2);
     const done = await recorder.stop();
@@ -1445,12 +1487,10 @@ describe('other spellings of a secret (review 2, finding 9)', () => {
     recorder = newRecorder();
     await recorder.start();
     await page.fill('#phrase', 'say open  sesame now');
-    recorder.armPick();
-    await sleep(100);
+    await armPick();
     await page.click('#phrase');
     await actionsReach(2);
-    recorder.armPick();
-    await sleep(100);
+    await armPick();
     await page.click('#pre');
     await actionsReach(3);
     const done = await recorder.stop();

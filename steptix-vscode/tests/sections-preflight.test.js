@@ -322,14 +322,23 @@ test("preflight and payload agree about which files are runnable", () => {
 // sectionedSkillRefusal
 // ---------------------------------------------------------------------------
 
-test("refusal: a skill that defines sections cannot be line-anchored", () => {
+/** A fresh temp dir, removed when the test ends — pass or fail. The retries
+ *  cover Windows, where Defender or the indexer can hold a just-written file
+ *  for a moment and `force` only forgives ENOENT. */
+function refusalDir(t) {
+  const dir = mkdtempSync(path.join(tmpdir(), "sections-refusal-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  return dir;
+}
+
+test("refusal: a skill that defines sections cannot be line-anchored", (t) => {
   // Line anchors into a skill file assume document order matches execution
   // order there. A skill with its own sections breaks that — its bodies sit
   // below its main flow but execute wherever called — and the server applies
   // exact matching only to the TEST file, so a skill anchor falls back to
   // nearest-line and can land inside a body that already ran. Measured: a
   // re-run from a skill's last step re-executed two passed body steps.
-  const dir = mkdtempSync(path.join(tmpdir(), "sections-refusal-"));
+  const dir = refusalDir(t);
   const skill = path.join(dir, "sectioned.md");
   writeFileSync(
     skill,
@@ -343,12 +352,10 @@ test("refusal: a skill that defines sections cannot be line-anchored", () => {
   });
   assert.match(problem ?? "", /defines inline sections/i);
   assert.match(problem ?? "", /sectioned/);
-
-  rmSync(dir, { recursive: true, force: true });
 });
 
-test("refusal: a plain skill is still re-runnable", () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "sections-refusal-"));
+test("refusal: a plain skill is still re-runnable", (t) => {
+  const dir = refusalDir(t);
   const skill = path.join(dir, "plain.md");
   writeFileSync(
     skill,
@@ -358,21 +365,19 @@ test("refusal: a plain skill is still re-runnable", () => {
     sectionedSkillRefusal({ kind: "skill", skillUri: skill, skillName: "plain" }),
     null,
   );
-  rmSync(dir, { recursive: true, force: true });
 });
 
-test("refusal: a SECTION failure is never refused by this check", () => {
+test("refusal: a SECTION failure is never refused by this check", (t) => {
   // For a section failure `skillUri` IS the test file, which by definition
   // defines sections. A kind-blind check would refuse every section re-run —
   // the exact flow this feature adds.
-  const dir = mkdtempSync(path.join(tmpdir(), "sections-refusal-"));
+  const dir = refusalDir(t);
   const test_ = path.join(dir, "t.md");
   writeFileSync(test_, ["## Steps", "1. Helper", "", "### Helper", "1. Body"].join("\n"));
   assert.equal(
     sectionedSkillRefusal({ kind: "section", skillUri: test_, skillName: "Helper" }),
     null,
   );
-  rmSync(dir, { recursive: true, force: true });
 });
 
 test("refusal: an unreadable skill file does not invent an error", () => {

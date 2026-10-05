@@ -40,17 +40,6 @@ function effectiveEndLine(c: AnchorChange): number {
   return c.endCharacter === 0 ? c.endLine - 1 : c.endLine;
 }
 
-/** True when some change in the event replaces content on the anchor's own
- *  line — i.e. the snap-forward branch will run, so the caller must supply the
- *  post-edit step lines. Mirrors the classification in `shiftAnchorForChanges`
- *  so the two never disagree about whether a touch occurred. */
-export function changesTouchAnchor(
-  changes: ReadonlyArray<AnchorChange>,
-  anchorLine: number,
-): boolean {
-  return changes.some((c) => c.startLine <= anchorLine && anchorLine <= effectiveEndLine(c));
-}
-
 /**
  * Pure shift/snap/clear math for the resume position-anchor (see
  * stories/specs/resume-position-anchor.md §4.2). Kept here, free of any

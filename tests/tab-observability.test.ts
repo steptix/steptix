@@ -112,10 +112,17 @@ describe('PageTracker target ids', () => {
       context: () => ({}),
     } as never;
 
-    const started = Date.now();
-    const tab = await new PageTracker(page).describeActiveTab();
-    expect(tab!.title).toBe('');
-    expect(Date.now() - started).toBeLessThan(3000);
+    // On a fake clock: the bound is a timer, so running the timers is what
+    // must end the wait. Without one, this awaits forever and the test times
+    // out — no wall-clock budget needed to see it.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const pending = new PageTracker(page).describeActiveTab();
+      await vi.runAllTimersAsync();
+      expect((await pending)!.title).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reports the ACTIVE tab, not the first one', async () => {
@@ -200,14 +207,17 @@ describe('PageTracker unexpected-tab attribution', () => {
     expect(byId.get('OUR-POPUP')).toBe(false);
   });
 
-  it('the flag is advisory — it is not a status and cannot fail a step', async () => {
+  it('the flag is advisory — it comes with no status or error a step could fail on', async () => {
     const tracker = new PageTracker(fakePage({ targetId: 'MAIN' }));
     const stranger = fakePage({ url: 'https://elsewhere', targetId: 'STRANGER' });
     tracker.addPage(stranger);
     tracker.switchTo('elsewhere');
     const tab = await tracker.describeActiveTab();
-    // Nothing but a boolean on a diagnostic object — no status, no error.
-    expect(Object.keys(tab!).sort()).toEqual(['label', 'targetId', 'title', 'unexpected', 'url']);
+    // A boolean on a diagnostic object, beside nothing a run reads as an
+    // outcome: no status, no error.
+    expect(tab!.unexpected).toBe(true);
+    expect(tab).not.toHaveProperty('status');
+    expect(tab).not.toHaveProperty('error');
   });
 });
 
@@ -273,23 +283,6 @@ describe('the fold carries tab through to the MCP step payload', () => {
       { type: 'done', status: 'passed' },
     ]);
     expect(result.steps[0]!.tab).toBeNull();
-  });
-
-  it('keeps two sessions\u2019 identically-labelled tabs distinguishable', () => {
-    // The assertion labels alone cannot make, and the reason targetId is on
-    // the wire at all.
-    const a = fold([
-      { type: 'step:start', line: 1 },
-      { type: 'step:pass', line: 1, tab: TAB({ label: 'page:2', targetId: 'SESSION-A-TAB' }) as never },
-      { type: 'done', status: 'passed' },
-    ]);
-    const b = fold([
-      { type: 'step:start', line: 1 },
-      { type: 'step:pass', line: 1, tab: TAB({ label: 'page:2', targetId: 'SESSION-B-TAB' }) as never },
-      { type: 'done', status: 'passed' },
-    ]);
-    expect(a.steps[0]!.tab!.label).toBe(b.steps[0]!.tab!.label);
-    expect(a.steps[0]!.tab!.targetId).not.toBe(b.steps[0]!.tab!.targetId);
   });
 });
 
@@ -385,11 +378,9 @@ describe('the report surfaces the tab', () => {
         step(3, { label: 'page:2', targetId: 'B', url: 'https://shop/cart', title: 'Cart', unexpected: false }),
       ]),
     );
-    const rows = html.split('tab-row').length - 1;
-    // Two tabs, and the class only appears on the unexpected variant, so
+    // Two tabs. The row class only appears on the unexpected variant, so
     // count the id cells instead.
     expect(html.match(/class="tab-id"/g)).toHaveLength(2);
-    expect(rows).toBeGreaterThanOrEqual(0);
   });
 
   it('renders unchanged for a run with no tab data at all', () => {

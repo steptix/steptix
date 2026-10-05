@@ -37,6 +37,10 @@ const ORIGIN = 'http://tabs.test';
 const ALPHA = `${ORIGIN}/alpha`;
 const BETA = `${ORIGIN}/beta`;
 const OPENER = `${ORIGIN}/opener`;
+/** A navigation the route refuses, as a dead host would — but without leaving
+ *  the routed origin, so the failure is immediate and nothing touches the
+ *  network. */
+const REFUSED = `${ORIGIN}/refused`;
 
 const BODIES: Record<string, string> = {
   '/alpha': '<title>Alpha</title><h1>alpha</h1>',
@@ -70,7 +74,9 @@ beforeEach(async () => {
   if (context) await context.close().catch(() => {});
   context = await browser.newContext();
   await context.route(`${ORIGIN}/**`, async (route) => {
-    const body = BODIES[new URL(route.request().url()).pathname];
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname === '/refused') return route.abort('connectionrefused');
+    const body = BODIES[pathname];
     if (body === undefined) return route.fulfill({ status: 404, body: 'not found' });
     return route.fulfill({ status: 200, contentType: 'text/html', body });
   });
@@ -123,10 +129,11 @@ describe('ctx.tabs — open', () => {
     const tracker = trackedContext();
     const tabs = makeTabApi(tracker);
 
-    await expect(tabs.open('http://127.0.0.1:1/nothing-here')).rejects.toThrow();
+    await expect(tabs.open(REFUSED)).rejects.toThrow(/ERR_CONNECTION_REFUSED/);
     // The failed tab must not be left open and active — the following steps
     // would run in a blank tab that looks like a page.
     expect(tracker.getActive()).toBe(mainPage);
+    expect(context.pages()).toEqual([mainPage]);
   });
 });
 
@@ -226,21 +233,38 @@ describe('ctx.browsers', () => {
    * active pointer, and navigating would only tie them to the routed origin
    * the tab tests set up on a different context.
    */
-  /** Browsers these tests launched, closed in `afterEach` — `browsers.close`
-   *  really closes the `Browser`, so sharing the suite-wide one would kill it
-   *  for every test that follows. */
-  const launchedHere: Browser[] = [];
-
+  /**
+   * A context on the suite-wide browser. Every test here but one only reads
+   * labels and the active pointer, which a context carries as well as a whole
+   * browser does — and a cold Chromium launch per session, two per test, is
+   * what made these slow under a loaded run.
+   */
+  const contextsHere: BrowserContext[] = [];
   async function session(engine = 'chromium', channel = 'chrome'): Promise<BrowserSession> {
+    const ctx = await browser.newContext();
+    contextsHere.push(ctx);
+    const page = await ctx.newPage();
+    return { browser, context: ctx, page, pageTracker: new PageTracker(page), engine, channel };
+  }
+
+  /** A browser of its own, for the session a test hands to `browsers.close` —
+   *  which really closes the `Browser`, so closing the suite-wide one would
+   *  kill it for every test that follows. Closed in `afterEach` as well, in
+   *  case the test fails before it gets that far. */
+  const launchedHere: Browser[] = [];
+  async function launchedSession(): Promise<BrowserSession> {
     const own = await chromium.launch({ headless: true });
     launchedHere.push(own);
     const ctx = await own.newContext();
     const page = await ctx.newPage();
-    return { browser: own, context: ctx, page, pageTracker: new PageTracker(page), engine, channel };
+    return { browser: own, context: ctx, page, pageTracker: new PageTracker(page), engine: 'chromium', channel: 'chrome' };
   }
 
   afterEach(async () => {
-    await Promise.all(launchedHere.splice(0).map((b) => b.close().catch(() => {})));
+    await Promise.all([
+      ...contextsHere.splice(0).map((c) => c.close().catch(() => {})),
+      ...launchedHere.splice(0).map((b) => b.close().catch(() => {})),
+    ]);
   });
 
   it('opens a browser, auto-promotes it, and returns its active page', async () => {
@@ -260,8 +284,6 @@ describe('ctx.browsers', () => {
     expect(page).toBe(tracker.getActivePage());
     expect(launched).toEqual([{ engine: 'firefox' }]);
     expect(browsers.list().map((b) => b.label)).toEqual(['default', 'worker']);
-
-
   });
 
   it('refuses a label that is already taken', async () => {
@@ -282,8 +304,6 @@ describe('ctx.browsers', () => {
     expect(back).toBe(initial.page);
     expect(browsers.activeLabel()).toBe('default');
     expect(browsers.list().find((b) => b.isActive)?.label).toBe('default');
-
-
   });
 
   it('names the known labels when asked for one that is not tracked', async () => {
@@ -293,10 +313,13 @@ describe('ctx.browsers', () => {
     await expect(browsers.switchTo('nope')).rejects.toThrow(/known: default/);
   });
 
+  // The one test that pays for a cold launch, and the budget says so: under a
+  // loaded run closing a Chromium alone can take tens of seconds.
   it('closes a browser and drops it from the list', async () => {
     const tracker = new BrowserTracker(await session());
-    const browsers = makeBrowserApi(tracker, () => session());
+    const browsers = makeBrowserApi(tracker, () => launchedSession());
     await browsers.open('worker');
+    const worker = launchedHere[0]!;
 
     await browsers.close('worker');
 
@@ -304,7 +327,8 @@ describe('ctx.browsers', () => {
     // active session, so there is no honest page to hand back. A step that
     // closes one asserts over `list()`.
     expect(browsers.list().map((b) => b.label)).toEqual(['default']);
-  });
+    expect(worker.isConnected()).toBe(false);
+  }, 60_000);
 });
 
 describe('the unavailable APIs', () => {

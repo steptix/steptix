@@ -105,8 +105,11 @@ function seedUserRoot(spec: { config?: Record<string, unknown>; env?: Record<str
   return root;
 }
 
-/** Directory symlinks need a junction on win32 and are outright unavailable
- *  in some sandboxes; a test that cannot create one has nothing to assert. */
+/** Directory symlinks need a junction on win32, FILE symlinks need admin or
+ *  Developer Mode there, and both are outright unavailable in some sandboxes.
+ *  A test that cannot create one has nothing to assert — so it calls
+ *  `ctx.skip()` on a false return, and reports skipped rather than passing
+ *  green about a security boundary it never touched. */
 function trySymlink(target: string, link: string, type: 'dir' | 'file'): boolean {
   try {
     symlinkSync(target, link, type === 'dir' && process.platform === 'win32' ? 'junction' : type);
@@ -204,12 +207,12 @@ describe('allowed roots (§4a)', () => {
     expect(text).toContain('outside every allowed root');
   });
 
-  it('refuses a symlink inside the root that points outside it', async () => {
+  it('refuses a symlink inside the root that points outside it', async (ctx) => {
     const parent = makeTmp();
     const root = seedProject(path.join(parent, 'proj'));
     const secrets = seedProject(path.join(parent, 'secrets'), { files: { 'x.md': '# x\n' } });
     process.env['STEPTIX_MCP_ROOTS'] = root;
-    if (!trySymlink(secrets, path.join(root, 'link'), 'dir')) return;
+    if (!trySymlink(secrets, path.join(root, 'link'), 'dir')) ctx.skip('cannot create a directory link here');
 
     const text = await refusalText(() =>
       resolveProject({ testFilePath: path.join(root, 'link', 'x.md') }),
@@ -595,13 +598,13 @@ describe('environment composition (§4)', () => {
     expect(text).toBe(`Environment file not found: ${path.join(root, '.env.uat')}`);
   });
 
-  it('refuses a .env.<name> symlinked outside the allowed roots', async () => {
+  it('refuses a .env.<name> symlinked outside the allowed roots', async (ctx) => {
     const parent = makeTmp();
     const root = seedProject(path.join(parent, 'proj'));
     const secrets = path.join(parent, 'secrets.env');
     writeFileSync(secrets, 'STOLEN=1\n');
     process.env['STEPTIX_MCP_ROOTS'] = root;
-    if (!trySymlink(secrets, path.join(root, '.env.uat'), 'file')) return;
+    if (!trySymlink(secrets, path.join(root, '.env.uat'), 'file')) ctx.skip('cannot create a file symlink here');
 
     const text = await refusalText(() => resolveProject({ projectRoot: root, envName: 'uat' }));
     expect(text).toContain('outside every allowed root');
@@ -793,28 +796,32 @@ describe('user root joins the allow-list for ADDRESSING only, never project file
     expect(() => resolveTestsGlob(project)).toThrow(PreflightFailure);
   });
 
-  it('a project skillsDir/toolsDir pointing into the user root is dropped, not loaded', async () => {
-    // resolveProjectDir confines against the configured roots and returns null
-    // for anything outside them — so a config aiming skills at the user root
-    // gets no skills directory rather than one that executes user-root code.
-    const parent = makeTmp();
-    const root = seedProject(path.join(parent, 'proj'), {
-      config: { tests: { skillsDir: '../../steptix-evil-skills' } },
-    });
-    // Even if such a directory exists, it is outside the configured root.
-    mkdirSync(path.join(parent, 'steptix-evil-skills'), { recursive: true });
-    process.env['STEPTIX_MCP_ROOTS'] = root;
+  it('a project skillsDir or toolsDir pointing into the user root is refused, not loaded', async () => {
+    // resolveProjectDir confines against the CONFIGURED roots before it looks
+    // for the directory — so a config aiming skills or tools at the user root,
+    // which `allowedRoots()` does list, is refused rather than handed a
+    // directory that executes user-root code. The directory exists, so it is
+    // the confinement that refuses it, not a missing path.
+    const target = path.join(testUserRoot(), 'skills');
+    mkdirSync(target, { recursive: true });
 
-    const text = await refusalText(() => resolveProject({ projectRoot: root }));
-    expect(text).toContain('outside every allowed root');
+    for (const key of ['skillsDir', 'toolsDir']) {
+      const root = seedProject(makeTmp(), { config: { tests: { [key]: target } } });
+      process.env['STEPTIX_MCP_ROOTS'] = root;
+
+      const text = await refusalText(() => resolveProject({ projectRoot: root }));
+      expect(text, key).toContain('outside every allowed root');
+    }
   });
 
-  it('a base .env symlinked into the user root is refused (machine-key exfil channel)', async () => {
+  it('a base .env symlinked into the user root is refused (machine-key exfil channel)', async (ctx) => {
     const root = seedProject(makeTmp(), { env: null });
     mkdirSync(testUserRoot(), { recursive: true });
     writeFileSync(path.join(testUserRoot(), '.env'), 'STEPTIX_SERVER_API_KEY=machine-secret\n');
     process.env['STEPTIX_MCP_ROOTS'] = root;
-    if (!trySymlink(path.join(testUserRoot(), '.env'), path.join(root, '.env'), 'file')) return;
+    if (!trySymlink(path.join(testUserRoot(), '.env'), path.join(root, '.env'), 'file')) {
+      ctx.skip('cannot create a file symlink here');
+    }
 
     const text = await refusalText(() => resolveProject({ projectRoot: root }));
     expect(text).toContain('outside every allowed root');

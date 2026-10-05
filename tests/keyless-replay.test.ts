@@ -19,7 +19,7 @@
  * env. The runner-side half of that wiring — where the flag comes FROM — is
  * `keyless-diagnosis.test.ts`.
  */
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,7 +44,16 @@ const KEYLESS_COPY =
   'Recompile or repair this step where AI is available.';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-keyless-replay');
+/**
+ * In-repo, because the compiled `.steps.ts` imports `steptix/codebehind` and
+ * package self-resolution needs a path under this checkout. Unique per run, so
+ * a killed run's leftovers are never read as this run's input, and two runs in
+ * one checkout cannot delete each other's files.
+ */
+let tmpBase: string;
+beforeAll(async () => {
+  tmpBase = await fs.mkdtemp(path.join(repoRoot, 'tests', '.tmp-keyless-replay-'));
+});
 
 let counter = 0;
 let dir: string;
@@ -56,7 +65,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  if (tmpBase) await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 async function write(rel: string, contents: string): Promise<string> {
@@ -226,6 +235,8 @@ describe('a keyless run of a compiled test', () => {
 
     const [first, failed, third] = results;
     expect(failed!.status).toBe('failed');
+    // No `keylessReason` given: the machine-has-no-AI copy is the default,
+    // which keeps the policy variant below additive.
     expect(failed!.error).toBe(KEYLESS_COPY);
     expect(KEYLESS_HEAL_SKIPPED_ERROR).toBe(KEYLESS_COPY);
     // No `invalid_api_key` anywhere near it — the point of the proactive skip.
@@ -292,20 +303,6 @@ describe('a keyless run of a compiled test', () => {
     });
     expect(failed.codeBehindStale).toBeUndefined();
     expect(attempts).toEqual([]);
-  });
-
-  it('keeps the machine-has-no-AI copy when no reason is given', async () => {
-    // The default, asserted beside the variant above: an absent `keylessReason`
-    // is exactly today's behaviour, which is what makes the new flag additive.
-    const md = await write('transfers.md', TEST_MD);
-    await write('transfers.steps.ts', stepsFile('throws'));
-
-    const { steps, registry } = await registryFor(md);
-    const { client } = forbiddenClient();
-    const { results } = await runAll(steps, registry, client, { keyless: true });
-
-    expect(results[1]!.error).toBe(KEYLESS_HEAL_SKIPPED_ERROR);
-    expect(POLICY_HEAL_SKIPPED_ERROR).not.toBe(KEYLESS_HEAL_SKIPPED_ERROR);
   });
 
   it('names the underlying entry failure in the explanation, not in the error', async () => {

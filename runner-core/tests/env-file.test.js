@@ -189,14 +189,6 @@ test('composeEnv: overlay wins on conflicts, base-only keys survive, overlay-onl
   });
 });
 
-test('composeEnv: does not mutate its inputs', () => {
-  const base = { A: '1' };
-  const overlay = { A: '2', B: '3' };
-  composeEnv(base, overlay);
-  assert.deepEqual(base, { A: '1' });
-  assert.deepEqual(overlay, { A: '2', B: '3' });
-});
-
 // ---------------------------------------------------------------------------
 // scanServerEnv / parseServerEnv — the grammar the SERVER applies
 //

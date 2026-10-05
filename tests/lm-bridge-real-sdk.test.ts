@@ -27,6 +27,7 @@ import { AIGateway } from '@pkent/aigateway';
 import {
   chatCompletionBody,
   streamFrames,
+  translateRequest,
 } from '../steptix-vscode/src/extension/lm-bridge-core.js';
 
 /** What the bridge would answer with, for a fixed reply. */
@@ -139,9 +140,10 @@ describe('the bridge answers the real client stack', () => {
   });
 
   it('carries an effort profile through without the bridge having to know it', async () => {
-    // `retry`/`authoring` send `reasoning_effort`. The bridge drops it silently;
-    // this pins that it is a field the SDK really does send, so "drop silently"
-    // stays a rule about something that happens.
+    // `retry`/`authoring` send `reasoning_effort`, and the bridge drops it
+    // silently. The real request, as the SDK put it on the wire, through the
+    // bridge's own translation: accepted, and read exactly as if the field were
+    // not there — neither refused nor smuggled into the prompt.
     const before = seen.length;
     await gateway().chat([{ role: 'user', content: 'Repair step 2.' }], {
       maxTokens: 8192,
@@ -149,6 +151,13 @@ describe('the bridge answers the real client stack', () => {
       responseFormat: { type: 'json_object' },
     });
 
-    expect(seen[before]!.body['reasoning_effort']).toBe('medium');
+    const body = seen[before]!.body;
+    // The precondition, so "drop silently" stays a rule about something that
+    // happens: the SDK really does send the field.
+    expect(body['reasoning_effort']).toBe('medium');
+    const { reasoning_effort: _dropped, ...without } = body;
+    const translated = translateRequest(body);
+    expect(translated.ok).toBe(true);
+    expect(translated).toEqual(translateRequest(without));
   });
 });

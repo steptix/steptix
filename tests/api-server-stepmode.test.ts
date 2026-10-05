@@ -842,15 +842,21 @@ type: skill
     expect(scope.token).toBe('sk-supersecret');
   });
 
-  it('stepMode=over skips a [skill: ...] body atomically', async () => {
-    // Phase 3.1.e — covers the "Step Over a skill" end-to-end path that
-    // wasn't exercised in Phase 3. Three inline steps with the middle
-    // one being [skill: demo_skill] which expands to 2 body steps. With
-    // mode='over' the server should pause AFTER step 1 (next is the
-    // first skill body at depth 1 → don't pause yet... actually that's
-    // 'over' = pause when nextDepth ≤ curDepth, and curDepth here is 0
-    // so the SKILL body executes atomically. The next pause is when
-    // we're back to depth 0 — i.e., after the skill body finishes.
+  it('stepMode=over from the root pauses inside the skill, then back at depth 0', async () => {
+    // Phase 3.1.e — the "Step Over a skill" end-to-end path. Three inline
+    // steps, the middle one `[skill: demo_skill]`, which expands to two body
+    // steps on skill-file lines 7 and 8. `over` pauses when the next step's
+    // depth is <= the CURRENT step's depth:
+    //
+    //   step 1 (depth 0) → next is body #1 (depth 1): 1 > 0, no pause.
+    //   body #1 (depth 1) → next is body #2 (depth 1): PAUSE, naming line 8.
+    //     Inside the skill — once the run IS at depth 1, `over` steps one
+    //     statement of that frame, which is debugger-correct.
+    //   body #2 (depth 1) → next is step 3 (depth 0): PAUSE, naming line 3.
+    //   step 3 is the last step: no pause.
+    //
+    // So the pauses are exactly [8, 3]. `into` would give [7, 8, 3] and `out`
+    // fewer still, which is what makes this test about `over`.
     const sessionId = 'stepmode-over-skill-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
     const events: any[] = [];
@@ -872,31 +878,11 @@ type: skill
     })();
     await consume;
 
-    // Three step:awaiting pauses total: one after step 1 (about to enter
-    // skill), one after the skill body completes (about to run step 3),
-    // and none after step 3 (last step). Wait — let's compute carefully:
-    //
-    //   step 1 (depth 0, inline): pass. nextDepth = 1 (skill body).
-    //     'over': 1 > 0 → DON'T pause.
-    //   step 2 (skill body #1, depth 1): pass. nextDepth = 1.
-    //     'over': 1 ≤ 1 → PAUSE. ⚠ This pauses INSIDE the skill body —
-    //     because once the user IS at depth 1, 'over' is interpreted in
-    //     the now-deeper frame. That's debugger-correct: 'over' steps
-    //     one statement of the current frame.
-    //
-    // So the user would hit pause inside the skill body. Subsequent
-    // 'over' commands step through the rest of the skill body, then
-    // back to depth 0. Total step:awaiting: depends on number of
-    // skill-body steps. demo_skill has 2 body steps, so 1 pause inside
-    // (between body steps), 1 pause back at depth 0 (before step 3).
-    const awaitingCount = events.filter((e) => e.type === 'step:awaiting').length;
-    expect(awaitingCount).toBeGreaterThan(0);
-
-    // The frame:push / frame:pop pair MUST surround the skill body in
-    // the trace, regardless of how step:awaitings interleave.
-    const types = events.map((e) => e.type);
-    expect(types.indexOf('frame:push')).toBeGreaterThan(-1);
-    expect(types.indexOf('frame:pop')).toBeGreaterThan(types.indexOf('frame:push'));
+    const awaiting = events.filter((e) => e.type === 'step:awaiting');
+    expect(awaiting.map((e) => e.line)).toEqual([8, 3]);
+    // The first pause names a line of the SKILL file, so it carries the
+    // skill's frame; the second is back in the test's own flow.
+    expect(awaiting[0].frame?.skillName).toBe('demo_skill');
 
     // Total step:pass count: 1 (step 1 inline) + 2 (skill body) + 1
     // (step 3 inline) = 4. The skill INVOCATION line (step 2) doesn't
@@ -1452,30 +1438,11 @@ type: skill
     if (defaultImpl) exec.mockImplementation(defaultImpl);
   });
 
-  it('breakpointsByUri entries keyed at testFilePath are ignored (client trims those)', async () => {
-    // The fix's contract: the server skips testFilePath entries from
-    // the map because the client's client-side trimAtBreakpoint
-    // already prevents the server from reaching those lines. If the
-    // server ALSO honored them, we'd double-trigger on resume.
-    const sessionId = 'skill-bp-testfile-skipped-' + Date.now();
-    const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
-    const events: any[] = [];
-
-    for await (const ev of sseEvents(url, {
-      steps: ['Open the page', 'Verify result'],
-      sourceLines: [1, 2],
-      testFilePath,
-      // Try to trigger a server-side pause on line 1 of the TEST file.
-      // The server must ignore this (testFilePath entries are filtered).
-      breakpointsByUri: { [testFilePath]: [1] },
-    })) {
-      events.push(ev);
-      if (ev.type === 'done') break;
-    }
-
-    const awaiting = events.filter((e) => e.type === 'step:awaiting');
-    expect(awaiting).toHaveLength(0);
-  });
+  // A test-file breakpoint on a MAIN-FLOW line is the client's to honour (it
+  // trims the batch there), so the server must not pause on it as well. That
+  // is pinned by api-server-sections.test.ts "does NOT pause on a main-flow
+  // line", whose request expands — a request that does not never reaches the
+  // breakpoint check at all, so it cannot tell the rule from its absence.
 
   it('aborts cleanly when a [skill:] invocation has a syntax error', async () => {
     // A malformed skill call (unterminated quoted argument) must not crash

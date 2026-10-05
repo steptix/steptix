@@ -29,7 +29,12 @@ const judge = vi.hoisted(() => ({
   answers: [] as Array<number | null>,
   evidence: { dom: '<main>Page 4 of 4 <button disabled>Next</button></main>', url: 'https://app.test/list?page=4' },
 }));
-const settle = vi.hoisted(() => ({ calls: 0 }));
+const settle = vi.hoisted(() => ({
+  calls: 0,
+  /** `'settle'` per settle, in sequence with whatever a test's own condition
+   *  entries push — so a test can say the settle came FIRST, not just once. */
+  order: [] as string[],
+}));
 
 vi.mock('../src/runner/step-executor.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/runner/step-executor.js')>()),
@@ -45,6 +50,7 @@ vi.mock('../src/runner/step-executor.js', async (importOriginal) => ({
   }),
   settleBeforeConditions: vi.fn(async () => {
     settle.calls++;
+    settle.order.push('settle');
   }),
 }));
 
@@ -203,6 +209,7 @@ beforeEach(() => {
   judge.calls.length = 0;
   judge.answers = [];
   settle.calls = 0;
+  settle.order = [];
   warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
   vi.spyOn(logger, 'error').mockImplementation(() => {});
 });
@@ -428,19 +435,23 @@ describe('a chain decided by code', () => {
   });
 
   it('settles the page once, right before the first entry runs', async () => {
-    const a = scripted(false);
-    const b = scripted(true);
-    const ev = await visit({
+    // A condition is a question about the page once it has stopped moving —
+    // the same gate the model gets. Settling after the first entry had read
+    // the page would still count one settle, so the order is what is checked.
+    const answering = (name: string, holds: boolean) => async () => {
+      settle.order.push(name);
+      return holds;
+    };
+    await visit({
       controls: CHAIN,
       state: createControlState(),
       codeBehind: registry({
-        0: binding('a', { condition: a.condition }),
-        2: binding('b', { condition: b.condition }),
-        4: binding('c', { condition: scripted(true).condition }),
+        0: binding('a', { condition: answering('a', false) }),
+        2: binding('b', { condition: answering('b', true) }),
+        4: binding('c', { condition: answering('c', true) }),
       }),
     });
-    expect(ev.guard).toEqual({ decidedBy: 'code', selected: 2 });
-    expect(settle.calls).toBe(1);
+    expect(settle.order).toEqual(['settle', 'a', 'b']);
   });
 });
 
@@ -549,6 +560,9 @@ describe('a condition entry that fails for real', () => {
     expect(ev.guard).toEqual({ decidedBy: 'code', failedMember: 0 });
     expect(judge.calls).toEqual([]);
     expect(w.entry).toBeDefined();
+    // An assertion that did not hold is not the author's deliberate failure —
+    // only step.fail is (below).
+    expect(ev.deliberate).toBeUndefined();
   });
 
   it('fails the guard on step.fail, in the author\'s words', async () => {
@@ -568,14 +582,6 @@ describe('a condition entry that fails for real', () => {
       ...guardCodeBehindFields(ev),
     });
     expect(row.deliberate).toBe(true);
-  });
-
-  it('does not mark a step.expect failure deliberate', async () => {
-    const w = binding('w', {
-      condition: async ({ step }) => { step.expect(false, 'the list never loaded'); return true; },
-    });
-    const ev = await visit({ controls: whileControls(), state: createControlState(), codeBehind: registry({ 0: w }) });
-    expect(ev.deliberate).toBeUndefined();
   });
 
   it('treats a failure while the run is being stopped as a stop: no stale, no failure', async () => {

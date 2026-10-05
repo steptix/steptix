@@ -65,6 +65,12 @@ export function clearDetectionCache(): void {
   cachedDetection = null;
 }
 
+/** What the module cache holds — tests only, to see that a call with injected
+ *  deps never writes its fake answer where a real caller would read it. */
+export function __testCachedDetection(): InstalledBinaries | null {
+  return cachedDetection;
+}
+
 export function detectInstalled(deps?: LauncherDeps): InstalledBinaries {
   const hasOverrides = deps !== undefined && Object.keys(deps).length > 0;
   if (!hasOverrides && cachedDetection) {

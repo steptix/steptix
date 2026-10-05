@@ -809,10 +809,22 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-/** Wait until a spy has been called `n` times, without guessing at timing. */
+/**
+ * Wait until a spy has been called `n` times, without guessing at timing.
+ *
+ * Between two looks the other attempt may have to scan the shared Chromium
+ * page, which this suite and the other browser suites starve each other of in
+ * a parallel run, so any fixed count of looks is a guess at how long that
+ * takes. The ceiling is therefore as generous as the test's own timeout
+ * allows: just short of it, so a call that never comes fails here, named,
+ * and the poll stops rather than outliving the test.
+ * Each look is a macrotask apart, so whatever the n-th call does synchronously
+ * and in its microtasks has run by the time this returns.
+ */
 async function calledTimes(spy: ReturnType<typeof vi.fn>, n: number): Promise<void> {
-  for (let i = 0; i < 500 && spy.mock.calls.length < n; i++) await new Promise((r) => setTimeout(r, 10));
-  expect(spy.mock.calls.length).toBeGreaterThanOrEqual(n);
+  const deadline = Date.now() + BROWSER_TEST_TIMEOUT_MS - 5_000;
+  while (spy.mock.calls.length < n && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+  expect(spy.mock.calls.length, `calls seen after waiting for ${n}`).toBeGreaterThanOrEqual(n);
 }
 
 /**

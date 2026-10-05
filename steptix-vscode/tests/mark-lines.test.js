@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
-  shiftMarkLine,
   markLineMoves,
   moveLineKeyed,
 } from '../src/extension/mark-lines-core.ts';
@@ -271,7 +270,6 @@ test('two touching selections deleted together join a step onto an UNMARKED line
   // line. Step 1 has no mark here (a Run Selected of steps 2–3), so nothing
   // else was going to stop step 3's ✗ and hover landing on step 1.
   const changes = [change(8, 0, 9, 0, ''), change(7, 5, 8, 0, '')];
-  assert.equal(shiftMarkLine(9, changes, () => 0), null);
   assert.deepEqual(after(changes, { marks: [9, 10] }).text, { 9: null, 10: null });
   // With step 1 marked it keeps its own mark.
   assert.deepEqual(after(changes).text, { 8: `1. Na${STEP_3}`, 9: null, 10: null });

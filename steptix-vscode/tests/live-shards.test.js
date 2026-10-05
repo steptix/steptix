@@ -6,7 +6,7 @@
 // for the wrong reason, and a pool that hands two items to one worker just
 // looks like a slow afternoon. Everything here is pure or filesystem-only —
 // no VS Code, no server, no browser.
-import { test } from "node:test";
+import { test, after } from "node:test";
 import { strict as assert } from "node:assert";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -23,9 +23,18 @@ const {
   sharedServerStatsWarning,
 } = require("../tests/integration/liveShards.cjs");
 
+/** A fresh temp dir, removed when the file is done. `maxRetries`: on Windows
+ *  antivirus or the indexer can still hold a file written moments ago, and
+ *  `force` does not cover EBUSY/EPERM. */
+const made = [];
 function tmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "live-shards-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "live-shards-"));
+  made.push(dir);
+  return dir;
 }
+after(() => {
+  for (const dir of made) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+});
 
 function write(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });

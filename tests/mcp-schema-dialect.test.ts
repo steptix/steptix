@@ -57,25 +57,9 @@ describe('tool schemas as they go out on the wire', () => {
     const tools = await listToolsOverTheWire();
 
     // Guards the guard: an empty list would make every assertion below vacuous.
-    expect(tools.map((t) => t.name).sort()).toEqual([
-      'close_cdp_tab',
-      'close_session',
-      'focus_cdp_tab',
-      'get_last_run',
-      'get_page_content',
-      'get_run_settings',
-      'list_cdp_browsers',
-      'list_sessions',
-      'list_test_files',
-      'log_into_site',
-      'navigate_tab',
-      'peek_tab',
-      'run_errand',
-      'run_steps',
-      'run_test_file',
-      'server_status',
-      'start_cdp_browser',
-    ]);
+    // Not the exact names — mcp-seam.test.ts pins the registered set, and a
+    // third copy here made every new tool a three-file edit for no coverage.
+    expect(tools.length).toBeGreaterThan(0);
 
     for (const tool of tools) {
       // `in`, not `=== undefined`. The gate we care about is `"$schema" in

@@ -66,19 +66,16 @@ function runWithProbe(args: string[]): Promise<ProbeResult> {
 const built = existsSync(distEntry);
 
 describe.skipIf(!built)('steptix mcp module graph (dist)', () => {
-  it('loads no browser stack, and exits when stdin closes', async () => {
+  it('loads no browser stack, writes nothing to stdout, and exits when stdin closes', async () => {
+    // One process for all three: each claim is about the same plain `mcp`
+    // start, and every spawn is a real cold start.
     const result = await runWithProbe(['mcp']);
 
     expect(result.browsery).toBe(0);
-    expect(result.code).toBe(0);
-  }, 60_000);
-
-  it('writes nothing to stdout that is not protocol', async () => {
     // With no client speaking to it, a correct server emits zero bytes. Any
     // banner, spinner or log line here would corrupt the first real frame.
-    const result = await runWithProbe(['mcp']);
-
     expect(result.stdout).toBe('');
+    expect(result.code).toBe(0);
   }, 60_000);
 
   it('prints usage on stderr for --help without starting a server', async () => {

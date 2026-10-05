@@ -1,4 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { parseTestContent, parseTestFile, scanStepSpans } from '../src/parser/markdown.js';
 
@@ -107,7 +109,7 @@ describe('items under a depth-≥4 heading never run', () => {
     expect(cleanup?.steps).toEqual(['Sign out']);
   });
 
-  it('leaves a depth-≥4 heading with no items beneath it exactly as it was', () => {
+  it('a #### heading followed by prose still makes later items inert', () => {
     const text = [
       '---', 'type: test', '---', '',
       '# Harmless', '',
@@ -155,10 +157,15 @@ describe('items under a depth-≥4 heading never run', () => {
  * executes — which is how both absorption cases were found in the first place.
  */
 describe('what a run would execute', () => {
+  let dir: string;
+  beforeAll(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'inert-'));
+  });
+  afterAll(async () => {
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+
   const write = async (name: string, text: string): Promise<string> => {
-    const fs = await import('node:fs/promises');
-    const os = await import('node:os');
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'inert-'));
     const file = path.join(dir, name);
     await fs.writeFile(file, text, 'utf-8');
     return file;

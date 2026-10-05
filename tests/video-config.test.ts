@@ -39,7 +39,10 @@ describe('browser.video — loader tri-state + boolean sugar', () => {
   }
 
   it("defaults to 'off' when unspecified", async () => {
-    const config = await loadConfig();
+    // A project folder with no config file in it. With no arguments the loader
+    // reads the cwd's — the repo's own steptix.config.json — so the answer
+    // would depend on what a developer last set there.
+    const config = await loadConfig(undefined, tmpDir);
     expect(config.browser.video).toBe('off');
   });
 

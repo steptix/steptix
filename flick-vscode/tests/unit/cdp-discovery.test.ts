@@ -83,12 +83,18 @@ test('two ports respond, one is unreachable; tabs filtered to page-type non-devt
 });
 
 test('ports queried in parallel', async () => {
-  const startTimestamps: number[] = [];
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  // Concurrency, counted rather than timed: a fetch is in flight from its call
+  // until its answer. Probing the ports one after another never has more than
+  // one; probing them together has all three /json/version calls out at once
+  // (each port's /json/list is sequenced after its own /json/version).
+  let inFlight = 0;
+  let maxInFlight = 0;
   const fetchFn: FetchFn = (async (input: RequestInfo | URL) => {
-    startTimestamps.push(Date.now());
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
     const url = typeof input === 'string' ? input : input.toString();
-    await sleep(50);
+    await new Promise((r) => setImmediate(r));
+    inFlight--;
     const body = url.includes('/json/version')
       ? { Browser: 'Chrome/120.0.0.0' }
       : [];
@@ -101,12 +107,7 @@ test('ports queried in parallel', async () => {
 
   await discoverCdpPorts([9222, 9223, 9229], { fetchFn });
 
-  // Only the *first* fetch per port runs in parallel — the /json/list call
-  // is sequenced after /json/version on each port — so check just the first
-  // three timestamps. Their spread is the parallelism signal.
-  const firstThree = startTimestamps.slice(0, 3);
-  const spread = Math.max(...firstThree) - Math.min(...firstThree);
-  assert.ok(spread < 20, `expected parallel start (spread < 20ms), got ${spread}ms`);
+  assert.equal(maxInFlight, 3, 'all three ports should be probed at once');
 });
 
 test('reachable but no pages → engine classified, tabs: [], no error', async () => {
@@ -122,7 +123,7 @@ test('reachable but no pages → engine classified, tabs: [], no error', async (
 });
 
 test('engine classification by Browser-field prefix', async () => {
-  const cases: Array<{ browser: string; expected: string }> = [
+  const cases: Array<{ browser: unknown; expected: string }> = [
     { browser: 'Chrome/120.0.6099.130', expected: 'chrome' },
     // The string a real Edge actually sends. Measured against Edge
     // 151.0.4129.78; the table used to carry only the `Edge/` spelling below,
@@ -133,6 +134,8 @@ test('engine classification by Browser-field prefix', async () => {
     { browser: 'Chromium/118.0.5993.117', expected: 'chromium' },
     { browser: 'HeadlessChrome/120.0.6099.0', expected: 'chrome' },
     { browser: 'SomeOtherBrowser/1.0', expected: 'unknown' },
+    // No Browser field at all: classified from '' rather than throwing.
+    { browser: undefined, expected: 'unknown' },
   ];
   for (const { browser, expected } of cases) {
     const fetchFn = mockFetch({
@@ -188,15 +191,5 @@ test('Node.js inspector → engine "node", reachable, so the dropdown can hide i
   assert.equal(r.engine, 'node');
   assert.equal(r.reachable, true);
   // type: 'node' targets are filtered out (not pages), so tabs is empty.
-  assert.deepEqual(r.tabs, []);
-});
-
-test('empty Browser field → engine "unknown"', async () => {
-  const fetchFn = mockFetch({
-    '/json/version': () => ({ json: { Browser: '' } }),
-    '/json/list': () => ({ json: [] }),
-  });
-  const [r] = await discoverCdpPorts([9222], { fetchFn });
-  assert.equal(r.engine, 'unknown');
   assert.deepEqual(r.tabs, []);
 });

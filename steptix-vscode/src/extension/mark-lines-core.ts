@@ -254,7 +254,16 @@ function rewriteTail(
   return postEditLineLength(tailLine) > rewrite.lastLength ? tailLine : start;
 }
 
-/** `shiftMarkLine` over measured spans, with the move already recognised. */
+/**
+ * The new 0-based line of a mark on 0-based `line`, or null when the event
+ * removed the line — over the event's measured spans, with any move already
+ * recognised.
+ *
+ * Every change is classified against the ORIGINAL `line`, never against a
+ * running result, for the reason `shiftAnchorForChanges` gives: one event's
+ * changes are simultaneous, and folding them one at a time mixes pre- and
+ * post-edit coordinates.
+ */
 function shiftSpans(
   line: number,
   spans: ReadonlyArray<Span>,
@@ -287,24 +296,6 @@ function shiftSpans(
   return rewrite !== null && rewrite.added > 0
     ? rewriteTail(start, rewrite, postEditLineLength)
     : start;
-}
-
-/**
- * The new 0-based line of a mark on 0-based `line`, or null when the event
- * removed the line.
- *
- * Every change is classified against the ORIGINAL `line`, never against a
- * running result, for the reason `shiftAnchorForChanges` gives: one event's
- * changes are simultaneous, and folding them one at a time mixes pre- and
- * post-edit coordinates.
- */
-export function shiftMarkLine(
-  line: number,
-  changes: ReadonlyArray<MarkChange>,
-  postEditLineLength: PostEditLineLength,
-): number | null {
-  const spans = spansOf(changes);
-  return shiftSpans(line, spans, linesMovedPast(spans, postEditLineLength), postEditLineLength);
 }
 
 /**

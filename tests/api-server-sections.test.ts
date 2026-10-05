@@ -247,6 +247,21 @@ beforeAll(async () => {
       '',
     ].join('\n'),
   );
+  // A skill that calls a section of its own — skill-private, so never the
+  // `sourceSection` tag of the steps inside it.
+  await fs.writeFile(
+    path.join(skillsDir, 'tidy.md'),
+    [
+      '---', 'type: skill', '---', '# tidy', '',
+      '## Steps',
+      '1. Tidy start',
+      '2. Clear the basket',
+      '',
+      '### Clear the basket',
+      '1. Empty the basket',
+      '',
+    ].join('\n'),
+  );
   // A skill that defines AND calls a section named `__proto__` — a legal
   // name that an object literal silently swallows.
   await fs.writeFile(
@@ -431,23 +446,18 @@ describe('sections reach the expander through the HTTP layer', () => {
   it('an empty sections map behaves exactly as absent', async () => {
     // `{}` is truthy in JS. If any gate checked `request.sections` directly,
     // this run would take the expansion path instead of the legacy one —
-    // a behaviour change for every existing sectionless client.
-    executedSteps.length = 0;
-    const res = await postSteps({
-      steps: ['Just this'],
-      sourceLines: [3],
-      testFilePath,
-      sections: {},
-    });
-    expect(res.status).toBe(200);
-    expect(executedSteps).toEqual(['Just this']);
-  });
+    // a behaviour change for every existing sectionless client. The absent
+    // run is the control, sent the same way.
+    const body = { steps: ['Just this'], sourceLines: [3], testFilePath };
+    const outcome = async (extra: Record<string, unknown>) => {
+      executedSteps.length = 0;
+      const res = await postSteps({ ...body, ...extra });
+      return { status: res.status, executed: [...executedSteps] };
+    };
 
-  it('omitting sections entirely still works', async () => {
-    executedSteps.length = 0;
-    const res = await postSteps({ steps: ['Just this'], sourceLines: [3], testFilePath });
-    expect(res.status).toBe(200);
-    expect(executedSteps).toEqual(['Just this']);
+    const absent = await outcome({});
+    expect(absent).toEqual({ status: 200, executed: ['Just this'] });
+    expect(await outcome({ sections: {} })).toEqual(absent);
   });
 });
 
@@ -980,16 +990,16 @@ describe('sourceSection attribution', () => {
   it('tags body steps with the outermost section, and skips skill-private ones', async () => {
     generatedReports.length = 0;
     const res = await postSteps({
-      steps: ['Open the shop', 'Do the thing'],
-      sourceLines: [3, 4],
+      steps: ['Open the shop', '[skill: tidy]', 'Do the thing'],
+      sourceLines: [3, 4, 5],
       testFilePath,
       skillsDir,
       sections: {
         'do the thing': {
           name: 'Do the thing',
-          headingLine: 6,
-          steps: ['[skill: wave]'],
-          stepLines: [7],
+          headingLine: 7,
+          steps: ['[skill: wave]', '[skill: tidy]'],
+          stepLines: [8, 9],
         },
       },
     });
@@ -1010,6 +1020,16 @@ describe('sourceSection attribution', () => {
     const inner = byInstruction.get('Wave hello');
     expect(inner?.sourceSection).toBe('Do the thing');
     expect(inner?.sourceSkill).toBe('wave');
+
+    // `tidy`'s own `### Clear the basket` is skill-private, so it is never the
+    // tag. Called from the root flow, its body step has no section at all;
+    // called from `Do the thing` (test → section → skill → section), it
+    // reports the TEST's section, the outermost one outside any skill.
+    const tidied = (report.steps ?? []).filter((s: any) => s.instruction === 'Empty the basket');
+    expect(tidied.map((s: any) => [s.sourceSection, s.sourceSkill])).toEqual([
+      [undefined, 'tidy'],
+      ['Do the thing', 'tidy'],
+    ]);
   });
 });
 

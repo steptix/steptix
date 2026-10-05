@@ -115,17 +115,6 @@ describe('step prompt — readTable rule', () => {
     const clause = 'ROW IDS.';
     expect(prompt.indexOf(clause)).toBeLessThan(prompt.indexOf('13d. READING A TABLE'));
     expect(prompt.indexOf('8a. PLACEHOLDERS')).toBeLessThan(prompt.indexOf(clause));
-    const blocks = buildSystemPrompt('');
-    const rules = blocks.find((b) => b.type === 'text' && b.text.includes(clause));
-    expect(rules, 'the row-id clause should live in the rules block').toBeDefined();
-    expect(rules && 'cache' in rules ? rules.cache : false).toBe(true);
-  });
-
-  it('keeps the SPLIT GRIDS clause inside the cacheable rules block', () => {
-    const blocks = buildSystemPrompt('');
-    const rules = blocks.find((b) => b.type === 'text' && b.text.includes('SPLIT GRIDS.'));
-    expect(rules, 'the split-grid clause should live in the rules block').toBeDefined();
-    expect(rules && 'cache' in rules ? rules.cache : false).toBe(true);
   });
 
   it('carries the bounded-window example and its limit restrictions', () => {
@@ -159,6 +148,9 @@ describe('step prompt — readTable rule', () => {
     expect(prompt).toMatch(/checkbox's ticked state, an input's value or an attribute is not supported yet/);
   });
 
+  // The one cache check this file keeps: ROW IDS, SPLIT GRIDS and 13d are all
+  // in the single rules template (prompts.ts), whose block prompts-cache.test.ts
+  // pins as cacheable, so a check per clause would find the same block again.
   it('keeps the rule inside the cacheable rules block, beside the read rules', () => {
     const blocks = buildSystemPrompt('');
     const rules = blocks.find(

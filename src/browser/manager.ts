@@ -1819,12 +1819,11 @@ export interface FinalizeMainPageVideoArgs {
  *   2. Close the context/browser(s) — this finalises the .webm (random-hash
  *      name) inside `videoDir`.
  *   3. No video handle → nothing was recorded → return undefined.
- *   4. `retain-on-failure` + passed → delete the .webm and return undefined
- *      (deleting BEFORE any saveAs avoids leaking a copy).
- *   5. Otherwise `saveAs` to the stable name (waits for finalisation; works
- *      cross-device; unlike `path()` it does not throw under remote/CDP — though
- *      CDP never records), then delete the original hash-named file so `videos/`
- *      holds one file per kept run.
+ *   4. `retain-on-failure` + passed → delete the .webm and return undefined.
+ *   5. Otherwise rename the hash-named file to the stable name in the same
+ *      directory, so `videos/` holds one file per kept run. (A filesystem
+ *      rename, not `video.saveAs()`: that needs the browser connection step 2
+ *      closed.) On Windows both 4 and 5 wait out a moment's hold on the file.
  *
  * Returns the ABSOLUTE saved path, or undefined when nothing was kept. Every
  * failure is non-fatal (logged) — recording must never break a run, mirroring
@@ -1858,10 +1857,11 @@ export async function finalizeMainPageVideo(
   await args.closeContext();
 
   if (!video || !sourcePath) return undefined;
+  const source = sourcePath;
 
   // retain-on-failure on a PASSING run: drop the recording, no report link.
   if (args.mode === 'retain-on-failure' && args.passed) {
-    await fs.rm(sourcePath, { force: true }).catch(() => { /* non-fatal */ });
+    await whileVideoHeld(() => fs.rm(source, { force: true })).catch(() => { /* non-fatal */ });
     return undefined;
   }
 
@@ -1870,11 +1870,33 @@ export async function finalizeMainPageVideo(
     // Rename the finalised hash-named file to the stable, report-matching name.
     // A filesystem rename works after the browser is closed; video.saveAs() does
     // not.
-    await fs.rename(sourcePath, target);
+    await whileVideoHeld(() => fs.rename(source, target));
     return target;
   } catch (err) {
     logger.warn(`Failed to save session video to ${target}: ${String(err)}`);
     return undefined;
+  }
+}
+
+/** The codes Windows answers with while another process — Playwright's ffmpeg
+ *  still exiting, a virus scanner reading the new file — has a just-closed
+ *  .webm open. */
+const VIDEO_HELD = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+/** A rename or delete of the finalised .webm. Windows refuses both while
+ *  another process has the file open — usually for a moment — so a refusal
+ *  there is tried again for up to two seconds before it counts. Elsewhere an
+ *  open file can be renamed or unlinked, so a refusal is a real one. */
+async function whileVideoHeld(op: () => Promise<void>): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await op();
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? '';
+      if (process.platform !== 'win32' || !VIDEO_HELD.has(code) || attempt >= 20) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
   }
 }
 

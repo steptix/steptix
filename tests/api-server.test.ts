@@ -325,6 +325,42 @@ describe('API Server', () => {
       const { status } = await api('GET', '/sessions');
       expect(status).toBe(200);
     });
+
+    it('every route except /health answers 401 without a key', async () => {
+      // Auth is one `app.use` registered after /health and before every other
+      // route, so registration ORDER is the whole guarantee: a route added
+      // above it is public, and nothing else would say so. Walked off the
+      // app's own router rather than listed here, so a route added later is
+      // covered without anyone remembering to write it a 401 test.
+      const { app } = createApiServer(testConfig);
+      type Layer = { route?: { path: string; methods: Record<string, boolean> } };
+      const routes = (app as unknown as { router: { stack: Layer[] } }).router.stack.flatMap(
+        (layer) =>
+          layer.route
+            ? Object.keys(layer.route.methods).map((method) => ({ method, path: layer.route!.path }))
+            : [],
+      );
+      // The walk found the real table — the open route among them — rather
+      // than nothing, which every assertion below would pass for.
+      expect(routes).toContainEqual({ method: 'get', path: '/health' });
+      expect(routes.length).toBeGreaterThan(20);
+
+      const local = await listenOnRandomPort(app);
+      try {
+        for (const { method, path: route } of routes) {
+          if (route === '/health') continue;
+          const url = route.replace(/:port\b/g, '51000').replace(/:\w+/g, 'x');
+          const res = await fetch(`${local.baseUrl}${url}`, {
+            method: method.toUpperCase(),
+            headers: { 'Content-Type': 'application/json' },
+            ...(method === 'get' ? {} : { body: '{}' }),
+          });
+          expect(res.status, `${method.toUpperCase()} ${route}`).toBe(401);
+        }
+      } finally {
+        await closeServer(local.server);
+      }
+    });
   });
 
   describe('POST /sessions/:id/steps', () => {
@@ -389,6 +425,10 @@ describe('API Server', () => {
 
         expect(status).toBe(200);
         expect(body.status).toBe('passed');
+        // What the executor was handed. The mocked step passes whatever it
+        // gets, so a 200 alone holds just as well for a literal `${data.url}`
+        // that was never resolved.
+        expect(vi.mocked(executeStepMock).mock.calls.at(-1)![2]).toBe('Navigate to https://example.test/');
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
@@ -429,6 +469,7 @@ describe('API Server', () => {
         });
         expect(ok.status).toBe(200);
         expect(ok.body.status).toBe('passed');
+        expect(vi.mocked(executeStepMock).mock.calls.at(-1)![2]).toBe('Go to https://cat.test/');
 
         // Missing key → interpolation throws (500), proving the namespace was
         // registered server-side (a dropped dataSources map would pass through).
@@ -587,19 +628,18 @@ describe('API Server', () => {
 
   describe('GET /sessions', () => {
     it('returns list of active sessions', async () => {
-      // Ensure at least one session exists (from prior tests)
+      // Its own session, so the test holds alone or in any order rather than
+      // leaning on whatever the tests above happened to leave open.
+      await api('POST', '/sessions/list-own/steps', { steps: ['Click something'] });
+
       const { status, body } = await api('GET', '/sessions');
 
       expect(status).toBe(200);
-      expect(body).toHaveProperty('sessions');
       expect(Array.isArray(body.sessions)).toBe(true);
-      // There should be sessions from the tests above
-      expect(body.sessions.length).toBeGreaterThan(0);
-
-      const session = body.sessions[0];
-      expect(session).toHaveProperty('sessionId');
+      const session = body.sessions.find((s: { sessionId: string }) => s.sessionId === 'list-own');
+      expect(session).toBeDefined();
       expect(session).toHaveProperty('status');
-      expect(session).toHaveProperty('totalStepsExecuted');
+      expect(session.totalStepsExecuted).toBeGreaterThanOrEqual(1);
     });
   });
 
@@ -749,48 +789,58 @@ describe('API Server', () => {
     });
 
     it('aborts the in-flight run when the client disconnects', { timeout: 30_000 }, async () => {
-      const { executeStep } = await import('../src/runner/step-executor.js');
-      vi.mocked(executeStep).mockClear();
-      // Slow each mocked step so we can disconnect after the first one.
-      vi.mocked(executeStep).mockImplementation(async (idx) => {
-        await new Promise((r) => setTimeout(r, 200));
-        return {
-          index: idx,
-          instruction: `step ${idx}`,
-          status: 'passed',
-          turns: [],
-          durationMs: 200,
-          retried: false,
-        };
+      // On cue, not on the clock. Step s2 parks until the run's abort signal
+      // fires, so it returns only if the server noticed the disconnect and
+      // aborted; the disconnect is sent once s2 is known to be running, and
+      // the run is judged once the server says it is over. A sleep in any of
+      // those three places either fails a working server on a slow machine or
+      // passes a broken one on a fast one.
+      const started: string[] = [];
+      let markS2Started!: () => void;
+      const s2Started = new Promise<void>((r) => (markS2Started = r));
+      vi.mocked(executeStepMock).mockImplementation(async (idx, _total, instruction, opts) => {
+        started.push(instruction);
+        if (instruction === 's2') {
+          markS2Started();
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) resolve();
+            else opts.signal?.addEventListener('abort', () => resolve(), { once: true });
+          });
+        }
+        return { index: idx, instruction, status: 'passed', turns: [], durationMs: 1, retried: false };
       });
 
-      const ac = new AbortController();
-      const reqPromise = fetch(`${baseUrl}/sessions/abort-1/steps?stream=1`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': API_KEY,
-          Accept: 'text/event-stream',
-        },
-        body: JSON.stringify({ steps: ['s1', 's2', 's3', 's4', 's5'] }),
-        signal: ac.signal,
-      });
+      try {
+        const ac = new AbortController();
+        const reqPromise = fetch(`${baseUrl}/sessions/abort-1/steps?stream=1`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': API_KEY,
+            Accept: 'text/event-stream',
+          },
+          body: JSON.stringify({ steps: ['s1', 's2', 's3', 's4', 's5'] }),
+          signal: ac.signal,
+        });
 
-      // Wait long enough for step 1 to start (and probably finish), then
-      // abort the fetch to simulate the user clicking Stop.
-      await new Promise((r) => setTimeout(r, 250));
-      ac.abort();
+        // The user clicks Stop while s2 is running.
+        await s2Started;
+        ac.abort();
+        await reqPromise.catch(() => {});
 
-      // The fetch should reject (it was aborted).
-      await reqPromise.catch(() => {});
+        // Over when the server's own counter says so. A run that never saw the
+        // abort leaves s2 parked and this wait fails at its ceiling.
+        await vi.waitFor(
+          async () => expect((await api('GET', '/health')).body.runsInFlight).toBe(0),
+          { timeout: 10_000, interval: 20 },
+        );
 
-      // Give the server a moment to notice the disconnect and unwind.
-      await new Promise((r) => setTimeout(r, 800));
-
-      const callsAfterAbort = vi.mocked(executeStep).mock.calls.length;
-      // We requested 5 steps. If the server propagates abort, fewer than 5
-      // executeStep calls should have fired before the loop tore down.
-      expect(callsAfterAbort).toBeLessThan(5);
+        // s2 was the last step to start: the loop ended on the abort rather
+        // than running s3-s5 to completion against a client that had gone.
+        expect(started).toEqual(['s1', 's2']);
+      } finally {
+        vi.mocked(executeStepMock).mockImplementation(defaultStepImpl);
+      }
     });
 
     it('capture events stream with source="capture" for [output:] extractions', { timeout: 30_000 }, async () => {
@@ -894,18 +944,8 @@ describe('API Server', () => {
   });
 
   describe('per-request env injection', () => {
-    it('accepts env in request body without crashing', async () => {
-      // Full assertion that env reaches the AiClient lives in session-manager unit
-      // tests; here we just confirm the API surface accepts and runs the request.
-      const { status, body } = await api('POST', '/sessions/env-1/steps', {
-        steps: ['Click'],
-        env: { AI_API_KEY: 'overridden-key', AI_MODEL: 'overridden-model' },
-      });
-
-      expect(status).toBe(200);
-      expect(body.status).toBe('passed');
-    });
-
+    // That `env` reaches the AiClient is asserted over this same route in
+    // tests/api-server-run-settings.test.ts; this is the other half.
     it('does not leak env into server process.env', async () => {
       const before = process.env['AI_API_KEY'];
       await api('POST', '/sessions/env-2/steps', {

@@ -28,7 +28,6 @@ import path from 'node:path';
 import { assembleSteps } from '../src/mcp/assemble.js';
 import { resolveProject } from '../src/mcp/project.js';
 import {
-  PLACEHOLDER_NAME_SOURCE,
   PLACEHOLDER_SOURCE,
   WIDE_PLACEHOLDER_SOURCE,
   interpolate,
@@ -62,23 +61,6 @@ import type { AIAction } from '../src/ai/types.js';
 // ───────────────────────────────────────────────────────────────────────────
 // The grammar itself
 // ───────────────────────────────────────────────────────────────────────────
-
-/**
- * The exact source string, pinned.
- *
- * Not tidiness: `steptix-vscode/src/extension/env-data-completion-core.ts`
- * and `env-data-definition-core.ts` cannot import `src/` and carry the
- * grammar by hand (phase 3 of §1.3 widens them). This literal is what they
- * must mirror, and a golden is how the two sides get a target that does not
- * move underneath them between phases.
- */
-it('pins the source string the Steptix copies have to mirror', () => {
-  expect(PLACEHOLDER_NAME_SOURCE).toBe('\\w+(?:\\.[A-Za-z_][A-Za-z0-9_]*)?');
-  expect(PLACEHOLDER_SOURCE).toBe('\\{\\{(\\w+(?:\\.[A-Za-z_][A-Za-z0-9_]*)?)\\}\\}');
-  expect(WIDE_PLACEHOLDER_SOURCE).toBe(
-    '\\{\\{\\s*(\\w+(?:\\.[A-Za-z_][A-Za-z0-9_]*)?)\\s*\\}\\}',
-  );
-});
 
 /** `[text, the name it should be read as, or null for "not a reference"]`. */
 const CORPUS: Array<[string, string | null]> = [
@@ -215,8 +197,11 @@ describe('every module that reads a reference reads the same one', () => {
 describe('the MCP pre-flight knows a dotted reference comes from a loop', () => {
   let root: string;
   const created: string[] = [];
+  /** Whatever the environment held before; restored, not just deleted. */
+  let savedRoots: string | undefined;
 
   beforeEach(() => {
+    savedRoots = process.env['STEPTIX_MCP_ROOTS'];
     root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'steptix-dotted-')));
     created.push(root);
     writeFileSync(
@@ -228,8 +213,11 @@ describe('the MCP pre-flight knows a dotted reference comes from a loop', () => 
   });
 
   afterEach(() => {
-    for (const dir of created.splice(0)) rmSync(dir, { recursive: true, force: true });
-    delete process.env['STEPTIX_MCP_ROOTS'];
+    for (const dir of created.splice(0)) {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+    if (savedRoots === undefined) delete process.env['STEPTIX_MCP_ROOTS'];
+    else process.env['STEPTIX_MCP_ROOTS'] = savedRoots;
   });
 
   const warningsFor = async (steps: string[]): Promise<string> => {

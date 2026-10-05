@@ -198,6 +198,17 @@ function passingResult(index: number, instruction: string): StepResult {
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe('test-runner runnerControl handling', () => {
+  /** process.stdout's own `isTTY` as it was before this block forced it —
+   *  undefined when the stream had none (a piped worker's usual state). */
+  let savedIsTTY: PropertyDescriptor | undefined;
+
+  afterEach(() => {
+    // Put it back, so the describes below run with the TTY state the worker
+    // really has rather than this block's forced `true`.
+    if (savedIsTTY) Object.defineProperty(process.stdout, 'isTTY', savedIsTTY);
+    else delete (process.stdout as { isTTY?: boolean }).isTTY;
+  });
+
   beforeEach(() => {
     // Reset only the executeStep / runInteractiveRepl mocks — clearing
     // queued mockResolvedValueOnce responses between tests so they don't
@@ -224,6 +235,7 @@ describe('test-runner runnerControl handling', () => {
 
     // Default: stdout.isTTY treated as true so the failure-REPL path COULD
     // engage if the guard didn't fire. We force this for the re-entry test.
+    savedIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
     Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true });
   });
 

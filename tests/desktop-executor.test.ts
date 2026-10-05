@@ -109,15 +109,9 @@ describe('executeComputerAction — pointer actions map through §5.2', () => {
     expect(harness.lines).toContain('[computer] click image(812,544) → screen(1746,1169)');
   });
 
-  it('halves the point again at density 2', async () => {
-    const adapter = new FakeDesktopAdapter();
-    const harness = ctx(adapter, view({ width: 3440, height: 1440, scaleX: 2, scaleY: 2 }, 1600, 670));
-    const result = await executeComputerAction(
-      { action: 'click', x: 800, y: 335, button: 'left', count: 1, description: '' },
-      harness.context,
-    );
-    expect(result.screenPoint).toEqual({ x: 860, y: 360 });
-  });
+  // Density is `mapToScreen`'s business (desktop-capture.test.ts, "both
+  // together: downscale THEN density"), and the click above already proves the
+  // executor maps through it.
 
   it('clicks where the model pointed AFTER a zoom', async () => {
     // §13 item 3's last clause. The zoom is built for real, out of real
@@ -451,15 +445,17 @@ describe('executeComputerAction — windows (§5.4)', () => {
 
   it('wait_window looks at most once per poll interval, even when a sleep returns early (A5)', async () => {
     // The measured spin: after Stop, the run's interruptible sleep resolves at
-    // once, and the loop asked for the window list 6.6 million times.
+    // once, and the loop asked for the window list 6.6 million times. Here the
+    // sleep returns at once AND the clock never moves, so the deadline can
+    // never end the wait: only the look count can.
     const adapter = new FakeDesktopAdapter({ windows: [] });
     const harness = ctx(adapter, view({}, 100, 100));
     const result = await executeComputerAction(
       { action: 'wait_window', title: 'Never', state: 'open', timeoutMs: 100, description: '' },
-      { ...harness.context, now: Date.now, sleep: async () => {} },
+      { ...harness.context, now: () => 0, sleep: async () => {} },
     );
     expect(result.ok).toBe(false);
-    // ceil(100 / 250) + 1: the first look, and one at the deadline.
+    // ceil(100 / 250) + 1: the first look, and one where the deadline would be.
     expect(adapter.callsOf('windows')).toHaveLength(2);
   });
 

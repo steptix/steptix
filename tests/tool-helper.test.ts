@@ -23,13 +23,15 @@ describe('tool() helper', () => {
   });
 
   it('throws on tool(fn) when the argument is not a function', () => {
-    // @ts-expect-error testing runtime guard
-    expect(() => tool('only-name-no-fn')).toThrow(/argument must be a function/);
+    // Not a string: a string first argument takes the tool(name, fn) branch
+    // and throws that overload's message instead, so the guard named here
+    // is only reached by something that is neither a name nor a function.
+    expect(() => tool(42 as never)).toThrow(/^tool\(fn\): argument must be a function$/);
   });
 
   it('throws on tool(name, fn) when the second argument is not a function', () => {
     // @ts-expect-error testing runtime guard
-    expect(() => tool('greet', 'not-a-function')).toThrow(/second argument must be a function/);
+    expect(() => tool('greet', 'not-a-function')).toThrow(/^tool\(name, fn\): second argument must be a function$/);
   });
 
   it('returns a frozen object so authors cannot mutate the spec', () => {
