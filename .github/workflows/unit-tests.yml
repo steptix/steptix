@@ -37,6 +37,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
+        id: node
         with:
           node-version: 24
           cache: npm
@@ -47,10 +48,27 @@ jobs:
             steptix-vscode/package-lock.json
             fixtures/tools/package-lock.json
 
+      # The five node_modules trees, keyed on all five lockfiles and the Node
+      # version, so a run whose dependencies haven't changed skips npm ci.
+      # The npm cache above only saves the downloads; npm ci still writes
+      # every file, which is the slow part on Windows.
+      - name: Restore node_modules
+        id: nm
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            node_modules
+            runner-core/node_modules
+            fixtures/tools/node_modules
+            flick-vscode/node_modules
+            steptix-vscode/node_modules
+          key: node-modules-${{ runner.os }}-node${{ steps.node.outputs.node-version }}-${{ hashFiles('package-lock.json', 'runner-core/package-lock.json', 'fixtures/tools/package-lock.json', 'flick-vscode/package-lock.json', 'steptix-vscode/package-lock.json') }}
+
       # Order matters: runner-core first (its `prepare` builds the dist/ that
       # steptix-vscode's file: dep links to), and the root before
       # fixtures/tools (its `steptix` dep is file:../..).
       - name: Install
+        if: steps.nm.outputs.cache-hit != 'true'
         shell: bash
         run: |
           npm ci
@@ -58,6 +76,41 @@ jobs:
           npm ci --prefix fixtures/tools
           npm ci --prefix flick-vscode
           npm ci --prefix steptix-vscode
+
+      # The two file: deps are junctions to ../runner-core and to the repo
+      # root. They stay out of the cache: archiving one would store a link
+      # to this runner's checkout, or a copy of what it points at — for
+      # fixtures/tools, the whole repo. Remove only the links, save, and
+      # make them fresh below on every run.
+      - name: Unlink file deps
+        if: steps.nm.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          [System.IO.Directory]::Delete("$PWD/steptix-vscode/node_modules/steptix-runner-core", $false)
+          [System.IO.Directory]::Delete("$PWD/fixtures/tools/node_modules/steptix", $false)
+
+      - name: Save node_modules
+        if: steps.nm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            node_modules
+            runner-core/node_modules
+            fixtures/tools/node_modules
+            flick-vscode/node_modules
+            steptix-vscode/node_modules
+          key: ${{ steps.nm.outputs.cache-primary-key }}
+
+      - name: Link file deps
+        shell: pwsh
+        run: |
+          New-Item -ItemType Junction -Path "$PWD/steptix-vscode/node_modules/steptix-runner-core" -Target "$PWD/runner-core" | Out-Null
+          New-Item -ItemType Junction -Path "$PWD/fixtures/tools/node_modules/steptix" -Target "$PWD" | Out-Null
+
+      # npm ci's `prepare` built runner-core's dist/; on a cache hit nothing did.
+      - name: Build runner-core
+        if: steps.nm.outputs.cache-hit == 'true'
+        run: npm run build --prefix runner-core
 
       # The root suite's real-browser tests launch Playwright's Chromium.
       # Cached per Playwright version so a run doesn't download it again;
