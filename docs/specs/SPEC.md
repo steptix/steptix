@@ -1,6 +1,6 @@
 # Steptix — Technical Specification v1.0
 
-**Author:** Greg (AI Tech Lead) / Paul Kent
+**Author:** Paul Kent
 **Date:** 2026-03-26
 **Status:** Draft
 

@@ -1,6 +1,6 @@
 # Steptix — API Testing Extension Specification v1.0
 
-**Author:** Greg (AI Tech Lead) / Paul Kent
+**Author:** Paul Kent
 **Date:** 2026-03-27
 **Status:** Draft
 **Depends on:** SPEC.md (core UI testing specification)
