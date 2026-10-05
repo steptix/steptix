@@ -30,6 +30,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
 const vscode = require('vscode');
+const { serverApiKey } = require('./credentials.cjs');
 
 const EXT_ID = 'pkent.steptix-vscode';
 
@@ -125,14 +126,6 @@ function reportsIn(workspaceRoot) {
   const dir = path.resolve(workspaceRoot, 'init', 'reports');
   if (!fs.existsSync(dir)) return [];
   return fs.readdirSync(dir).filter((f) => f.endsWith('.html'));
-}
-
-/** `STEPTIX_SERVER_API_KEY` from the (shard's) workspace .env. */
-function apiKeyFrom(workspaceRoot) {
-  const envPath = path.resolve(workspaceRoot, '.env');
-  const text = fs.readFileSync(envPath, 'utf8');
-  const m = /^\s*STEPTIX_SERVER_API_KEY\s*=\s*(.+)$/m.exec(text);
-  return m ? m[1].trim().replace(/^["']|["']$/g, '') : '';
 }
 
 /** The server's own view of its live sessions. */
@@ -391,7 +384,7 @@ describe('Steptix live — a run-level data table', function () {
   it('rows 1-2 with step 2 selected runs the step twice, on the session it is on', async function () {
     this.timeout(420_000);
 
-    const apiKey = apiKeyFrom(workspaceRoot);
+    const apiKey = serverApiKey(workspaceRoot);
     const sessionsBefore = await listSessions(serverUrl(), apiKey);
     say(`sessions before: ${JSON.stringify(
         sessionsBefore.map((s) => [s.sessionId, s.totalStepsExecuted, s.tab?.targetId]),
@@ -695,7 +688,7 @@ describe('Steptix live — a selection narrows a section\'s body', function () {
   it('runs the flow once, for row 2, entering only the password', async function () {
     this.timeout(300_000);
 
-    const apiKey = apiKeyFrom(workspaceRoot);
+    const apiKey = serverApiKey(workspaceRoot);
     const tap = startOutputTap(hooks);
     const editor = vscode.window.activeTextEditor;
     // Three ranges, the gesture the story describes: drag the main flow,

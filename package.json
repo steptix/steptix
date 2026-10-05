@@ -31,6 +31,7 @@
     "build:watch": "tsc --watch",
     "build:ui": "vite build --config src/ui/renderer/vite.config.ts",
     "build:all": "npm run build && npm run build:ui",
+    "setup": "npm install && npm install --prefix runner-core && npm install --prefix steptix-vscode && npm install --prefix flick-vscode && npm install --prefix fixtures/tools && npx playwright install chromium",
     "dev": "tsx src/index.ts",
     "dev:debug": "node --inspect --import tsx src/index.ts serve",
     "dev:ui": "concurrently \"vite --config src/ui/renderer/vite.config.ts\" \"sleep 2 && VITE_DEV_SERVER_URL=http://localhost:5173 electron dist/ui/main/index.js\"",

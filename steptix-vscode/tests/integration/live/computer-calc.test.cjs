@@ -85,6 +85,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 const vscode = require('vscode');
+const { serverApiKey } = require('./credentials.cjs');
 
 const EXT_ID = 'pkent.steptix-vscode';
 const FIXTURE = 'calc-one-plus-one.md';
@@ -166,15 +167,6 @@ async function fetchServerPid() {
     `/health carries no usable pid: ${JSON.stringify(body.pid)}`,
   );
   return body.pid;
-}
-
-/** `STEPTIX_SERVER_API_KEY` from the workspace .env — the file the extension's
- *  own walk-up ends at, and the one runLiveTest.cjs requires to carry it. */
-function apiKeyFrom(workspaceRoot) {
-  const envPath = path.resolve(workspaceRoot, '.env');
-  const text = fs.readFileSync(envPath, 'utf8');
-  const m = /^\s*STEPTIX_SERVER_API_KEY\s*=\s*(.+)$/m.exec(text);
-  return m ? m[1].trim().replace(/^["']|["']$/g, '') : '';
 }
 
 /**
@@ -453,8 +445,7 @@ describe('Steptix live — computer mode drives Calculator, and the lock follows
     hooks = await activate();
     workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     assert.ok(workspaceRoot, 'no workspace folder — the live runner must pass templates/');
-    apiKey = apiKeyFrom(workspaceRoot);
-    assert.ok(apiKey, `no STEPTIX_SERVER_API_KEY in ${path.resolve(workspaceRoot, '.env')}`);
+    apiKey = serverApiKey(workspaceRoot);
     serverPid = await fetchServerPid();
     say(`server ${serverUrl()} is pid ${serverPid}`);
     say(`lock file: ${LOCK_PATH} — before anything runs: ${describeLock(readLock())}`);

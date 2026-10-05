@@ -123,9 +123,24 @@ npx steptix ui --config ./custom.config.ts
 | `npm run ui` | Build all and launch the Runner UI |
 | `npm run dev:ui` | Dev mode with hot-reload for the renderer |
 | `npm run dev` | Run the CLI directly via tsx (no build needed) |
+| `npm run setup` | Install all five projects and Playwright's Chromium — run once after cloning (see below) |
 | `npm test` | Run the test suite |
 | `npm run lint` | Type-check without emitting |
 | `npm run clean` | Remove build artifacts |
+
+### Set up a clone to run the tests
+
+The repo is five npm projects — the framework at the root, `runner-core/`,
+`steptix-vscode/`, `flick-vscode/` and `fixtures/tools/` — and the root suite
+uses all of them, plus Playwright's Chromium. One command, once:
+
+```bash
+npm run setup
+```
+
+After that the four unit suites (`npm test` at the root and in `runner-core/`,
+`flick-vscode/` and `steptix-vscode/`) and `npm run test:integration` need no
+keys or `.env` files. The live suite needs a model key; see below.
 
 ### Testing the Steptix extension
 
@@ -147,8 +162,22 @@ worker on a free port from 3200 up, boots the `fixtures/test-app` site on
 8787, runs the suite across four VS Code instances, prints a merged report
 and tears everything down — about five and a half minutes for 33 tests.
 
-It needs `templates/.env` to carry `AI_API_KEY` and `STEPTIX_SERVER_URL`; the model
-calls are real and are billed. Useful variants:
+It needs one thing you supply: a model key. The model calls are real and are
+billed. Put your OpenAI key in the machine-wide `.env` —
+`%LOCALAPPDATA%\steptix\.env` on Windows, `~/.steptix/.env` elsewhere — and
+every checkout on the machine uses it:
+
+```
+AI_API_KEY=<your OpenAI API key>
+```
+
+The default model (`openai/…`) goes straight to OpenAI. To use another
+provider or a gateway, set `AI_MODEL` (and `AI_GATEWAY_URL` for a
+gateway-routed model) there too; see `.env.example`. A `templates/.env` with
+the same lines overrides the machine file for this repo only. Nothing else
+needs setting up: the runner gives each worker its own `STEPTIX_SERVER_URL`,
+and the server generates its own key on first start. If the key is missing, the
+runner says so and stops before it starts anything. Useful variants:
 
 ```bash
 npm run test:live -- --shards=2                       # fewer workers
@@ -909,7 +938,7 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 
 | Variable | Purpose |
 | --- | --- |
-| `AI_API_KEY` | API key for the aiapi gateway. Required for anything that calls a model — compiling, healing a broken entry, AI-executed steps, errands. A fully compiled test replays without it (see [stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md)). One exception: a `bedrock/` model supplies its own credentials, so a run with no key here is still treated as having AI — see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). The runner now uses aiapi v2 endpoints. |
+| `AI_API_KEY` | The key for wherever `AI_MODEL` routes: an OpenAI key for the default `openai/…` model, a gateway token for an `aibroker/` or `gateway/` one. Required for anything that calls a model — compiling, healing a broken entry, AI-executed steps, errands. A fully compiled test replays without it (see [stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md)). One exception: a `bedrock/` model supplies its own credentials, so a run with no key here is still treated as having AI — see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). The runner now uses aiapi v2 endpoints. |
 | `AI_MODEL` | Overrides `ai.model` from the config file. Optional — falls back to the project default when unset. The first segment decides routing: `gateway/<model>` and `aibroker/<provider>/<model>` route to whatever `AI_GATEWAY_URL` names (a hosted broker, your own gateway, a local bridge, Ollama) and **refuse to run when that variable is unset** — there is no built-in endpoint; `bedrock/<model>` is Claude in your own AWS account, needs `AWS_REGION` and no key; anything else (`openai/…`, `anthropic/…`) goes direct to the provider. |
 | `AWS_REGION` | Only for a `bedrock/` model, and then **required** — the client does not read `~/.aws/config`, so an SSO profile carrying a region is not enough. Read by the AWS SDK straight from `process.env`, not by this framework, so unlike every other row in this table it belongs in the **machine environment** — the shell that starts `steptix serve`, or the CI job — rather than in a project `.env`. Same for `AWS_DEFAULT_REGION`, `AWS_PROFILE` and the rest of the credential chain, which work exactly as they do for any AWS tool. A project `.env` reaches it on `steptix run` and the Electron UI only; see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). |
 | `AI_GATEWAY_URL` | Overrides `ai.gatewayUrl` from the config file — the OpenAI-compatible endpoint gateway-routed models go through. Required for `gateway/` and `aibroker/` models and unused by any other; there is no built-in default, so a gateway-routed model with this unset is refused before anything is sent. Setting it in a `.env` keeps pointing a shared repo at your org's gateway a one-line change with nothing tracked to edit. Same precedence as `AI_MODEL` (environment → `steptix.config.json` → machine `.env`), and it reaches the server path too: the Steptix extension ships the project's `.env` with each run. |
