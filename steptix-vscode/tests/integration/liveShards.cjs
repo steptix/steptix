@@ -161,7 +161,7 @@ function rebaseConfigPaths(copyRoot, originalRoot) {
 /**
  * Point a copied workspace's `.env` at `serverUrl`.
  *
- * The extension resolves SERVER_URL by walking up from the test file, so this
+ * The extension resolves STEPTIX_SERVER_URL by walking up from the test file, so this
  * line — not any flag we pass — is what decides which server a shard drives.
  * Rewritten rather than appended when present, because a later duplicate does
  * not reliably win in every .env parser and "it depends" is not a property a
@@ -172,9 +172,9 @@ function pointEnvAtServer(envPath, serverUrl) {
     throw new Error(`shard workspace has no .env at ${envPath}`);
   }
   const original = fs.readFileSync(envPath, 'utf8');
-  const line = `SERVER_URL=${serverUrl}`;
-  const rewritten = /^SERVER_URL=.*$/m.test(original)
-    ? original.replace(/^SERVER_URL=.*$/m, line)
+  const line = `STEPTIX_SERVER_URL=${serverUrl}`;
+  const rewritten = /^STEPTIX_SERVER_URL=.*$/m.test(original)
+    ? original.replace(/^STEPTIX_SERVER_URL=.*$/m, line)
     : `${original.replace(/\s*$/, '')}\n${line}\n`;
   fs.writeFileSync(envPath, rewritten, 'utf8');
 }
@@ -479,7 +479,7 @@ async function runPool(workers, items, task) {
 
 /**
  * What the live runner prints, once, when the suite drives a server it did not
- * start — `--server=<url>`, `LIVE_SERVER_URL`, or the serial `--shards=1`
+ * start — `--server=<url>`, `LIVE_STEPTIX_SERVER_URL`, or the serial `--shards=1`
  * path, which always uses an already-running server.
  *
  * The scoreboard tags a line with the suite of the PROCESS that wrote it

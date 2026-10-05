@@ -147,7 +147,7 @@ worker on a free port from 3200 up, boots the `fixtures/test-app` site on
 8787, runs the suite across four VS Code instances, prints a merged report
 and tears everything down — about five and a half minutes for 33 tests.
 
-It needs `templates/.env` to carry `AI_API_KEY` and `SERVER_URL`; the model
+It needs `templates/.env` to carry `AI_API_KEY` and `STEPTIX_SERVER_URL`; the model
 calls are real and are billed. Useful variants:
 
 ```bash
@@ -383,8 +383,8 @@ refused.
 - Hosts run `dist/`, so **run `npm run build`** after changing the source — and
   once on a fresh clone, or the configs above point at a file that isn't there.
 - If you let the MCP server auto-start the API server, check on it with
-  `steptix status --url $SERVER_URL`. Plain `steptix status` reads
-  `steptix.config.json`, which can name a different host or port than `SERVER_URL`.
+  `steptix status --url $STEPTIX_SERVER_URL`. Plain `steptix status` reads
+  `steptix.config.json`, which can name a different host or port than `STEPTIX_SERVER_URL`.
 - The Codex VS Code extension currently has an open bug picking up MCP servers
   from `config.toml`. Verify with Codex CLI first — a no-show in the extension
   is not a problem with this server.
@@ -962,7 +962,7 @@ MCP client config that launches the server. A project's `.env` deliberately
 **cannot** supply `NODE_EXTRA_CA_CERTS`; it is filtered by
 `UNSAFE_CHILD_ENV_KEYS` in
 [src/mcp/server-start.ts](./src/mcp/server-start.ts). One Sessions API server
-serves *every* project pointing at that `SERVER_URL` and holds each one's
+serves *every* project pointing at that `STEPTIX_SERVER_URL` and holds each one's
 credentials, so a CA installed by one project would be trusted for every other
 project's calls.
 
@@ -1128,7 +1128,7 @@ Three limits worth knowing before you set it up. Screenshots are dropped: the
 bridge speaks text only, so an image block is replaced with a short note (the
 diagnosis pass still works, text-only). The bridge is loopback — a **remote**
 Sessions API server would resolve `127.0.0.1` to itself, so this only works with
-a server on the same machine; the setup command warns when `SERVER_URL` is not
+a server on the same machine; the setup command warns when `STEPTIX_SERVER_URL` is not
 local. And the `gateway/` prefix is resolved by `@pkent/aigateway` inside the server
 process, so the server has to be running a build whose dependency ships it —
 `1.4.0-beta.5` or later. If it answers `Unsupported model "gateway/…"` and lists

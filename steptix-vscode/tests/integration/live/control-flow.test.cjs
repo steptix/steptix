@@ -32,7 +32,7 @@
  * failure here is a regression, not a flaky page — see
  * templates/init/tests/control-flow.md for the reasoning in full.
  *
- * Prereq: the API server on $LIVE_SERVER_URL (the parallel runner starts one
+ * Prereq: the API server on $LIVE_STEPTIX_SERVER_URL (the parallel runner starts one
  * per shard and points that shard's templates/.env at it) and the fixture app
  * on :8787 (runLiveTest.cjs boots it).
  *
@@ -90,7 +90,7 @@ async function waitFor(label, predicate, timeoutMs = 60_000) {
 const PASSED = new Set(['pass', 'pass-code-behind', 'pass-stale']);
 const passed = (status) => PASSED.has(status);
 
-const serverUrl = () => process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+const serverUrl = () => process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
 
 async function activate() {
   const ext = vscode.extensions.getExtension(EXT_ID);

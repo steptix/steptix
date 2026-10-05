@@ -179,7 +179,7 @@ The test does what a user does, in a temporary folder whose path has spaces:
 3. **VS Code.**
    - It opens VS Code with the extension from this checkout, a fresh profile
      with no Steptix settings, a project with no `.env`, no machine key, and
-     Node found on PATH. The machine `.env` holds only `SERVER_URL`, on a free
+     Node found on PATH. The machine `.env` holds only `STEPTIX_SERVER_URL`, on a free
      port, with nothing listening.
    - It presses Run.
    - It checks that the extension found the installed runtime and started its
@@ -243,14 +243,14 @@ itself, as `steptix.cmd serve --port <port> --idle-timeout 60`.
 
 It finds the server the same way for every project:
 
-1. `SERVER_URL` in the project's `.env`, if the project has one and sets it.
-2. The `SERVER_URL` environment variable.
-3. `SERVER_URL` in `%LOCALAPPDATA%\steptix\.env`, the file that also holds
+1. `STEPTIX_SERVER_URL` in the project's `.env`, if the project has one and sets it.
+2. The `STEPTIX_SERVER_URL` environment variable.
+3. `STEPTIX_SERVER_URL` in `%LOCALAPPDATA%\steptix\.env`, the file that also holds
    the machine key.
 4. `http://127.0.0.1:3100`, where `steptix serve` listens by default.
 
 So a project needs no `.env` at all. To run the server on another port for
-every project, add a line like `SERVER_URL=http://127.0.0.1:3200` to
+every project, add a line like `STEPTIX_SERVER_URL=http://127.0.0.1:3200` to
 `%LOCALAPPDATA%\steptix\.env`; the extension starts the runtime on that port.
 
 Two User settings change this. `steptix.serverAutoStart.command` starts

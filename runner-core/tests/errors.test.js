@@ -85,13 +85,13 @@ test('errors involving a file path mention the path verbatim', () => {
   }
 });
 
-test('errors involving SERVER_URL mention it verbatim', () => {
+test('errors involving STEPTIX_SERVER_URL mention it verbatim', () => {
   const cases = ['STX010', 'STX011', 'STX012', 'STX013', 'STX014', 'STX027', 'STX028'];
   for (const code of cases) {
     const payload = reportError(code, SAMPLE_CONTEXTS[code]);
     assert.ok(
       payload.message.includes('http://localhost:3100'),
-      `${code}: message must include SERVER_URL`,
+      `${code}: message must include STEPTIX_SERVER_URL`,
     );
   }
 });

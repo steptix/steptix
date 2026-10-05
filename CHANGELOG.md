@@ -9,6 +9,26 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Changed — `SERVER_URL` is now `STEPTIX_SERVER_URL`
+
+The variable that names the Steptix server is now `STEPTIX_SERVER_URL`, so it
+cannot be mistaken for some other server's address. It matches
+`STEPTIX_SERVER_API_KEY` beside it. It is read from the same places as before:
+the project's `.env` or `.env.<name>`, the environment, and the machine `.env`
+(`%LOCALAPPDATA%\steptix\.env`, `~/.steptix/.env` elsewhere). Error messages,
+the MCP server's usage text and the runtime's readme use the new name too
+(extension 0.5.170).
+
+There is no fallback to the old name. A `SERVER_URL` line is ignored: the VS
+Code extension then uses the default, `http://127.0.0.1:3100`, and the MCP
+server refuses a project with "No STEPTIX_SERVER_URL". Rename the line in
+each `.env`, `.env.<name>` and the machine `.env`, and rename a `SERVER_URL`
+environment variable if you set one.
+
+For the same reason, the live integration tests' `LIVE_SERVER_URL` is now
+`LIVE_STEPTIX_SERVER_URL`. Set the new name when you point a live run at a
+server yourself; the old one is ignored and the tests check against `:3100`.
+
 ### Changed — the default model is openai/gpt-6-luna
 
 The built-in default model, the one `steptix init` writes into a new
@@ -129,25 +149,25 @@ Every fix is a patch or minor release inside the existing ranges, except
 ### Changed — Steptix runs a test with nothing configured
 
 Running a test used to need two things set up by hand: a `.env` in the
-project naming `SERVER_URL`, and the `steptix.serverAutoStart.command` and
+project naming `STEPTIX_SERVER_URL`, and the `steptix.serverAutoStart.command` and
 `.cwd` User settings pointing at a server to start. Neither is needed now
 (extension 0.5.168).
 
-- **The server address has a machine-level home.** `SERVER_URL` comes from
+- **The server address has a machine-level home.** `STEPTIX_SERVER_URL` comes from
   the project's `.env` (and the active `.env.<name>`) as before, then the
-  `SERVER_URL` environment variable, then `SERVER_URL` in
+  `STEPTIX_SERVER_URL` environment variable, then `STEPTIX_SERVER_URL` in
   `%LOCALAPPDATA%\steptix\.env` (`~/.steptix/.env` elsewhere) — the file that
   already holds the machine key — and finally `http://127.0.0.1:3100`, where
   `steptix serve` listens by default. The run log says which one it used.
 - **A project needs no `.env`.** One without a `.env` now runs instead of
   failing with STX001. STX001 remains only for a `steptix.defaultEnvFile` that
-  names a missing file, and a project `.env` without `SERVER_URL` no longer
+  names a missing file, and a project `.env` without `STEPTIX_SERVER_URL` no longer
   fails with STX002.
 - **The installed runtime starts itself.** With
   `steptix.serverAutoStart.command` empty, a run that finds no server on a
-  localhost `SERVER_URL` starts the newest runtime under
+  localhost `STEPTIX_SERVER_URL` starts the newest runtime under
   `%LOCALAPPDATA%\steptix\runtimes` (`~/.steptix/runtimes` elsewhere) as
-  `serve --port <SERVER_URL's port> --idle-timeout 60`, in the runtime's own
+  `serve --port <STEPTIX_SERVER_URL's port> --idle-timeout 60`, in the runtime's own
   folder. The new `steptix.serverAutoStart.useInstalledRuntime` User setting
   (on by default) turns this off. A command setting, when set, still wins.
 - Start Server, Stop Server, Server Status and the Copilot setup's

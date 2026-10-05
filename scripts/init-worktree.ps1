@@ -7,7 +7,7 @@
 #
 # A fresh worktree contains only tracked files, so it is missing:
 #
-#   .env, templates/.env       API keys, SERVER_URL, site credentials
+#   .env, templates/.env       API keys, STEPTIX_SERVER_URL, site credentials
 #   node_modules x5            root, flick-vscode, steptix-vscode, runner-core,
 #                              fixtures/tools
 #   dist/                      the compiled server, and the target of the package
@@ -47,7 +47,7 @@
 # the test file's path (src/server/project-bundle.ts), so it already honours a
 # worktree's own steptix.config.json and .env — but it executes whatever `src/`
 # build it booted from. Pass -Port to move the worktree's clients onto their own
-# server: it rewrites SERVER_URL in the worktree's .env files (gitignored, so no
+# server: it rewrites STEPTIX_SERVER_URL in the worktree's .env files (gitignored, so no
 # diff noise) and prints the matching `serve` command.
 #
 # Don't try to junction node_modules back to the source checkout to "save time":
@@ -66,7 +66,7 @@ param(
     [switch]$SkipBuilds,
 
     # Point this worktree's clients at a server on <port> instead of the default
-    # 3100, by rewriting SERVER_URL in the seeded .env files.
+    # 3100, by rewriting STEPTIX_SERVER_URL in the seeded .env files.
     [ValidateRange(1, 65535)]
     [int]$Port,
 
@@ -167,7 +167,7 @@ function Remove-DirOrLink {
     }
 }
 
-# Rewrite (or append) SERVER_URL without disturbing anything else in the file.
+# Rewrite (or append) STEPTIX_SERVER_URL without disturbing anything else in the file.
 #
 # Written with an explicit BOM-less UTF-8 encoder: Set-Content -Encoding UTF8
 # emits a BOM on Windows PowerShell 5.1, and a BOM in front of the first key
@@ -185,8 +185,8 @@ function Set-ServerUrl {
 
     $text = [IO.File]::ReadAllText($Path)
     # '$' is the substitution marker in a .NET replacement string.
-    $replacement = "SERVER_URL=$Url".Replace('$', '$$')
-    $pattern = '(?m)^[ \t]*SERVER_URL[ \t]*=[^\r\n]*'
+    $replacement = "STEPTIX_SERVER_URL=$Url".Replace('$', '$$')
+    $pattern = '(?m)^[ \t]*STEPTIX_SERVER_URL[ \t]*=[^\r\n]*'
 
     if ([regex]::IsMatch($text, $pattern)) {
         $text = [regex]::Replace($text, $pattern, $replacement)
@@ -194,7 +194,7 @@ function Set-ServerUrl {
         # Match the file's existing newline style rather than imposing one.
         $nl = if ($text -match "`r`n") { "`r`n" } else { "`n" }
         if ($text.Length -gt 0 -and -not $text.EndsWith("`n")) { $text += $nl }
-        $text += "SERVER_URL=$Url$nl"
+        $text += "STEPTIX_SERVER_URL=$Url$nl"
     }
 
     $utf8NoBom = [Text.UTF8Encoding]::new($false)
@@ -202,12 +202,12 @@ function Set-ServerUrl {
     return $true
 }
 
-# The port a checkout has been seeded with, read back off its SERVER_URL.
+# The port a checkout has been seeded with, read back off its STEPTIX_SERVER_URL.
 function Get-EnvPort {
     param([Parameter(Mandatory)][string]$EnvPath)
     if (-not (Test-Path $EnvPath)) { return 0 }
     $text = [IO.File]::ReadAllText($EnvPath)
-    $m = [regex]::Match($text, '(?m)^[ \t]*SERVER_URL[ \t]*=[ \t]*[A-Za-z]+://[^:/\s]+:(\d+)')
+    $m = [regex]::Match($text, '(?m)^[ \t]*STEPTIX_SERVER_URL[ \t]*=[ \t]*[A-Za-z]+://[^:/\s]+:(\d+)')
     if ($m.Success) { return [int]$m.Groups[1].Value }
     return 0
 }
@@ -462,10 +462,10 @@ if ($Port -gt 0) {
     Write-Host "Pointing this worktree's clients at ${serverUrl}:"
     foreach ($rel in @('.env', 'templates/.env')) {
         # Deliberately NOT steptix-vscode/tests/integration/fixtures/.env —
-        # its SERVER_URL is a dead port for the FakeApiClient, not a real server.
+        # its STEPTIX_SERVER_URL is a dead port for the FakeApiClient, not a real server.
         $p = Join-Path $dest $rel
         if (Set-ServerUrl -Path $p -Url $serverUrl) {
-            Write-Host "  edit  $rel  SERVER_URL=$serverUrl"
+            Write-Host "  edit  $rel  STEPTIX_SERVER_URL=$serverUrl"
         } else {
             Write-Host "  skip  $rel (not present)"
         }
@@ -508,9 +508,9 @@ if ($serverUrl) {
     Write-Host "the OTHER checkout on 3100, keeps polling $Port, and fails with STX028 —"
     Write-Host "leaving a stray server behind. Start this worktree's server first."
     Write-Host ""
-    Write-Host "Live integration tests read LIVE_SERVER_URL and fall back to :3100 in every"
+    Write-Host "Live integration tests read LIVE_STEPTIX_SERVER_URL and fall back to :3100 in every"
     Write-Host "suite, so point them at this worktree's server explicitly:"
     Write-Host ""
     Write-Host "    cd `"$dest\steptix-vscode`""
-    Write-Host "    `$env:LIVE_SERVER_URL = `"$serverUrl`"; npm run test:live"
+    Write-Host "    `$env:LIVE_STEPTIX_SERVER_URL = `"$serverUrl`"; npm run test:live"
 }

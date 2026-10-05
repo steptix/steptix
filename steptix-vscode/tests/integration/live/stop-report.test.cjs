@@ -2,7 +2,7 @@
  * Live end-to-end STOP → report test (issue 021).
  *
  * Drives securebank.md against the REAL Steptix Sessions API server
- * (SERVER_URL from templates/.env, expected on http://localhost:3100). A real
+ * (STEPTIX_SERVER_URL from templates/.env, expected on http://localhost:3100). A real
  * browser opens, real AI calls happen. Validates that after a user STOP:
  *   - the run halts promptly (ties to issue 020's fast-stop),
  *   - the stopped run's report path is recovered (GET /sessions/:id/last-run)
@@ -23,7 +23,7 @@
  * (auto-discovered by the glob — no wiring needed).
  *
  * Required env (from templates/.env, picked up via walkup):
- *   SERVER_URL, STEPTIX_SERVER_API_KEY, AI_API_KEY
+ *   STEPTIX_SERVER_URL, STEPTIX_SERVER_API_KEY, AI_API_KEY
  */
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -60,7 +60,7 @@ describe('Steptix live STOP → report recovery against real server', function (
     hooks = ext.exports?.__testHooks;
     assert.ok(hooks, '__testHooks missing — activation may have failed');
 
-    const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, { method: 'OPTIONS' });
       assert.ok(

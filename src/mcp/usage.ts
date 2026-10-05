@@ -45,7 +45,7 @@ Environment
                     (Codex CLI, Copilot CLI), whose spawn directory is not
                     your project. The user root is always allowed on top,
                     and never counts as a project candidate.
-  SERVER_URL        Sessions API base URL. Normally read from the project's
+  STEPTIX_SERVER_URL    Sessions API base URL. Normally read from the project's
                     .env / .env.<name>; this is a lowest-precedence fallback.
                     Project-less calls default to http://127.0.0.1:3141 —
                     a distinct port, so they never collide with a project
@@ -62,6 +62,6 @@ Host configuration
 Notes
   Hosts execute dist/, so run \`npm run build\` after changing the source.
   If you let this server auto-start the API server, use
-  \`steptix status --url $SERVER_URL\` — plain \`steptix status\` reads
+  \`steptix status --url $STEPTIX_SERVER_URL\` — plain \`steptix status\` reads
   steptix.config.json, which can name a different host or port.
 `.trimStart();

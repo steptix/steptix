@@ -22,7 +22,7 @@
  * rows it did not select keep the ✓ scenario 1 left, and scenario 3 runs on
  * the session scenario 2 left open. Mocha runs `it`s in declaration order.
  *
- * Prereq: the API server running at $LIVE_SERVER_URL (the parallel runner
+ * Prereq: the API server running at $LIVE_STEPTIX_SERVER_URL (the parallel runner
  * starts one per shard and points the shard's templates/.env at it), and the
  * fixture app on :8787 (runLiveTest.cjs boots it).
  */
@@ -165,7 +165,7 @@ async function openTestFile(hooks, workspaceRoot, name) {
   return uri;
 }
 
-const serverUrl = () => process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+const serverUrl = () => process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
 
 async function activate() {
   const ext = vscode.extensions.getExtension(EXT_ID);

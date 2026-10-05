@@ -101,7 +101,7 @@ async function setUp() {
   const hooks = ext.exports?.__testHooks;
   assert.ok(hooks, '__testHooks missing — activation may have failed');
 
-  const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+  const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
   try {
     const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, { method: 'OPTIONS' });
     assert.ok(res.status === 204 || res.status === 200, `Server at ${serverUrl} not responding`);
@@ -122,12 +122,12 @@ async function setUp() {
 /**
  * A project folder of the test's own inside the workspace: a
  * `steptix.config.json` whose browser listens for DevTools on `cdpPort`, a `.env`
- * (the workspace's — the shard's SERVER_URL, key and model — plus `extraEnv`),
+ * (the workspace's — the shard's STEPTIX_SERVER_URL, key and model — plus `extraEnv`),
  * and `tests/` holding `files`.
  *
  * The `.env` is a whole copy because Steptix takes the FIRST `.env` walking
  * up from the test file (runner-core env-file.ts): one holding only PASSWORD
- * would hide the shard's SERVER_URL.
+ * would hide the shard's STEPTIX_SERVER_URL.
  */
 function makeProject(workspaceRoot, name, { cdpPort, files = {}, extraEnv = {} }) {
   const dir = path.join(workspaceRoot, name);

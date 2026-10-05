@@ -1,6 +1,6 @@
 /**
  * Auto-start: guarantee a Sessions API server is listening at the project's
- * `SERVER_URL` before any tool sends it a request (stories/mcp-server.md §5).
+ * `STEPTIX_SERVER_URL` before any tool sends it a request (stories/mcp-server.md §5).
  *
  * The shape is a four-arm decision tree over one `/health` probe:
  *
@@ -314,7 +314,7 @@ export async function ensureServerReadyWith(
 }
 
 // ---------------------------------------------------------------------------
-// SERVER_URL validation
+// STEPTIX_SERVER_URL validation
 // ---------------------------------------------------------------------------
 
 /**
@@ -373,7 +373,7 @@ function assertSpawnable(url: URL, serverUrl: string): void {
         serverUrl,
         `nothing is listening there and \`steptix serve\` speaks plain HTTP, so a ` +
           `"${url.protocol}" URL cannot be started automatically. Start the server ` +
-          'yourself behind your proxy, or point SERVER_URL at the http:// origin.',
+          'yourself behind your proxy, or point STEPTIX_SERVER_URL at the http:// origin.',
       ),
     );
   }
@@ -582,7 +582,7 @@ const attemptLogOffsets = new Map<string, number>();
  *
  * That a project's own files can run that project's own code is the product
  * working as designed. The reason this list exists is that the boundary here is
- * wider: one server serves *every* project pointing at that `SERVER_URL`, holds
+ * wider: one server serves *every* project pointing at that `STEPTIX_SERVER_URL`, holds
  * each one's composed `.env`, and lives for the whole idle window — so without
  * the filter, project A's `.env` gets code execution inside the process that
  * later handles project B's credentials.

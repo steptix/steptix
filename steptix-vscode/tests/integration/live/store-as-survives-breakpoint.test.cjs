@@ -18,7 +18,7 @@
  * real `[store as: X]` capture, real session.outputs persistence,
  * real {{X}} interpolation in batch 2.
  *
- * Prereq: `npm run dev` (or `steptix serve`) on $LIVE_SERVER_URL.
+ * Prereq: `npm run dev` (or `steptix serve`) on $LIVE_STEPTIX_SERVER_URL.
  */
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -51,7 +51,7 @@ describe('Steptix live — [store as: X] survives a breakpoint pause', function 
     hooks = ext.exports?.__testHooks;
     assert.ok(hooks, '__testHooks missing — activation may have failed');
 
-    const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, {
         method: 'OPTIONS',

@@ -8,7 +8,7 @@
  *     behaviour (no opts).
  *  3. A `tool:awaiting-debugger` event triggers the ackToolDebugger
  *     call after the (mocked) debugger attach completes. The local-
- *     server check short-circuits when SERVER_URL isn't a loopback,
+ *     server check short-circuits when STEPTIX_SERVER_URL isn't a loopback,
  *     and the ack still fires so the run isn't left hanging.
  *
  * The Node debugger attach itself can't be exercised in this harness

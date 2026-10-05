@@ -217,7 +217,7 @@ function launchVSCode({
     STEPTIX_TEST_REPORT: reportPath,
     STEPTIX_LIVE_LOG: logPath,
     ELECTRON_ENABLE_LOGGING: '1',
-    LIVE_SERVER_URL: serverUrl,
+    LIVE_STEPTIX_SERVER_URL: serverUrl,
   };
   if (files) env.STEPTIX_LIVE_FILES = files.join(',');
 
@@ -317,7 +317,7 @@ async function main() {
   if (!fs.existsSync(path.join(templatesDir, '.env'))) {
     console.error(
       `templates/.env not found at ${templatesDir}. The live test ` +
-        `requires SERVER_URL, STEPTIX_SERVER_API_KEY, AI_API_KEY in that file.`,
+        `requires STEPTIX_SERVER_URL, STEPTIX_SERVER_API_KEY, AI_API_KEY in that file.`,
     );
     process.exit(2);
   }
@@ -333,7 +333,7 @@ async function main() {
   const installRoot = path.dirname(codeExe);
   const cliJs = path.join(installRoot, 'resources', 'app', 'out', 'cli.js');
 
-  const sharedServer = (opts.server || process.env.LIVE_SERVER_URL || '')
+  const sharedServer = (opts.server || process.env.LIVE_STEPTIX_SERVER_URL || '')
     .trim()
     .replace(/\/+$/, '') || null;
 

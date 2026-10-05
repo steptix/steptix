@@ -2,7 +2,7 @@
  * Live end-to-end WAIT timeout-hint + abort-aware-wait test (issue 022).
  *
  * Drives generated fixtures against the REAL Steptix Sessions API
- * server (SERVER_URL from templates/.env, expected on http://localhost:3100) —
+ * server (STEPTIX_SERVER_URL from templates/.env, expected on http://localhost:3100) —
  * real browser, real AI calls. A small local HTTP server provides a page whose
  * "Ready now" element appears only after ~12s, so a wait that beats the old 10s
  * default can be proven to succeed.
@@ -28,7 +28,7 @@
  * NOT part of the fast suite. Run via: node tests/integration/runLiveTest.cjs
  * (auto-discovered by the glob).
  *
- * Required env (from templates/.env, via walk-up): SERVER_URL, STEPTIX_SERVER_API_KEY,
+ * Required env (from templates/.env, via walk-up): STEPTIX_SERVER_URL, STEPTIX_SERVER_API_KEY,
  * AI_API_KEY.
  */
 const assert = require('node:assert/strict');
@@ -153,7 +153,7 @@ describe('Steptix live wait timeout-hint + abort-aware waits (issue 022)', funct
     hooks = ext.exports?.__testHooks;
     assert.ok(hooks, '__testHooks missing — activation may have failed');
 
-    const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, { method: 'OPTIONS' });
       assert.ok(res.status === 204 || res.status === 200, `Server at ${serverUrl} not responding (status=${res.status})`);

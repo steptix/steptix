@@ -3,7 +3,7 @@
 //
 // Unlike tests/integration/suite/, this entry runs against the real
 // Steptix Sessions API server (assumed running at the
-// SERVER_URL in templates/.env). The single test exercises the
+// STEPTIX_SERVER_URL in templates/.env). The single test exercises the
 // pause / resume / pause sequence end-to-end including a real browser.
 const path = require('node:path');
 const fs = require('node:fs');

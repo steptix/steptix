@@ -78,10 +78,10 @@ test('readMachineServerUrl: read from the same file as the key, trimmed, blank i
     fs.writeFileSync(envPath, `${MACHINE_KEY_VAR}=k\n`);
     assert.equal(readMachineServerUrl(deps), null, 'a file with only the key');
 
-    fs.writeFileSync(envPath, `${MACHINE_KEY_VAR}=k\nSERVER_URL=  http://127.0.0.1:3200  \n`);
+    fs.writeFileSync(envPath, `${MACHINE_KEY_VAR}=k\nSTEPTIX_SERVER_URL=  http://127.0.0.1:3200  \n`);
     assert.equal(readMachineServerUrl(deps), 'http://127.0.0.1:3200');
 
-    fs.writeFileSync(envPath, 'SERVER_URL=\n');
+    fs.writeFileSync(envPath, 'STEPTIX_SERVER_URL=\n');
     assert.equal(readMachineServerUrl(deps), null, 'a blanked-out line');
   } finally {
     cleanup();

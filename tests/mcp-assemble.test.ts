@@ -28,7 +28,7 @@ import { expandSkills } from '../src/skills/expander.js';
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mcp');
 
 const BASE_ENV = {
-  SERVER_URL: 'http://127.0.0.1:3100',
+  STEPTIX_SERVER_URL: 'http://127.0.0.1:3100',
   STEPTIX_SERVER_API_KEY: 'project-key',
   BASE_URL: 'https://base.example.com',
   GREETING: 'Welcome back',
@@ -80,7 +80,7 @@ async function refusalText(fn: () => Promise<unknown>): Promise<string> {
 const originalEnv = { ...process.env };
 
 beforeEach(() => {
-  delete process.env['SERVER_URL'];
+  delete process.env['STEPTIX_SERVER_URL'];
   delete process.env['STEPTIX_SERVER_API_KEY'];
   // Every `resolveProject` reads the machine key from the user root's `.env`
   // and confines paths against that root — redirect it into an empty per-test

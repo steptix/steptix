@@ -2,7 +2,7 @@
   "name": "steptix-vscode",
   "displayName": "Steptix (Beta)",
   "publisher": "pkent",
-  "version": "0.5.169",
+  "version": "0.5.170",
   "license": "Apache-2.0",
   "description": "Write, run and debug Steptix natural-language tests in VS Code",
   "private": true,
@@ -75,7 +75,7 @@
         "steptix.defaultEnvFile": {
           "type": "string",
           "default": "",
-          "description": "Absolute or workspace-relative path used when walk-up finds no .env next to (or above) the test file. Optional: a project with no .env takes SERVER_URL and STEPTIX_SERVER_API_KEY from the machine .env (%LOCALAPPDATA%\\steptix\\.env, ~/.steptix/.env elsewhere), and SERVER_URL defaults to http://127.0.0.1:3100."
+          "description": "Absolute or workspace-relative path used when walk-up finds no .env next to (or above) the test file. Optional: a project with no .env takes STEPTIX_SERVER_URL and STEPTIX_SERVER_API_KEY from the machine .env (%LOCALAPPDATA%\\steptix\\.env, ~/.steptix/.env elsewhere), and STEPTIX_SERVER_URL defaults to http://127.0.0.1:3100."
         },
         "steptix.consoleLogLevel": {
           "type": "string",
@@ -130,7 +130,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "markdownDescription": "Shell command Steptix runs to start the Steptix server when a run or a code-behind compile finds nothing listening on a **localhost** `SERVER_URL`.\n\n**Leave it empty if you installed the Steptix runtime**: Steptix then starts the newest runtime under `%LOCALAPPDATA%\\steptix\\runtimes` (`~/.steptix/runtimes` elsewhere) on the port `SERVER_URL` names — see `#steptix.serverAutoStart.useInstalledRuntime#`. Set a command only to start something else, such as a framework checkout.\n\nSuggested values — set `steptix.serverAutoStart.cwd` to match:\n\n- With the `steptix` package installed in your test project (`cwd` = that project):\n\n  `npx steptix serve --idle-timeout 60`\n\n- With a checkout of the framework (`cwd` = the checkout):\n\n  `node --inspect=0 dist/index.js serve --idle-timeout 60`\n\nNo `--env-file` is needed: `serve` reads the machine key from `%LOCALAPPDATA%\\steptix\\.env` (`~/.steptix/.env` elsewhere) and generates one there on first start — the same file Steptix reads, so the two always agree. Pass `--env-file` only to pin a different key or AI settings for this server.\n\n`--idle-timeout 60` makes the server stop itself after an hour with no run in flight and no API traffic. `--inspect=0` lets Node pick a free inspector port, which the extension discovers via `/health`; it is what lets step-into descend into tool code. To keep that with the package form, run its entry point through Node directly: `node --inspect=0 node_modules/steptix/dist/index.js serve --idle-timeout 60`.\n\n**This setting is machine-scoped: it can only be set in User settings, never by a workspace.** The extension executes it verbatim, so a workspace-settable value would let any cloned repo run arbitrary code the moment you pressed Run."
+          "markdownDescription": "Shell command Steptix runs to start the Steptix server when a run or a code-behind compile finds nothing listening on a **localhost** `STEPTIX_SERVER_URL`.\n\n**Leave it empty if you installed the Steptix runtime**: Steptix then starts the newest runtime under `%LOCALAPPDATA%\\steptix\\runtimes` (`~/.steptix/runtimes` elsewhere) on the port `STEPTIX_SERVER_URL` names — see `#steptix.serverAutoStart.useInstalledRuntime#`. Set a command only to start something else, such as a framework checkout.\n\nSuggested values — set `steptix.serverAutoStart.cwd` to match:\n\n- With the `steptix` package installed in your test project (`cwd` = that project):\n\n  `npx steptix serve --idle-timeout 60`\n\n- With a checkout of the framework (`cwd` = the checkout):\n\n  `node --inspect=0 dist/index.js serve --idle-timeout 60`\n\nNo `--env-file` is needed: `serve` reads the machine key from `%LOCALAPPDATA%\\steptix\\.env` (`~/.steptix/.env` elsewhere) and generates one there on first start — the same file Steptix reads, so the two always agree. Pass `--env-file` only to pin a different key or AI settings for this server.\n\n`--idle-timeout 60` makes the server stop itself after an hour with no run in flight and no API traffic. `--inspect=0` lets Node pick a free inspector port, which the extension discovers via `/health`; it is what lets step-into descend into tool code. To keep that with the package form, run its entry point through Node directly: `node --inspect=0 node_modules/steptix/dist/index.js serve --idle-timeout 60`.\n\n**This setting is machine-scoped: it can only be set in User settings, never by a workspace.** The extension executes it verbatim, so a workspace-settable value would let any cloned repo run arbitrary code the moment you pressed Run."
         },
         "steptix.serverAutoStart.cwd": {
           "type": "string",
@@ -148,7 +148,7 @@
           "type": "boolean",
           "default": true,
           "scope": "machine",
-          "markdownDescription": "When `#steptix.serverAutoStart.command#` is empty, start the newest Steptix runtime installed under `%LOCALAPPDATA%\\steptix\\runtimes` (`~/.steptix/runtimes` elsewhere) — the place the runtime installer puts it — with `serve --port <SERVER_URL's port> --idle-timeout 60`. Nothing else needs configuring.\n\nTurn off to never start a server unless a command is set.\n\n**Machine-scoped: User settings only**, like the other `serverAutoStart` settings: whether opening a repo can start processes is not the repo's to decide."
+          "markdownDescription": "When `#steptix.serverAutoStart.command#` is empty, start the newest Steptix runtime installed under `%LOCALAPPDATA%\\steptix\\runtimes` (`~/.steptix/runtimes` elsewhere) — the place the runtime installer puts it — with `serve --port <STEPTIX_SERVER_URL's port> --idle-timeout 60`. Nothing else needs configuring.\n\nTurn off to never start a server unless a command is set.\n\n**Machine-scoped: User settings only**, like the other `serverAutoStart` settings: whether opening a repo can start processes is not the repo's to decide."
         },
         "steptix.lmBridge.enabled": {
           "type": "boolean",

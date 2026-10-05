@@ -258,7 +258,7 @@ sourcemapped loader; nothing to add.
   points there, not at your `.steps.ts`. Debug via a normal run/replay. F11's
   cooperative pause is line-based, not sourcemap-based, but compile runs
   never send the flag either.
-- **Remote `SERVER_URL`** ⇒ both flows decline with the same status-bar
+- **Remote `STEPTIX_SERVER_URL`** ⇒ both flows decline with the same status-bar
   message tool step-into uses. The inspector URL from `/health` is only ever
   dialled when it parses to a loopback host.
 - **Breakpoint on module top-level code** (outside any `run()`): binds and

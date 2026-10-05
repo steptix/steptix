@@ -867,7 +867,7 @@ export class RunController {
    *  `currentServerUrl` (run-scoped, nulled at run end), these PERSIST past the
    *  run so out-of-band lifecycle ops (closeSession, the re-run liveness probe,
    *  getLastRun) follow the same server the run used — critical once a selected
-   *  env's `.env.<name>` can override SERVER_URL/STEPTIX_SERVER_API_KEY away from base
+   *  env's `.env.<name>` can override STEPTIX_SERVER_URL/STEPTIX_SERVER_API_KEY away from base
    *  `.env`. Null before the first run, when `resolveClient` falls back to disk. */
   private lastRunServerUrl: string | null = null;
   private lastRunApiKey: string | null = null;
@@ -990,7 +990,7 @@ export class RunController {
        */
       onServerReady?: (info: {
         inspectorUrl: string | null | undefined;
-        /** The run's resolved SERVER_URL — the hook's loopback check, since
+        /** The run's resolved STEPTIX_SERVER_URL — the hook's loopback check, since
          *  attaching a LOCAL debugger for a REMOTE server is the
          *  wrong-process bug §7 exists to prevent. */
         serverUrl: string;
@@ -1481,7 +1481,7 @@ export class RunController {
   /**
    * Pre-run server check + auto-start (story server-lifecycle §5).
    *
-   * Runs after env resolution has produced SERVER_URL and before any session
+   * Runs after env resolution has produced STEPTIX_SERVER_URL and before any session
    * is created. The run's AbortController already exists, so Stop cancels a
    * wedged health wait or spawn poll — and an abort during this phase is an
    * `aborted` run, never an STX028.
@@ -2075,7 +2075,7 @@ export class RunController {
 
     // Prefer the server the most-recent run actually targeted, so close /
     // liveness / getLastRun follow a run whose selected env (`.env.<name>`)
-    // overrode SERVER_URL. These persist past run end (unlike currentServerUrl).
+    // overrode STEPTIX_SERVER_URL. These persist past run end (unlike currentServerUrl).
     if (this.lastRunServerUrl && this.lastRunApiKey) {
       const client = this.clientFactory({
         serverUrl: this.lastRunServerUrl,
@@ -2093,7 +2093,7 @@ export class RunController {
     // No run yet this session (or after a window reload): resolve base `.env`
     // from disk. Normally there's no live session to target in that state. The
     // caveat is a window reload that orphaned a session on an env-overridden
-    // SERVER_URL — a fresh controller has no `lastRunServerUrl`, so this close
+    // STEPTIX_SERVER_URL — a fresh controller has no `lastRunServerUrl`, so this close
     // would hit the base server and miss it. Accepted: that session is keyed on
     // the file path and gets reclaimed by the next run's first-close.
     const settings = vscode.workspace.getConfiguration('steptix');
@@ -2113,10 +2113,10 @@ export class RunController {
     try {
       if (envResolution.hit) env = await readEnvFile(envResolution.path);
       const resolved = resolveServerUrl(
-        envResolution.hit ? { value: env['SERVER_URL'], path: envResolution.path } : null,
+        envResolution.hit ? { value: env['STEPTIX_SERVER_URL'], path: envResolution.path } : null,
       );
       serverUrl = resolved.serverUrl;
-      source = `SERVER_URL from ${describeServerUrlOrigin(resolved.origin)}`;
+      source = `STEPTIX_SERVER_URL from ${describeServerUrlOrigin(resolved.origin)}`;
       apiKey =
         env['STEPTIX_SERVER_API_KEY']?.trim() ||
         process.env['STEPTIX_SERVER_API_KEY']?.trim() ||
@@ -2138,10 +2138,10 @@ export class RunController {
   /**
    * Everything a request to the server needs from the project's env: the
    * resolved `.env` (with the selected environment's `.env.<name>` laid over
-   * it) and SERVER_URL. Refusals are the STXxxx payloads a run has always
+   * it) and STEPTIX_SERVER_URL. Refusals are the STXxxx payloads a run has always
    * failed with; the caller reports them.
    *
-   * A project needs no `.env`: with none, the env map is empty and SERVER_URL
+   * A project needs no `.env`: with none, the env map is empty and STEPTIX_SERVER_URL
    * comes from the rest of its chain (server-url.ts) — the environment, the
    * machine `.env`, the default. Only a `steptix.defaultEnvFile` naming a
    * file that is not there still refuses (STX001): that is a setting someone
@@ -2214,7 +2214,7 @@ export class RunController {
       this.lastResolvedEnvPath = null;
       envPath = path.join(this.workspaceFolder.uri.fsPath, '.env');
     }
-    // Which file SERVER_URL came from, if the project's env names one: the
+    // Which file STEPTIX_SERVER_URL came from, if the project's env names one: the
     // overlay's when it sets one (it wins in `composeEnv`), the base's
     // otherwise.
     let serverUrlFile = envPath;
@@ -2233,7 +2233,7 @@ export class RunController {
         .trim() || null;
 
     // Overlay the selected `.env.<name>` on top of base `.env` so $VAR
-    // references in ## Parameters / ## Config — and SERVER_URL/STEPTIX_SERVER_API_KEY —
+    // references in ## Parameters / ## Config — and STEPTIX_SERVER_URL/STEPTIX_SERVER_API_KEY —
     // honour the active environment (matching the server's ${env.X} map and the
     // CLI). A selected env with no matching file is a hard error (STX006); a
     // malformed overlay reuses STX005 with the overlay's path.
@@ -2270,10 +2270,10 @@ export class RunController {
         return { ok: false, payload };
       }
       env = composeEnv(env, overlay);
-      if (overlay['SERVER_URL']?.trim()) serverUrlFile = overlayPath;
+      if (overlay['STEPTIX_SERVER_URL']?.trim()) serverUrlFile = overlayPath;
       // The KEYS, not just how many: this line is the only place a run says
       // which values the overlay took over, and the ones that mislead hardest
-      // when they are silently replaced (AI_API_KEY, SERVER_URL) look exactly
+      // when they are silently replaced (AI_API_KEY, STEPTIX_SERVER_URL) look exactly
       // like a broken bridge or a dead server from every other error message.
       // Safe to name — a key is not its value, and the values are secrets.
       const keys = Object.keys(overlay);
@@ -2287,7 +2287,7 @@ export class RunController {
 
     let resolved: ResolvedServerUrl;
     try {
-      resolved = resolveServerUrl({ value: env['SERVER_URL'], path: serverUrlFile });
+      resolved = resolveServerUrl({ value: env['STEPTIX_SERVER_URL'], path: serverUrlFile });
     } catch (err) {
       // The machine .env is there but unreadable. The URL may well be in it,
       // so this is not "absent" — the same refusal the key's read gets.
@@ -2300,7 +2300,7 @@ export class RunController {
     }
     const { serverUrl } = resolved;
     const origin = describeServerUrlOrigin(resolved.origin);
-    log(`SERVER_URL ${serverUrl} — from ${origin}`);
+    log(`STEPTIX_SERVER_URL ${serverUrl} — from ${origin}`);
     try {
       new URL(serverUrl);
     } catch {
@@ -2878,7 +2878,7 @@ export class RunController {
     log(`run requested for ${filePath}: lines=[${lines.join(',')}]`);
 
     const settings = vscode.workspace.getConfiguration('steptix');
-    // .env, the selected environment and SERVER_URL — shared with Record
+    // .env, the selected environment and STEPTIX_SERVER_URL — shared with Record
     // Steps, which needs the same server and the same env map. The API key
     // comes later, once the server is ready (resolveApiKey).
     const target = await this.resolveServerTarget(options.envOverride, log);
@@ -3134,7 +3134,7 @@ export class RunController {
     // Persist the run's server target past run end so out-of-band lifecycle
     // ops (close / liveness / getLastRun via resolveClient) follow this run even
     // after currentServerUrl is nulled — needed once .env.<name> can retarget
-    // SERVER_URL away from base .env.
+    // STEPTIX_SERVER_URL away from base .env.
     this.lastRunServerUrl = serverUrl;
     this.lastRunApiKey = apiKey;
 

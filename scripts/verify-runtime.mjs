@@ -75,7 +75,7 @@ const binDir = path.join(profile, 'steptix', 'bin');
 // Nothing of the developer's may leak in: no key, no AI settings, no server.
 const baseEnv = { ...process.env, LOCALAPPDATA: profile, STEPTIX_STATS: 'off' };
 for (const key of Object.keys(baseEnv)) {
-  if (/^(AI_|STEPTIX_SERVER_API_KEY$|SERVER_URL$|LIVE_SERVER_URL$|AUTOMATION_ENV$|STEPTIX_NODE$)/i.test(key)) delete baseEnv[key];
+  if (/^(AI_|STEPTIX_SERVER_API_KEY$|STEPTIX_SERVER_URL$|LIVE_STEPTIX_SERVER_URL$|AUTOMATION_ENV$|STEPTIX_NODE$)/i.test(key)) delete baseEnv[key];
 }
 // The CLI phase names Node through STEPTIX_NODE; the VS Code phase leaves it
 // unset, so steptix.cmd takes `node` from PATH. Between them both branches run.
@@ -265,14 +265,14 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
 
   // ── 3. VS Code: Run starts the installed server through steptix.cmd ────
   // Nothing configured: no extension settings, no project .env. The one line
-  // written is SERVER_URL in the machine .env, because 3100 — the default the
+  // written is STEPTIX_SERVER_URL in the machine .env, because 3100 — the default the
   // extension would otherwise use — may be a developer's own server.
   base = `http://127.0.0.1:${await freePort()}`;
   await fs.rm(path.join(project, '.env'), { force: true });
   // A first-time user has no machine key; the server the extension starts
   // must create it, beside the URL, and the extension must then find it.
   await fs.mkdir(path.dirname(keyFile), { recursive: true });
-  await fs.writeFile(keyFile, `SERVER_URL=${base}\n`);
+  await fs.writeFile(keyFile, `STEPTIX_SERVER_URL=${base}\n`);
 
   console.log('Building the VS Code extension under test...');
   execSync('npm run build', { cwd: path.join(root, 'steptix-vscode'), stdio: 'inherit' });
@@ -313,7 +313,7 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
     );
   }
   assert.ok(started, 'the VS Code test passed but recorded no server');
-  checks.push('VS Code: with no settings and no project .env, Run finds the installed runtime and the machine .env\'s SERVER_URL, starts the server through steptix.cmd with Node from PATH and a generated key, and the test passes');
+  checks.push('VS Code: with no settings and no project .env, Run finds the installed runtime and the machine .env\'s STEPTIX_SERVER_URL, starts the server through steptix.cmd with Node from PATH and a generated key, and the test passes');
 
   // ── 4. The started server, from outside VS Code ────────────────────────
   const key = (await fs.readFile(keyFile, 'utf8')).match(/^STEPTIX_SERVER_API_KEY=(.+)$/m)?.[1].trim();

@@ -106,8 +106,8 @@ test('resolveEnvFile: miss returns searched dirs + fallback path', async () => {
 });
 
 test('parseEnv: KEY=VALUE basic', () => {
-  const out = parseEnv('SERVER_URL=http://localhost:3100\nSTEPTIX_SERVER_API_KEY=abc');
-  assert.deepEqual(out, { SERVER_URL: 'http://localhost:3100', STEPTIX_SERVER_API_KEY: 'abc' });
+  const out = parseEnv('STEPTIX_SERVER_URL=http://localhost:3100\nSTEPTIX_SERVER_API_KEY=abc');
+  assert.deepEqual(out, { STEPTIX_SERVER_URL: 'http://localhost:3100', STEPTIX_SERVER_API_KEY: 'abc' });
 });
 
 test('parseEnv: comments and blank lines ignored', () => {

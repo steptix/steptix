@@ -7,9 +7,9 @@
 > frontmatter env/dataSources resolved, inline sections executed, report
 > written — and its result carries per-step status, per-step error text,
 > the report path and token totals; (3) with no server running, the first
-> tool call auto-starts `steptix serve` on the port `SERVER_URL` names, with
+> tool call auto-starts `steptix serve` on the port `STEPTIX_SERVER_URL` names, with
 > the project's API key, and the run proceeds — no terminal involved,
-> **and `steptix status --url $SERVER_URL` can still see the server it
+> **and `steptix status --url $STEPTIX_SERVER_URL` can still see the server it
 > started**; (4) two
 > successive `run_steps` calls with the same `session_id` share page
 > state and captured variables; (5) cancelling a call mid-run aborts the
@@ -107,7 +107,7 @@ unrelated.)
   second project's `config` silently never applied. An id not starting
   `mcp:` is refused unless `allow_foreign_session: true`.
 - **Auto-start spawns this package** with a normalized `--host`/`--port`
-  derived from `SERVER_URL`, `--inspect=0` and an explicit `env` (§5).
+  derived from `STEPTIX_SERVER_URL`, `--inspect=0` and an explicit `env` (§5).
 - **One MCP process per host session**; cross-process collisions on a
   shared session id are accepted and documented (§6).
 
@@ -518,7 +518,7 @@ error for every `run_steps` call.
     of step 7's map. *This step exists separately because the
     frontmatter name is not known until step 9 — resolving the env at
     step 7 would silently ignore `env: uat` in a test file, running it
-    with the base `.env` only: wrong `SERVER_URL`, wrong AI key, wrong
+    with the base `.env` only: wrong `STEPTIX_SERVER_URL`, wrong AI key, wrong
     interpolation, and rule 6 never applied.*
 11. **(file)** Re-check frontmatter `dataSources` against the roots (§4a rule 5),
     replicating `resolveDataSourcePath(declared, dirname(absPath))`
@@ -668,7 +668,7 @@ with no `env_name` and otherwise ship the whole MCP host environment as
 the request's `env` field and into the spawned child — the egress §5
 arm 2 exists to prevent. Cited as contrast, not as the recipe.
 
-**Discovery-only fallback.** `SERVER_URL` and `STEPTIX_SERVER_API_KEY` may also
+**Discovery-only fallback.** `STEPTIX_SERVER_URL` and `STEPTIX_SERVER_API_KEY` may also
 come from `process.env`, at **lowest precedence** (`.env.<name>` >
 `.env` > `process.env`) and **never merged into the `env` map sent to
 the server**. This is required, not a convenience: for Codex CLI and
@@ -678,8 +678,8 @@ from exactly that channel — refusing the other two would be
 inconsistent and would make those hosts unconfigurable.
 
 Note `steptix stop` does neither — it reads `process.env` and derives its
-URL from `loadConfig().server.host/port`, never `SERVER_URL`. No
-`SERVER_URL` in scope ⇒ pre-flight error naming both files and the env
+URL from `loadConfig().server.host/port`, never `STEPTIX_SERVER_URL`. No
+`STEPTIX_SERVER_URL` in scope ⇒ pre-flight error naming both files and the env
 var. **No `STEPTIX_SERVER_API_KEY`** ⇒ its own pre-flight error (§7): `serve`
 hard-exits before binding without it, so otherwise a missing key costs a
 full 20 s poll and reports "auto-start failed" instead of the truth.
@@ -756,7 +756,7 @@ missed update makes `status` exit 1 instead of its documented 2, and
 makes `stop` fall past its refusal and POST `STEPTIX_SERVER_API_KEY` to the
 foreign process.)*
 
-**`SERVER_URL` validation.** Refuse with a §7 row, *before the probe*, a
+**`STEPTIX_SERVER_URL` validation.** Refuse with a §7 row, *before the probe*, a
 path component (`probeHealth` appends `/health` after
 `normalizeBaseUrl`, so `http://h:3100/api` probes `/api/health`, 404s,
 and lands in arm 2 with a misleading message).
@@ -791,7 +791,7 @@ Decision tree:
 
 ```
 process.execPath --inspect=0 <dist>/index.js serve \
-    --host <normalized> --port <from SERVER_URL> --idle-timeout 60
+    --host <normalized> --port <from STEPTIX_SERVER_URL> --idle-timeout 60
 ```
 
 ```ts
@@ -813,7 +813,7 @@ up to the 60-minute idle timeout, an MCP process that started one would
 Every part of that is load-bearing:
 
 - **`--host` must be normalized**, and this repo is the proof. Its
-  `.env` says `SERVER_URL=http://localhost:3100` while its
+  `.env` says `STEPTIX_SERVER_URL=http://localhost:3100` while its
   `steptix.config.json` says `"host": "127.0.0.1"`. Passing `--host
   localhost` makes `serve` override the config and `app.listen(3100,
   'localhost')` resolve via `dns.lookup`, which on this machine returns
@@ -1020,9 +1020,9 @@ a dozen literals.
 | --- | --- |
 | path/root outside allowed roots; unresolvable `project_root` | the root, the candidates, and `STEPTIX_MCP_ROOTS` |
 | no `steptix.config.json` within the root | `STEPTIX_MCP_ROOTS` first, then every directory searched |
-| no `SERVER_URL` | both env files and the env var |
+| no `STEPTIX_SERVER_URL` | both env files and the env var |
 | no `STEPTIX_SERVER_API_KEY` | both env files and the env var |
-| `SERVER_URL` non-`http:`, portless, or path-bearing | the URL and the rule |
+| `STEPTIX_SERVER_URL` non-`http:`, portless, or path-bearing | the URL and the rule |
 | unrecognized service on the port | the port and what it reported |
 | server down, remote URL | the URL; only loopback auto-starts |
 | `dist/index.js` missing | the resolved path and `npm run build` |
@@ -1065,9 +1065,9 @@ that part of the test cannot execute unattended.
   VS Code extension has an open bug detecting `config.toml` MCP servers
   (verify via Codex CLI first); Windows Codex setups may need
   `startup_timeout_ms` raised; and **if you auto-start via MCP, use
-  `steptix status --url $SERVER_URL`** — `status`/`stop` otherwise derive
+  `steptix status --url $STEPTIX_SERVER_URL`** — `status`/`stop` otherwise derive
   their target from `steptix.config.json`, which can disagree with
-  `SERVER_URL` on host *or* port.
+  `STEPTIX_SERVER_URL` on host *or* port.
 
 ## Out of scope
 
@@ -1178,7 +1178,7 @@ does not typecheck them.
   reach via the parser and skill expander — extend it or do not mock
   the logger here; and **port ordering** — mkdtemp → `createApiServer` →
   `listenOnRandomPort` → *then* write `.env` with the resulting
-  `SERVER_URL` and a matching `STEPTIX_SERVER_API_KEY` → then call the tool.
+  `STEPTIX_SERVER_URL` and a matching `STEPTIX_SERVER_API_KEY` → then call the tool.
   Scope note: with `step-executor` mocked, per-step statuses are
   synthetic, so this is a **field-drop** test (`envName`, `sections`,
   `sourceLines`, `dataSources` against the allow-list), not a fold test.
@@ -1193,7 +1193,7 @@ does not typecheck them.
   and no env sent**; down+remote ⇒ error; down+loopback ⇒ spawn asserted
   to carry the **normalized** `--host` (`localhost` ⇒ `127.0.0.1`),
   `--port`, `--inspect=0`, `shell:false`, and the composed `env`;
-  portless/`https:`/path-bearing `SERVER_URL` refused; missing
+  portless/`https:`/path-bearing `STEPTIX_SERVER_URL` refused; missing
   `dist/index.js` refused fast; `spawn` emitting `'error'` does not
   crash the process; never-healthy ⇒ error with log tail; repeat failure
   suppressed with the backoff message; **two parallel cold starts spawn
@@ -1230,8 +1230,8 @@ Accepted without a test, explicitly: Windows detached-spawn semantics
 
 - Claude Code via this repo's `.mcp.json`: `run_steps`;
   `run_test_file` with an env; kill the server and watch a call
-  auto-start it on the `SERVER_URL` port; **then `steptix status --url
-  $SERVER_URL` and `steptix stop`** (verification rule 3); cancel mid-run
+  auto-start it on the `STEPTIX_SERVER_URL` port; **then `steptix status --url
+  $STEPTIX_SERVER_URL` and `steptix stop`** (verification rule 3); cancel mid-run
   then `get_last_run`; confirm `/health` reports an inspector so
   Steptix step-into still works.
 - Codex CLI and Copilot CLI (both with `STEPTIX_MCP_ROOTS` set): register,
@@ -1363,7 +1363,7 @@ Security, all fixed:
 - **A project `.env` could execute code in the spawned server.**
   `NODE_OPTIONS` honours `--require`/`--import`, and the child env was an
   unfiltered overlay. The boundary crossed matters: one server serves every
-  project on that `SERVER_URL` and holds each one's `.env`, so project A got
+  project on that `STEPTIX_SERVER_URL` and holds each one's `.env`, so project A got
   execution in the process later handling project B's credentials.
   `UNSAFE_CHILD_ENV_KEYS` now strips the loader-influencing names.
 - **The auto-start failure message could quote a previous server's log** —
@@ -1374,7 +1374,7 @@ Security, all fixed:
   and be parsed, shipped as the request's `env`, and interpolated into step
   text. Both are confined now, and a `STEPTIX_MCP_ROOTS` entry must be a
   directory.
-- **`SERVER_URL` accepted a query, fragment or embedded credentials**; the
+- **`STEPTIX_SERVER_URL` accepted a query, fragment or embedded credentials**; the
   check is now `origin`-based, and messages echo a credential-stripped form.
 - **Foreign text was interpolated unbounded** into an error (a port squatter
   chooses `health.detail`) and into `captures` (the page under test chooses

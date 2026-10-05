@@ -45,7 +45,7 @@ No high risks. Ports are 0 everywhere, and the real-app files park `executeStep`
 - Mechanism: these call the real `resolveProject` without redirecting the user root. `withServerDiscovery` always evaluates `readMachineKey()` (src/mcp/project.ts:447-451), and `allowedRoots()` canonicalises the real `%LOCALAPPDATA%\steptix` (project.ts:141-148). The developer machine's real user-root `.env` is therefore read in every test. `readUserRootEnv` rethrows any non-ENOENT error (src/env/user-root.ts:66-74).
 - Risk: medium. Machine state leaks into unit tests: an unreadable or odd user root on one machine changes outcomes.
 - Fix: redirect `LOCALAPPDATA` and `XDG_CONFIG_HOME` into a tmp dir in `beforeEach`/`beforeAll`, exactly as `tests/mcp-project.test.ts:121-132` and `tests/mcp-server-start.test.ts:166-180` already do.
-- Evidence: reasoning. Unlike its siblings, mcp-assemble's `beforeEach` (lines 82-89) only deletes `SERVER_URL` and `STEPTIX_SERVER_API_KEY`.
+- Evidence: reasoning. Unlike its siblings, mcp-assemble's `beforeEach` (lines 82-89) only deletes `STEPTIX_SERVER_URL` and `STEPTIX_SERVER_API_KEY`.
 
 Checked and fine:
 - `mcp-registry:108` (real 20 ms timer, asserts only `>= 10`) and `mcp-seam:1788` (`holdMs: 60`, asserts `> 0`, and the FIFO order is deterministic): both assert lower bounds that load cannot undercut.

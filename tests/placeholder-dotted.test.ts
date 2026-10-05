@@ -208,7 +208,7 @@ describe('the MCP pre-flight knows a dotted reference comes from a loop', () => 
       path.join(root, 'steptix.config.json'),
       JSON.stringify({}),
     );
-    writeFileSync(path.join(root, '.env'), 'SERVER_URL=http://127.0.0.1:3100\n');
+    writeFileSync(path.join(root, '.env'), 'STEPTIX_SERVER_URL=http://127.0.0.1:3100\n');
     process.env['STEPTIX_MCP_ROOTS'] = root;
   });
 
