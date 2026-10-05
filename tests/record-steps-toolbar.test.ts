@@ -477,6 +477,26 @@ describe('screenshots paint the toolbar out', () => {
     // Nor its label's graphite.
     expect(await pixelsNear(crop, GRAPHITE, 6)).toBe(0);
   }, 30_000);
+
+  it('pick mode armed under a resting pointer outlines what it rests on, without another move', async () => {
+    await page.goto(`${origin}/wide.html`);
+    recorder = newRecorder({ sendScreenshots: true });
+    await recorder.start();
+    // The pointer gets there first and stays: the only pointermove reaches
+    // the page before pick mode does.
+    await page.mouse.move(40, 660);
+    recorder.armPick();
+    await until(
+      async () => pixelsNear(await page.screenshot({ type: 'png' }), [0x2e, 0x9b, 0xff], 20),
+      (blue) => blue > 50,
+      'the pick outline to be painted',
+      15_000,
+    );
+    await page.mouse.down();
+    await page.mouse.up();
+    const [check] = await until(async () => actions, (a) => a.length === 1, 'the check');
+    expect(check!.kind).toBe('check');
+  }, 30_000);
 });
 
 describe('pause and resume', () => {
