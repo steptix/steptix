@@ -731,7 +731,7 @@ export const slugify = tool<{ s: string }>(({ s }) =>
 export const upper = tool<{ s: string }>(({ s }) => s.toUpperCase());
 ```
 
-Call them path-qualified: `[tool: strings/slugify s="Hello World"]` and `[tool: strings/upper s="quiet"]`. A bare `[tool: slugify …]` does not resolve — only a default export answers to the file name alone.
+Call them as `[tool: strings/slugify s="Hello World"]` and `[tool: strings/upper s="quiet"]`. A tool reference is `<file>/<tool>` — the file's path under `toolsDir` without its extension, then the tool's name; a bare `[tool: uuid]` is sugar only for a top-level file whose tool is named after it, so it can't pick one tool out of a multi-tool file.
 
 #### Rung 3 — `defineTool({...})` (full schema)
 
