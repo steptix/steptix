@@ -142,9 +142,11 @@ jobs:
       #
       # Vitest starts CPUs - 1 workers outside watch mode, which is one on a
       # 2-vCPU hosted runner: every file in turn. The root suite mostly waits
-      # on Chromium and child processes, so more workers than cores still pay.
+      # on Chromium and child processes, so more workers than cores still pay
+      # — up to a point: 6 was slower than 4, and its load pushed a
+      # wait-for-paint check in record-steps-toolbar past its 15 s ceiling.
       - name: Root
-        run: npm test -- --maxWorkers=6
+        run: npm test -- --maxWorkers=4
       - name: runner-core
         if: ${{ !cancelled() }}
         run: npm test --ignore-scripts --prefix runner-core
