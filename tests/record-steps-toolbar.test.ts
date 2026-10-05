@@ -26,6 +26,8 @@ import {
   stepBoxValue,
   toolbarButtonAt,
   until,
+  untilPagePick,
+  untilPageRecording,
   watchStatus,
 } from './record-toolbar-cdp.js';
 
@@ -387,8 +389,12 @@ describe('the toolbar is kept out of the recording', () => {
     expect((await readToolbar(page))!.sub).toContain('Paused. Nothing you do is recorded.');
     await page.keyboard.press('Alt+Shift+P');
     await until(async () => recorder.isPaused, (p) => !p, 'resumed');
+    // The page hears of the Resume after the recorder: a paused page drops
+    // Add check, and one not yet armed takes the second press as another arm.
+    await untilPageRecording(page);
     await page.keyboard.press('Alt+Shift+C');
     await until(async () => picks, (p) => p.length === 1, 'armed');
+    await untilPagePick(page, true);
     await page.keyboard.press('Alt+Shift+C');
     await until(async () => picks, (p) => p.length === 2, 'disarmed');
     await page.keyboard.press('Alt+Shift+Z');
@@ -532,7 +538,8 @@ describe('pause and resume', () => {
 
     await clickToolbar(page, 'pause'); // Resume
     await until(async () => recorder.isPaused, (p) => !p, 'resumed');
-    await sleep(250);
+    // A page that has not heard of the Resume yet records nothing.
+    await untilPageRecording(page);
     await page.click('#go');
     await until(async () => actions.length, (n) => n === 4, 'the click after resume');
     const after = actions[3]!;
@@ -905,9 +912,14 @@ describe("a page's native popover menu (finding 8, documented)", () => {
     await page.keyboard.press('Alt+Shift+C');
     await until(async () => picks, (p) => p.length === 1, 'armed by the shortcut');
     expect(await menuOpen()).toBe(true);
+    // Not before the page shows it armed: until then it takes the press as
+    // another arm.
+    await untilPagePick(page, true);
     await page.keyboard.press('Alt+Shift+C');
     await until(async () => picks, (p) => p.length === 2, 'disarmed by the shortcut');
+    expect(picks).toEqual([true, false]);
     expect(await menuOpen()).toBe(true);
+    await untilPagePick(page, false);
     // The platform's light dismiss runs on the pointer going down, before any
     // listener: the bar's own button closes the menu.
     await clickToolbar(page, 'check');

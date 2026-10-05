@@ -392,3 +392,22 @@ export async function until<T>(
   }
   return last;
 }
+
+// The recorder flips its own flags at once (`isPaused`, `onPick`) and tells
+// the page after: a key or click sent between the two reaches a page that
+// still has the old state, and is dropped or taken the other way. Before
+// acting on a Resume or an Add check, wait for the page to show it.
+
+/** Wait until the page's bar shows the recording running, not paused. */
+export async function untilPageRecording(page: Page): Promise<void> {
+  await until(() => readToolbar(page), (t) => t !== null && t.status.startsWith('REC'), 'the page to show REC');
+}
+
+/** Wait until the page's bar shows pick mode armed, or not armed. */
+export async function untilPagePick(page: Page, armed: boolean): Promise<void> {
+  await until(
+    () => readToolbar(page),
+    (t) => t !== null && t.sub.includes('Click what to check') === armed,
+    armed ? 'the page to show pick mode' : 'the page to leave pick mode',
+  );
+}

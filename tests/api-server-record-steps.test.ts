@@ -144,7 +144,7 @@ vi.mock('../src/report/generator.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
-import { clickDrawer, clickToolbar, readDrawer, readToolbar, stepBoxValue, until } from './record-toolbar-cdp.js';
+import { clickDrawer, clickToolbar, readDrawer, readToolbar, stepBoxValue, until, untilPageRecording } from './record-toolbar-cdp.js';
 import { addLogCallback, getLogLevel, logger, setLogLevel } from '../src/utils/logger.js';
 import {
   RECORD_STEPS_HEADLESS_MESSAGE,
@@ -1328,7 +1328,10 @@ describe('the browser toolbar — on the wire', () => {
     // Resumed: the action that waited is drafted…
     await s.draftThrough(1);
     expect(ai.requests).toHaveLength(1);
-    // …and the first action after the pause says so to the model.
+    // …and the first action after the pause says so to the model — once the
+    // page has heard of the Resume: record:paused goes out first, and a page
+    // still paused records nothing.
+    await untilPageRecording(page);
     await page.click('#signin');
     await s.draftThrough(2);
     expect(recordingOf(ai.requests[1]!)[0]).toMatchObject({ kind: 'click', afterPause: true });
