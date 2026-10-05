@@ -9,6 +9,22 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Changed — runtime upgrades remove older versions, and wait while Steptix runs
+
+Installing a version of the Windows runtime now removes every installed
+version older than it, each with its own uninstaller, so its Installed Apps
+entry goes too. Before, every version stayed installed, at about 170 MB each,
+although only the newest ever ran. Installing an older version again, as a
+rollback, leaves newer ones in place.
+
+The installer and uninstaller also refuse to change a runtime folder that
+Steptix is running from. Removing a running server's files did not fail: the
+server broke later, the next time it loaded one. An interactive install asks
+you to stop it (Steptix: Stop Server, or `steptix stop`) and press Retry. A
+silent one exits with code 3 and changes nothing. If Windows PowerShell cannot
+run the check, the install goes ahead as before but removes no older version.
+See [packaging/runtime/README.md](packaging/runtime/README.md#upgrades).
+
 ### Fixed — unit tests that failed for no reason, and four things they found
 
 A review of all four unit suites (9,338 tests) cut them to 8,945 and made

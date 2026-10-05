@@ -7,8 +7,50 @@ with `STEPTIX_NODE`.
 
 The default installation is per-user, requires no elevation, and lives at
 `%LOCALAPPDATA%\steptix\runtimes\1.0.0-beta.1`. Each version gets its own
-Windows Installed Apps entry. Uninstalling preserves shared keys, browser
-downloads and test projects. Stop the server before uninstalling.
+Windows Installed Apps entry, and installing a version removes the older ones
+(see [Upgrades](#upgrades)). Uninstalling preserves shared keys, browser
+downloads and test projects.
+
+## Upgrades
+
+Installing a version removes every installed version older than it. Each one
+is removed by its own uninstaller, run in place and waited for, so its folder
+and its Installed Apps entry go, and it keeps the PATH folder, which now runs
+the new version. Nothing ever ran an older version: the extension and
+`steptix` on PATH both run the newest. Each one took about 170 MB on disk.
+
+Only folders this installer made are removed: those with the launch files, the
+installation marker and an uninstaller. Newer versions are never removed.
+Installing an older version again, as a rollback, leaves the newer ones
+installed, and the newest still runs until it is uninstalled.
+
+The folders stay one per version, so an upgrade never writes into a folder in
+use. The installer and the uninstaller also wait until Steptix is not running
+from any folder they would change:
+
+- the installer: the folder it installs into, and every older version it
+  would remove. A newer version it leaves alone does not count.
+- the uninstaller: its own folder.
+
+A server must not lose its files while it runs. Node does not lock the files
+it has loaded, so removing them does not fail. The server breaks later instead,
+the next time it loads one. "Running" means `node.exe` with a file from the
+folder on its command line (the launcher, the server, a CLI run), or an
+executable inside the folder (esbuild). A shell or an editor that only names
+the folder does not count. Installing normally, you are asked to stop it and
+press Retry: in VS Code, run Steptix: Stop Server, or in a terminal run
+`steptix stop`. The extension's server keeps running for up to 60 minutes
+after its last use, so an upgrade with VS Code open usually asks. The next Run
+starts the server again from the new version.
+
+[runtime-scan.ps1](runtime-scan.ps1) answers both questions, in Windows
+PowerShell 5.1, which every supported Windows has. Its version order is a
+deliberate copy of the extension's, and
+`steptix-vscode/tests/runtime-scan.test.js` holds the two together. If the scan
+cannot run, for example because PowerShell is blocked by policy, the install
+goes ahead as it did before this check existed but removes no older version,
+since it could not tell whether one was running. The NSIS side is in
+[runtime-scan.nsh](runtime-scan.nsh).
 
 ## On PATH
 
@@ -55,11 +97,20 @@ folder to disappear rather than for the command to finish.
 
 A silent run never shows a dialog. Each one it could show has a silent answer
 (`/SD`), because without one NSIS shows the dialog even under `/S`, and a
-script waits on it indefinitely. An install that cannot proceed, on 32-bit
-Windows for example, exits with code 2. An uninstall that cannot proceed,
-because the folder's installation marker is missing or names another version,
-removes nothing. Its exit code goes to the temporary copy, not to you, so the
-sign is that the runtime folder stays.
+script waits on it indefinitely. The exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Installed |
+| 2 | Could not proceed, on 32-bit Windows for example |
+| 3 | Steptix is running from a version this install would change. Stop it and run the installer again. |
+
+An uninstall that cannot proceed removes nothing. That happens when Steptix is
+running from it, or when the folder's installation marker is missing or names
+another version. Its exit code goes to the temporary copy, not to you, so the
+sign is that the runtime folder stays. Run it in place with
+`Uninstall.exe /S _?=<its folder>` to get the code (3 or 2), but then
+`Uninstall.exe` and the folder are left for you to delete.
 
 `/D=<folder>` installs elsewhere, but neither the extension nor `steptix` on
 PATH looks outside `%LOCALAPPDATA%\steptix\runtimes`, so a runtime installed
@@ -115,7 +166,7 @@ version: one patch higher, with a `-verify` suffix (`1.0.1-verify` beside
 `1.0.0-beta.1`). Its version is bumped in the two files that report it, so
 `steptix --version` can tell the two runtimes apart. It lives in
 `dist-runtime/unverified/newer/` and is never released. The test needs it to
-uninstall one version while another stays.
+upgrade, to roll back, and to uninstall one version while another stays.
 
 The test does what a user does, in a temporary folder whose path has spaces:
 
@@ -134,8 +185,12 @@ The test does what a user does, in a temporary folder whose path has spaces:
    - It checks that the extension found the installed runtime and started its
      server through `cmd.exe` → `steptix.cmd` → the launcher, on that port,
      that the server generated the machine key, and that every step passed.
-4. **Server.** It runs the Sessions API with that key, checks tool source
-   maps, then stops the server with `steptix.cmd stop`.
+4. **Server.** It runs the Sessions API with that key and checks tool source
+   maps. While that server is still running, it runs three things silently:
+   the same installer again, the newer installer (an upgrade, which would
+   remove this version), and this version's uninstaller, in place. Each must
+   exit with code 3, change nothing, and leave the server serving. Then it
+   stops the server with `steptix.cmd stop`.
 5. **PATH.** It reinstalls silently over the same folder without `/NOPATH`.
    The PATH folder must be added to the end of the seeded `Path`, with every
    other entry and the value's type kept. Then it runs `steptix --version` the
@@ -146,9 +201,12 @@ The test does what a user does, in a temporary folder whose path has spaces:
    folder whose marker is missing, then on one whose marker names another
    version. Each must exit with an error code and no dialog, and remove
    nothing.
-7. **A newer version beside it.** It installs the newer installer silently,
-   as after an upgrade. `Path` must still hold one entry for the PATH folder,
-   and `steptix --version` must now report the newer version.
+7. **Upgrade, then roll back.** It installs the newer installer silently. The
+   installer under test must be gone, folder and Installed Apps entry, removed
+   by its own uninstaller. `Path` must still hold one entry for the PATH
+   folder, and `steptix --version` must now report the newer version. Then it
+   installs the installer under test again: both versions must be installed,
+   and `steptix` must still run the newer one.
 8. **Uninstall, while the newer version stays.** It runs the Installed Apps
    entry's uninstall command for the installer under test. Then it checks that
    the install folder and the entry are gone and that the project and the key
@@ -228,5 +286,5 @@ channel uses installed Google Chrome; downloading Playwright Chromium does
 not change that default. The browser installer command is included, but
 downloads require network access.
 
-Managed upgrades, choosing a runtime other than the newest, and a dedicated
-runtime-management command family remain future work.
+Choosing a runtime other than the newest, and a dedicated runtime-management
+command family, remain future work.
