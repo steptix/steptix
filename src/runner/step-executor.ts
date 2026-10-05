@@ -2,6 +2,7 @@ import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import type { Config } from '../config/types.js';
+import { effectiveViewport } from '../config/viewport.js';
 import type { AIAction, BranchedAIResponse, TableReadMapping } from '../ai/types.js';
 import type { StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
@@ -2519,7 +2520,7 @@ async function executeStepAttempt(
       baseUrl,
       stepIndex,
       totalSteps,
-      config.browser.headed ? config.browser.windowSize : config.browser.viewport,
+      effectiveViewport(config.browser),
       buildActiveBrowserInfo(opts.browserTracker),
     );
 
@@ -4480,7 +4481,7 @@ export async function evaluateConditions(
           baseUrl,
           undefined,
           undefined,
-          config.browser.headed ? config.browser.windowSize : config.browser.viewport,
+          effectiveViewport(config.browser),
           buildActiveBrowserInfo(opts.browserTracker),
         ),
         values,
@@ -4669,7 +4670,7 @@ export async function executeBranchedStep(
       baseUrl,
       group.conditionalSteps[0]!.index,
       totalSteps,
-      config.browser.headed ? config.browser.windowSize : config.browser.viewport,
+      effectiveViewport(config.browser),
       buildActiveBrowserInfo(opts.browserTracker),
     );
     const userMessage = buildBranchedStepMessage(

@@ -24,6 +24,7 @@ import {
   MIN_VIEWPORT_DIMENSION,
   VIEWPORT_PRESETS,
   describeViewportSource,
+  effectiveViewport,
   formatViewport,
   resolveViewportSpec,
   viewportCdpConflictError,
@@ -289,3 +290,40 @@ function attemptError(raw: string): string {
 function escape(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+
+/**
+ * `effectiveViewport` — the size anything DESCRIBING the page must read.
+ *
+ * The three sizing keys diverge exactly when a test declares a viewport, which
+ * is the only time the answer matters, so every case below is about precedence
+ * rather than arithmetic.
+ */
+describe('effectiveViewport — which of the three keys is the page (§2/§4)', () => {
+  const PAIR = {
+    viewport: { width: 1280, height: 720 },
+    windowSize: { width: 1440, height: 900 },
+  };
+
+  it('a fixed viewport wins in BOTH modes — that is the whole point of it', () => {
+    const fixedViewport = { width: 390, height: 844 };
+    expect(effectiveViewport({ ...PAIR, fixedViewport, headed: true })).toEqual(fixedViewport);
+    expect(effectiveViewport({ ...PAIR, fixedViewport, headed: false })).toEqual(fixedViewport);
+  });
+
+  it('without one, the old pair still answers — headed reads the window', () => {
+    expect(effectiveViewport({ ...PAIR, headed: true })).toEqual(PAIR.windowSize);
+    expect(effectiveViewport({ ...PAIR, headed: false })).toEqual(PAIR.viewport);
+  });
+
+  it('an explicitly undefined fixedViewport is the same as an absent one', () => {
+    expect(effectiveViewport({ ...PAIR, headed: false, fixedViewport: undefined }))
+      .toEqual(PAIR.viewport);
+  });
+
+  it('classifies as the device the page IS, not the one the window is', () => {
+    // The bug in one line: the prompt derives `(mobile view)` vs `(desktop
+    // view)` from this width, and the pre-fix expression handed it 1440.
+    const size = effectiveViewport({ ...PAIR, headed: true, fixedViewport: VIEWPORT_PRESETS.mobile! });
+    expect(size.width).toBe(390);
+  });
+});
