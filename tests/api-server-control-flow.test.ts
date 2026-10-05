@@ -212,9 +212,13 @@ vi.mock('../src/api/response-store.js', () => ({
 
 /** The report each run produced, so the loop markers can be asserted. */
 const generatedReports: any[] = [];
+/** Called with each report as it is written — the cue for a test whose run
+ *  ends after its client has gone, so there is no `done` frame to wait on. */
+let onReport: ((report: any) => void) | undefined;
 vi.mock('../src/report/generator.js', () => ({
   generateReport: vi.fn(async (report: unknown) => {
     generatedReports.push(report);
+    onReport?.(report);
     return '/tmp/fake-report.html';
   }),
   getPrimaryModel: vi.fn(() => 'mock-model'),
@@ -312,6 +316,7 @@ beforeEach(() => {
   flowControlFor = () => undefined;
   judgeParksUntilAbort = false;
   judgeEntered = undefined;
+  onReport = undefined;
   (logger.warn as unknown as { mockClear: () => void }).mockClear();
 });
 
@@ -1948,32 +1953,10 @@ describe('compiling a file with control flow', () => {
     Object.values(compileResultIn(events).files as Record<string, string>).join('\n');
   const WHILE_LINE = 'While the Next button is enabled, Go to the next page';
 
-  it('compiles a whole file that loops — the refusal is gone', async () => {
-    // stories/codebehind-loops-and-conditions.md: the server used to refuse
-    // any compile whose slice touched a loop, before anything ran. Nothing is
-    // refused now; the `While` decides "no" on its first visit, so the loop
-    // runs no passes, and the run goes straight on.
-    const events = await collect(whileBody({ compile: 'run' }));
-
-    expect(refusalIn(events)).toBeUndefined();
-    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
-    expect(executedSteps).toEqual(['Open the statements page', 'Verify the last page is shown']);
-
-    const result = compileResultIn(events);
-    // The guard's condition is generated from the one visit — it did not hold.
-    expect(proposalIn(events)).toContain('async condition(');
-    const conditionPrompt = compilePrompts.find((p) => /async condition\(\{ page, step \}\)/.test(p))!;
-    expect(conditionPrompt).toContain('### Observation 1 — the condition did NOT hold');
-    // The body never ran: named not attempted with the DECISION sentence
-    // (decision 12), not the return one.
-    const bodyNumber = 3;
-    expect(result.summary.notAttempted).toContain(bodyNumber);
-    const bodyFrame = events.find(
-      (e) => e.type === 'compile:step' && e.step === bodyNumber && /did not run/.test(e.message),
-    );
-    expect(bodyFrame?.message).toBe('the step did not run — the run decided against it');
-    expect(result.status).toBe('partial');
-  });
+  // A whole-file Run & Compile of a `While` that runs no passes — no refusal,
+  // the condition generated from the one not-held visit, the body named not
+  // attempted — is `api-server-loops-compile.test.ts`'s "a While that runs no
+  // passes names its body, with the decision sentence".
 
   it('lets a bounded compile of a step OUTSIDE every loop proceed', async () => {
     // Line 3 is `Open the statements page`; the only loop is on line 4.
@@ -2105,6 +2088,13 @@ describe('stopping the run mid-decision', () => {
     const entered = new Promise<void>((resolve) => {
       judgeEntered = resolve;
     });
+    // The run unwinds after the client has gone — notice the abort, reject the
+    // parked judge, leave the loop, write the report — so the report itself is
+    // the event to wait on. A deadline would race all of that against every
+    // other worker on the box.
+    const reported = new Promise<any>((resolve) => {
+      onReport = resolve;
+    });
 
     let clientAborted = false;
     const consume = (async () => {
@@ -2125,8 +2115,9 @@ describe('stopping the run mid-decision', () => {
 
     // The report is written on the way out, and says the run was stopped —
     // the guard's AbortError did not escape as "Server error" (issues/020).
-    await vi.waitFor(() => expect(generatedReports.length).toBeGreaterThan(0));
-    expect(generatedReports.at(-1)!.aborted).toBe(true);
+    const report = await reported;
+    expect(report.aborted).toBe(true);
+    expect(generatedReports).toHaveLength(1);
     // The tail never ran.
     expect(executedSteps).not.toContain('Click Pay now');
   });
@@ -2761,12 +2752,14 @@ describe('step mode after a return that ended a PASS', () => {
     }
 
     const awaitingLines = events.filter((e) => e.type === 'step:awaiting').map((e) => e.line);
-    // Line 4 is the guard: the run goes back to it after the pass ends, so
-    // that is where the ▶ belongs.
-    expect(awaitingLines).toContain(4);
-    // Line 9 is the body's second step. This run reported it skipped and is
-    // never going to run it.
-    expect(awaitingLines).not.toContain(9);
+    // Two pauses, and the whole sequence rather than "contains 4": the pause
+    // after `Open` names the guard too (a guard runs undispatched, so it never
+    // pauses itself), so `toContain(4)` held before the return was ever
+    // reached. The SECOND is the one under test — after the `Return`, the run
+    // goes back to the guard, line 4, so that is where the ▶ belongs. Not line
+    // 9, the body's second step, which this run reported skipped and is never
+    // going to run; and not line 5, the step after the loop.
+    expect(awaitingLines).toEqual([4, 4]);
     expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
   });
 
@@ -2791,8 +2784,10 @@ describe('step mode after a return that ended a PASS', () => {
     }
 
     const awaitingLines = events.filter((e) => e.type === 'step:awaiting').map((e) => e.line);
-    // After line 8 (`Click Next`, the whole body) the run re-evaluates line 4.
-    expect(awaitingLines.slice(awaitingLines.indexOf(8))).toContain(4);
+    // The first pause, after `Open`, names the guard whatever the fix; the
+    // second follows line 8 (`Click Next`, the whole body), and the run then
+    // re-evaluates line 4 — not line 5, the step after the loop.
+    expect(awaitingLines).toEqual([4, 4]);
     expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
   });
 });

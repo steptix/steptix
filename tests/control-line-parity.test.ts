@@ -12,8 +12,6 @@ import {
 import { parseFlowControlStep } from '../src/parser/flow-control-step.js';
 import {
   parseControlLine as coreParse,
-  isControlLineClaim as coreClaims,
-  claimedControlForm as coreForm,
   closedChainMemberMessage as coreClosed,
   danglingChainMemberMessage as coreDangling,
   chainMemberWord as coreWord,
@@ -212,13 +210,9 @@ const CORPUS = [
 ];
 
 describe('src/parser/control-line.ts and runner-core/src/control-line.ts agree', () => {
-  it('on what claims, and on which form', () => {
-    for (const line of CORPUS) {
-      expect(coreClaims(line), line).toBe(cliClaims(line));
-      expect(coreForm(line), line).toBe(cliForm(line));
-    }
-  });
-
+  // The parse is the whole comparison: runner-core mirrors no claim test, since
+  // no client asks whether a line claimed a form, only whether it parsed. The
+  // CLI's claim functions still steer the corpus self-check below.
   it('on what parses, and on every field including the tail offset', () => {
     for (const line of CORPUS) {
       expect(coreParse(line), line).toEqual(cliParse(line));
@@ -391,7 +385,6 @@ describe('flow control wins the overlap, identically on both sides', () => {
       expect(cliParse(line), line).toBeNull();
       expect(coreParse(line), line).toBeNull();
       expect(cliClaims(line), line).toBe(false);
-      expect(coreClaims(line), line).toBe(false);
       expect(cliForm(line), line).toBeNull();
       // …and it really is claimed by the other grammar, or this suite would
       // pass just as well on a typo nobody claims.
@@ -412,7 +405,6 @@ describe('flow control wins the overlap, identically on both sides', () => {
       expect(cliParse(line), line).toBeNull();
       expect(coreParse(line), line).toBeNull();
       expect(cliClaims(line), line).toBe(false);
-      expect(coreClaims(line), line).toBe(false);
     }
   });
 
@@ -435,7 +427,6 @@ describe('flow control wins the overlap, identically on both sides', () => {
     for (const line of ['Return', 'Stop here', 'Stop running the remaining steps', 'Fail',
       'Fail the test with error "boom"']) {
       expect(cliClaims(line), line).toBe(false);
-      expect(coreClaims(line), line).toBe(false);
       expect(parseFlowControlStep(line), line).not.toBeNull();
     }
   });
@@ -453,7 +444,6 @@ describe('flow control wins the overlap, identically on both sides', () => {
     // …so the last two stay ordinary prose: no ` then `, so no chain either.
     for (const line of ['If X return', 'If X stop here']) {
       expect(cliClaims(line), line).toBe(false);
-      expect(coreClaims(line), line).toBe(false);
     }
   });
 });

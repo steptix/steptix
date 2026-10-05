@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,7 @@ import {
 import { buildRepairPrompt } from '../src/codebehind/repair.js';
 import { buildFileReviewPrompt, parseFileRevision } from '../src/codebehind/review.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * Generation, review and repair as the compiler uses them: the prompts' inputs,
@@ -38,10 +39,16 @@ import type { CodeBehindBinding } from '../src/codebehind/loader.js';
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-generate');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
 
 let counter = 0;
 let dir: string;
+
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('codebehind-generate');
+});
 
 beforeEach(async () => {
   dir = path.join(tmpBase, `t${counter++}`);
@@ -49,7 +56,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true });
+  await removeScratchBase(tmpBase);
 });
 
 /** An AI client that answers with `text` and records what it was asked. */
@@ -838,7 +845,11 @@ describe('unwaitedReadComplaint', () => {
 });
 
 describe('generateStepEntry', () => {
-  it('returns the entry the model produced', async () => {
+  it('takes a clean entry on the first answer — no re-ask, and no leak where the value is read by name', async () => {
+    // What is under test is that nothing refuses it: the leak guard sees
+    // `octocat` resolved and the code reading `username` instead, and no
+    // complaint sends it back. The code itself is the stub's, so it is not
+    // read back here.
     const { client, calls } = stubClient(JSON.stringify({
       entry: [
         `{`,
@@ -862,8 +873,6 @@ describe('generateStepEntry', () => {
 
     expect(result.kind).toBe('entry');
     expect(calls).toHaveLength(1);
-    expect(result.kind === 'entry' && result.code).toContain("step.getVar('username')");
-    expect(result.kind === 'entry' && result.code).not.toContain('octocat');
   });
 
   it('turns a model decline into a declined result carrying the reason', async () => {
@@ -1358,15 +1367,27 @@ describe('generateStepEntry — which dotted names the prompt masks (§7.6)', ()
     expect(text).toContain('{{user.apikey}} resolved to "uk_live_1234" on this run');
   });
 
-  it('is handed a marked snapshot by both compilers', () => {
-    // The live compiler: its `liveCompileSnapshot`. The boxed one: its
-    // `passSnapshots` fold, which marks what each pass bound — generation,
-    // the condition prompt, and both repairs (review round 2, F1).
-    const live = readFileSync(path.join(repoRoot, 'src', 'codebehind', 'live-compile.ts'), 'utf8');
-    const boxed = readFileSync(path.join(repoRoot, 'src', 'codebehind', 'compile.ts'), 'utf8');
-    expect(live).toContain('parameterMap: input.resolvedParameters');
-    expect(boxed).toContain('parameterMap: passValues');
-    expect(boxed.match(/parameterMap: values/g)).toHaveLength(3);
+  it('is handed the map at every prompt site of both compilers', () => {
+    // The live compiler hands over its `liveCompileSnapshot`, the boxed one its
+    // `passSnapshots` fold — generation, the condition prompt, and the repairs
+    // (review round 2, F1). No prompt shows a site that dropped it: each also
+    // hands over a mask set built from the same map, which masks the heading's
+    // value on its own (measured: the generation prompt above is the same with
+    // and without the map once that set is passed). The map is the second line,
+    // so a site losing it leaves every behaviour test green.
+    //
+    // Hence a count, as codebehind-live-compile.test.ts counts the snapshot
+    // sites in session-manager.ts:
+    // every place a compiler builds one of those prompts, and every map handed
+    // over, independently — a site that drops it, or a new one added without
+    // it, makes them disagree, and renaming the variable it passes does not.
+    for (const file of ['compile.ts', 'live-compile.ts']) {
+      const source = readFileSync(path.join(repoRoot, 'src', 'codebehind', file), 'utf8');
+      const sites = source.match(/\bgenerate(?:Step|Condition)Entry\(|: RepairPromptInput = \{/g) ?? [];
+      const maps = source.match(/^\s*parameterMap: /gm) ?? [];
+      expect(sites.length, file).toBeGreaterThanOrEqual(3);
+      expect(maps, file).toHaveLength(sites.length);
+    }
   });
 });
 

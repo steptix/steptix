@@ -30,7 +30,7 @@
  *  - and the two Origin Energy passes open DIFFERENT details pages, each
  *    verifying its own amount. That is the assertion the fixture exists for.
  *
- * Prereq: the API server on $LIVE_SERVER_URL (the parallel runner starts one
+ * Prereq: the API server on $LIVE_STEPTIX_SERVER_URL (the parallel runner starts one
  * per shard and points that shard's templates/.env at it) and the fixture app
  * on :8787 (runLiveTest.cjs boots it).
  *
@@ -84,7 +84,7 @@ async function waitFor(label, predicate, timeoutMs = 60_000) {
 const PASSED = new Set(['pass', 'pass-code-behind', 'pass-stale']);
 const passed = (status) => PASSED.has(status);
 
-const serverUrl = () => process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+const serverUrl = () => process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
 
 async function activate() {
   const ext = vscode.extensions.getExtension(EXT_ID);

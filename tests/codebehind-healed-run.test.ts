@@ -19,10 +19,9 @@
  * where the loop attributes tokens and what it puts on the report, neither of
  * which a unit test of the counting helper would reach.
  */
-import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import type { Config } from '../src/config/types.js';
 import type { ParsedTest, TestInstance } from '../src/parser/types.js';
@@ -164,11 +163,17 @@ vi.mock('../src/report/history-appender.js', () => ({
 }));
 
 import { runTest } from '../src/runner/test-runner.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-healed-run');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
+
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('healed-run');
+});
 
 function makeTest(steps: string[], filePath: string): ParsedTest {
   return {
@@ -277,7 +282,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true });
+  await removeScratchBase(tmpBase);
 });
 
 // ─── 1. The runner ──────────────────────────────────────────────────────────

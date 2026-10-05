@@ -233,8 +233,8 @@ describe('src/parser/use-step.ts and runner-core/src/use-step.ts agree', () => {
     // …and the NBSP line, which must be prose on BOTH sides. If a copy widens
     // the class to `\s` this row starts claiming, which is the drift the line
     // is in the corpus for.
-    if (!CORPUS.some((l) => l.includes(' '))) missing.push('no nbsp');
-    expect(cliClaims('[use computer]')).toBe(false);
+    if (!CORPUS.some((l) => l.includes('\u00a0'))) missing.push('no nbsp');
+    expect(cliClaims('[use\u00a0computer]')).toBe(false);
     expect(missing).toEqual([]);
   });
 });

@@ -24,9 +24,16 @@ memory/
 # the project zip but stays out of git to avoid churn).
 .steptix/
 *.tsbuildinfo
+# Unit-test scratch dirs. In-repo because code-behind bundles resolve the
+# package from there; each run removes its own, but a killed run leaves one.
+tests/.tmp-*/
 .env
 .env.*
 !.env.example
+# The integration suite's fixture project. Fake values only (a dead port and a
+# made-up key, against a fake API client); tracked so a fresh clone can run
+# `npm run test:integration`.
+!steptix-vscode/tests/integration/fixtures/.env
 .claude/settings.local.json
 .claude/worktrees/
 .claude/scheduled_tasks.lock

@@ -26,7 +26,7 @@ through the extension. Users wanting a real Chrome with their profile have
 to either drop down to the CLI or hand-edit a markdown test outside the
 extension's flow.
 
-The "Adopt ▾" dropdown added in commit `e283d3a` already establishes the
+The "Adopt ▾" dropdown added in commit `f13ae13` already establishes the
 mental model "attach to something that already exists" — currently scoped
 to server-side sessions. Extending it to also enumerate live Chrome tabs
 makes CDP discoverable in the same gesture, with no new top-level menu.

@@ -31,14 +31,14 @@ describe('interpolate', () => {
     expect(interpolate('', { foo: 'bar' })).toBe('');
   });
 
-  it('substitutes only word-character keys', () => {
+  it('substitutes a key with underscores, and leaves a hyphenated one literal', () => {
     expect(interpolate('{{foo_bar}} value', { foo_bar: '42' })).toBe('42 value');
+    // Not a reference at all, so not looked up — even when the map holds it.
+    expect(interpolate('{{order-id}} value', { 'order-id': '42' })).toBe('{{order-id}} value');
   });
 });
 
 describe('resolveParameters', () => {
-  const originalEnv = { ...process.env };
-
   beforeEach(() => {
     // Clean slate for each test
     Object.keys(process.env).forEach((k) => {
@@ -47,7 +47,7 @@ describe('resolveParameters', () => {
   });
 
   afterEach(() => {
-    // Restore original env
+    // Remove what the test set
     Object.keys(process.env).forEach((k) => {
       if (k.startsWith('TEST_PARAM_')) delete process.env[k];
     });

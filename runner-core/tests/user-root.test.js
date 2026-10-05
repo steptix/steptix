@@ -5,12 +5,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   bareServePort,
-  chooseServerUrl,
   readMachineKey,
   readMachineServerUrl,
+  userRootDir,
   userRootEnvExposed,
   userRootEnvPath,
-  DEFAULT_SERVER_URL,
   MACHINE_KEY_VAR,
 } from '../dist/user-root.js';
 
@@ -72,86 +71,76 @@ test('readMachineKey: a blanked-out line reads as absent, never the empty string
   }
 });
 
-// ---------------------------------------------------------------------------
-// The machine's server (stories/machine-server-url.md)
-// ---------------------------------------------------------------------------
+test('userRootDir: the folder the .env sits in, which runtimes/ sits beside', () => {
+  const localAppData = path.resolve(path.sep, 'lad');
+  const deps = { env: { LOCALAPPDATA: localAppData }, platform: 'win32' };
+  assert.equal(userRootDir(deps), path.join(localAppData, 'steptix'));
+  assert.equal(userRootEnvPath(deps), path.join(userRootDir(deps), '.env'));
+});
 
-test('readMachineServerUrl: null when absent or blank, trimmed value when set', () => {
+test('readMachineServerUrl: read from the same file as the key, trimmed, blank is absent', () => {
   const { deps, cleanup } = tmpDeps();
   try {
-    assert.equal(readMachineServerUrl(deps), null);
-    writeMachineEnv(deps, 'SERVER_URL=\n');
-    assert.equal(readMachineServerUrl(deps), null);
-    writeMachineEnv(deps, 'SERVER_URL=  http://127.0.0.1:3200  \n');
+    assert.equal(readMachineServerUrl(deps), null, 'no file');
+
+    const envPath = userRootEnvPath(deps);
+    fs.mkdirSync(path.dirname(envPath), { recursive: true });
+    fs.writeFileSync(envPath, `${MACHINE_KEY_VAR}=k\n`);
+    assert.equal(readMachineServerUrl(deps), null, 'a file with only the key');
+
+    fs.writeFileSync(envPath, `${MACHINE_KEY_VAR}=k\nSTEPTIX_SERVER_URL=  http://127.0.0.1:3200  \n`);
     assert.equal(readMachineServerUrl(deps), 'http://127.0.0.1:3200');
+
+    fs.writeFileSync(envPath, 'STEPTIX_SERVER_URL=\n');
+    assert.equal(readMachineServerUrl(deps), null, 'a blanked-out line');
   } finally {
     cleanup();
   }
 });
 
-test('the default is 3100 on the address a default serve binds', () => {
-  assert.equal(DEFAULT_SERVER_URL, 'http://127.0.0.1:3100');
+test('readMachineServerUrl: an unreadable file throws rather than reading as absent', () => {
+  const { deps, cleanup } = tmpDeps();
+  try {
+    // A folder where the file should be is a portable EISDIR.
+    fs.mkdirSync(userRootEnvPath(deps), { recursive: true });
+    assert.throws(() => readMachineServerUrl(deps), { code: 'EISDIR' });
+  } finally {
+    cleanup();
+  }
 });
 
-test('bareServePort: 3100 with no machine SERVER_URL, else the port and file of that URL', () => {
+// ---------------------------------------------------------------------------
+// Where a bare `serve` listens (stories/machine-server-url.md)
+// ---------------------------------------------------------------------------
+
+test('bareServePort: 3100 with no machine STEPTIX_SERVER_URL, else the port and file of that URL', () => {
   const { deps, cleanup } = tmpDeps();
   try {
     assert.deepEqual(bareServePort(deps), { ok: true, port: 3100, source: 'the default' });
-    const envPath = writeMachineEnv(deps, 'SERVER_URL=http://localhost:3200\n');
+    const envPath = writeMachineEnv(deps, 'STEPTIX_SERVER_URL=http://localhost:3200\n');
     assert.deepEqual(bareServePort(deps), {
       ok: true,
       port: 3200,
-      source: `SERVER_URL in ${envPath}`,
+      source: `STEPTIX_SERVER_URL in ${envPath}`,
     });
   } finally {
     cleanup();
   }
 });
 
-test('bareServePort: a machine SERVER_URL with no port, or not a URL, is a refusal naming the file', () => {
+test('bareServePort: a machine STEPTIX_SERVER_URL with no port, or not a URL, is a refusal naming the file', () => {
   const { deps, cleanup } = tmpDeps();
   try {
-    const envPath = writeMachineEnv(deps, 'SERVER_URL=http://localhost\n');
+    const envPath = writeMachineEnv(deps, 'STEPTIX_SERVER_URL=http://localhost\n');
     const noPort = bareServePort(deps);
     assert.equal(noPort.ok, false);
     assert.match(noPort.reason, /has no port/);
     assert.ok(noPort.reason.includes(envPath));
 
-    writeMachineEnv(deps, 'SERVER_URL=localhost 3100\n');
+    writeMachineEnv(deps, 'STEPTIX_SERVER_URL=localhost 3100\n');
     const notUrl = bareServePort(deps);
     assert.equal(notUrl.ok, false);
     assert.match(notUrl.reason, /not a valid URL/);
-  } finally {
-    cleanup();
-  }
-});
-
-test('chooseServerUrl: the project wins, then the machine .env, then the default', () => {
-  const { deps, cleanup } = tmpDeps();
-  try {
-    const projectEnv = path.join(path.resolve(path.sep, 'proj'), '.env');
-
-    assert.deepEqual(chooseServerUrl({}, null, deps), {
-      serverUrl: 'http://127.0.0.1:3100',
-      source: 'the default',
-      path: null,
-    });
-
-    const machineEnv = writeMachineEnv(deps, 'SERVER_URL=http://127.0.0.1:3200\n');
-    assert.deepEqual(chooseServerUrl({}, null, deps), {
-      serverUrl: 'http://127.0.0.1:3200',
-      source: `SERVER_URL in ${machineEnv}`,
-      path: machineEnv,
-    });
-
-    // A project .env without SERVER_URL still falls through to the machine one.
-    assert.equal(chooseServerUrl({ AI_MODEL: 'm' }, projectEnv, deps).serverUrl, 'http://127.0.0.1:3200');
-
-    assert.deepEqual(chooseServerUrl({ SERVER_URL: ' http://localhost:3104 ' }, projectEnv, deps), {
-      serverUrl: 'http://localhost:3104',
-      source: `SERVER_URL in ${projectEnv}`,
-      path: projectEnv,
-    });
   } finally {
     cleanup();
   }

@@ -21,7 +21,8 @@ import { Store } from '../../src/extension/store';
 import type { HostToWebview } from '../../src/shared/protocol';
 import { FakeApiServer, failedBatch, passedBatch } from '../fakes/fake-api-server';
 import { FakeBrowserServer } from '../fakes/fake-browser-server';
-import { FakeWebview, delay } from '../fakes/fake-webview';
+import { refusingPort } from '../fakes/refusing-port';
+import { FakeWebview } from '../fakes/fake-webview';
 import {
   __reset,
   __setConfig,
@@ -55,7 +56,9 @@ describe('FlickController', () => {
     await controller?.drain();
     controller = undefined;
     await server.stop();
-    fs.rmSync(dir, { recursive: true, force: true });
+    // Retried: on Windows an on-access scanner can still hold a file just
+    // written here, and `force` only forgives ENOENT.
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   /** Boot a controller, attach a fresh fake webview, and complete the handshake. */
@@ -70,7 +73,12 @@ describe('FlickController', () => {
   }
 
   function wait<T extends HostToWebview['type']>(fw: FakeWebview, type: T): Promise<Msg<T>> {
-    return fw.waitFor<Msg<T>>((m) => m.type === type);
+    return fw.waitFor<Msg<T>>((m) => m.type === type, undefined, () => {
+      const failures = controller?.__testBackgroundFailures ?? [];
+      return failures.length === 0
+        ? ''
+        : `the controller's background work failed: ${failures.map((e) => String(e)).join(' | ')}`;
+    });
   }
 
   /** Create one session and return its id. Call once per test. */
@@ -248,9 +256,13 @@ describe('FlickController', () => {
     assert.equal(entry.batch.outputSources, undefined);
   });
 
-  test('an unreachable server produces an error result entry and an error toast', async () => {
-    // Port 1 is reserved and refuses connections — a genuine network failure.
-    __setConfig('flick.apiUrl', 'http://127.0.0.1:1');
+  test('an unreachable server produces an error result entry and an error toast', async (t) => {
+    // A genuine ECONNREFUSED, from a port held for the whole test so nothing
+    // else can start listening on it. (Port 1 would not do — it is on fetch's
+    // bad-port list, so the request is rejected before any socket is opened.)
+    const gone = await refusingPort();
+    t.after(() => gone.release());
+    __setConfig('flick.apiUrl', gone.url);
 
     const fw = await boot();
     const sessionId = await createSession(fw);
@@ -387,7 +399,8 @@ describe('FlickController', () => {
     __setWarningResponse(undefined); // user cancels the modal
     fw.drain();
     fw.send({ type: 'deleteSession', sessionId });
-    await delay(100);
+    // The handler has run to its end — the cancelled modal included.
+    await controller!.drain();
 
     assert.equal(fw.last('sessions'), undefined, 'no sessions update should be posted');
     const persisted = await new Store(dir).loadSessions();
@@ -426,11 +439,14 @@ describe('FlickController', () => {
     assert.equal(reply.sessions![0].pageTitle, 'Dashboard');
   });
 
-  test('listServerSessions surfaces an error when the server is unreachable', async () => {
-    // Crash the server before the request fires; the listSessions client
-    // method maps the network failure to ApiError with a clear message.
+  test('listServerSessions surfaces an error when the server is unreachable', async (t) => {
+    // Nothing answers at the configured URL; the listSessions client method
+    // maps the refusal to ApiError with a clear message. The port is held for
+    // the whole test, so nothing else can start listening on it.
+    const gone = await refusingPort();
+    t.after(() => gone.release());
+    __setConfig('flick.apiUrl', gone.url);
     const fw = await boot();
-    await server.stop();
     fw.drain();
 
     fw.send({ type: 'listServerSessions' });
@@ -808,12 +824,15 @@ describe('FlickController', () => {
       assert.equal(result.engine, 'edge');
       assert.equal(result.error, 'Edge not found');
 
+      // Let the handler run to its end, so what follows checks what it did
+      // rather than what it had not done yet.
+      await controller!.drain();
+
       // No lastLaunched write.
       const persisted = await new Store(dir).loadCdpLastLaunched();
       assert.equal(persisted, null);
 
-      // Brief settle; no cdpDiscovery should have been broadcast.
-      await delay(50);
+      // No cdpDiscovery broadcast.
       const discoveries = fw.allOf<Msg<'cdpDiscovery'>>('cdpDiscovery');
       assert.equal(discoveries.length, 0, 'no rediscover on failure');
     });

@@ -68,10 +68,14 @@ describe('canonicalServerKey', () => {
     );
   });
 
-  it('returns a stable key for an unparseable URL instead of throwing', () => {
+  it('returns a key for an unparseable URL instead of throwing', () => {
     // Validation belongs to auto-start, which can name the bad value in an
     // error. Throwing here would turn a diagnosable config mistake into a
     // stack trace from a bookkeeping helper.
-    expect(canonicalServerKey('not a url')).toBe(canonicalServerKey('not a url'));
+    expect(() => canonicalServerKey('not a url')).not.toThrow();
+    // …and that key is not some real server's: a garbage STEPTIX_SERVER_URL must not
+    // share a backoff or a single-flight start with the default one.
+    expect(canonicalServerKey('not a url')).not.toBe(canonicalServerKey('http://127.0.0.1:3100'));
+    expect(canonicalServerKey('not a url')).not.toBe(canonicalServerKey('http://localhost:3100'));
   });
 });

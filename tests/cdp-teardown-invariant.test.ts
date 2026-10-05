@@ -48,13 +48,9 @@ function fakeSession(over: Partial<BrowserSession> = {}): BrowserSession & {
 }
 
 describe('closeBrowser on a CDP session', () => {
-  it('never closes the context — that is the whole point of CDP teardown', async () => {
-    const session = fakeSession({ cdp: true });
-    await closeBrowser(session);
-    expect(session.calls).not.toContain('context.close');
-  });
-
-  it('severs the connection only, leaving the browser process running', async () => {
+  it('severs the connection only — never the context, which is the whole point of CDP teardown', async () => {
+    // Exactly one call, so a `context.close` is excluded along with anything
+    // else: the browser process is the user's, and keeps running.
     const session = fakeSession({ cdp: true });
     await closeBrowser(session);
     expect(session.calls).toEqual(['browser.close']);

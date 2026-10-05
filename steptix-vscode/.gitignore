@@ -8,7 +8,7 @@ tests/integration/test-report.json
 tests/integration/live-test-report.json
 tests/integration/live-test-output.log
 tests/integration/fast-suite-output.log
-tests/integration/fixtures/github.md
+tests/integration/fixtures/securebank.md
 integration-out.log
 *.vsix
 
@@ -22,6 +22,7 @@ tests/integration/fixtures/snc-project/
 tests/integration/fixtures/dc-project/
 tests/integration/fixtures/sac-project/
 tests/integration/fixtures/no-key-project/
+tests/integration/fixtures/no-url-project/
 
 # Remembered wall-clock per live test file, used to start the slow ones first.
 # A local timing hint, not a fact about the code — machine-specific, and stale

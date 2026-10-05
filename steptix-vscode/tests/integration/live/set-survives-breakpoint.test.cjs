@@ -19,7 +19,7 @@
  * quietly sent one of these to the model would show up as a non-zero
  * total.
  *
- * Prereq: `steptix serve` on $LIVE_SERVER_URL.
+ * Prereq: `steptix serve` on $LIVE_STEPTIX_SERVER_URL.
  */
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -52,7 +52,7 @@ describe('Steptix live — Set assignments survive a breakpoint pause', function
     hooks = ext.exports?.__testHooks;
     assert.ok(hooks, '__testHooks missing — activation may have failed');
 
-    const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, { method: 'OPTIONS' });
       assert.ok(

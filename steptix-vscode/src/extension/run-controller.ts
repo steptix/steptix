@@ -27,7 +27,6 @@ import {
   readEnvFile,
   readEnvOverlayFile,
   readMachineKey,
-  chooseServerUrl,
   reportError,
   describeStepFailure,
   isSkippedPass,
@@ -36,7 +35,6 @@ import {
   userRootEnvPath,
   userRootEnvExposed,
   type ClassifiedStep,
-  type ServerUrlChoice,
   type CompileEvent,
   type CompileProgressEvent,
   type CompileSummary,
@@ -103,7 +101,6 @@ import {
 } from './row-selection-core.js';
 import {
   decideServerAction,
-  servePortOfCommand,
   defaultHealthProbe,
   defaultServerSpawner,
   describeServerVersion,
@@ -116,6 +113,11 @@ import {
   type HealthProbe,
   type ServerSpawner,
 } from './server-manager.js';
+import {
+  describeServerUrlOrigin,
+  resolveServerUrl,
+  type ResolvedServerUrl,
+} from './server-url.js';
 
 /**
  * Subset of the ApiClient surface we depend on. Defining it lets tests
@@ -870,7 +872,7 @@ export class RunController {
    *  `currentServerUrl` (run-scoped, nulled at run end), these PERSIST past the
    *  run so out-of-band lifecycle ops (closeSession, the re-run liveness probe,
    *  getLastRun) follow the same server the run used — critical once a selected
-   *  env's `.env.<name>` can override SERVER_URL/STEPTIX_SERVER_API_KEY away from base
+   *  env's `.env.<name>` can override STEPTIX_SERVER_URL/STEPTIX_SERVER_API_KEY away from base
    *  `.env`. Null before the first run, when `resolveClient` falls back to disk. */
   private lastRunServerUrl: string | null = null;
   private lastRunApiKey: string | null = null;
@@ -993,7 +995,7 @@ export class RunController {
        */
       onServerReady?: (info: {
         inspectorUrl: string | null | undefined;
-        /** The run's resolved SERVER_URL — the hook's loopback check, since
+        /** The run's resolved STEPTIX_SERVER_URL — the hook's loopback check, since
          *  attaching a LOCAL debugger for a REMOTE server is the
          *  wrong-process bug §7 exists to prevent. */
         serverUrl: string;
@@ -1484,7 +1486,7 @@ export class RunController {
   /**
    * Pre-run server check + auto-start (story server-lifecycle §5).
    *
-   * Runs after env resolution has produced SERVER_URL and before any session
+   * Runs after env resolution has produced STEPTIX_SERVER_URL and before any session
    * is created. The run's AbortController already exists, so Stop cancels a
    * wedged health wait or spawn poll — and an abort during this phase is an
    * `aborted` run, never an STX028.
@@ -1496,9 +1498,10 @@ export class RunController {
    *      steptix server whose Express 404s /health is indistinguishable from a
    *      foreign one by this probe, so we neither spawn nor refuse; the
    *      authenticated calls that follow sort it out via the TB01x mapping.
-   *   5. down, but remote / unconfigured ⇒ proceed and let the existing
+   *   5. down, but remote / nothing to start ⇒ proceed and let the existing
    *      STX010 path report it (with the new settings hint).
-   *   6. down + localhost + configured  ⇒ spawn, then poll until healthy.
+   *   6. down + localhost + a command setting or an installed runtime
+   *      ⇒ spawn, then poll until healthy.
    *
    * Returns `null` to proceed, or an ErrorPayload the caller fails the run
    * with. `aborted: true` means the user pressed Stop mid-phase.
@@ -1516,12 +1519,10 @@ export class RunController {
     const probe = await this.healthProbe(serverUrl, HEALTH_PROBE_TIMEOUT_MS, signal);
     if (signal.aborted) return { kind: 'aborted' };
 
-    const autoStart = readAutoStartSettings(vscode.workspace.getConfiguration('steptix'));
     const action = decideServerAction(
       serverUrl,
       probe,
-      autoStart,
-      servePortOfCommand(autoStart.command),
+      readAutoStartSettings(vscode.workspace.getConfiguration('steptix')),
     );
 
     switch (action.kind) {
@@ -1566,7 +1567,8 @@ export class RunController {
 
       case 'refuse-port': {
         // Starting it anyway would leave a server on a port this run never
-        // connects to, then fail the wait with STX028 (stories/machine-server-url.md).
+        // connects to, then fail the wait with STX028
+        // (stories/machine-server-url.md).
         const { servePort } = action;
         const payload = servePort.ok
           ? reportError('STX033', {
@@ -1588,6 +1590,7 @@ export class RunController {
         // Explorer batch every test re-runs this phase, so a broken command
         // would otherwise spawn one detached shell per test and stall the
         // whole batch for readyTimeoutSeconds each time.
+        const runtimeDir = action.runtime?.dir;
         if (this.server.autoStartGuard?.isSuppressed(serverUrl)) {
           log(`server down at ${serverUrl} — auto-start was already tried and failed recently`);
           return {
@@ -1598,12 +1601,20 @@ export class RunController {
                 'a previous auto-start attempt failed moments ago, so this run did not retry it. ' +
                 'Fix the command (or start the server yourself) and run again',
               ...(this.server.logPath && { logPath: this.server.logPath() }),
+              ...(runtimeDir && { runtimeDir }),
             }),
           };
+        }
+        if (action.runtime) {
+          log(
+            `server down at ${serverUrl} — starting the Steptix runtime ${action.runtime.version} ` +
+              `installed in ${action.runtime.dir} ("steptix.serverAutoStart.command" is not set)`,
+          );
         }
         const outcome = await this.autoStartServer({
           serverUrl,
           autoStart: action.config,
+          runtimeDir,
           signal,
           log,
         });
@@ -1621,10 +1632,12 @@ export class RunController {
   private async autoStartServer(args: {
     serverUrl: string;
     autoStart: AutoStartConfig;
+    /** Set when `autoStart` starts the installed runtime, for STX028's fix. */
+    runtimeDir: string | undefined;
     signal: AbortSignal;
     log: (line: string) => void;
   }): Promise<ServerReadiness> {
-    const { serverUrl, autoStart, signal, log } = args;
+    const { serverUrl, autoStart, runtimeDir, signal, log } = args;
 
     const result = await startServerAndWait({
       serverUrl,
@@ -1652,7 +1665,14 @@ export class RunController {
         };
       case 'refused':
         log(`STX028 refusing to spawn — ${result.reason}`);
-        return { kind: 'fail', payload: reportError('STX028', { serverUrl, reason: result.reason }) };
+        return {
+          kind: 'fail',
+          payload: reportError('STX028', {
+            serverUrl,
+            reason: result.reason,
+            ...(runtimeDir && { runtimeDir }),
+          }),
+        };
       case 'timeout':
         log(`STX028 server did not become healthy within ${result.seconds}s`);
         // ONLY this arm arms the backoff. The refusals above never spawned
@@ -1667,6 +1687,7 @@ export class RunController {
             reason: `it did not become healthy within ${result.seconds}s`,
             logPath: result.logPath,
             ...(result.logTail && { logTail: result.logTail }),
+            ...(runtimeDir && { runtimeDir }),
           }),
         };
     }
@@ -2062,8 +2083,8 @@ export class RunController {
    * Tell the server to drop this session and close its browser.
    */
   /**
-   * Resolve an ApiClient for this controller's test from its env file, or null
-   * when the env can't be resolved (no env file, missing SERVER_URL/API_KEY).
+   * Resolve an ApiClient for this controller's test, or null when it can't be
+   * (an unreadable env file, no API key anywhere).
    * `sessionId` is the current/most-recent run's session id (`activeSessionId`)
    * — the stable file path for interactive runs, or the unique `<path>::run-N`
    * for batch runs — so `closeSession`, the re-run liveness probe, and getLastRun
@@ -2072,8 +2093,8 @@ export class RunController {
    *
    * `serverUrl` and `source` say which server this is and where the URL came
    * from, for callers that log their target before using it (Compile) or map
-   * a transport failure onto the STXxxx catalogue. `envPath` is the .env the
-   * URL was read from, or null when it is the last run's.
+   * a transport failure onto the STXxxx catalogue. `envPath` is the project
+   * .env, or null when the project has none or the target is the last run's.
    */
   private async resolveClient(): Promise<ResolvedClient | null> {
     const filePath = this.document.uri.fsPath;
@@ -2081,7 +2102,7 @@ export class RunController {
 
     // Prefer the server the most-recent run actually targeted, so close /
     // liveness / getLastRun follow a run whose selected env (`.env.<name>`)
-    // overrode SERVER_URL. These persist past run end (unlike currentServerUrl).
+    // overrode STEPTIX_SERVER_URL. These persist past run end (unlike currentServerUrl).
     if (this.lastRunServerUrl && this.lastRunApiKey) {
       const client = this.clientFactory({
         serverUrl: this.lastRunServerUrl,
@@ -2099,7 +2120,7 @@ export class RunController {
     // No run yet this session (or after a window reload): resolve base `.env`
     // from disk. Normally there's no live session to target in that state. The
     // caveat is a window reload that orphaned a session on an env-overridden
-    // SERVER_URL — a fresh controller has no `lastRunServerUrl`, so this close
+    // STEPTIX_SERVER_URL — a fresh controller has no `lastRunServerUrl`, so this close
     // would hit the base server and miss it. Accepted: that session is keyed on
     // the file path and gets reclaimed by the next run's first-close.
     const settings = vscode.workspace.getConfiguration('steptix');
@@ -2109,48 +2130,53 @@ export class RunController {
       workspaceRoot: this.workspaceFolder.uri.fsPath,
       fallbackPath: fallbackSetting,
     });
-    // No project .env is a supported setup: SERVER_URL then comes from the
-    // machine .env or the default, exactly as on the run path.
-    const envPath = envResolution.hit ? envResolution.path : null;
+    // Same chains as the run path: no project .env is no reason to give up,
+    // since the URL and the key both have machine-level homes. Without them,
+    // Compile would refuse on a machine where Run works.
     let env: Record<string, string> = {};
-    let choice: ServerUrlChoice;
-    let machineKey: string | null;
+    let serverUrl: string;
+    let source: string;
+    let apiKey: string;
     try {
-      if (envPath !== null) env = await readEnvFile(envPath);
-      choice = chooseServerUrl(env, envPath);
-      machineKey = readMachineKey();
+      if (envResolution.hit) env = await readEnvFile(envResolution.path);
+      const resolved = resolveServerUrl(
+        envResolution.hit ? { value: env['STEPTIX_SERVER_URL'], path: envResolution.path } : null,
+      );
+      serverUrl = resolved.serverUrl;
+      source = `STEPTIX_SERVER_URL from ${describeServerUrlOrigin(resolved.origin)}`;
+      apiKey =
+        env['STEPTIX_SERVER_API_KEY']?.trim() ||
+        process.env['STEPTIX_SERVER_API_KEY']?.trim() ||
+        readMachineKey() ||
+        '';
     } catch {
       return null;
     }
-    // Same chain as the run path (stories/machine-key.md): the project's .env,
-    // the extension host's environment, then the machine key. Without the last
-    // two, Compile would refuse on a machine where Run works.
-    const apiKey =
-      env['STEPTIX_SERVER_API_KEY']?.trim() ||
-      process.env['STEPTIX_SERVER_API_KEY']?.trim() ||
-      machineKey ||
-      '';
     if (!apiKey) return null;
-    const { serverUrl } = choice;
     return {
       client: this.clientFactory({ serverUrl, apiKey }),
       sessionId,
       serverUrl,
-      source: choice.source,
-      envPath,
+      source,
+      envPath: envResolution.hit ? envResolution.path : null,
     };
   }
 
   /**
    * Everything a request to the server needs from the project's env: the
    * resolved `.env` (with the selected environment's `.env.<name>` laid over
-   * it) and SERVER_URL. Refusals are the STXxxx payloads a run has always
+   * it) and STEPTIX_SERVER_URL. Refusals are the STXxxx payloads a run has always
    * failed with; the caller reports them.
    *
-   * A test with no project `.env` is not refused: its env map is empty and
-   * SERVER_URL comes from the machine `.env`, else the default — the same two
-   * a bare `steptix serve` takes its port from (stories/machine-server-url.md).
-   * `envPath` is then null.
+   * A project needs no `.env`: with none, the env map is empty and STEPTIX_SERVER_URL
+   * comes from the rest of its chain (server-url.ts) — the environment, the
+   * machine `.env`, the default. Only a `steptix.defaultEnvFile` naming a
+   * file that is not there still refuses (STX001): that is a setting someone
+   * wrote, and running without the file it names would ignore it.
+   *
+   * `envPath` is the project `.env` that was read — or, when there is none,
+   * where one would go (`<workspace root>/.env`), for the messages that list
+   * the places a value was looked for.
    *
    * NOT the API key: that is `resolveApiKey`'s, after the server is ready.
    *
@@ -2164,10 +2190,10 @@ export class RunController {
     | {
         ok: true;
         env: Record<string, string>;
-        envPath: string | null;
+        envPath: string;
         envName: string | null;
         serverUrl: string;
-        /** Where `serverUrl` came from, for logs and STX033. */
+        /** Where `serverUrl` came from, for STX033. */
         serverUrlSource: string;
       }
     | { ok: false; payload: ErrorPayload }
@@ -2182,11 +2208,22 @@ export class RunController {
       fallbackPath: fallbackSetting,
     });
 
-    const envPath = envResolution.hit ? envResolution.path : null;
-    this.lastResolvedEnvPath = envPath;
+    if (!envResolution.hit && envResolution.fallbackPath) {
+      log(`.env not found. Searched: ${envResolution.searchedDirs.join(' → ')}; fallback: "${envResolution.fallbackPath}" does not exist`);
+      const payload = reportError('STX001', {
+        searchedDirs: envResolution.searchedDirs,
+        fallbackSetting: fallbackSetting,
+      });
+      this.lastResolvedEnvPath = null;
+      return { ok: false, payload };
+    }
+
     let env: Record<string, string> = {};
+    let envPath: string;
     if (envResolution.hit) {
       log(`.env resolved (${envResolution.source}): ${envResolution.path}`);
+      this.lastResolvedEnvPath = envResolution.path;
+      envPath = envResolution.path;
       try {
         env = await readEnvFile(envResolution.path);
       } catch (err) {
@@ -2202,13 +2239,13 @@ export class RunController {
         throw err;
       }
     } else {
-      log(
-        `no project .env (searched: ${envResolution.searchedDirs.join(' → ')}; ` +
-          `steptix.defaultEnvFile: "${envResolution.fallbackPath || 'unset'}")`,
-      );
+      log(`no project .env (searched: ${envResolution.searchedDirs.join(' → ')})`);
+      this.lastResolvedEnvPath = null;
+      envPath = path.join(this.workspaceFolder.uri.fsPath, '.env');
     }
-    /** The project file SERVER_URL would be read from — the overlay's when it
-     *  sets one, since that is the line to fix. */
+    // Which file STEPTIX_SERVER_URL came from, if the project's env names one: the
+    // overlay's when it sets one (it wins in `composeEnv`), the base's
+    // otherwise.
     let serverUrlFile = envPath;
 
     // Which environment this run targets. An explicit override (batch mode
@@ -2225,7 +2262,7 @@ export class RunController {
         .trim() || null;
 
     // Overlay the selected `.env.<name>` on top of base `.env` so $VAR
-    // references in ## Parameters / ## Config — and SERVER_URL/STEPTIX_SERVER_API_KEY —
+    // references in ## Parameters / ## Config — and STEPTIX_SERVER_URL/STEPTIX_SERVER_API_KEY —
     // honour the active environment (matching the server's ${env.X} map and the
     // CLI). A selected env with no matching file is a hard error (STX006); a
     // malformed overlay reuses STX005 with the overlay's path.
@@ -2256,15 +2293,16 @@ export class RunController {
         const payload = reportError('STX006', {
           envName: effectiveEnvName,
           expectedPath: overlayPath,
+          baseEnvPath: envPath,
         });
         log(`STX006 ${payload.diagnosis}`);
         return { ok: false, payload };
       }
       env = composeEnv(env, overlay);
-      if (overlay['SERVER_URL']?.trim()) serverUrlFile = overlayPath;
+      if (overlay['STEPTIX_SERVER_URL']?.trim()) serverUrlFile = overlayPath;
       // The KEYS, not just how many: this line is the only place a run says
       // which values the overlay took over, and the ones that mislead hardest
-      // when they are silently replaced (AI_API_KEY, SERVER_URL) look exactly
+      // when they are silently replaced (AI_API_KEY, STEPTIX_SERVER_URL) look exactly
       // like a broken bridge or a dead server from every other error message.
       // Safe to name — a key is not its value, and the values are secrets.
       const keys = Object.keys(overlay);
@@ -2276,10 +2314,12 @@ export class RunController {
       );
     }
 
-    let choice: ServerUrlChoice;
+    let resolved: ResolvedServerUrl;
     try {
-      choice = chooseServerUrl(env, serverUrlFile);
+      resolved = resolveServerUrl({ value: env['STEPTIX_SERVER_URL'], path: serverUrlFile });
     } catch (err) {
+      // The machine .env is there but unreadable. The URL may well be in it,
+      // so this is not "absent" — the same refusal the key's read gets.
       const payload = reportError('STX007', {
         machineEnvPath: userRootEnvPath(),
         reason: err instanceof Error ? err.message : String(err),
@@ -2287,8 +2327,9 @@ export class RunController {
       log(`STX007 ${payload.diagnosis}`);
       return { ok: false, payload };
     }
-    const { serverUrl } = choice;
-    log(`SERVER_URL ${serverUrl} (from ${choice.source})`);
+    const { serverUrl } = resolved;
+    const origin = describeServerUrlOrigin(resolved.origin);
+    log(`STEPTIX_SERVER_URL ${serverUrl} — from ${origin}`);
     if (!machineEnvExposureReported && userRootEnvExposed()) {
       // Once per window: the file is read on every run, and the fix is one
       // command. Linux and macOS only — see userRootEnvExposed.
@@ -2301,18 +2342,10 @@ export class RunController {
     try {
       new URL(serverUrl);
     } catch {
-      // The default always parses, so a bad URL always has a file to name.
-      const payload = reportError('STX004', { envPath: choice.path ?? choice.source, value: serverUrl });
+      const payload = reportError('STX004', { envPath: origin, value: serverUrl });
       return { ok: false, payload };
     }
-    return {
-      ok: true,
-      env,
-      envPath,
-      envName: effectiveEnvName,
-      serverUrl,
-      serverUrlSource: choice.source,
-    };
+    return { ok: true, env, envPath, envName: effectiveEnvName, serverUrl, serverUrlSource: origin };
   }
 
   /**
@@ -2336,7 +2369,7 @@ export class RunController {
    */
   private resolveApiKey(target: {
     env: Record<string, string>;
-    envPath: string | null;
+    envPath: string;
   }): { kind: 'proceed'; apiKey: string } | { kind: 'fail'; payload: ErrorPayload } {
     const pinned =
       target.env['STEPTIX_SERVER_API_KEY']?.trim() ||
@@ -2752,12 +2785,6 @@ export class RunController {
     // previous pause linger at that line while the new run boots, which
     // reads as "the arrow jumped straight to the breakpoint."
     this.post({ type: 'breakpointStop', line: null });
-    /** Was a Continue owed when this call started? Read BEFORE the flag is
-     *  cleared, because a run injected at a pause — the skill-step picker's
-     *  `runLines([callLine], { isContinuation: true })` — leaves the paused
-     *  run parked and its Continue still to come, and by the time the
-     *  narrowing is decided below there is no way left to tell. */
-    const injectedAtPause = this.parkedAtPause && options.isResume !== true;
     this.parkedAtPause = false;
 
     /**
@@ -2786,9 +2813,10 @@ export class RunController {
      * only if this call parks with it still unspent.
      */
     const inheritedRunStart = options.isResume === true && this.parkedRunStartOwed;
-    // Kept across an injected run, like `parkedNarrowing`: the paused run's
-    // Continue is still to come, and it still owes what it owed.
-    if (!injectedAtPause) this.parkedRunStartOwed = false;
+    // Cleared like `parkedNarrowing` below: the park belongs to the run that
+    // made it, and nothing can start a run injected at a pause, so a new run
+    // supersedes it with no exception.
+    this.parkedRunStartOwed = false;
     const runStartOwedAtStart = startsRun || inheritedRunStart;
 
     // A new run — including a Resume — supersedes any paused state, so the
@@ -2883,7 +2911,7 @@ export class RunController {
     log(`run requested for ${filePath}: lines=[${lines.join(',')}]`);
 
     const settings = vscode.workspace.getConfiguration('steptix');
-    // .env, the selected environment and SERVER_URL — shared with Record
+    // .env, the selected environment and STEPTIX_SERVER_URL — shared with Record
     // Steps, which needs the same server and the same env map. The API key
     // comes later, once the server is ready (resolveApiKey).
     const target = await this.resolveServerTarget(options.envOverride, log);
@@ -3144,7 +3172,7 @@ export class RunController {
     // Persist the run's server target past run end so out-of-band lifecycle
     // ops (close / liveness / getLastRun via resolveClient) follow this run even
     // after currentServerUrl is nulled — needed once .env.<name> can retarget
-    // SERVER_URL away from base .env.
+    // STEPTIX_SERVER_URL away from base .env.
     this.lastRunServerUrl = serverUrl;
     this.lastRunApiKey = apiKey;
 
@@ -3174,14 +3202,16 @@ export class RunController {
      * this; the continuation inherits it, as it inherits the compile mode.
      */
     const resumingNarrowing = options.isResume === true ? this.parkedNarrowing : null;
-    // Cleared unless a Continue is still owed. A run INJECTED at a pause — the
-    // skill-step picker's `runLines([callLine], { isContinuation: true })`,
-    // which is followed by a `isParkedAtPause` check precisely because the
-    // paused run is still there — is not a resume and carries no `isResume`,
-    // but the Continue after it is. Dropping the park here would run the rest
-    // of the narrowed body on that Continue, paint the marks the selection
-    // excluded, and disarm the old-server detector on the way past.
-    if (!injectedAtPause) this.parkedNarrowing = null;
+    // The park belongs to the run that made it, and a new run supersedes it.
+    // There is no exception for a run "injected at a pause": nothing can start
+    // one. The skill-step picker excludes parked controllers when it builds
+    // its rows (`collectSkillRunTargets`) and refuses again on the pick
+    // (`isParkedAtPause`, commands/index.ts), and Run and Compile refuse the
+    // same way. A guard for that case would only keep a previous run's
+    // narrowing alive across every OTHER fresh non-resume run started while
+    // parked — a plain F5 on the parked file — which is the drift the clearing
+    // exists to prevent.
+    this.parkedNarrowing = null;
     /**
      * The section-loop narrowings that survive this run's step selection.
      *
@@ -3241,12 +3271,19 @@ export class RunController {
       // reads as one that expired there.
       for (const [name, indices] of Object.entries(resumingNarrowing.steps ?? {})) {
         const snapshot = this.narrowedBodySnapshot?.[name];
+        // No snapshot, no line. The two are parked together and travel
+        // together, so a missing one means something is wrong with the park
+        // rather than with this section — and the fallback that was here
+        // ("of `indices.length`") would have printed `body step 2 of 1`,
+        // a sentence whose halves contradict each other. Silence is the
+        // smaller lie; the narrowing itself still applies.
+        if (!snapshot) continue;
         this.postOutput(
           sectionStepsResumedLogLine(
             name,
             indices.map((n) => n + 1),
-            snapshot?.steps.length ?? indices.length,
-            snapshot?.everyCall ?? false,
+            snapshot.steps.length,
+            snapshot.everyCall,
           ),
           'info',
         );
@@ -3779,13 +3816,20 @@ export class RunController {
         }
       }
 
-      // Will this row's block leave the run PARKED at a breakpoint? The post-
-      // loop code below turns `pausedAt` into the yellow ▶ under exactly these
+      // Will this block leave the run PARKED at a breakpoint? The post-loop
+      // code below turns `pausedAt` into the yellow ▶ under exactly these
       // conditions; asked here because that is where the loop can still act on
       // the answer, and because the row that is parked in is not a row that
       // has passed — half its steps have not run.
-      const parkedHere =
-        row !== null && pausedAt !== null && !anyFailed && !ac.signal.aborted;
+      //
+      // Asked of a file with NO table too (`row === null`, one `null` block).
+      // It has no row to settle, but it does have an `endReason`, and the one
+      // way to reach here with `loopEnd` already set and a park still coming is
+      // a cancelled `[input:]` prompt above a breakpoint. `prompt-cancelled`
+      // would then be the reason for a run that is sitting at a pause offering
+      // Continue — and everything downstream that asks "did this run park?" by
+      // reading the reason would answer no.
+      const parkedHere = pausedAt !== null && !anyFailed && !ac.signal.aborted;
       if (parkedHere) loopEnd = { kind: 'paused' };
 
       if (row !== null && !parkedHere && loopEnd === null) {
@@ -4000,32 +4044,31 @@ export class RunController {
       // from the pause point and cannot re-derive any of this, so the one
       // thing that must survive is handed over explicitly.
       //
-      // An injected run at a pause parks nothing of its own and takes nothing
-      // away: the paused run's Continue is still owed, and its narrowing is
-      // still the one that Continue must carry.
-      this.parkedNarrowing =
-        endReason.kind === 'paused' && this.parkedAtPause
-          ? {
-              rows: this.sectionRowsOfRun,
-              rowTotals: this.sectionRowTotalsOfRun,
-              steps: this.sectionStepsOfRun,
-              unselectedBodyLines: this.unselectedBodyLines,
-              bodySnapshot: this.narrowedBodySnapshot,
-            }
-          : injectedAtPause
-            ? this.parkedNarrowing
-            : null;
-      // Same handover, same precedence, for the one thing a run that paused
-      // before sending anything still owes the server: its `runStart`. An
-      // `[input:]` answered and then a breakpoint, an `[interactive]` session
-      // left without a step, a Pause pressed at a prompt — each parks a run
-      // the server has not heard begin.
-      this.parkedRunStartOwed =
-        endReason.kind === 'paused' && this.parkedAtPause
-          ? runStartOwed
-          : injectedAtPause
-            ? this.parkedRunStartOwed
-            : false;
+      // `parkedAtPause` alone decides it, not `endReason`. A cancelled
+      // `[input:]` prompt (or an `[interactive]` `/quit`) in a run that ALSO
+      // parks at a breakpoint is BOTH things at once, and `endReason` can only
+      // name one: `loopEnd` wins, the reason reads `prompt-cancelled`, and the
+      // park is dropped while the yellow ▶ and a Continue are still on offer.
+      // A file with a data table was saved from that by accident — `parkedHere`
+      // rewrites `loopEnd` to `paused` for it — and a file without one ran its
+      // whole body on the Continue, painting the marks the selection excluded.
+      // The question this answers is "is a Continue owed?", which is exactly
+      // what the flag says.
+      this.parkedNarrowing = this.parkedAtPause
+        ? {
+            rows: this.sectionRowsOfRun,
+            rowTotals: this.sectionRowTotalsOfRun,
+            steps: this.sectionStepsOfRun,
+            unselectedBodyLines: this.unselectedBodyLines,
+            bodySnapshot: this.narrowedBodySnapshot,
+          }
+        : null;
+      // Same handover, same rule, for the one thing a run that paused before
+      // sending anything still owes the server: its `runStart`. An `[input:]`
+      // answered and then a breakpoint, an `[interactive]` session left without
+      // a step, a Pause pressed at a prompt — each parks a run the server has
+      // not heard begin.
+      this.parkedRunStartOwed = this.parkedAtPause ? runStartOwed : false;
       this.sectionRowsOfRun = undefined;
       this.sectionRowTotalsOfRun = undefined;
       this.sectionStepsOfRun = undefined;
@@ -4187,15 +4230,13 @@ export class RunController {
         everyCall: pick.everyCall,
       };
       // A chain kept whole. Said before the narrowing line, because it changes
-      // what that line is about to claim.
-      if (pick.addedForChain.length > 0 && pick.chainLink) {
+      // what that line is about to claim — and once per BROKEN LINK, because a
+      // body can hold two independent chains and a selection can break both.
+      // One line naming the first left the other chain's added steps in the
+      // narrowing with nothing anywhere saying where they came from.
+      for (const link of pick.chainLinks) {
         this.postOutput(
-          chainMembersKeptLogLine(
-            pick.section,
-            pick.addedForChain,
-            pick.ordinals.filter((n) => !pick.addedForChain.includes(n)),
-            pick.chainLink,
-          ),
+          chainMembersKeptLogLine(pick.section, link.added, [link.selected], link),
           'warn',
         );
       }
@@ -5847,7 +5888,7 @@ export class RunController {
   private describeRecordError(
     err: unknown,
     serverUrl: string,
-    envPath: string | null,
+    envPath: string,
     log: (line: string) => void,
   ): string {
     const apiErr = asApiClientError(err);
@@ -5941,7 +5982,7 @@ function asApiClientError(err: unknown): ApiClientError | null {
 
 function mapApiErrorToPayload(
   err: unknown,
-  ctx: { serverUrl: string; envPath: string | null },
+  ctx: { serverUrl: string; envPath: string },
 ): ErrorPayload {
   const apiErr = asApiClientError(err);
   if (apiErr) {

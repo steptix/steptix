@@ -79,7 +79,7 @@ describe('Steptix Copilot setup vs. the active env overlay', function () {
   /** The trio a settled file holds, for the "already correct" case. */
   const settledEnv = () =>
     [
-      'SERVER_URL=http://127.0.0.1:39917',
+      'STEPTIX_SERVER_URL=http://127.0.0.1:39917',
       'STEPTIX_SERVER_API_KEY=integration-test-key',
       'AI_MODEL=gateway/copilot/gpt-4.1',
       `AI_GATEWAY_URL=http://127.0.0.1:${port}`,
@@ -291,7 +291,7 @@ describe('Steptix Copilot setup vs. the active env overlay', function () {
   });
 
   it('an overlay that touches none of the trio is not a conflict', async () => {
-    fs.writeFileSync(OVERLAY_ENV, 'SERVER_URL=http://127.0.0.1:39917\nUAT_ONLY=x\n');
+    fs.writeFileSync(OVERLAY_ENV, 'STEPTIX_SERVER_URL=http://127.0.0.1:39917\nUAT_ONLY=x\n');
     await setActiveEnv(ENV_NAME);
 
     await vscode.commands.executeCommand(SETUP_COMMAND);

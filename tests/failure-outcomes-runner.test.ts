@@ -5,10 +5,10 @@
  * history it writes, the counts on the report. The executor's own half is pinned
  * against the real executor in `failure-tail-executor.test.ts`.
  */
-import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { Config } from '../src/config/types.js';
 import type { ParsedTest, TestInstance } from '../src/parser/types.js';
 import type { StepResult, TestReport } from '../src/report/types.js';
@@ -131,12 +131,14 @@ vi.mock('../src/report/history-appender.js', () => ({
 
 import { runTest } from '../src/runner/test-runner.js';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { renderReport } from '../src/report/generator.js';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-failure-outcomes-runner');
+/** A fresh directory per run, under the OS temp dir. Nothing here needs the
+ *  repo's packages to resolve — no `.steps.ts` is written, only `.md` — and a
+ *  fixed path shared by every run from this checkout let two concurrent runs
+ *  delete each other's files. */
+let tmpBase: string;
 
 const TOLERATED_STEP = 'Verify the footer shows the build number otherwise continue';
 const FAIL_STEP =
@@ -264,6 +266,10 @@ let dir: string;
 let counter = 0;
 let file = 0;
 
+beforeAll(async () => {
+  tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), 'failure-outcomes-runner-'));
+});
+
 beforeEach(async () => {
   executeStepMock.mockReset();
   executeStepCalls.length = 0;
@@ -283,7 +289,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true });
+  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 // ─── `otherwise continue` ───────────────────────────────────────────────────
@@ -421,11 +427,9 @@ describe('a tolerated failure mid-run', () => {
     expect(report.toleratedSteps).toBe(1);
   });
 
-  it('shows a Tolerated stat on the report and no red banner', async () => {
-    const html = renderReport(await runLoop(TOLERATED_DOC, { tolerate: 2 }));
-    expect(html).toMatch(/badge badge-pass">✓ PASSED</);
-    expect(html).toMatch(/stat-tolerated">1</);
-  });
+  // How that report RENDERS — the Tolerated stat, no red badge — is
+  // report-failure-outcomes.test.ts's: the renderer reads only `status` and
+  // `toleratedSteps` off the report, both asserted here.
 });
 
 // ─── The deliberate `fail` ──────────────────────────────────────────────────
@@ -516,24 +520,10 @@ describe('a bare `Fail the test with error "…"` step', () => {
 });
 
 // ─── The contradiction backstop (decision 8) ────────────────────────────────
-
-describe('a line that both ends the flow and tolerates its own failure', () => {
-  it('never reaches the run: the parse refuses the file first, with that sentence', async () => {
-    // `validateControlFlow` runs over `## Steps` AND every `### Section` body, so
-    // no file delivers one of these to the loop; the loop's backstop stays for the
-    // validator-less paths, and `api-server-failure-outcomes.test.ts` pins it
-    // firing there in this same sentence — decision 8's actual requirement.
-    const line = 'If the page is ready then return otherwise continue';
-    await expect(
-      instanceOf(`${stepsDoc('Navigate to /', 'Check it', 'Click "Sign out"')}
-### Check it
-1. ${line}
-`),
-    ).rejects.toThrow('a step cannot both end the flow and tolerate its own failure');
-    // The line is named back, so the author can find it.
-    await expect(instanceOf(stepsDoc(line))).rejects.toThrow(line);
-  });
-});
+//
+// A line that both ends the flow and tolerates its own failure never reaches
+// this loop: the parse refuses the file first, in `## Steps` and in every
+// `### Section` body — failure-tail-parse.test.ts pins both.
 
 // ─── Hooks (decision 7) ─────────────────────────────────────────────────────
 

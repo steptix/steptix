@@ -116,7 +116,7 @@ function makeProject(overrides: Record<string, unknown> = {}): any {
     projectRoot: root,
     configPath: path.join(root, 'steptix.config.json'),
     env: {
-      SERVER_URL: 'http://localhost:3100',
+      STEPTIX_SERVER_URL: 'http://localhost:3100',
       STEPTIX_SERVER_API_KEY: 'project-key',
       AI_API_KEY: 'ai-secret',
     },
@@ -152,12 +152,6 @@ async function failure(promise: Promise<unknown>): Promise<unknown> {
     },
     (err: unknown) => err,
   );
-}
-
-/** Let a start that outlived its caller (a cancellation) run to completion,
- *  so it settles inside the test that created it rather than the next one. */
-async function drain(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 25));
 }
 
 let userRootTmp: string;
@@ -277,10 +271,10 @@ describe('ensureServerReady — probe arms', () => {
 });
 
 // ---------------------------------------------------------------------------
-// SERVER_URL validation
+// STEPTIX_SERVER_URL validation
 // ---------------------------------------------------------------------------
 
-describe('ensureServerReady — SERVER_URL validation', () => {
+describe('ensureServerReady — STEPTIX_SERVER_URL validation', () => {
   it('refuses a path-bearing URL before probing at all', async () => {
     const h = makeHarness();
     h.up = true;
@@ -323,7 +317,7 @@ describe('ensureServerReady — SERVER_URL validation', () => {
     expect(h.deps.spawn).not.toHaveBeenCalled();
   });
 
-  it('refuses a SERVER_URL that is not a URL at all', async () => {
+  it('refuses a STEPTIX_SERVER_URL that is not a URL at all', async () => {
     const h = makeHarness();
 
     const err = await failure(
@@ -615,8 +609,23 @@ describe('ensureServerReady — single-flight', () => {
     expect(String((err as Error).message)).not.toContain('did not become healthy');
 
     // The shared start is meant to outlive its cancelled caller; let it finish
-    // here rather than in whatever test runs next.
+    // here rather than in whatever test runs next, where its cleanup would
+    // delete that test's in-flight entry. Join it rather than wait a while: a
+    // caller with no signal is handed the shared promise itself, which settles
+    // only after the registry has dropped the entry. The joiner's own first
+    // probe must still see `down`, or it returns at once without joining —
+    // and its probe and its lookup of the in-flight entry are all microtasks,
+    // so one macrotask turn has it joined before the server is seen to be up.
+    const joined = ensureServerReadyWith(makeProject(), undefined, h.deps);
+    let joinedSettled = false;
+    void joined.finally(() => (joinedSettled = true)).catch(() => undefined);
+    await new Promise((resolve) => setImmediate(resolve));
+    // Still waiting on the shared start — it joined rather than answering
+    // from its own probe.
+    expect(joinedSettled).toBe(false);
     h.up = true;
-    await drain();
+    await expect(joined).resolves.toBeUndefined();
+    // Joined, not started afresh: one spawn between the two callers.
+    expect(h.spawns).toHaveLength(1);
   });
 });

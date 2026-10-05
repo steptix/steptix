@@ -121,26 +121,33 @@ function passed(index: number, instruction: string): StepResult {
 
 type Emitted = { channel: string; data: Record<string, unknown> };
 
-function makeAdapter(): { adapter: UIRunnerAdapter; events: Emitted[] } {
+function makeAdapter(): {
+  adapter: UIRunnerAdapter;
+  events: Emitted[];
+  emitted: (channel: string) => Promise<void>;
+} {
   const events: Emitted[] = [];
+  const waiters: Array<{ channel: string; resolve: () => void }> = [];
   const adapter = new UIRunnerAdapter((channel, data) => {
     events.push({ channel, data: data as Record<string, unknown> });
+    for (const w of waiters) if (w.channel === channel) w.resolve();
   });
-  return { adapter, events };
+  /**
+   * Settles when the adapter emits `channel` — at once if it already has. It
+   * waits on the event itself rather than polling against a clock of its own,
+   * so a slow start under a loaded suite is bounded by the test timeout only.
+   */
+  function emitted(channel: string): Promise<void> {
+    if (events.some((e) => e.channel === channel)) return Promise.resolve();
+    return new Promise((resolve) => waiters.push({ channel, resolve }));
+  }
+  return { adapter, events, emitted };
 }
 
 async function runAdapter(file: string): Promise<Emitted[]> {
   const { adapter, events } = makeAdapter();
   await adapter.start(file, []);
   return events;
-}
-
-async function waitFor(condition: () => boolean, timeoutMs = 5000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error('timed out waiting for the adapter');
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
 }
 
 function errorLogs(events: Emitted[]): unknown[] {
@@ -321,11 +328,18 @@ describe('UIRunnerAdapter resolves ${env.X} / ${data.x} in step text', () => {
   });
 
   it('a steer resolves against the same environment; one the environment cannot answer is refused as a log line and the run stays paused', async () => {
-    const { adapter, events } = makeAdapter();
+    const { adapter, events, emitted } = makeAdapter();
     const file = writeProject(root, FRONTMATTER_ENV + STEPS_WITH_REFS);
 
     const run = adapter.start(file, [1]);
-    await waitFor(() => events.some((e) => e.channel === 'runner:paused'));
+    // A run that ends without reaching the breakpoint fails here and says so,
+    // rather than leaving the wait to run out the test timeout.
+    await Promise.race([
+      emitted('runner:paused'),
+      run.then(() => {
+        throw new Error(`the run ended without pausing: ${JSON.stringify(events.at(-1))}`);
+      }),
+    ]);
 
     // Refused: said in the log, not thrown at an invoke nobody catches, and
     // not `runner:error`, which would end the run in the panel.

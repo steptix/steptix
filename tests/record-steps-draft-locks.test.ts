@@ -16,6 +16,7 @@ import { DraftEngine } from '../src/recorder/draft-engine.js';
 import { authorStepLines, authorStepSecrets } from '../src/recorder/record-steps-run.js';
 import { summarizeTargetFile } from '../src/recorder/target-file.js';
 import type { RecordStreamEvent, RecordedAction } from '../src/recorder/types.js';
+import { splitAuthorSteps } from '../steptix-vscode/src/extension/record-steps-core.js';
 
 const FILE = summarizeTargetFile('# T\n\n## Steps\n1. Navigate to /\n', 'cursor', 4);
 
@@ -94,9 +95,18 @@ function harness(): Harness {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** Wait until `calls` model calls have been made and none is running, then a
+ *  moment for the engine to act on the last answer. Throws, saying what it
+ *  saw, when that does not happen — not a silent return that lets the test
+ *  fail later on a draft assertion that does not say why. */
 async function settled(h: Harness, calls: number): Promise<void> {
-  const until = Date.now() + 3_000;
-  while ((h.calls.length < calls || h.engine.callsInFlight > 0) && Date.now() < until) await sleep(5);
+  const until = Date.now() + 5_000;
+  while (h.calls.length < calls || h.engine.callsInFlight > 0) {
+    if (Date.now() > until) {
+      throw new Error(`the engine did not settle: ${h.calls.length} of ${calls} calls made, ${h.engine.callsInFlight} running`);
+    }
+    await sleep(5);
+  }
   await sleep(30);
 }
 
@@ -144,6 +154,36 @@ describe('a step the author adds at the end', () => {
     expect(authorStepLines('   \n\n')).toEqual([]);
     // Only a marker followed by a space is one: this is text.
     expect(authorStepLines('8.5 kg is the limit')).toEqual(['8.5 kg is the limit']);
+  });
+});
+
+/**
+ * The extension cleans a step the author types IN THE FILE with its own copy
+ * of this rule (`splitAuthorSteps` / `cleanAuthorLine`, steptix-vscode's
+ * record-steps-core.ts), and sends the result here, where `authorStepLines`
+ * runs again. The two packages cannot share the code at run time, so the same
+ * cases go through both. Known to part, and not pinned here: runs of inner
+ * whitespace (the extension collapses them), a number of ten digits or more,
+ * a lone CR — and a line that still starts with a marker once one is taken
+ * off, which is stripped again on arrival (`1. 2. Pay` is sent as `2. Pay`
+ * and kept as `Pay`).
+ */
+describe("authorStepLines and the extension's copy agree", () => {
+  it.each([
+    '8. Click Pay now\n\n  - Verify the receipt shows "Paid"  \n* Go back\n3) Reload the page',
+    'Click Save\r\nVerify the total is 2',
+    '   \n\n',
+    '3.',
+    '-',
+    '+ Tick Cash',
+    '10) Ten is a number, not text',
+    '8.5 kg is the limit',
+    '-5 degrees is not a marker',
+  ])('%j', (text) => {
+    const ext = splitAuthorSteps(text);
+    expect(ext).toEqual(authorStepLines(text));
+    // What the extension sends comes back as it sent it.
+    expect(ext.flatMap((line) => authorStepLines(line))).toEqual(ext);
   });
 });
 
@@ -351,12 +391,14 @@ describe('the prompt with locks (buildRecordStepsPrompt)', () => {
     expect(text).toContain('>>   5  2. Click \\"Sign in\\"');
   });
 
-  it('without locks, the draft reads exactly as it always did', () => {
+  it('without locks, the draft says nothing of them: no lock, no author mark, no insert marker, and the whole draft may be rewritten', () => {
     const [, user] = buildRecordStepsPrompt({ ...base, draft: { steps: ['A', 'B'], parameters: [] } });
     const text = textOf([user!]);
-    expect(text).toContain(
-      '## The draft so far: 2 steps\nIndexes count from 0, as replaceFrom does. To only add steps, replaceFrom is 2; the furthest back you may start is 0.\n```json',
-    );
+    expect(text).not.toContain('LOCKED');
+    expect(text).not.toContain('"locked"');
+    expect(text).not.toContain('"author"');
+    expect(text).not.toContain('yourStepsGoHere');
+    expect(text).toContain('the furthest back you may start is 0.');
   });
 
   it('the rules for locked and authored steps, a pause, and painted boxes', () => {

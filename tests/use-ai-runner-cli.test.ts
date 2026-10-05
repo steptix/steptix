@@ -8,7 +8,7 @@
  *
  * The model is a scripted `AiClient.complete` that records what it was sent.
  */
-import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -125,7 +125,9 @@ import { addLogCallback } from '../src/utils/logger.js';
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-use-ai-runner-cli');
+// Unique per run (still under tests/), so two runs of this file from one
+// checkout never share — or delete — each other's tree.
+let tmpBase: string;
 let dir: string;
 let counter = 0;
 
@@ -176,6 +178,10 @@ async function logged<T>(fn: () => Promise<T>): Promise<{ value: T; lines: strin
   }
 }
 
+beforeAll(async () => {
+  tmpBase = await fs.mkdtemp(path.join(repoRoot, 'tests', '.tmp-use-ai-runner-cli-'));
+});
+
 beforeEach(async () => {
   executeStepCalls.length = 0;
   model.replies = [];
@@ -191,7 +197,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true });
+  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 // ─── The cases ──────────────────────────────────────────────────────────────

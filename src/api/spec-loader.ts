@@ -143,49 +143,6 @@ export function extractSpecUrlsFromContext(contextContent: string): string[] {
   return urls;
 }
 
-/**
- * Produce a human-readable summary of an OpenAPI spec for inclusion in the AI system prompt.
- * Lists all endpoints with their HTTP method and summary.
- */
-export function summarizeSpec(spec: unknown): string {
-  if (typeof spec !== 'object' || spec === null) return 'Invalid spec';
-
-  const s = spec as Record<string, unknown>;
-  const lines: string[] = [];
-
-  const info = s['info'] as Record<string, unknown> | undefined;
-  if (info?.['title']) {
-    const version = info['version'] ? ` v${String(info['version'])}` : '';
-    lines.push(`API: ${String(info['title'])}${version}`);
-    lines.push('');
-  }
-
-  const paths = s['paths'] as Record<string, unknown> | undefined;
-  if (!paths) return lines.join('\n');
-
-  const methods = ['get', 'post', 'put', 'patch', 'delete'] as const;
-
-  for (const [pathStr, pathObj] of Object.entries(paths)) {
-    if (typeof pathObj !== 'object' || pathObj === null) continue;
-
-    for (const method of methods) {
-      const op = (pathObj as Record<string, unknown>)[method];
-      if (typeof op !== 'object' || op === null) continue;
-
-      const operation = op as Record<string, unknown>;
-      const summary = typeof operation['summary'] === 'string'
-        ? operation['summary']
-        : typeof operation['operationId'] === 'string'
-          ? operation['operationId']
-          : '';
-
-      lines.push(`${method.toUpperCase()} ${pathStr}${summary ? ` — ${summary}` : ''}`);
-    }
-  }
-
-  return lines.join('\n');
-}
-
 /** Convert a URL to a safe filename (strip protocol, replace special chars) */
 function urlToFileName(url: string): string {
   return url

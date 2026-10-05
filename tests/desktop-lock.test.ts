@@ -71,10 +71,15 @@ describe('acquireComputerLock — §5.9', () => {
   it('is idempotent for the same pid AND session, keeping the original `since`', () => {
     // Sections and skills open with `[use computer]` defensively (§4.5), so
     // re-entry is the normal case, not the odd one. The record must still say
-    // when the mouse was FIRST taken.
-    const first = acquireComputerLock('sess-1', { lockPath, pid: 4242, isAlive: alive });
+    // when the mouse was FIRST taken. Taken long ago here: two acquires a
+    // millisecond apart would stamp the same `since`, rewritten or not.
+    const since = '2000-01-01T00:00:00.000Z';
+    writeFileSync(lockPath, JSON.stringify({ pid: 4242, sessionId: 'sess-1', since }), 'utf8');
+
     const again = acquireComputerLock('sess-1', { lockPath, pid: 4242, isAlive: alive });
-    expect(again).toEqual(first);
+
+    expect(again).toEqual({ pid: 4242, sessionId: 'sess-1', since });
+    expect(readComputerLock({ lockPath })).toEqual({ pid: 4242, sessionId: 'sess-1', since });
   });
 
   it('replaces a lock file that was truncated mid-write', () => {

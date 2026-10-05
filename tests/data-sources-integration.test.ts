@@ -133,36 +133,11 @@ dataSources:
     expect(resolveStep(parsed, 1)).toBe('Login as admin@stg.example.com / stg-admin');
     // $VIP_PWD comes from .env.staging — proves $VAR resolution runs on extra namespaces.
     expect(resolveStep(parsed, 2)).toBe('Switch to VIP vip@example.com / stg-vip');
+    // `./overrides.json` sits beside the .md under tmpRoot/tests; the cwd (the
+    // repo root) has none, so this resolving proves a relative source path is
+    // read against the test file's directory, not the cwd.
     expect(resolveStep(parsed, 3)).toBe('Place order 50000 USD');
     expect(resolveStep(parsed, 4)).toBe('Assert tier "Platinum"');
-  });
-
-  it('resolves a relative dataSources path against the test file directory, not cwd', async () => {
-    // The test imports a file that's a sibling of the .md.  cwd is the
-    // project root (tmpRoot), so a `./overrides.json` path that resolved
-    // against cwd would miss — proving relative resolution targets the .md.
-    const testFile = path.join(tmpRoot, 'tests', 'relative.md');
-    writeFileSync(
-      testFile,
-      `---
-env: staging
-dataSources:
-  local: ./overrides.json
----
-
-# Relative path
-
-## Steps
-1. Total \${local.fixtures.minOrderTotal}
-`,
-    );
-
-    const bundle = await resolveEnvBundle({ envName: 'staging', projectRoot: tmpRoot, dataDir: 'fixtures/data' });
-    const parsed = await parseTestFile(testFile, {
-      envData: { env: bundle.env, data: bundle.data },
-    });
-
-    expect(resolveStep(parsed, 0)).toBe('Total 50000');
   });
 
   it('expands `~/...` paths against the user home directory', async () => {

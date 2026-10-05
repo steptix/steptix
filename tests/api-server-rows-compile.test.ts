@@ -29,7 +29,7 @@
  * right to. That one is the client's to get right, and
  * steptix-vscode's integration suite covers it (`codebehind-rows`).
  */
-import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -396,7 +396,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((r, e) => server.close((err) => (err ? e(err) : r())));
-  await fs.rm(tmpDir, { recursive: true, force: true });
+  await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 beforeEach(async () => {
@@ -404,7 +404,35 @@ beforeEach(async () => {
   aiPrompts.length = 0;
   aiCalls.length = 0;
   for (const f of fixtures.values()) await fs.rm(f.steps, { force: true });
-  await fs.rm(path.join(tmpDir, '.steptix-codebehind-cache'), { recursive: true, force: true });
+  await fs.rm(path.join(tmpDir, '.steptix-codebehind-cache'), {
+    recursive: true, force: true, maxRetries: 10, retryDelay: 100,
+  });
+});
+
+/**
+ * Every session a case posted to, closed when the case ends.
+ *
+ * A `'run'` compile is RETAINED on its session by design — it is what the
+ * kept-session case below continues — and its candidate keeps writing under
+ * the shared cache dir. Left open, it races the next case's `beforeEach`
+ * cleanup (compile-mode measured that as ENOTEMPTY plus a cascade of
+ * timeouts). Closing the session discards the compiler and waits out any
+ * generation still in flight.
+ */
+const openedSessions = new Set<string>();
+
+afterEach(async () => {
+  const ids = [...openedSessions];
+  openedSessions.clear();
+  await Promise.all(ids.map(async (id) => {
+    const res = await fetch(`${baseUrl}/sessions/${id}`, {
+      method: 'DELETE',
+      headers: { 'x-api-key': API_KEY },
+    });
+    // 404: the session was never made, because the test failed before it was.
+    // That test has already said why; anything else is this cleanup's own failure.
+    expect([200, 404], `closing session ${id} answered ${res.status}`).toContain(res.status);
+  }));
 });
 
 /**
@@ -418,6 +446,7 @@ async function post(
   sessionId: string,
   body: Record<string, unknown>,
 ): Promise<{ type: string; [k: string]: any }[]> {
+  openedSessions.add(sessionId);
   const res = await fetch(`${baseUrl}/sessions/${sessionId}/steps?stream=1`, {
     method: 'POST',
     headers: {
@@ -459,7 +488,7 @@ function compileResult(frames: { type: string; [k: string]: any }[]): {
 }
 
 describe('a looped section compiles its body once', () => {
-  it('generates ONE entry for a three-row body, bound to the authored text', async () => {
+  it('generates ONE entry for a three-row body, bound to the authored text each row ran', async () => {
     const { md: loopFilePath, steps: loopStepsPath } = await writeLoopFixture('loop-entries');
     const frames = await post('rows-section', {
       steps: LOOP_STEPS,
@@ -485,6 +514,15 @@ describe('a looped section compiles its body once', () => {
     expect(sourcesIn(file)).toEqual(['Open the dashboard', 'Upload {{file}}']);
     // The body's entry is scoped to its section; the main-flow step is not.
     expect(file).toContain("section: 'Upload each file'");
+
+    // The other half of the same change, and the one that keeps it honest: the
+    // authored text is the BINDING, not the instruction. Each iteration still
+    // executes `Upload a.png` — a run that sent `Upload {{file}}` to the
+    // browser would be a regression the assertion above cannot see.
+    expect(stepCalls.map((c) => c.instruction)).toEqual([
+      'Open the dashboard',
+      ...FILES.map((f) => `Upload ${f}`),
+    ]);
 
     // The recording is the run's, so it has all four steps — and all three
     // iterations carry the same identity, which is what lets a later
@@ -514,25 +552,6 @@ describe('a looped section compiles its body once', () => {
     expect(result.summary.keptAi).toBe(0);
     expect(result.summary.unproven).toEqual([1, 2]);
     expect(result.summary.notAttempted).toEqual([]);
-  }, CASE_TIMEOUT);
-
-  it('offers the body under the interpolated instruction it actually ran', async () => {
-    // The other half of the same change, and the one that keeps it honest: the
-    // authored text is the BINDING, not the instruction. Each iteration still
-    // executes `Upload a.png` — a run that sent `Upload {{file}}` to the
-    // browser would be a regression the assertion above cannot see.
-    const { md } = await writeLoopFixture('loop-exec');
-    await post('rows-section-exec', {
-      steps: LOOP_STEPS,
-      sourceLines: [4, 5],
-      testFilePath: md,
-      sections: LOOP_SECTIONS,
-      compile: 'run',
-    });
-    expect(stepCalls.map((c) => c.instruction)).toEqual([
-      'Open the dashboard',
-      ...FILES.map((f) => `Upload ${f}`),
-    ]);
   }, CASE_TIMEOUT);
 });
 

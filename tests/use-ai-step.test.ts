@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -30,9 +30,15 @@ import { resolveProject } from '../src/mcp/project.js';
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-use-ai-step');
+// Unique per run (still under tests/), so two runs of this file from one
+// checkout never share — or delete — each other's tree.
+let tmpBase: string;
 let counter = 0;
 let dir: string;
+
+beforeAll(async () => {
+  tmpBase = await fs.mkdtemp(path.join(repoRoot, 'tests', '.tmp-use-ai-step-'));
+});
 
 beforeEach(async () => {
   clearSkillCache();
@@ -41,7 +47,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true });
+  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 async function write(rel: string, contents: string): Promise<string> {
@@ -289,12 +295,12 @@ describe('the MCP pre-flight knows what a [use ai] step will name', () => {
     root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'steptix-use-ai-')));
     created.push(root);
     writeFileSync(path.join(root, 'steptix.config.json'), JSON.stringify({}));
-    writeFileSync(path.join(root, '.env'), 'SERVER_URL=http://127.0.0.1:3100\n');
+    writeFileSync(path.join(root, '.env'), 'STEPTIX_SERVER_URL=http://127.0.0.1:3100\n');
     process.env['STEPTIX_MCP_ROOTS'] = root;
   });
 
   afterEach(() => {
-    for (const d of created.splice(0)) rmSync(d, { recursive: true, force: true });
+    for (const d of created.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     delete process.env['STEPTIX_MCP_ROOTS'];
   });
 

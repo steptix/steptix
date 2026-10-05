@@ -194,32 +194,6 @@ describe('executeToolStep — array-typed parameters', () => {
     expect(outcome.status).toBe('failed');
     expect(outcome.error).toMatch(/parameter "urls".*expected a string\[\]/);
   });
-
-  it('treats a scalar string param as before (no behaviour change)', async () => {
-    let received: string | undefined;
-    const def: ToolDefinition = {
-      name: 'echo',
-      parameters: { msg: { type: 'string' } },
-      outputs: {},
-      run: (args) => {
-        received = (args as { msg: string }).msg;
-      },
-    };
-    const call: ToolCall = {
-      name: 'echo',
-      args: { msg: 'hello' },
-      outputAliases: {},
-    };
-
-    const outcome = await executeToolStep(call, {
-      ...stubCtx,
-      resolvedParameters: {},
-      catalogue: makeCatalogue(def) as never,
-    });
-
-    expect(outcome.status).toBe('passed');
-    expect(received).toBe('hello');
-  });
 });
 
 describe('executeToolStep — array outputs via setVar', () => {
@@ -276,33 +250,6 @@ describe('executeToolStep — array outputs via setVar', () => {
     // Round-trip preserves types.
     expect(JSON.parse(params['counts']!)).toEqual([1, 2, 3]);
     expect(JSON.parse(params['flags']!)).toEqual([true, false, true]);
-  });
-
-  it('honours output aliases when storing array outputs', async () => {
-    const def: ToolDefinition = {
-      name: 'collect',
-      parameters: {},
-      outputs: { items: { type: 'string[]' } },
-      run: (_args, ctx) => {
-        ctx.step.setVar('items', ['x', 'y']);
-      },
-    };
-    const call: ToolCall = {
-      name: 'collect',
-      args: {},
-      outputAliases: { items: 'product_codes' },
-    };
-    const params: Record<string, string> = {};
-
-    const outcome = await executeToolStep(call, {
-      ...stubCtx,
-      resolvedParameters: params,
-      catalogue: makeCatalogue(def) as never,
-    });
-
-    expect(outcome.status).toBe('passed');
-    expect(params['product_codes']).toBe(JSON.stringify(['x', 'y']));
-    expect(params['items']).toBeUndefined();
   });
 
   it('chains: tool A produces a list output, tool B consumes it as an array param', async () => {

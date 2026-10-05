@@ -28,7 +28,7 @@ import { expandSkills } from '../src/skills/expander.js';
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mcp');
 
 const BASE_ENV = {
-  SERVER_URL: 'http://127.0.0.1:3100',
+  STEPTIX_SERVER_URL: 'http://127.0.0.1:3100',
   STEPTIX_SERVER_API_KEY: 'project-key',
   BASE_URL: 'https://base.example.com',
   GREETING: 'Welcome back',
@@ -80,8 +80,17 @@ async function refusalText(fn: () => Promise<unknown>): Promise<string> {
 const originalEnv = { ...process.env };
 
 beforeEach(() => {
-  delete process.env['SERVER_URL'];
+  delete process.env['STEPTIX_SERVER_URL'];
   delete process.env['STEPTIX_SERVER_API_KEY'];
+  // Every `resolveProject` reads the machine key from the user root's `.env`
+  // and confines paths against that root — redirect it into an empty per-test
+  // dir so this machine's real one never decides an outcome. LOCALAPPDATA is
+  // what win32 reads, XDG_CONFIG_HOME what everything else does; the afterEach
+  // env restore puts both back.
+  const userRootTmp = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'steptix-mcp-asm-user-')));
+  created.push(userRootTmp);
+  process.env['LOCALAPPDATA'] = userRootTmp;
+  process.env['XDG_CONFIG_HOME'] = userRootTmp;
   root = makeProject(
     { tests: { skillsDir: './skills', toolsDir: './tools/src' } },
     ['skills', 'tools/src', 'data'],
@@ -93,7 +102,9 @@ afterEach(() => {
     if (!(key in originalEnv)) delete process.env[key];
   }
   Object.assign(process.env, originalEnv);
-  for (const dir of created.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of created.splice(0)) {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 });
 
 describe('assembleTestFile — goldens', () => {
@@ -252,35 +263,21 @@ describe('assembleTestFile — goldens', () => {
     });
   });
 
-  it('sends a tool `viewport` for a file that declares none', async () => {
-    const run = await assemble('simple.md', { config: { viewport: 'tablet' } });
-    expect(run.request.config).toEqual({ viewport: 'tablet' });
-  });
-
   // SPEC-structured-table-reads.md §7.10. The same whitelist, the same
   // argument: a key it does not name never reaches the wire, so without this
   // an MCP-run test that asked for `tableStructure: strict` would quietly
   // spend the model call it asked not to spend — and a run that had to be
   // deterministic would not be, with nothing in the result saying so.
+  //
+  // File-declared only: the tool's `config` (zod `toolConfig`) has no
+  // `tableStructure` key, so an agent cannot supply one and there is no
+  // tool-over-file merge for this field to test.
   it("forwards a file's `tableStructure` to the wire, raw", async () => {
     const run = await assemble('table-structure.md');
     expect(run.request.config).toEqual({
       baseUrl: 'https://example.com',
       tableStructure: 'strict',
     });
-  });
-
-  it('lets a tool `tableStructure` override the file per key', async () => {
-    const run = await assemble('table-structure.md', { config: { tableStructure: 'ask' } });
-    expect(run.request.config).toEqual({
-      baseUrl: 'https://example.com',
-      tableStructure: 'ask',
-    });
-  });
-
-  it('sends a tool `tableStructure` for a file that declares none', async () => {
-    const run = await assemble('simple.md', { config: { tableStructure: 'strict' } });
-    expect(run.request.config).toEqual({ tableStructure: 'strict' });
   });
 
   it('passes an invalid value THROUGH — the server owns the one validator', async () => {

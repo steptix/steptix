@@ -21,7 +21,7 @@ export function registerServeCommand(program: Command): void {
     .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
     .option(
       '-p, --port <number>',
-      'Port to listen on (default: the port of SERVER_URL in the machine .env, else 3100)',
+      'Port to listen on (default: the port of STEPTIX_SERVER_URL in the machine .env, else 3100)',
       parseInt,
     )
     .option('-H, --host <host>', 'Host to bind to')
@@ -69,7 +69,7 @@ export function registerServeCommand(program: Command): void {
           );
         }
       }
-      // -p, then the machine SERVER_URL's port, then 3100 — never a project's
+      // -p, then the machine STEPTIX_SERVER_URL's port, then 3100 — never a project's
       // own .env or config (stories/machine-server-url.md).
       let listen: ServePort;
       try {

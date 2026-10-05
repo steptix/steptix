@@ -135,7 +135,7 @@ Buys correctness without paying for re-parse on every batch.
 
 Auditing the pause-and-resume flow alongside [010](010-resume-uses-line-numbers-not-step-ordinals.md).
 The skill cache fix
-([f6b24c1 / 0.5.23 / 0.5.24](#)) covered the most common case;
+([1c7ed42 / 0.5.23 / 0.5.24](#)) covered the most common case;
 this is the remaining gap for env/data-bound values. Flagged here so
 the next pass at "make pause-and-resume bulletproof" can decide
 whether to ship it together with 010 or hold for a user report.

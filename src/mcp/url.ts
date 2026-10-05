@@ -36,7 +36,7 @@ export function isLoopbackHost(hostname: string): boolean {
  * report "not running" against a server that is running. The result is a
  * server you can neither see nor stop from the CLI.
  *
- * This repo triggers exactly that: `.env` says `SERVER_URL=http://localhost:3100`
+ * This repo triggers exactly that: `.env` says `STEPTIX_SERVER_URL=http://localhost:3100`
  * while `steptix.config.json` says `"host": "127.0.0.1"`.
  */
 export function normalizeSpawnHost(hostname: string): string {
@@ -66,7 +66,7 @@ export function canonicalServerKey(serverUrl: string): string {
   try {
     parsed = new URL(serverUrl);
   } catch {
-    // Not our job to validate here — auto-start reports a bad SERVER_URL with
+    // Not our job to validate here — auto-start reports a bad STEPTIX_SERVER_URL with
     // a message that names it. Fall back to a stable string so callers still
     // agree with each other.
     return normalizeBaseUrl(serverUrl).toLowerCase();

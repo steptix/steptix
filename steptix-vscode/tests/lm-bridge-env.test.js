@@ -67,7 +67,7 @@ test('the comment blames the machine, not Settings Sync', () => {
 test('unrelated lines are preserved exactly, in place', () => {
   const before = [
     '# my project',
-    'SERVER_URL=http://localhost:3100',
+    'STEPTIX_SERVER_URL=http://localhost:3100',
     'BANK_PASSWORD=hunter2',
     '',
   ].join('\n');
@@ -80,7 +80,7 @@ test('an existing assignment is rewritten where it sits, not appended again', ()
   const before = [
     '# which model to use',
     'AI_MODEL=openai/chatgpt-5.5',
-    'SERVER_URL=http://localhost:3100',
+    'STEPTIX_SERVER_URL=http://localhost:3100',
     '',
   ].join('\n');
   const result = plan(before);
@@ -123,13 +123,13 @@ test('a second write does not stack a second copy of the comment block', () => {
 });
 
 test('a blank AI_API_KEY is a keyless project, and filling it is flagged in words', () => {
-  const result = plan(['SERVER_URL=http://localhost:3100', 'AI_API_KEY=', ''].join('\n'));
+  const result = plan(['STEPTIX_SERVER_URL=http://localhost:3100', 'AI_API_KEY=', ''].join('\n'));
   assert.equal(result.flipsKeylessToKeyed, true);
   assert.ok(result.text.includes(`AI_API_KEY=${TOKEN}`));
 });
 
 test('a file with no AI_API_KEY at all is not a keyless flip — nothing was pinned', () => {
-  assert.equal(plan('SERVER_URL=http://localhost:3100\n').flipsKeylessToKeyed, false);
+  assert.equal(plan('STEPTIX_SERVER_URL=http://localhost:3100\n').flipsKeylessToKeyed, false);
   assert.equal(plan('').flipsKeylessToKeyed, false);
 });
 
@@ -166,12 +166,12 @@ test('a non-secret key keeps its old value in the diff — there is nothing to h
   assert.match(result.preview, /- AI_MODEL=openai\/chatgpt-5\.5/);
 });
 
-test('SERVER_URL is read back so the caller can warn about a remote server', () => {
-  assert.equal(plan('SERVER_URL=https://ci.corp.example\n').serverUrl, 'https://ci.corp.example');
+test('STEPTIX_SERVER_URL is read back so the caller can warn about a remote server', () => {
+  assert.equal(plan('STEPTIX_SERVER_URL=https://ci.corp.example\n').serverUrl, 'https://ci.corp.example');
   assert.equal(plan('').serverUrl, null);
 });
 
-test('a loopback SERVER_URL is local; anything else is not', () => {
+test('a loopback STEPTIX_SERVER_URL is local; anything else is not', () => {
   assert.equal(isLocalServerUrl('http://localhost:3100'), true);
   assert.equal(isLocalServerUrl('http://127.0.0.1:3100'), true);
   assert.equal(isLocalServerUrl('http://[::1]:3100'), true);
@@ -180,14 +180,14 @@ test('a loopback SERVER_URL is local; anything else is not', () => {
   assert.equal(isLocalServerUrl('http://192.168.1.20:3100'), false);
 });
 
-test('an unparseable or empty SERVER_URL does not raise a second, wrong warning', () => {
+test('an unparseable or empty STEPTIX_SERVER_URL does not raise a second, wrong warning', () => {
   assert.equal(isLocalServerUrl(''), true);
   assert.equal(isLocalServerUrl('   '), true);
   assert.equal(isLocalServerUrl('http://'), true);
 });
 
 test('a CRLF file stays CRLF — rewritten lines and appended ones both', () => {
-  const before = 'SERVER_URL=http://localhost:3100\r\nAI_MODEL=openai/chatgpt-5.5\r\n';
+  const before = 'STEPTIX_SERVER_URL=http://localhost:3100\r\nAI_MODEL=openai/chatgpt-5.5\r\n';
   const after = plan(before).text;
   assert.ok(after.includes('AI_MODEL=gateway/copilot/gpt-4.1\r\n'), 'the rewrite keeps its \\r');
   assert.ok(after.includes(`AI_API_KEY=${TOKEN}\r\n`), 'the append takes the file\'s ending');
@@ -201,13 +201,13 @@ test('a CRLF file stays CRLF — rewritten lines and appended ones both', () => 
 });
 
 test('an LF file stays LF — no stray \\r is introduced', () => {
-  const after = plan('SERVER_URL=http://localhost:3100\n').text;
+  const after = plan('STEPTIX_SERVER_URL=http://localhost:3100\n').text;
   assert.ok(!after.includes('\r'));
 });
 
 test('a file without a trailing newline gains a separating blank line, not a joined line', () => {
-  const out = lines(plan('SERVER_URL=http://localhost:3100'));
-  assert.equal(out[0], 'SERVER_URL=http://localhost:3100');
+  const out = lines(plan('STEPTIX_SERVER_URL=http://localhost:3100'));
+  assert.equal(out[0], 'STEPTIX_SERVER_URL=http://localhost:3100');
   assert.equal(out[1], '', 'the appended block starts on its own line');
 });
 
@@ -222,7 +222,7 @@ test('an absent overlay file sets none of the trio — that is the no-conflict c
 });
 
 test('an overlay with none of the trio does not interrupt setup', () => {
-  const text = ['SERVER_URL=http://localhost:3100', 'BANK_PASSWORD=hunter2', ''].join('\n');
+  const text = ['STEPTIX_SERVER_URL=http://localhost:3100', 'BANK_PASSWORD=hunter2', ''].join('\n');
   assert.deepEqual(overlayBridgeKeys(text), []);
 });
 
@@ -234,7 +234,7 @@ test('each of the three counts on its own, because each composes a broken run al
   assert.deepEqual(overlayBridgeKeys('AI_MODEL=openai/chatgpt-5.5\n'), ['AI_MODEL']);
   assert.deepEqual(overlayBridgeKeys('AI_GATEWAY_URL=https://uat.example\n'), ['AI_GATEWAY_URL']);
   assert.deepEqual(
-    overlayBridgeKeys('AI_API_KEY=x\nSERVER_URL=y\nAI_MODEL=z\n'),
+    overlayBridgeKeys('AI_API_KEY=x\nSTEPTIX_SERVER_URL=y\nAI_MODEL=z\n'),
     ['AI_MODEL', 'AI_API_KEY'],
     'reported in trio order, whatever order the file has',
   );
@@ -277,9 +277,9 @@ test('writing the overlay produces the SAME full trio, not just the shadowed key
 });
 
 test('targeting the overlay changes only the comment block — the same plan, either file', () => {
-  const base = plan('SERVER_URL=http://localhost:3100\n');
+  const base = plan('STEPTIX_SERVER_URL=http://localhost:3100\n');
   const overlay = planEnvUpdate({
-    text: 'SERVER_URL=http://localhost:3100\n',
+    text: 'STEPTIX_SERVER_URL=http://localhost:3100\n',
     ...INPUT,
     envName: 'uat',
   });
@@ -322,14 +322,14 @@ test('both blocks share their first line, so switching target cannot stack two',
   assert.equal(second.split(ENV_COMMENT_LINES[0]).length - 1, 1);
 });
 
-test('SERVER_URL reads back the same way for either file', () => {
-  assert.equal(serverUrlIn('SERVER_URL=https://ci.corp.example\n'), 'https://ci.corp.example');
-  assert.equal(serverUrlIn('SERVER_URL=a\nSERVER_URL=b\n'), 'b', 'the line a run wins with');
+test('STEPTIX_SERVER_URL reads back the same way for either file', () => {
+  assert.equal(serverUrlIn('STEPTIX_SERVER_URL=https://ci.corp.example\n'), 'https://ci.corp.example');
+  assert.equal(serverUrlIn('STEPTIX_SERVER_URL=a\nSTEPTIX_SERVER_URL=b\n'), 'b', 'the line a run wins with');
   assert.equal(serverUrlIn(''), null);
 });
 
 // ---------------------------------------------------------------------------
-// Which env names may name a file, and which SERVER_URL a run would use
+// Which env names may name a file, and which STEPTIX_SERVER_URL a run would use
 // ---------------------------------------------------------------------------
 
 test('a dotted env name is a real file, so setup must consider it', () => {
@@ -351,21 +351,21 @@ test('only names that would ESCAPE the folder are rejected', () => {
   assert.equal(envNameStaysInFolder('../secrets/.env'), false);
 });
 
-test('the warning follows composeEnv: the overlay when it sets SERVER_URL, else the base', () => {
+test('the warning follows composeEnv: the overlay when it sets STEPTIX_SERVER_URL, else the base', () => {
   // Both directions, because reading only the write target got both wrong. An
   // overlay pointing back at this machine must silence the warning...
-  const url = effectiveServerUrl('SERVER_URL=http://ci.corp:3100\n', 'SERVER_URL=http://localhost:3100\n');
+  const url = effectiveServerUrl('STEPTIX_SERVER_URL=http://ci.corp:3100\n', 'STEPTIX_SERVER_URL=http://localhost:3100\n');
   assert.equal(url, 'http://localhost:3100');
   assert.equal(isLocalServerUrl(url), true, 'nothing to warn about — the run dials localhost');
 
   // ...and an overlay pointing away from it must raise one, however local the
   // base `.env` looks.
-  const away = effectiveServerUrl('SERVER_URL=http://localhost:3100\n', 'SERVER_URL=http://ci.corp:3100\n');
+  const away = effectiveServerUrl('STEPTIX_SERVER_URL=http://localhost:3100\n', 'STEPTIX_SERVER_URL=http://ci.corp:3100\n');
   assert.equal(away, 'http://ci.corp:3100');
   assert.equal(isLocalServerUrl(away), false, 'connection refused, warned about first');
 
   // An overlay that names none inherits the base's; no overlay at all is base.
-  assert.equal(effectiveServerUrl('SERVER_URL=http://ci.corp:3100\n', 'UAT_ONLY=x\n'), 'http://ci.corp:3100');
-  assert.equal(effectiveServerUrl('SERVER_URL=http://ci.corp:3100\n', null), 'http://ci.corp:3100');
+  assert.equal(effectiveServerUrl('STEPTIX_SERVER_URL=http://ci.corp:3100\n', 'UAT_ONLY=x\n'), 'http://ci.corp:3100');
+  assert.equal(effectiveServerUrl('STEPTIX_SERVER_URL=http://ci.corp:3100\n', null), 'http://ci.corp:3100');
   assert.equal(effectiveServerUrl('', null), null);
 });

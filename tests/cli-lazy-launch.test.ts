@@ -202,20 +202,15 @@ describe('runTest launches the browser at the first step, not at startup', () =>
     expect(order).toEqual(['launch', 'step:first', 'step:second']);
   });
 
+  // Teardown has to survive the no-browser case too — the run getting back
+  // here without a throw is that check: `closeAll()` over an unlaunched
+  // tracker is a no-op, and `finalizeMainPageVideo` is handed `undefined` for
+  // its page.
   it('launches nothing for a test with no steps at all', async () => {
     await runTest(makeInstance([]), makeConfig(), '');
 
     expect(launchBrowserMock).not.toHaveBeenCalled();
     expect(trackers[0].hasActive()).toBe(false);
-  });
-
-  // Teardown has to survive the no-browser case: `closeAll()` over an
-  // unlaunched tracker is a no-op, and `finalizeMainPageVideo` is handed
-  // `undefined` for its page.
-  it('tears down cleanly when nothing ever launched', async () => {
-    const report = await runTest(makeInstance([]), makeConfig(), '');
-
-    expect(report).toBeDefined();
     expect(closeBrowserMock).not.toHaveBeenCalled();
   });
 });

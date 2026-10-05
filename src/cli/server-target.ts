@@ -10,7 +10,7 @@ export interface ServerTargetOptions {
 /**
  * Resolve which server `status` / `stop` are talking about, in the order
  * `serve` picks its port (stories/machine-server-url.md): `--url` if given,
- * else the user root's `SERVER_URL`, else the default port on the loaded
+ * else the user root's `STEPTIX_SERVER_URL`, else the default port on the loaded
  * config's `server.host`.
  *
  * A server started with an explicit `-p` is not found this way — `steptix

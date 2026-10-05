@@ -14,8 +14,15 @@
  * a config file, a synthetic path, a project resolver and a route in that
  * order.
  *
- * Verification items (1), (2), (3), (4) and (6) of stories/tab-peek.md live
- * here. Item (5)'s no-raise clause is asserted in
+ * Verification items (1), (2) and (4) of stories/tab-peek.md live here. Items
+ * (3) and (6) — the two tab refusals and the `session_id` wrong door — fire in
+ * the tool layer: the `session_id` one before any HTTP, the tab ones after
+ * resolving the browser and listing its tabs, decided over that listing
+ * alone. So the real server adds nothing to them beyond the listing:
+ * they are in `tests/mcp-peek-seam.test.ts`, and the page-type filter over the
+ * real listing is pinned once, in `tests/mcp-errands-real-app.test.ts`, since
+ * both tools match over the same candidate list. Item (5)'s no-raise clause is
+ * asserted in
  * `tests/browser-manager-focus.test.ts` — the only suite that mocks
  * `playwright` itself and can therefore see the attach-path call; a
  * mocked-manager harness like this one cannot fail on it and must not claim
@@ -23,7 +30,7 @@
  * `tests/api-server-cdp.test.ts`, over raw HTTP, because neither has a
  * tool-shaped door.
  */
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -92,10 +99,10 @@ const TABS = [
  * alongside three things that are not tabs, each named so it would match the
  * same words a real tab does.
  *
- * Raw rather than pre-filtered, because the filter is what item (3)'s
- * candidate-set clause is about. Writing the filtered list here would assert
- * the fixture; this way the candidate set is whatever the REAL `toPageTabs`
- * makes of it.
+ * Raw rather than pre-filtered, so the listing every name here resolves
+ * against is whatever the REAL `toPageTabs` makes of it rather than an
+ * assertion about the fixture. (The filter itself is pinned in the errand
+ * twin of this file.)
  */
 function rawDevToolsTargets(): unknown[] {
   return [
@@ -508,7 +515,6 @@ import { createMcpServer } from '../src/mcp/server.js';
 import { createApiClient } from '../src/mcp/api-client.js';
 import { resolveProject } from '../src/mcp/project.js';
 import { resetRegistry } from '../src/mcp/registry.js';
-import { describeBrowser, peekTabAmbiguous, peekTabNotFound } from '../src/mcp/errors.js';
 
 const API_KEY = 'sk-peek-real-app';
 
@@ -534,10 +540,21 @@ let client: Client;
 let tightDir: string;
 let plainDir: string;
 let previousRoots: string | undefined;
-
-const THIS_BROWSER = describeBrowser({ engine: 'edge', profile: 'default', scope: 'project' });
+/** The user root this file resolves against, and the values it displaced. */
+let userRootTmp: string;
+const savedUserRoot: Record<string, string | undefined> = {};
 
 beforeAll(async () => {
+  // Every `resolveProject` reads the machine key from the user root's `.env`
+  // and confines paths against that root, so point it into an empty tmp dir —
+  // this machine's real %LOCALAPPDATA%\steptix must not decide an outcome here.
+  // LOCALAPPDATA is what win32 reads, XDG_CONFIG_HOME what everything else does.
+  userRootTmp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-peek-user-root-')));
+  for (const key of ['LOCALAPPDATA', 'XDG_CONFIG_HOME'] as const) {
+    savedUserRoot[key] = process.env[key];
+    process.env[key] = userRootTmp;
+  }
+
   const { app } = createApiServer(cfg);
   server = createServer(app);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
@@ -545,7 +562,7 @@ beforeAll(async () => {
   if (typeof addr !== 'object' || addr === null) throw new Error('no port');
   const baseUrl = `http://127.0.0.1:${addr.port}`;
 
-  const env = `SERVER_URL=${baseUrl}\nSTEPTIX_SERVER_API_KEY=${API_KEY}\n`;
+  const env = `STEPTIX_SERVER_URL=${baseUrl}\nSTEPTIX_SERVER_API_KEY=${API_KEY}\n`;
   tightDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-peek-tight-')));
   await fs.writeFile(path.join(tightDir, '.env'), env);
   await fs.writeFile(
@@ -577,11 +594,24 @@ beforeAll(async () => {
 afterAll(async () => {
   if (previousRoots === undefined) delete process.env['STEPTIX_MCP_ROOTS'];
   else process.env['STEPTIX_MCP_ROOTS'] = previousRoots;
+  for (const [key, value] of Object.entries(savedUserRoot)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   await client?.close();
   await new Promise<void>((r) => server?.close(() => r()));
   resetRegistry();
-  await fs.rm(tightDir, { recursive: true, force: true }).catch(() => {});
-  await fs.rm(plainDir, { recursive: true, force: true }).catch(() => {});
+  for (const dir of [tightDir, plainDir, userRootTmp]) {
+    if (dir) await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).catch(() => {});
+  }
+});
+
+// The report mock is module-level and the session tests below DO generate
+// reports (a `run_steps` batch writes one), so every "nothing generated a
+// report" assertion has to start from a clean count — or it holds only while
+// those tests happen to run last.
+beforeEach(() => {
+  vi.mocked(generateReportMock).mockClear();
 });
 
 async function listSessionIds(root = tightDir): Promise<string[]> {
@@ -593,23 +623,6 @@ async function listSessionIds(root = tightDir): Promise<string[]> {
 
 function content(result: unknown): string {
   return JSON.stringify((result as { content: unknown }).content);
-}
-
-/** The refusal as a model reads it, for comparison against the exported error
- *  builders — a substring match decays the moment either side is reworded. */
-function textOf(result: unknown): string {
-  return (result as { content: { text?: string }[] }).content.map((c) => c.text ?? '').join('\n');
-}
-
-/** The one text an `McpToolError` builder carries. */
-function errorText(built: { content: { text: string }[] }): string {
-  return built.content.map((c) => c.text).join('\n');
-}
-
-/** Every open tab as the listing reports it — the candidate list both
- *  refusals are built from. */
-function openTabs() {
-  return TABS.map((p) => ({ targetId: p.targetId, title: p.titleText, url: p.urlText }));
 }
 
 function peek(args: Record<string, unknown>) {
@@ -670,68 +683,72 @@ describe('peek_tab over the real HTTP seam', () => {
     // reads on that path are exactly what a seam test cannot see.
     attaches.length = 0;
     const before = await listSessionIds();
-
-    // The default arm: a new tab, and no existing tab moved.
-    const urlsBefore = TABS.map((t) => t.urlText);
-    const opened = await client.callTool({
-      name: 'navigate_tab',
-      arguments: { url: 'https://example.com/pricing', profile: 'default', project_root: tightDir },
-    });
-
-    expect(opened.isError, content(opened)).toBeFalsy();
-    const openedValue = opened.structuredContent as Record<string, unknown>;
-    expect(openedValue.openedNewTab).toBe(true);
-    expect(openedValue.requestedUrl).toBe('https://example.com/pricing');
-    expect(openedValue.url).toBe('https://example.com/pricing');
-    expect(openedValue.targetId).toBe('tab-opened');
-    expect(attaches[0]!.cdp).toEqual({ port: CDP_PORT, tab: 'new', activate: false });
-    // Item (1) proved the only way that means anything: every tab the user had
-    // is still where it was.
-    expect(TABS.map((t) => t.urlText)).toEqual(urlsBefore);
-    // **The opened tab SURVIVES the detach.** `closeBrowser` closes a tab the
-    // attach opened, which is right for a run and exactly wrong here — opening
-    // the tab is the job. Found live, where the new tab navigated and then
-    // vanished before anything could look at it; pinned here because a detach
-    // that quietly took the deliverable with it looked like a success.
-    const openedPage = detaches.at(-1)!.page as { close: ReturnType<typeof vi.fn> };
-    expect(openedPage.close).not.toHaveBeenCalled();
-    expect(detaches.at(-1)!.cdpTabOpenedByUs).toBe(false);
-
-    // The replace arm, by exact id, and the tab really moves.
     const cart = TABS.find((t) => t.targetId === 'tab-cart')!;
-    const replaced = await client.callTool({
-      name: 'navigate_tab',
-      arguments: {
-        url: 'https://example.com/needs-login',
-        target_id: 'tab-cart',
-        profile: 'default',
-        project_root: tightDir,
-      },
-    });
 
-    expect(replaced.isError, content(replaced)).toBeFalsy();
-    const replacedValue = replaced.structuredContent as Record<string, unknown>;
-    expect(replacedValue.openedNewTab).toBe(false);
-    expect(replacedValue.targetId).toBe('tab-cart');
-    // The redirect, end to end: asked for one page, landed on a sign-in.
-    expect(replacedValue.requestedUrl).toBe('https://example.com/needs-login');
-    expect(replacedValue.url).toBe('https://accounts.example/login');
-    expect(replacedValue.title).toBe('Sign in');
-    expect(content(replaced)).toContain('Landed on: https://accounts.example/login');
-    expect(cart.urlText).toBe('https://accounts.example/login');
-    expect(attaches[1]!.cdp).toEqual({
-      port: CDP_PORT,
-      tab: 'targetId:tab-cart',
-      activate: false,
-    });
+    try {
+      // The default arm: a new tab, and no existing tab moved.
+      const urlsBefore = TABS.map((t) => t.urlText);
+      const opened = await client.callTool({
+        name: 'navigate_tab',
+        arguments: { url: 'https://example.com/pricing', profile: 'default', project_root: tightDir },
+      });
 
-    // Still no sessions, and no report: a navigation is not a run.
-    expect(await listSessionIds()).toEqual(before);
-    expect(generateReportMock).not.toHaveBeenCalled();
+      expect(opened.isError, content(opened)).toBeFalsy();
+      const openedValue = opened.structuredContent as Record<string, unknown>;
+      expect(openedValue.openedNewTab).toBe(true);
+      expect(openedValue.requestedUrl).toBe('https://example.com/pricing');
+      expect(openedValue.url).toBe('https://example.com/pricing');
+      expect(openedValue.targetId).toBe('tab-opened');
+      expect(attaches[0]!.cdp).toEqual({ port: CDP_PORT, tab: 'new', activate: false });
+      // Item (1) proved the only way that means anything: every tab the user had
+      // is still where it was.
+      expect(TABS.map((t) => t.urlText)).toEqual(urlsBefore);
+      // **The opened tab SURVIVES the detach.** `closeBrowser` closes a tab the
+      // attach opened, which is right for a run and exactly wrong here — opening
+      // the tab is the job. Found live, where the new tab navigated and then
+      // vanished before anything could look at it; pinned here because a detach
+      // that quietly took the deliverable with it looked like a success.
+      const openedPage = detaches.at(-1)!.page as { close: ReturnType<typeof vi.fn> };
+      expect(openedPage.close).not.toHaveBeenCalled();
+      expect(detaches.at(-1)!.cdpTabOpenedByUs).toBe(false);
 
-    // Put the fixture back, since later tests read this tab by name.
-    cart.urlText = 'https://shop.example/cart';
-    cart.titleText = 'Cart — Shop';
+      // The replace arm, by exact id, and the tab really moves.
+      const replaced = await client.callTool({
+        name: 'navigate_tab',
+        arguments: {
+          url: 'https://example.com/needs-login',
+          target_id: 'tab-cart',
+          profile: 'default',
+          project_root: tightDir,
+        },
+      });
+
+      expect(replaced.isError, content(replaced)).toBeFalsy();
+      const replacedValue = replaced.structuredContent as Record<string, unknown>;
+      expect(replacedValue.openedNewTab).toBe(false);
+      expect(replacedValue.targetId).toBe('tab-cart');
+      // The redirect, end to end: asked for one page, landed on a sign-in.
+      expect(replacedValue.requestedUrl).toBe('https://example.com/needs-login');
+      expect(replacedValue.url).toBe('https://accounts.example/login');
+      expect(replacedValue.title).toBe('Sign in');
+      expect(content(replaced)).toContain('Landed on: https://accounts.example/login');
+      expect(cart.urlText).toBe('https://accounts.example/login');
+      expect(attaches[1]!.cdp).toEqual({
+        port: CDP_PORT,
+        tab: 'targetId:tab-cart',
+        activate: false,
+      });
+
+      // Still no sessions, and no report: a navigation is not a run.
+      expect(await listSessionIds()).toEqual(before);
+      expect(generateReportMock).not.toHaveBeenCalled();
+    } finally {
+      // Put the fixture back even when an assertion above failed: every other
+      // test reads this tab by name, and a cart left on "Sign in" turns one
+      // real failure into a column of unrelated ones.
+      cart.urlText = 'https://shop.example/cart';
+      cart.titleText = 'Cart — Shop';
+    }
   }, 30_000);
 
   it('photographs the named tab, and full_page survives every layer', async () => {
@@ -837,61 +854,6 @@ describe('peek_tab over the real HTTP seam', () => {
     expect((plain.structuredContent as { root: string }).root).toBe(plainDir);
   }, 30_000);
 
-  it('refuses a name matching nothing, listing what is open (item 3)', async () => {
-    const res = await peek({ tab: 'the invoices tab' });
-
-    expect(res.isError).toBe(true);
-    // Word for word against this tool's own exported builder, over the REAL
-    // listing straight off the real route.
-    expect(textOf(res)).toBe(errorText(peekTabNotFound('the invoices tab', THIS_BROWSER, openTabs())));
-  }, 30_000);
-
-  it('refuses a name matching two, naming both (item 3)', async () => {
-    const res = await peek({ tab: 'shop.example' });
-
-    expect(res.isError).toBe(true);
-    expect(textOf(res)).toBe(
-      errorText(
-        peekTabAmbiguous('shop.example', [
-          { targetId: 'tab-cart', title: 'Cart — Shop', url: 'https://shop.example/cart' },
-          { targetId: 'tab-archive', title: 'Archive — Shop', url: 'https://shop.example/archive' },
-        ]),
-      ),
-    );
-    // Not the one that did not match.
-    expect(content(res)).not.toContain('tab-mail');
-  }, 30_000);
-
-  it('never makes an iframe, a browser_ui target or a dialog a candidate (item 3)', async () => {
-    // The listing's page-type filter, running for real: the fake DevTools
-    // surface reports an iframe, a browser_ui target and an `edge://…-dialog`
-    // page whose titles all contain "Cart — Shop", so any of them WOULD match
-    // if the candidate set were the raw target list.
-    for (const spec of ['targetId:frame-cart-promo', 'targetId:ui-omnibox', 'targetId:dialog-sync']) {
-      const res = await peek({ tab: spec });
-      expect(res.isError, `${spec}: ${content(res)}`).toBe(true);
-      expect(textOf(res), spec).toBe(errorText(peekTabNotFound(spec, THIS_BROWSER, openTabs())));
-    }
-    // Control: the three are not merely absent from the listing, they are
-    // absent from the candidate set for a name they all carry — "Cart — Shop"
-    // still resolves to exactly one tab.
-    const one = await peek({ tab: 'Cart — Shop' });
-    expect(one.isError, content(one)).toBeFalsy();
-    expect((one.structuredContent as { targetId: string }).targetId).toBe('tab-cart');
-  }, 30_000);
-
-  it('refuses session_id before it touches anything (item 6)', async () => {
-    attaches.length = 0;
-    const before = await listSessionIds();
-
-    const res = await peek({ tab: 'targetId:tab-cart', session_id: 'mcp:steps-1' });
-
-    expect(res.isError).toBe(true);
-    expect(content(res)).toContain('get_page_content');
-    expect(attaches).toEqual([]);
-    expect(await listSessionIds()).toEqual(before);
-  });
-
   // -------------------------------------------------------------------------
   // Item (4): reads coexist with drivers
   // -------------------------------------------------------------------------
@@ -935,11 +897,13 @@ describe('peek_tab over the real HTTP seam', () => {
     // is held only as long as the extraction takes.
     const id = 'mcp:peek-idle';
     executedSteps.length = 0;
-    const bound = await sessionSteps(id, ['read the inbox'], true);
-    expect(bound.isError, content(bound)).toBeFalsy();
-    expect(await listSessionIds()).toEqual([id]);
+    const before = await listSessionIds();
 
     try {
+      const bound = await sessionSteps(id, ['read the inbox'], true);
+      expect(bound.isError, content(bound)).toBeFalsy();
+      expect(await listSessionIds()).toEqual([...before, id].sort());
+
       const read = await peek({ tab: 'targetId:tab-mail' });
       expect(read.isError, content(read)).toBeFalsy();
       expect((read.structuredContent as { title: string }).title).toBe('Inbox');
@@ -951,7 +915,7 @@ describe('peek_tab over the real HTTP seam', () => {
       expect(executedSteps).toContain('read the inbox again');
 
       // And the peek added nothing to the sessions map on its way through.
-      expect(await listSessionIds()).toEqual([id]);
+      expect(await listSessionIds()).toEqual([...before, id].sort());
     } finally {
       await closeSession(id);
     }
@@ -965,11 +929,13 @@ describe('peek_tab over the real HTTP seam', () => {
     // an owned browser is the user's own, which `list_cdp_browsers` already
     // shows them every tab of.
     const id = 'c:/someone-elses/tests/theirs.md';
-    const bound = await sessionSteps(id, ['read the inbox'], true, true);
-    expect(bound.isError, content(bound)).toBeFalsy();
-    expect(await listSessionIds()).toEqual([id]);
+    const before = await listSessionIds();
 
     try {
+      const bound = await sessionSteps(id, ['read the inbox'], true, true);
+      expect(bound.isError, content(bound)).toBeFalsy();
+      expect(await listSessionIds()).toEqual([...before, id].sort());
+
       const read = await peek({ tab: 'targetId:tab-mail' });
 
       expect(read.isError, content(read)).toBeFalsy();
@@ -992,6 +958,7 @@ describe('peek_tab over the real HTTP seam', () => {
     // a peek takes it, consults it and blocks on it never.
     const id = 'mcp:peek-midbatch';
     executedSteps.length = 0;
+    const before = await listSessionIds();
     let release!: () => void;
     let markParked!: () => void;
     const gate = new Promise<void>((r) => (release = r));
@@ -1006,7 +973,7 @@ describe('peek_tab over the real HTTP seam', () => {
       return original(i, t, instruction, options);
     });
 
-    let batch: ReturnType<typeof sessionSteps>;
+    let batch: ReturnType<typeof sessionSteps> | undefined;
     try {
       const bound = await sessionSteps(id, ['read the inbox'], true);
       expect(bound.isError, content(bound)).toBeFalsy();
@@ -1020,10 +987,13 @@ describe('peek_tab over the real HTTP seam', () => {
     } finally {
       release();
       vi.mocked(executeStep).mockImplementation(original);
+      // Let the released batch finish, then close — here rather than after the
+      // assertions, so a failure above cannot leave the session open for
+      // whichever test runs next.
+      await batch?.catch(() => undefined);
+      await closeSession(id);
     }
     expect((await batch!).isError).toBeFalsy();
-
-    await closeSession(id);
-    expect(await listSessionIds()).toEqual([]);
+    expect(await listSessionIds()).toEqual(before);
   }, 30_000);
 });

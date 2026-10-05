@@ -13,7 +13,7 @@
  * what the *real* server emits. The vitest layer catches the wire
  * value but never runs the extension's paint code. This test wires
  * the whole stack:
- *   real api-server (running externally on $LIVE_SERVER_URL)
+ *   real api-server (running externally on $LIVE_STEPTIX_SERVER_URL)
  *     → real http transport (runner-core's ApiClient)
  *       → real RunController + tracker
  *         → real ActiveFileTracker.statuses[]
@@ -27,7 +27,7 @@
  * AI + browser for steps that aren't part of what's under test, and
  * any flakiness there would mask the bug we're guarding against.
  *
- * Prereq: `npm run dev` (or `steptix serve`) running on $LIVE_SERVER_URL
+ * Prereq: `npm run dev` (or `steptix serve`) running on $LIVE_STEPTIX_SERVER_URL
  * (default http://localhost:3100), and templates/.env with
  * STEPTIX_SERVER_API_KEY + AI_API_KEY present.
  */
@@ -61,7 +61,7 @@ describe('Steptix live — [skill:] line gets painted at breakpoint pause', func
     hooks = ext.exports?.__testHooks;
     assert.ok(hooks, '__testHooks missing — activation may have failed');
 
-    const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, {
         method: 'OPTIONS',

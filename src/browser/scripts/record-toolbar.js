@@ -716,10 +716,12 @@
       }
     }
     if ((view.phase === 'done' || view.phase === 'ended') && !tbLocal.removeTimer) {
+      // `endShowMs` is a test's override (the recorder's option of that name).
+      var showFor = typeof view.endShowMs === 'number' && view.endShowMs > 0 ? view.endShowMs : END_SHOW_MS;
       tbLocal.removeTimer = setTimeout(function () {
         tbLocal.removeTimer = 0;
         tbRemove();
-      }, END_SHOW_MS);
+      }, showFor);
     }
     var notice = view.notice && typeof view.notice === 'object' ? view.notice : null;
     if (notice) {
@@ -2335,6 +2337,11 @@
   var pk = null;
   var pickTarget = null;
   var crosshairSheet = null;
+  // Whether pick mode was on at the last pickApply, and where the pointer
+  // last moved in this document (null once it has left it): pick mode that
+  // comes on under a resting pointer outlines what it rests on.
+  var pickOn = false;
+  var pickPointer = null;
 
   function pickBuild() {
     var host = document.createElement(PICK_TAG);
@@ -2382,6 +2389,30 @@
     var on = state.recording && state.pick && !state.paused;
     crosshair(on);
     if (!on) pickHide();
+    else if (!pickOn) pickUnderPointer();
+    pickOn = on;
+  }
+
+  /** The state reaches the page after the server arms it, so the pointer may
+   *  already be resting where the author means to pick — and the outline
+   *  waits for a pointermove that need not come. */
+  function pickUnderPointer() {
+    if (!pickPointer) return;
+    var t;
+    try {
+      t = document.elementFromPoint(pickPointer.x, pickPointer.y);
+      // Down through open roots, as composedPath() does for a pointermove.
+      while (t && t.shadowRoot) {
+        var inner = t.shadowRoot.elementFromPoint(pickPointer.x, pickPointer.y);
+        if (!inner || inner === t) break;
+        t = inner;
+      }
+    } catch (err) {
+      return;
+    }
+    // A frame's own document outlines what is in it.
+    if (!t || /^i?frame$/i.test(t.tagName)) return;
+    pickOver(t);
   }
 
   function pickHide() {
@@ -2467,12 +2498,17 @@
   }
 
   function onPickHover(event) {
-    if (!state.recording || !state.pick || state.paused || !event.isTrusted) return;
+    if (!event.isTrusted) return;
+    pickPointer = { x: event.clientX, y: event.clientY };
+    if (!state.recording || !state.pick || state.paused) return;
     if (isOurs(event)) {
       pickHide();
       return;
     }
-    var t = realTarget(event);
+    pickOver(realTarget(event));
+  }
+
+  function pickOver(t) {
     if (!t || isOurHost(t)) return;
     var el = actionable(t) || t;
     if (el === document.documentElement || el === document.body) {
@@ -2487,7 +2523,9 @@
   }
 
   function onPickLeave(event) {
-    if (state.pick && !event.relatedTarget) pickHide();
+    if (event.relatedTarget) return;
+    pickPointer = null;
+    if (state.pick) pickHide();
   }
 
   /** Where the bar is, for the crop to paint out (fieldRects): the same

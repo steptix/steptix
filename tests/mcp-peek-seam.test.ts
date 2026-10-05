@@ -31,10 +31,12 @@ import type {
 // `peek_tab`, driven through a real MCP client over a real transport with only
 // the outside world faked (stories/tab-peek.md).
 //
-// The surface itself is what this file examines, which nothing else can: every
-// `tab` spelling and the union it matches over, the profile normalisation, the
+// The surface itself is what this file examines, which nothing else can: that
+// a name reaches the wire only as an exact id, the profile normalisation, the
 // shape of both refusals over a fixture listing, the `session_id` wrong door,
 // the route-missing/tab-gone 404 split, and the description's three-door rule.
+// (The `tab` spellings themselves are one table over the shared matcher, in
+// mcp-errands-seam.test.ts.)
 //
 // Item (3)'s sharing clause is pinned the way errands pins it: each tool's
 // refusals are asserted against ITS OWN exported builder, and the two tools'
@@ -236,23 +238,19 @@ describe('peek_tab refuses what it cannot do, naming what can', () => {
     expect(h.peeks).toEqual([]);
   });
 
-  it('treats an empty session_id as absent — a serializer the model cannot control sends ""', async () => {
-    // Measured live on run_errand (OpenCode + gpt-5.6-luna, 2026-08-13): the
-    // provider layer serializes every declared optional as "", so "call again
-    // without session_id" is an instruction the model physically cannot
-    // follow. The refusal fires on a non-empty VALUE only.
-    const h = await connect();
-    const result = await peek(h, { session_id: '' });
-    expect(result.isError).toBeFalsy();
-    expect(h.peeks).toHaveLength(1);
-  });
-
-  it('treats a whitespace session_id the same as empty', async () => {
-    const h = await connect();
-    const result = await peek(h, { session_id: '  ' });
-    expect(result.isError).toBeFalsy();
-    expect(h.peeks).toHaveLength(1);
-  });
+  it.each(['', '  '])(
+    'treats an empty or whitespace session_id (%j) as absent — a serializer the model cannot control sends ""',
+    async (sessionId) => {
+      // Measured live on run_errand (OpenCode + gpt-5.6-luna, 2026-08-13): the
+      // provider layer serializes every declared optional as "", so "call again
+      // without session_id" is an instruction the model physically cannot
+      // follow. The refusal fires on a non-empty VALUE only.
+      const h = await connect();
+      const result = await peek(h, { session_id: sessionId });
+      expect(result.isError).toBeFalsy();
+      expect(h.peeks).toHaveLength(1);
+    },
+  );
 
   it('declares session_id only to warn about it', async () => {
     const { client } = await connect();
@@ -308,52 +306,28 @@ describe('peek_tab refuses what it cannot do, naming what can', () => {
 // ---------------------------------------------------------------------------
 
 describe('the tab matcher', () => {
-  it('takes targetId: exactly', async () => {
+  // The matching rules themselves (targetId:, title, url, case, title~/url~)
+  // are one table over the shared pure `matchTabsByName`, in
+  // mcp-errands-seam.test.ts. What is pinned here is this tool's own half: the
+  // wire gets an exact id, the refusals use ITS builders, and its candidate
+  // list is the errand's.
+  it('sends the wire an exact target id, and the port from the profile', async () => {
     const h = await connect();
 
-    const result = await peek(h, { tab: 'targetId:T-ACT' });
-
-    expect(result.isError).toBeFalsy();
+    const exact = await peek(h, { tab: 'targetId:T-ACT' });
+    expect(exact.isError).toBeFalsy();
     expect(h.peeks[0]?.targetId).toBe('T-ACT');
     // The port came from the browser resolution, not from the caller — there is
     // no `port` argument on this tool at all, which is what makes the
     // foreign-browser gate unreachable by construction.
     expect(h.peeks[0]?.port).toBe(51000);
-  });
 
-  it('matches a bare string against the title', async () => {
-    const h = await connect();
-    await peek(h, { tab: 'activity |' });
-    expect(h.peeks[0]?.targetId).toBe('T-ACT');
-  });
-
-  it('matches a bare string against the url as well as the title', async () => {
-    const h = await connect();
-    await peek(h, { tab: 'shop.example' });
-    expect(h.peeks[0]?.targetId).toBe('T-CART');
-  });
-
-  it('matches case-insensitively', async () => {
-    const h = await connect();
-    await peek(h, { tab: 'INBOX' });
-    expect(h.peeks[0]?.targetId).toBe('T-MAIL');
-  });
-
-  it('narrows to titles with title~ and to urls with url~', async () => {
-    const byTitle = await connect();
-    await peek(byTitle, { tab: 'title~inbox' });
-    expect(byTitle.peeks[0]?.targetId).toBe('T-MAIL');
-
-    const byUrl = await connect();
-    await peek(byUrl, { tab: 'url~folder/1' });
-    expect(byUrl.peeks[0]?.targetId).toBe('T-MAIL');
-
-    // …and each really does exclude the other half: this substring is in the
-    // url only, so as a title it matches nothing.
-    const narrowed = await connect();
-    const refused = await peek(narrowed, { tab: 'title~mail.example' });
-    expect(refused.isError).toBe(true);
-    expect(narrowed.peeks).toEqual([]);
+    // A NAME never reaches the wire — only an exact target id does. The
+    // first-match-wins arm of the server's own resolver is never asked to
+    // arbitrate, which is the whole reason a name-shaped argument is safe here.
+    const named = await peek(h, { tab: 'title~Cart' });
+    expect(named.isError).toBeFalsy();
+    expect(h.peeks[1]?.targetId).toBe('T-CART');
   });
 
   it('refuses a name that matches nothing, listing what IS open', async () => {
@@ -418,14 +392,6 @@ describe('the tab matcher', () => {
     // And the prose really does differ, so the assertion above is not two
     // names for one string.
     expect(text(errandRefusal)).not.toBe(text(peekRefusal));
-  });
-
-  it('never lets a name reach the wire — only an exact target id does', async () => {
-    // The first-match-wins arm of the server's own resolver is never asked to
-    // arbitrate, which is the whole reason a name-shaped argument is safe here.
-    const h = await connect();
-    await peek(h, { tab: 'title~Cart' });
-    expect(h.peeks[0]?.targetId).toBe('T-CART');
   });
 
   it('normalises an explicit empty profile to the default', async () => {

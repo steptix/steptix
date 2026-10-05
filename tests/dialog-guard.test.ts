@@ -9,16 +9,22 @@
  * never reached, and answers the dialog itself with the failure caught.
  *
  * Three layers, because the bug needs all three to stay dead:
- *   - the disposition and the catch, against fakes (fast, exhaustive);
- *   - the real crash race, against a real browser (a cross-origin iframe torn
- *     out from under its own dialog — the shape the incident had, since the
- *     page in question hosted a Stripe payment iframe);
+ *   - the disposition and the catch, against fakes (fast, exhaustive — and the
+ *     only layer that reaches the catch on every run);
+ *   - the crash race's setting, against a real browser (a cross-origin iframe
+ *     torn out from under its own dialog — the shape the incident had, since
+ *     the page in question hosted a Stripe payment iframe);
  *   - the wiring, so a context we own can never reach a page without a guard.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
-import net from 'node:net';
+import { spawn } from 'node:child_process';
+import { mkdtempSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Dialog } from 'playwright';
 import { closeBrowser, installDialogGuard, launchBrowser } from '../src/browser/manager.js';
+import { readDevToolsPort } from '../src/browser/cdp-launcher.js';
 import { addLogCallback, type LogLevel } from '../src/utils/logger.js';
 import type { BrowserConfig } from '../src/config/types.js';
 
@@ -112,17 +118,6 @@ async function waitUntil(predicate: () => boolean, budgetMs: number): Promise<bo
     await new Promise((r) => setTimeout(r, 100));
   }
   return predicate();
-}
-
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.on('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address() as net.AddressInfo;
-      srv.close(() => resolve(port));
-    });
-  });
 }
 
 const BROWSER_CONFIG: BrowserConfig = {
@@ -282,13 +277,20 @@ describe('installDialogGuard — the crash race, real browser', () => {
 
   afterAll(async () => {
     try { await browser?.close(); } catch { /* noop */ }
-  }, 20_000);
+  }, 60_000);
 
-  it('survives a cross-origin iframe torn down while its own dialog is open', async () => {
+  it('answers the dialogs of a cross-origin iframe torn down mid-dialog, leaving nothing unhandled', async () => {
     // A dialog raised by an OOPIF blocks that renderer but NOT the parent's,
     // so the parent can remove the iframe mid-dialog and Chromium cancels the
-    // dialog underneath Playwright's in-flight handle. This is the reproduction
-    // that produced the incident's stack frame for frame.
+    // dialog underneath Playwright's in-flight handle. This is the shape that
+    // produced the incident's stack frame for frame.
+    //
+    // What it proves is that the CONTEXT guard is what answers an OOPIF's
+    // dialogs through that churn — with the guard deleted, none is logged. It
+    // does not prove the catch: the failing handle is the race's rare outcome
+    // (measured: not once in 30 s of churn, ~20 dialogs a second), so a run
+    // here almost never takes that branch. "swallows a rejected dismiss…"
+    // above proves the catch, every run.
     const context = await browser.newContext();
     installDialogGuard(context);
 
@@ -299,6 +301,9 @@ describe('installDialogGuard — the crash race, real browser', () => {
     const capture = captureLogs();
     const dialogsHandled = (): number =>
       capture.lines.filter((l) => l.includes('Browser dialog')).length;
+    /** Dialogs to see through the churn: a count, not a time, so a loaded
+     *  machine gets as many teardowns as an idle one. */
+    const DIALOGS = 20;
 
     await context.route('**/*', async (route) => {
       const url = route.request().url();
@@ -319,21 +324,20 @@ describe('installDialogGuard — the crash race, real browser', () => {
       });
     });
 
-    const page = await context.newPage();
-
-    const unhandled = await countUnhandledRejections(async () => {
-      await page.goto('https://parent.test/');
-      await waitUntil(() => dialogsHandled() > 0, 20_000);
-      // Keep churning past the first one — the failing handle is the rare
-      // outcome of the race, not the common one.
-      await new Promise((r) => setTimeout(r, 3_000));
-    });
-
-    capture.stop();
-    await context.close().catch(() => {});
+    let unhandled: number;
+    try {
+      const page = await context.newPage();
+      unhandled = await countUnhandledRejections(async () => {
+        await page.goto('https://parent.test/');
+        await waitUntil(() => dialogsHandled() >= DIALOGS, 30_000);
+      });
+    } finally {
+      capture.stop();
+      await context.close().catch(() => {});
+    }
 
     // A pass must not be the scenario silently never happening.
-    expect(dialogsHandled()).toBeGreaterThan(0);
+    expect(dialogsHandled()).toBeGreaterThanOrEqual(DIALOGS);
     expect(unhandled).toBe(0);
   }, 90_000);
 });
@@ -360,15 +364,59 @@ describe('launchBrowser — installs the guard on both paths', () => {
   it('guards a CDP-attached context', async () => {
     // The path where the blast radius is widest: the context we attach to is
     // the user's whole browser, tabs we deliberately ignore included.
-    const port = await freePort();
-    const cdpBrowser = await chromium.launch({
-      headless: true,
-      args: [`--remote-debugging-port=${port}`],
+    //
+    // The browser picks its own debugging port and says which in
+    // `DevToolsActivePort`, the way the product's CDP launcher learns it. A
+    // port found free here and handed over would be free only until another
+    // worker's browser or server took it first.
+    //
+    // Spawned, not launched through Playwright: a Playwright-launched profile
+    // has a connection of its own to every page in it, with no guard — so the
+    // test's own harness would race the dialog and raise the very unhandled
+    // rejection this file is about.
+    //
+    // On Linux it passes `--no-sandbox`, as Playwright's own launch does: as
+    // root in a container, or where AppArmor restricts user namespaces,
+    // Chromium's sandbox cannot start and the browser aborts.
+    const profileDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-dialog-cdp-'));
+    const cdpProcess = spawn(
+      chromium.executablePath(),
+      [
+        '--headless',
+        ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
+        '--remote-debugging-port=0',
+        `--user-data-dir=${profileDir}`,
+        '--no-first-run',
+        '--no-default-browser-check',
+        'about:blank',
+      ],
+      { stdio: ['ignore', 'ignore', 'pipe'] },
+    );
+    // The tail of what the browser printed, for the failure message if it dies.
+    let stderr = '';
+    cdpProcess.stderr!.on('data', (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString('utf8')).slice(-4000);
     });
+    let hasExited = false;
+    const exited = new Promise<void>((resolve) =>
+      cdpProcess.once('exit', () => {
+        hasExited = true;
+        resolve();
+      }),
+    );
     const capture = captureLogs();
     let session: Awaited<ReturnType<typeof launchBrowser>> | undefined;
     try {
-      session = await launchBrowser(BROWSER_CONFIG, { port, tab: 'new' });
+      await waitUntil(() => readDevToolsPort(profileDir) !== null || hasExited, 30_000);
+      const port = readDevToolsPort(profileDir);
+      if (port === null && hasExited) {
+        throw new Error(
+          `the browser exited (code ${cdpProcess.exitCode}, signal ${cdpProcess.signalCode}) ` +
+            `before writing DevToolsActivePort. It printed: ${stderr.trim() || '(nothing)'}`,
+        );
+      }
+      expect(port, 'the browser never wrote DevToolsActivePort').not.toBeNull();
+      session = await launchBrowser(BROWSER_CONFIG, { port: port!, tab: 'new' });
       await session.page.setContent('<body>attached</body>');
       await session.page.evaluate(() => { setTimeout(() => alert('cdp dialog'), 0); });
       await waitUntil(() => capture.lines.some((l) => l.includes('Browser dialog')), 15_000);
@@ -376,7 +424,15 @@ describe('launchBrowser — installs the guard on both paths', () => {
     } finally {
       capture.stop();
       if (session) await closeBrowser(session);
-      await cdpBrowser.close().catch(() => {});
+      if (cdpProcess.exitCode === null && cdpProcess.signalCode === null) {
+        cdpProcess.kill();
+        await exited;
+      }
+      // Chromium's helper processes can hold the profile's cache files for a
+      // moment after the browser process exits, so give Windows time to let
+      // go — and a profile left in the temp folder is harmless, so its removal
+      // never fails the test. (A run measured EBUSY on Cache_Data here.)
+      await rm(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }).catch(() => {});
     }
   }, 120_000);
 });

@@ -115,7 +115,7 @@ type: skill
     expect(frame.outputs).toEqual(['my_count', 'page_total']);
   });
 
-  it('omits frame.outputs detail for skills with no declared outputs', async () => {
+  it('records an empty outputs list for a skill with no declared outputs', async () => {
     await writeSkill(
       'noop',
       `---

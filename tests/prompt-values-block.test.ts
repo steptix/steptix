@@ -101,31 +101,10 @@ describe('buildStepMessage — the ## Values block', () => {
     expect(text).not.toContain('***');
   });
 
-  it('renders NO block for a step that references nothing, and the prompt is byte-identical to today\'s', () => {
+  it('renders NO block for a step that references nothing, and an empty one is the same as none', () => {
     const testInfo = formatTestInfo('Login flow', 'https://example.com', 1, 2);
     const history = ['Step 1: [✓ PASSED] Open the app'];
     const scroll = { scrollTop: 0, clientHeight: 800, scrollHeight: 1600 };
-
-    // Captured from the function as it stood before the ## Values block existed.
-    const BEFORE = [
-      '## Test Information',
-      '- Test: Login flow',
-      '- Base URL: https://example.com',
-      '- Current Step: 1 of 2',
-      '',
-      '## Prior Steps',
-      'Step 1: [✓ PASSED] Open the app',
-      '',
-      '## Current Step',
-      'Click login',
-      '',
-      'Scroll position: 0–800 of 1600px (at top)',
-      '',
-      '## DOM Snapshot',
-      '```html',
-      '<html></html>',
-      '```',
-    ].join('\n');
 
     const noValues = textOf(buildStepMessage('Click login', DOM, null, history, undefined, testInfo, scroll));
     const emptyValues = textOf(
@@ -135,10 +114,11 @@ describe('buildStepMessage — the ## Values block', () => {
       }),
     );
 
-    expect(noValues).toBe(BEFORE);
-    expect(emptyValues).toBe(BEFORE);
+    // Compared with each other rather than with a frozen copy of the whole
+    // prompt: an empty values object must change nothing, and the wording of
+    // Test Information, Prior Steps or the scroll line is not this block's.
+    expect(emptyValues).toBe(noValues);
     expect(noValues).not.toContain('## Values');
-    expect(emptyValues).not.toContain('## Values');
   });
 });
 

@@ -2,7 +2,7 @@
  * Live end-to-end pause/resume/pause test.
  *
  * Drives securebank.md against the REAL Steptix Sessions API server
- * (SERVER_URL from templates/.env, expected to be running on
+ * (STEPTIX_SERVER_URL from templates/.env, expected to be running on
  * http://localhost:3100). A real browser actually opens, real AI calls
  * happen, real network requests fly. Validates the spec promise that the
  * user can pause mid-step, resume, and pause again — through the
@@ -23,7 +23,7 @@
  *   node tests/integration/runLiveTest.cjs
  *
  * Required env (from templates/.env, picked up via walkup):
- *   SERVER_URL, STEPTIX_SERVER_API_KEY, AI_API_KEY
+ *   STEPTIX_SERVER_URL, STEPTIX_SERVER_API_KEY, AI_API_KEY
  */
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -61,7 +61,7 @@ describe('Steptix live pause/resume against real server', function () {
     assert.ok(hooks, '__testHooks missing — activation may have failed');
 
     // Sanity check: server reachable.
-    const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, {
         method: 'OPTIONS',

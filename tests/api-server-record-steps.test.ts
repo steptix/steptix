@@ -144,7 +144,7 @@ vi.mock('../src/report/generator.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
-import { clickDrawer, clickToolbar, readDrawer, readToolbar, stepBoxValue, until } from './record-toolbar-cdp.js';
+import { clickDrawer, clickToolbar, readDrawer, readToolbar, stepBoxValue, until, untilPageRecording } from './record-toolbar-cdp.js';
 import { addLogCallback, getLogLevel, logger, setLogLevel } from '../src/utils/logger.js';
 import {
   RECORD_STEPS_HEADLESS_MESSAGE,
@@ -267,7 +267,7 @@ const QUICK_SETTLE_MS = 150;
 const NEVER_SETTLES_MS = 60_000;
 
 async function startApp(
-  opts: { headed?: boolean; apiKey?: string | null; draftSettleMs?: number } = {},
+  opts: { headed?: boolean; apiKey?: string | null; draftSettleMs?: number; endShowMs?: number } = {},
 ): Promise<void> {
   const built = createApiServer(testConfig(opts.headed ?? true, opts.apiKey === undefined ? 'test-key' : opts.apiKey), undefined, undefined, {
     // A typed navigation needs no real-time wait here, and the tap is not used.
@@ -275,6 +275,7 @@ async function startApp(
       typedNavigationWindowMs: 200,
       historyCausedWindowMs: 200,
       draftSettleMs: opts.draftSettleMs ?? QUICK_SETTLE_MS,
+      ...(opts.endShowMs !== undefined && { endShowMs: opts.endShowMs }),
     },
   });
   sessionManager = built.sessionManager;
@@ -462,6 +463,11 @@ async function record(sessionId: string, body: Record<string, unknown>): Promise
     headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
     body: JSON.stringify(body),
     signal: controller.signal,
+  }).catch((err: unknown) => {
+    // undici's "fetch failed" says nothing on its own; the socket error is in
+    // `cause`, which a test report drops unless it is in the message.
+    const cause = (err as { cause?: unknown }).cause;
+    throw new Error(`POST ${baseUrl}/sessions/${sessionId}/record-steps failed: ${String(cause ?? err)}`, { cause: err });
   });
   if ((res.headers.get('content-type') ?? '').includes('text/event-stream')) {
     return { status: res.status, stream: new Stream(res, controller) };
@@ -591,12 +597,17 @@ describe('live drafting — a whole recording', () => {
   }, 90_000);
 
   it('a quick burst of actions goes in ONE call', async () => {
-    await restartApp({ draftSettleMs: 500 });
+    // The settle window restarts on every action, so the burst is one call
+    // only while the gap between two gestures is inside it. Two Playwright
+    // gestures took longer than 500 ms on a loaded run; 3 s is a burst to any
+    // machine and still far shorter than a pause between thoughts.
+    const settleMs = 3_000;
+    await restartApp({ draftSettleMs: settleMs });
     const s = await started('rec-burst');
     await pageOf().click('#email');
     await pageOf().check('#cash');
     await s.draftThrough(3);
-    await sleep(700);
+    await sleep(settleMs + 500);
     expect(ai.requests).toHaveLength(1);
     expect(recordingOf(ai.requests[0]!).map((a) => a['kind'])).toEqual(['click', 'click', 'tick']);
     await control('rec-burst', { action: 'cancel' });
@@ -1286,12 +1297,17 @@ describe('the browser toolbar — on the wire', () => {
   }, 60_000);
 
   it('Pause and Resume from the toolbar: record:paused, nothing recorded and no draft call while paused, the waiting action drafted on Resume', async () => {
-    await restartApp({ draftSettleMs: 700 });
+    // A settle window the Pause beats by a wide margin even on a loaded
+    // machine; the pause is then held until past it, so "no call while
+    // paused" is the pause holding the call, not the window still running.
+    const SETTLE_MS = 3_000;
+    await restartApp({ draftSettleMs: SETTLE_MS });
     const id = 'tb-pause';
     const s = await started(id);
     const page = pageOf();
     await page.click('#reports');
     await s.waitForCount('record:action', 1);
+    const actionHeardAt = Date.now(); // the window started no later than this
     await page.keyboard.press('Alt+Shift+P');
     const paused = await s.waitFor((f) => f.event === 'record:paused', 'record:paused');
     expect(paused.data).toMatchObject({ type: 'record:paused', paused: true, source: 'toolbar' });
@@ -1301,7 +1317,8 @@ describe('the browser toolbar — on the wire', () => {
     await page.fill('#email', 'while@paused.test');
     await page.goto(`${origin}/other.html`);
     await page.goBack();
-    await sleep(1_500);
+    // Past the settle window, and time for anything recorded to arrive.
+    await sleep(Math.max(1_500, actionHeardAt + SETTLE_MS + 500 - Date.now()));
     expect(s.of('record:action')).toHaveLength(1);
     expect(ai.requests).toHaveLength(0);
 
@@ -1311,7 +1328,10 @@ describe('the browser toolbar — on the wire', () => {
     // Resumed: the action that waited is drafted…
     await s.draftThrough(1);
     expect(ai.requests).toHaveLength(1);
-    // …and the first action after the pause says so to the model.
+    // …and the first action after the pause says so to the model — once the
+    // page has heard of the Resume: record:paused goes out first, and a page
+    // still paused records nothing.
+    await untilPageRecording(page);
     await page.click('#signin');
     await s.draftThrough(2);
     expect(recordingOf(ai.requests[1]!)[0]).toMatchObject({ kind: 'click', afterPause: true });
@@ -1815,6 +1835,10 @@ describe("a secret in a step of the author's (finding 5)", () => {
 
 describe('a run after the recording (finding 6)', () => {
   it("the Done bar is gone before the run's first step: the model never sees it", async () => {
+    // The bar's own time on screen is ten minutes here, not six seconds, so a
+    // bar that is gone was taken down by the run, however long the run took
+    // to start.
+    await restartApp({ endShowMs: 10 * 60_000 });
     const id = 'fix-done-bar-run';
     const s = await started(id);
     const page = pageOf();
@@ -1822,13 +1846,11 @@ describe('a run after the recording (finding 6)', () => {
     await s.draftThrough(1);
     await control(id, { action: 'stop' });
     await s.waitFor((f) => f.event === 'done', 'done');
-    const doneAt = Date.now();
     await toolbarShows(page, 'Done · 1 step written');
     ai.responder = () => new Error('scripted: no model for this run');
     const open = holdCalls();
     const run = post(`/sessions/${id}/steps`, { steps: ['Click the Sign in button'], testFilePath });
     await callInFlight();
-    expect(Date.now() - doneAt).toBeLessThan(5_000); // not the bar's own six seconds
     expect(await page.evaluate(() => document.querySelector('steptix-recorder') === null)).toBe(true);
     open();
     await run;

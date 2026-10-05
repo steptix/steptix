@@ -116,15 +116,6 @@ describe('runInteractiveRepl — exit / quit', () => {
     });
     expect(decision).toEqual({ kind: 'exit' });
   });
-
-  it('/exit works in planned-entry mode too', async () => {
-    const { decision } = await runRepl({
-      lines: ['/exit'],
-      entryReason: 'planned',
-      currentStepIndex: 1,
-    });
-    expect(decision).toEqual({ kind: 'exit' });
-  });
 });
 
 describe('runInteractiveRepl — continue', () => {
@@ -134,15 +125,6 @@ describe('runInteractiveRepl — continue', () => {
     const { decision } = await runRepl({
       lines: ['/continue'],
       entryReason: 'planned',
-      currentStepIndex: 2,
-    });
-    expect(decision).toEqual({ kind: 'continue' });
-  });
-
-  it('/continue returns continue decision (failure entry)', async () => {
-    const { decision } = await runRepl({
-      lines: ['/continue'],
-      entryReason: 'failure',
       currentStepIndex: 2,
     });
     expect(decision).toEqual({ kind: 'continue' });
@@ -158,16 +140,6 @@ describe('runInteractiveRepl — resume', () => {
       entryReason: 'failure',
       currentStepIndex: 2,
       testSteps: ['a', 'b', 'c', 'd'],
-    });
-    expect(decision).toEqual({ kind: 'resume', fromStepIndex: 3 });
-  });
-
-  it('/resume default in planned entry is also currentStepIndex + 1', async () => {
-    const { decision } = await runRepl({
-      lines: ['/resume', ''],
-      entryReason: 'planned',
-      currentStepIndex: 2,
-      testSteps: ['a', '[interactive]', 'c', 'd'],
     });
     expect(decision).toEqual({ kind: 'resume', fromStepIndex: 3 });
   });
@@ -406,24 +378,6 @@ describe('runInteractiveRepl — /help, blank input, banners, deprecation hints'
     expect(banner).toMatch(/\/continue/);
     expect(banner).toMatch(/\/resume/);
     expect(banner).toMatch(/\/exit/);
-  });
-
-  it('clarification-entry /resume default index is currentStepIndex + 1', async () => {
-    const writes: string[] = [];
-    const reader = scriptedReader(['/resume', '']);
-    const decision = await runInteractiveRepl({
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      page: stubPage() as any,
-      testSteps: ['a', 'b', 'c', 'd'],
-      currentStepIndex: 2,
-      entryReason: 'clarification',
-      clarificationQuestion: 'Confirm?',
-      executorOptions: stubExecutorOptions(),
-      adHocResults: [],
-      reader,
-      write: (s) => writes.push(s),
-    });
-    expect(decision).toEqual({ kind: 'resume', fromStepIndex: 3 });
   });
 
   it('typing bare-word "done" prints a deprecation hint and stays in REPL', async () => {

@@ -1,16 +1,19 @@
 /**
  * The compile-tail strip's wording, for the webview panel.
  *
- * These three MIRROR `src/extension/compile-progress-core.ts`. The webview
- * can't import from the extension side (Vite's CJS interop drops runner-core's
- * named exports through __exportStar — the same reason
- * `step-lines-inline.js` and `failure-text-inline.js` exist), so the strings
- * are duplicated here and pinned to the originals by
- * `tests/compile-strip-copy-parity.test.js`.
+ * The headline and the detail line live only here: nothing on the extension
+ * side draws them, and their wording is pinned by
+ * `tests/compile-progress.test.js`.
  *
- * Change one, change both. A divergence means the panel strip and the status
- * bar item describe the same compile in different words, which is exactly the
- * confusion this story set out to remove.
+ * `stripFractionInline` MIRRORS `stripFraction` in
+ * `src/extension/compile-progress-core.ts`, which the toast's increment is
+ * computed from. The webview can't import from the extension side (Vite's CJS
+ * interop drops runner-core's named exports through __exportStar — the same
+ * reason `step-lines-inline.js` and `failure-text-inline.js` exist), so the
+ * rule is duplicated here and pinned to the original by
+ * `tests/compile-strip-copy-parity.test.js`. Change one, change both: a
+ * divergence means the panel's bar and the toast's bar disagree about how far
+ * the same compile has got.
  */
 
 /**

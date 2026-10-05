@@ -505,7 +505,7 @@ describe('the drafting rules the smoke run asked for (review, finding 16)', () =
 
 describe('summarizeAction masks before it shortens (review, finding 8)', () => {
   it('a long value or check text keeps no prefix of a secret the cut went through', () => {
-    const secret = 'sk_live_51HxYzAbCdEfGhIjKlMnOpQrStUv';
+    const secret = 'fake-recorder-prompt-cut-test-secret';
     const check = action({
       kind: 'check',
       target: { tag: 'div', name: 'API key panel' },

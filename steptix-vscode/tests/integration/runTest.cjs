@@ -8,11 +8,50 @@ const { downloadAndUnzipVSCode } = require('@vscode/test-electron');
 
 const VERSION = '1.95.0';
 
+/**
+ * Build the framework's `dist/` at the repo root, the way the live runner does.
+ *
+ * `npm run test:integration` builds steptix-vscode (runner-core, webview,
+ * extension) and nothing else, but the suite reaches OUTSIDE the extension for
+ * one thing: `data-rows.test.cjs` loads the server's own
+ * `dist/server/section-entry.js` and runs every `sections` payload the client
+ * built through the validator that would 400 it. Against a stale `dist/` that
+ * validator is a different function — one whose rules predate `runSteps` — so
+ * every check passes and proves nothing, which is precisely the drift the
+ * import exists to prevent. (The suite also carries its own canary for the
+ * case where this build is skipped and the file on disk is old anyway.)
+ *
+ * ~7 s, incremental, and it is `tsc` — the same cost the live runner already
+ * pays for the same reason.
+ */
+function buildFramework(repoRoot) {
+  const started = Date.now();
+  const result = cp.spawnSync('npm', ['run', 'build'], {
+    cwd: repoRoot,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: true,
+  });
+  if (result.status !== 0) {
+    const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim();
+    console.error(
+      `\`npm run build\` failed in ${repoRoot} (exit ${result.status}). The fast ` +
+        'suite validates its section payloads with that build, so a stale dist/ ' +
+        'would check them against the wrong rules.' + (output ? `\n${output}` : ''),
+    );
+    process.exit(1);
+  }
+  return Date.now() - started;
+}
+
 async function main() {
   try {
     const extensionDevelopmentPath = path.resolve(__dirname, '..', '..');
     const extensionTestsPath = path.resolve(__dirname, 'suite', 'index.cjs');
     const workspacePath = path.resolve(__dirname, 'fixtures');
+    const repoRoot = path.resolve(__dirname, '..', '..', '..');
+
+    const buildMs = buildFramework(repoRoot);
+    console.log(`Built ${path.join(repoRoot, 'dist')} (${(buildMs / 1000).toFixed(0)}s)`);
 
     const codeExe = await downloadAndUnzipVSCode(VERSION);
     const installRoot = path.dirname(codeExe);
@@ -38,6 +77,8 @@ async function main() {
       '--extensions-dir=' + extensionsDir,
       '--disable-workspace-trust',
     ];
+
+    require('./userSettings.cjs').pinUserSettings(userDataDir);
 
     console.log('Launching:', codeExe);
     console.log('  args:', args.join(' '));

@@ -1,13 +1,7 @@
 import * as vscode from 'vscode';
+import { existsSync } from 'node:fs';
 import * as path from 'node:path';
-import {
-  chooseServerUrl,
-  composeEnv,
-  readEnvFile,
-  readEnvOverlayFile,
-  readMachineKey,
-  type ServerUrlChoice,
-} from 'steptix-runner-core';
+import { readEnvFile, readEnvOverlayFile, readMachineKey, composeEnv } from 'steptix-runner-core';
 import { EnvSelector } from './env-selector.js';
 import {
   defaultHealthProbe,
@@ -15,6 +9,7 @@ import {
   type HealthProbe,
   type HealthProbeResult,
 } from './server-manager.js';
+import { resolveServerUrl, type ServerUrlOrigin } from './server-url.js';
 
 /** Command the status-bar item invokes. Exported so the registration and the
  *  item cannot drift apart into a silently dead click. */
@@ -26,22 +21,23 @@ const PROBE_TIMEOUT_MS = 1_500;
 
 export interface ServerTarget {
   serverUrl: string;
-  /** Where `serverUrl` came from: `SERVER_URL in <path>`, or `the default`. */
-  source: string;
   apiKey: string;
+  /** Where `serverUrl` came from. */
+  origin: ServerUrlOrigin;
 }
 
 /**
- * SERVER_URL + STEPTIX_SERVER_API_KEY for out-of-run operations (story
+ * STEPTIX_SERVER_URL + STEPTIX_SERVER_API_KEY for out-of-run operations (story
  * server-lifecycle §6.2).
  *
  * There is no test file in play, so the walk-up-from-the-test-file `.env`
  * search that runs use doesn't apply. This reads the **workspace root's**
  * `.env` composed with `.env.<activeEnv>` — the same overlay mechanism,
- * anchored where the env selector enumerates and where the CLI/server read it.
- * With no SERVER_URL there, it falls back to the machine `.env`, then the
- * default, as a run does (stories/machine-server-url.md) — so every open
- * folder has a server to report on. Null only with no folder open.
+ * anchored where the env selector enumerates and where the CLI/server read it
+ * — and then the rest of a run's chain (server-url.ts), so Start and Stop
+ * mean the server a run would use even when the project names none.
+ *
+ * Null only with no folder open, or an unreadable machine `.env`.
  *
  * A free function rather than a method, so the command layer can resolve a
  * target without holding a UI widget.
@@ -50,14 +46,14 @@ export async function resolveServerTarget(
   workspaceRoot: string | undefined,
 ): Promise<ServerTarget | null> {
   if (!workspaceRoot) return null;
+  const basePath = path.join(workspaceRoot, '.env');
+  let serverUrlFile = basePath;
   let env: Record<string, string> = {};
-  let envPath: string | null = path.join(workspaceRoot, '.env');
   try {
-    env = await readEnvFile(envPath);
+    env = await readEnvFile(basePath);
   } catch {
-    // No readable base `.env` is not the end of it: an overlay alone can
-    // supply SERVER_URL, and without either the machine `.env` can.
-    envPath = null;
+    // No readable base `.env` is not the end of it — an overlay can supply
+    // STEPTIX_SERVER_URL, and so can the rest of the chain.
   }
   const envName = EnvSelector.activeEnv();
   if (envName) {
@@ -65,39 +61,57 @@ export async function resolveServerTarget(
       const overlay = await readEnvOverlayFile(workspaceRoot, envName);
       if (overlay) {
         env = composeEnv(env, overlay);
-        if (overlay['SERVER_URL']?.trim()) envPath = path.join(workspaceRoot, `.env.${envName}`);
+        if (overlay['STEPTIX_SERVER_URL']?.trim()) {
+          serverUrlFile = path.join(workspaceRoot, `.env.${envName.trim()}`);
+        }
       }
     } catch {
       // A malformed overlay is a run-time error (STX005), not a status-bar one.
     }
   }
+  let serverUrl: string;
+  let origin: ServerUrlOrigin;
+  try {
+    ({ serverUrl, origin } = resolveServerUrl({ value: env['STEPTIX_SERVER_URL'], path: serverUrlFile }));
+  } catch {
+    // An unreadable machine .env is a run-time error (STX007), not a
+    // status-bar one.
+    return null;
+  }
   // Same chain as a run (stories/machine-key.md): workspace .env, then the
   // extension host's environment, then the machine key. Without the fallback
   // the status bar's stop action would 401 against a machine-key server the
   // runs themselves can talk to.
-  let choice: ServerUrlChoice;
-  let machineKey: string | null;
-  try {
-    choice = chooseServerUrl(env, envPath);
-    machineKey = readMachineKey();
-  } catch {
-    // An unreadable machine `.env` is the run's to report (STX007). Here it
-    // only means there is nothing trustworthy to show.
-    return null;
-  }
   const apiKey =
     env['STEPTIX_SERVER_API_KEY']?.trim() ||
     process.env['STEPTIX_SERVER_API_KEY']?.trim() ||
-    machineKey ||
+    readMachineKey() ||
     '';
-  return { serverUrl: choice.serverUrl, source: choice.source, apiKey };
+  return { serverUrl, apiKey, origin };
+}
+
+/**
+ * Whether the status bar should show a server for this folder at all.
+ *
+ * Every window activates the extension, and every one would now resolve a
+ * server — the chain ends in a default — so "is there a STEPTIX_SERVER_URL" no longer
+ * tells a Steptix project from any other folder. Showing (and polling) a
+ * server item in every window open on unrelated code would be noise. So: a
+ * folder whose own env names a server, or one with a `steptix.config.json`
+ * at its root — what `steptix init` writes.
+ */
+export function showsServer(workspaceRoot: string, target: ServerTarget): boolean {
+  return (
+    target.origin.kind === 'project' || existsSync(path.join(workspaceRoot, 'steptix.config.json'))
+  );
 }
 
 /**
  * Status-bar item reporting whether the Sessions API server is up (§6).
  *
- * Shown whenever a folder is open: every folder resolves a server now, from
- * its own `.env` or the machine fallback. Hidden with no folder open.
+ * Shown for a Steptix folder (`showsServer`) — in particular "no env
+ * selected, STEPTIX_SERVER_URL in the base .env" must still show it, which is the
+ * common case.
  */
 export class ServerStatusBar implements vscode.Disposable {
   private readonly item: vscode.StatusBarItem;
@@ -112,7 +126,7 @@ export class ServerStatusBar implements vscode.Disposable {
     private readonly workspaceRoot: string | undefined,
     /** Swappable so the integration harness's fake reaches the poll too — an
      *  un-injected status bar keeps issuing real fetches at the fixture's
-     *  SERVER_URL for the whole suite. */
+     *  STEPTIX_SERVER_URL for the whole suite. */
     private probe: HealthProbe = defaultHealthProbe,
   ) {
     this.item = vscode.window.createStatusBarItem(
@@ -174,7 +188,7 @@ export class ServerStatusBar implements vscode.Disposable {
     this.refreshPending = false;
     try {
       const target = await resolveServerTarget(this.workspaceRoot);
-      if (!target) {
+      if (!target || !this.workspaceRoot || !showsServer(this.workspaceRoot, target)) {
         this.item.hide();
         return;
       }

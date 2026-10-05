@@ -39,7 +39,7 @@ const READ_ACTION: RecordedAction = {
 
 function bindingFor(source: string, overrides: Partial<CodeBehindBinding> = {}): CodeBehindBinding {
   return {
-    file: path.join('C:', 'nowhere', 'x.steps.ts'),
+    file: path.resolve(path.sep, 'nowhere', 'x.steps.ts'),
     source,
     occurrence: 0,
     scope: { renames: {}, inputs: {} },
@@ -143,7 +143,7 @@ describe('the step prompt shows what the recording captured', () => {
   });
 
   it('masks before it clips, so a clip cannot cut a secret in half past the mask', () => {
-    const secret = 'sk_live_ABCDEFGHIJKLMNOP';
+    const secret = 'fake-codebehind-clip-key';
     // The secret straddles the 1500-character clip.
     const value = `${'x'.repeat(1490)}${secret}${'y'.repeat(100)}`;
     const text = buildStepCodePrompt({
@@ -154,7 +154,7 @@ describe('the step prompt shows what the recording captured', () => {
       recordedCaptures: { log: value },
       secrets: [secret],
     }).content as string;
-    expect(text).not.toContain('sk_live');
+    expect(text).not.toContain(secret.slice(0, 8));
     expect(text).toMatch(/more characters\)/);
   });
 });

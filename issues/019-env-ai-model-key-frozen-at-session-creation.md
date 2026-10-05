@@ -36,7 +36,7 @@ one AiClient built (not rebuilt), `syncAuth` called per batch, and an omitted
 > test again, the run still uses the old model/key. I have to close the session
 > (or reload the VS Code window) for the change to take effect.
 
-Confirmed. The connection knobs (`SERVER_URL`, `STEPTIX_SERVER_API_KEY`) and `${env.*}`
+Confirmed. The connection knobs (`STEPTIX_SERVER_URL`, `STEPTIX_SERVER_API_KEY`) and `${env.*}`
 substitutions *are* picked up every run — only the AI model/key are frozen.
 
 ## Mechanism

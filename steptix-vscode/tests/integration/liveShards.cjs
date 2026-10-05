@@ -161,22 +161,114 @@ function rebaseConfigPaths(copyRoot, originalRoot) {
 /**
  * Point a copied workspace's `.env` at `serverUrl`.
  *
- * The extension resolves SERVER_URL by walking up from the test file, so this
+ * The extension resolves STEPTIX_SERVER_URL by walking up from the test file, so this
  * line — not any flag we pass — is what decides which server a shard drives.
  * Rewritten rather than appended when present, because a later duplicate does
  * not reliably win in every .env parser and "it depends" is not a property a
  * test harness should have.
+ *
+ * Created, holding only that line, when the workspace has none — a fresh
+ * clone has no `templates/.env` (it is gitignored), and the shard still needs
+ * a `.env` of its own: without one the walk-up would carry on past the shard
+ * and find whatever STEPTIX_SERVER_URL sits above it.
  */
 function pointEnvAtServer(envPath, serverUrl) {
-  if (!fs.existsSync(envPath)) {
-    throw new Error(`shard workspace has no .env at ${envPath}`);
-  }
-  const original = fs.readFileSync(envPath, 'utf8');
-  const line = `SERVER_URL=${serverUrl}`;
-  const rewritten = /^SERVER_URL=.*$/m.test(original)
-    ? original.replace(/^SERVER_URL=.*$/m, line)
-    : `${original.replace(/\s*$/, '')}\n${line}\n`;
+  const original = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
+  const line = `STEPTIX_SERVER_URL=${serverUrl}`;
+  const rewritten = /^STEPTIX_SERVER_URL=.*$/m.test(original)
+    ? original.replace(/^STEPTIX_SERVER_URL=.*$/m, line)
+    : original.trim() === ''
+      ? `${line}\n`
+      : `${original.replace(/\s*$/, '')}\n${line}\n`;
   fs.writeFileSync(envPath, rewritten, 'utf8');
+}
+
+/** One value from a `.env` file, or '' when the file, the key or a parseable
+ *  line is missing. A precheck reads it, so it never throws. */
+function envFileValue(envPath, key) {
+  let text;
+  try {
+    text = fs.readFileSync(envPath, 'utf8');
+  } catch {
+    return '';
+  }
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim().replace(/^export\s+/, '');
+    if (line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq > 0 && line.slice(0, eq).trim() === key) {
+      return line.slice(eq + 1).trim().replace(/^(["'])(.*)\1$/, '$2').trim();
+    }
+  }
+  return '';
+}
+
+/**
+ * Why a live run cannot make model calls, or null when it can.
+ *
+ * Asked before any server or VS Code starts, so a missing key reads as one
+ * instruction rather than as a failed step minutes into the run. Lenient on
+ * purpose: a value in ANY file the run could take it from — `templates/.env`,
+ * the environment, the repo-root `.env`, the machine `.env` — passes, so this
+ * can refuse a setup that is missing something but never one that works.
+ *
+ * Two things are checked: an `AI_API_KEY` somewhere, and, when the model is
+ * gateway-routed (`aibroker/…` or `gateway/…`), an `AI_GATEWAY_URL` — there is
+ * no built-in one. The default model is a direct `openai/…` one, which needs
+ * only the key.
+ */
+function liveAiProblem({ templatesDir, repoRoot, env = process.env, machineEnvPath }) {
+  const machine = machineEnvPath ?? require('steptix-runner-core').userRootEnvPath();
+  const sources = [
+    { label: 'templates/.env', read: (k) => envFileValue(path.join(templatesDir, '.env'), k) },
+    { label: 'the environment', read: (k) => (env[k] ?? '').trim() },
+    { label: `${path.join(repoRoot, '.env')}`, read: (k) => envFileValue(path.join(repoRoot, '.env'), k) },
+    { label: machine, read: (k) => envFileValue(machine, k) },
+  ];
+  const first = (key) => {
+    for (const s of sources) {
+      const v = s.read(key);
+      if (v) return v;
+    }
+    return '';
+  };
+  const where = sources.map((s) => s.label).join(', ');
+
+  if (!first('AI_API_KEY')) {
+    return [
+      `Live tests make real model calls, and no AI_API_KEY was found in ${where}.`,
+      '',
+      `Add one line to ${machine} (every checkout on this machine reads it):`,
+      '',
+      '    AI_API_KEY=<your OpenAI API key>',
+      '',
+      'The default model (openai/…) goes straight to OpenAI with that key. To use',
+      'another provider or a gateway, set AI_MODEL too — see .env.example.',
+    ].join('\n');
+  }
+
+  const model = first('AI_MODEL');
+  if (/^(aibroker|gateway)\//.test(model) && !first('AI_GATEWAY_URL') && !configGatewayUrl(repoRoot)) {
+    return [
+      `AI_MODEL=${model} routes through a gateway, but AI_GATEWAY_URL is not set in ${where}`,
+      'or in steptix.config.json, and there is no built-in one.',
+      '',
+      `Add AI_GATEWAY_URL=<your gateway's URL> to ${machine},`,
+      'or use a direct model such as AI_MODEL=openai/<model>.',
+    ].join('\n');
+  }
+  return null;
+}
+
+/** `ai.gatewayUrl` from the repo's own steptix.config.json, or ''. */
+function configGatewayUrl(repoRoot) {
+  try {
+    const config = JSON.parse(fs.readFileSync(path.join(repoRoot, 'steptix.config.json'), 'utf8'));
+    const url = config?.ai?.gatewayUrl;
+    return typeof url === 'string' ? url.trim() : '';
+  } catch {
+    return '';
+  }
 }
 
 /** Is anything listening on `port` of 127.0.0.1? */
@@ -479,7 +571,7 @@ async function runPool(workers, items, task) {
 
 /**
  * What the live runner prints, once, when the suite drives a server it did not
- * start — `--server=<url>`, `LIVE_SERVER_URL`, or the serial `--shards=1`
+ * start — `--server=<url>`, `LIVE_STEPTIX_SERVER_URL`, or the serial `--shards=1`
  * path, which always uses an already-running server.
  *
  * The scoreboard tags a line with the suite of the PROCESS that wrote it
@@ -514,6 +606,7 @@ module.exports = {
   copyWorkspace,
   rebaseConfigPaths,
   pointEnvAtServer,
+  liveAiProblem,
   portInUse,
   pickFreePorts,
   probeHealth,

@@ -42,6 +42,9 @@ import type {
 
 const IDLE_PING_MS = 15_000;
 const BUSY_PING_MS = 4_000;
+/** Background failures kept for diagnosis; older ones are dropped so a
+ *  long-lived controller that keeps failing does not grow without bound. */
+const MAX_BACKGROUND_FAILURES = 20;
 
 interface Attachment {
   readonly webview: vscode.Webview;
@@ -78,6 +81,11 @@ export class FlickController {
   /** Detached async work started by this controller — webview message
    *  handlers, stale checks, connectivity pings. See {@link track}. */
   private readonly inflight = new Set<Promise<void>>();
+  /** What that work threw, oldest first — the most recent
+   *  {@link MAX_BACKGROUND_FAILURES} of it. Still non-fatal, but kept rather than
+   *  dropped: a test waiting for a message the failed work would have posted
+   *  can then say why it never came, instead of only that it timed out. */
+  private readonly backgroundFailures: unknown[] = [];
 
   private cdpPorts: readonly number[];
   private cdpDiscover: typeof realDiscoverCdpPorts;
@@ -134,7 +142,10 @@ export class FlickController {
   private track(work: Promise<unknown>): void {
     const settled = work.then(
       () => undefined,
-      () => undefined,
+      (err: unknown) => {
+        this.backgroundFailures.push(err);
+        if (this.backgroundFailures.length > MAX_BACKGROUND_FAILURES) this.backgroundFailures.shift();
+      },
     );
     this.inflight.add(settled);
     void settled.finally(() => this.inflight.delete(settled));
@@ -191,6 +202,10 @@ export class FlickController {
   }
   get __testActiveSessionId(): string | null {
     return this.activeSessionId;
+  }
+  /** Failures of detached work started by {@link track}, oldest first. */
+  get __testBackgroundFailures(): readonly unknown[] {
+    return this.backgroundFailures;
   }
   /** Replace the API client wholesale — e.g. to point at a fake HTTP server. */
   __testSetApiClient(client: SessionsApiClient): void {

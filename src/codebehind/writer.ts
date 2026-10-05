@@ -50,10 +50,19 @@ export interface WriteEntryRequest {
 
 export type WriteEntryAction = 'created' | 'appended' | 'replaced';
 
+/** Test seams. Production passes none. */
+export interface WriteSeams {
+  /** Called each time Windows refuses to replace the file because something
+   *  has it open, with the error code, before the writer waits to try again.
+   *  Awaited, so a test can end its lock at exactly that point. */
+  onLocked?: (code: string) => void | Promise<void>;
+}
+
 /** Write (or rewrite) one entry. Throws only on an I/O failure the caller
  *  cannot paper over; a validation failure restores and throws. */
 export async function writeCodeBehindEntry(
   request: WriteEntryRequest,
+  seams: WriteSeams = {},
 ): Promise<WriteEntryAction> {
   const file = path.resolve(request.file);
   const original = await readIfExists(file);
@@ -69,7 +78,7 @@ export async function writeCodeBehindEntry(
     action = spliced.action;
   }
 
-  await atomicWrite(file, next);
+  await atomicWrite(file, next, seams);
 
   try {
     await validate(file);
@@ -78,7 +87,7 @@ export async function writeCodeBehindEntry(
     if (original === null) {
       await fs.rm(file, { force: true });
     } else {
-      await atomicWrite(file, original);
+      await atomicWrite(file, original, seams);
     }
     throw new Error(
       `Generated code-behind did not compile, so ${file} was left exactly as it was: ${message}`,
@@ -173,15 +182,37 @@ export async function validateCodeBehindSource(
 
 /** Byte-for-byte restore-safe write: temp file in the same directory, then
  *  rename over the target (same filesystem, so the rename is atomic). */
-async function atomicWrite(file: string, contents: string): Promise<void> {
+async function atomicWrite(file: string, contents: string, seams: WriteSeams = {}): Promise<void> {
   const temp = path.join(path.dirname(file), `.${path.basename(file)}.${randomUUID()}.tmp`);
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(temp, contents, 'utf-8');
   try {
-    await fs.rename(temp, file);
+    await renameOver(temp, file, seams);
   } catch (err) {
     await fs.rm(temp, { force: true }).catch(() => {});
     throw err;
+  }
+}
+
+/** The codes Windows answers a rename with while another process — a virus
+ *  scanner, the search indexer, esbuild reading the file — has the target open. */
+const LOCKED = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+/** `fs.rename` over an existing file. Windows refuses to replace a file that
+ *  another process has open, for as long as it has it open — usually a few
+ *  milliseconds — so a refusal there is tried again for up to two seconds
+ *  before it counts. Elsewhere a rename replaces an open file. */
+async function renameOver(from: string, to: string, seams: WriteSeams): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.rename(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? '';
+      if (process.platform !== 'win32' || !LOCKED.has(code) || attempt >= 20) throw err;
+      await seams.onLocked?.(code);
+      await new Promise((r) => setTimeout(r, 100));
+    }
   }
 }
 

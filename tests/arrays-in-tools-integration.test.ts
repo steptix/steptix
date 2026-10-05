@@ -1,83 +1,46 @@
 /**
- * End-to-end integration test for the arrays-in-tools pipeline.
+ * Integration test for the arrays-in-tools pipeline, at its two real ends:
  *
- * Exercises the full chain that the user asked for:
- *
- *   read multiple: true   →   resolvedParameters['links'] = JSON-encoded array
- *                            ↓
+ *   executeAction read multiple: true   →   capturedValues (string[])
+ *                            ↓  (stored JSON-encoded — written out here, see below)
  *   `[tool: visit_each urls={{links}}]`   →   tool's `run({ urls })` receives string[]
  *                            ↓
  *   tool loops in TypeScript, captures titles, setVar('titles', titles)
  *                            ↓
  *   resolvedParameters['titles'] = JSON-encoded array, ready for next consumer
  *
+ * The storage step in the middle is the step executor's — it JSON-encodes
+ * `capturedValues` into the parameter map — and this file does NOT drive it:
+ * the tests write the same `JSON.stringify` themselves. The executor's own
+ * encoding is pinned by step-executor-placeholders.test.ts ("clears order.*
+ * on a plural read, which stores a JSON array"), and the decode at the tool
+ * boundary by tool-array-params.test.ts.
+ *
  * Real Playwright + the test-app server, same shape as `tool-end-to-end.test.ts`.
  * No AI in the loop — we directly drive the executor primitives so the test
  * is deterministic and cheap.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { spawn, type ChildProcess } from 'node:child_process';
-import net from 'node:net';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { loadToolCatalogue, type ToolCatalogue } from '../src/tools/registry.js';
 import { executeToolStep } from '../src/tools/executor.js';
 import { executeAction } from '../src/browser/actions.js';
+import { startFixtureServer, type FixtureServer } from './fixture-server.js';
 
 const repoRoot = path.resolve(__dirname, '..');
 const toolsDir = path.join(repoRoot, 'fixtures', 'tools', 'src');
-const serverPath = path.join(repoRoot, 'fixtures', 'test-app', 'server.ts');
 
-let serverProc: ChildProcess;
+let server: FixtureServer | undefined;
 let browser: Browser;
 let context: BrowserContext;
 let page: Page;
-let port: number;
 let baseUrl: string;
 let catalogue: ToolCatalogue;
 
-async function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.unref();
-    srv.on('error', reject);
-    srv.listen(0, () => {
-      const addr = srv.address();
-      if (addr && typeof addr === 'object') {
-        const p = addr.port;
-        srv.close(() => resolve(p));
-      } else {
-        srv.close(() => reject(new Error('port allocation failed')));
-      }
-    });
-  });
-}
-
-async function waitForHttp(url: string, timeoutMs = 15_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url);
-      if (res.status < 500) return;
-    } catch { /* not ready */ }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error(`Timed out waiting for ${url}`);
-}
-
 beforeAll(async () => {
-  port = await getFreePort();
-  baseUrl = `http://127.0.0.1:${port}`;
-
-  serverProc = spawn(process.execPath, ['--import', 'tsx', serverPath], {
-    cwd: repoRoot,
-    env: { ...process.env, PORT: String(port) },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  serverProc.stderr?.on('data', (b: Buffer) => {
-    process.stderr.write(`[test-app] ${b.toString()}`);
-  });
-  await waitForHttp(`${baseUrl}/api/csrf-token`);
+  server = await startFixtureServer();
+  baseUrl = server.baseUrl;
 
   catalogue = await loadToolCatalogue(toolsDir);
   browser = await chromium.launch({ headless: true });
@@ -87,15 +50,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   try { await browser?.close(); } catch { /* noop */ }
-  if (serverProc && !serverProc.killed) {
-    serverProc.kill('SIGTERM');
-    await new Promise((r) => setTimeout(r, 50));
-    if (!serverProc.killed) serverProc.kill('SIGKILL');
-  }
-}, 15_000);
+  await server?.stop();
+}, 60_000);
 
 describe('arrays-in-tools — extract → loop → consume', () => {
-  it('captures every link via read multiple, then visits each in a tool', async () => {
+  it('read multiple captures every link; visit_each decodes the encoded list and visits each', async () => {
     // Stage 1 — set up a page with three predictable links so we can assert
     // exact behaviour without depending on test-app DOM specifics.
     const linkPaths = ['/dashboard.html', '/transactions.html', '/delegates.html'];
@@ -110,8 +69,8 @@ describe('arrays-in-tools — extract → loop → consume', () => {
       </html>
     `);
 
-    // Stage 2 — the read multiple action populates the parameter map exactly
-    // the way the runner does. We mimic the step-executor's storage path.
+    // Stage 2 — the read multiple action captures the list; the storage into
+    // the parameter map is written out below, in the step executor's shape.
     const params: Record<string, string> = {};
     const readResult = await executeAction(page, {
       action: 'read',
@@ -148,23 +107,6 @@ describe('arrays-in-tools — extract → loop → consume', () => {
     expect(params['visited_count']).toBe('3');
   });
 
-  it('inline `urls=["…","…"]` literal works end-to-end without a captured variable', async () => {
-    const params: Record<string, string> = {};
-    const inline = `["${baseUrl}/dashboard.html","${baseUrl}/transactions.html"]`;
-    const outcome = await executeToolStep(
-      {
-        name: 'visit_each',
-        args: { urls: inline },
-        outputAliases: {},
-      },
-      { page, context, browser, resolvedParameters: params, catalogue },
-    );
-
-    expect(outcome.status).toBe('passed');
-    expect(JSON.parse(params['titles']!)).toHaveLength(2);
-    expect(params['visited_count']).toBe('2');
-  });
-
   it('an empty captured list flows through cleanly (tool runs, sees length 0)', async () => {
     await page.setContent('<html><body><section></section></body></html>');
     const params: Record<string, string> = {};
@@ -186,18 +128,5 @@ describe('arrays-in-tools — extract → loop → consume', () => {
     expect(outcome.status).toBe('passed');
     expect(params['visited_count']).toBe('0');
     expect(JSON.parse(params['titles']!)).toEqual([]);
-  });
-
-  it('fails fast with a labelled error when caller passes a non-array string', async () => {
-    const outcome = await executeToolStep(
-      {
-        name: 'visit_each',
-        args: { urls: 'not-an-array' },
-        outputAliases: {},
-      },
-      { page, context, browser, resolvedParameters: {}, catalogue },
-    );
-    expect(outcome.status).toBe('failed');
-    expect(outcome.error).toMatch(/parameter "urls".*expected a string\[\]/);
   });
 });

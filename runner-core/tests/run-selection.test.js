@@ -20,7 +20,6 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import {
   classifySelectedSteps,
-  resolveRunLines,
   resolveRunSelection,
   sectionBodyLinesAt,
 } from '../dist/step-lines.js';
@@ -128,39 +127,6 @@ test('a section heading line itself resolves to nothing', () => {
     scope: 'main-flow',
     lines: [],
   });
-});
-
-// ---------------------------------------------------------------------------
-// resolveRunLines — unchanged by all of the above
-// ---------------------------------------------------------------------------
-
-test('resolveRunLines is byte-identical on every selection shape', () => {
-  const rows = [
-    [[], MAIN_FLOW],
-    [[17, 18], [17, 18]],
-    [[17, 24, 25], [17]],
-    [[24, 25], []],
-    [[29], []],
-    [[15], [17, 18]],
-    [[22], []],
-    [[20], []],
-  ];
-  for (const [requested, expected] of rows) {
-    assert.deepEqual(
-      resolveRunLines(text, requested),
-      expected,
-      `resolveRunLines(${JSON.stringify(requested)})`,
-    );
-  }
-});
-
-test('resolveRunLines never leaks a body line, whatever the scope', () => {
-  const bodies = new Set([...LOGIN_BODY, ...CLEANUP_BODY]);
-  for (const requested of [[], [24], [24, 25], [17, 24], [33]]) {
-    for (const line of resolveRunLines(text, requested)) {
-      assert.equal(bodies.has(line), false, `body line ${line} leaked into runLines`);
-    }
-  }
 });
 
 // ---------------------------------------------------------------------------

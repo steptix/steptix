@@ -249,7 +249,7 @@ one line each:
 
 ```
 Log In — running rows 2 of 2; steps after this call will see only those rows
-Log In — running body steps 2 of 2
+Log In — running body step 2 of 2
 ```
 
 The two axes are independent — narrow the rows, the body steps, both or
@@ -258,7 +258,7 @@ that the body is expanded by the *server*: the selection cannot simply not-send
 a body line the way it not-sends a main-flow one, so it says which body steps
 to run and the expander honours it (`runSteps`, below). Body lines whose call
 is *not* in the selection are dropped and said out loud, exactly as ignored
-rows are: `Log In — body steps 2 ignored: the step that calls this section is
+rows are: `Log In — body step 2 ignored: the step that calls this section is
 not in your selection`. And a selection made of body lines ALONE is still the
 detached body run it has always been — it runs those lines at the root frame,
 with no call to narrow.
@@ -286,11 +286,18 @@ said out loud rather than done quietly:
   across consecutive body lines, and half of it is not a smaller version of it
   — it is a body the expander refuses, in a message that blames a file which is
   perfectly well formed. The Output says which step it added: `Log In — body
-  step 1 kept with 2: an Otherwise needs its If`.
+  step 1 kept with 2: an Otherwise needs its If`. One line per link the
+  selection broke, not one per section: a body can hold two independent
+  chains and a selection can break both, and a single line naming the first
+  left the other chain's added steps in the run with nothing anywhere saying
+  where they came from. The words are read off the file, so a predecessor that
+  is not a chain member at all gets no sentence rather than an invented `If` —
+  that file is refused by the run's own chain pre-flight before any of this is
+  reached.
 - **One narrowing covers every call of that section.** `runSteps` rides the
   section *definition*, and the wire has no way to say "this call only", so a
   flow that reaches `Log In` more than once narrows every one of them. The line
-  says so: `Log In — running body steps 2 of 2 (applies to every call of this
+  says so: `Log In — running body step 2 of 2 (applies to every call of this
   section)`. Deliberately not a number. What the file can be counted for is
   call *sites*, and sites are not frames — a section called from a looped
   section, from a `While … , Log In` guard tail, or from an `Outer` that is
@@ -303,11 +310,19 @@ A **Continue** after a breakpoint keeps the narrowing — the rows and the body
 steps both. It is a separate run that rebuilds its lines from the pause point —
 main-flow lines only, no body lines and no row lines to read — so it inherits
 what the paused run decided rather than recomputing it, and says so once per
-axis: `Log In — the narrowing still applies: body steps 2 of 2` and `Log In —
+axis: `Log In — the narrowing still applies: body step 2 of 2` and `Log In —
 the narrowing still applies: rows 2 of 3`. Without that inheritance the rest of
 the body would run and paint marks the selection excluded, the section's other
 rows would loop for the rest of the flow, and the old-server warning would be
 disarmed on the way past.
+
+What decides that a Continue is owed is the pause itself, not the run's end
+*reason*. A run can be two things at once — cancel an `[input:]` prompt (or
+`/quit` an `[interactive]` step) in a run that also has a breakpoint below it,
+and the end reason reads "the prompt was cancelled" while the yellow ▶ is on
+the breakpoint and Continue is on offer. A file with a data table hid this: its
+row loop rewrites the reason to `paused` whenever the block it just ran will
+park. A file without one did not, and its Continue ran the whole body.
 
 The indices are decided once, when Run is pressed, and every later batch
 rebuilds the sections payload from the live buffer — so an **edit to a
@@ -568,10 +583,16 @@ tables' data-row lines to the paintable set"; selecting run rows is
   are decided when Run is pressed, and every later batch rebuilds the payload
   from the live buffer, so an edit in between can leave them describing
   something else. The body's step texts are snapshotted at run start and a
-  batch that finds them changed is refused with a line naming the edit. An
-  out-of-range index is refused the same way rather than clipped: the indices
-  that survive a clip are no more trustworthy than the ones that did not, and
-  a clip to nothing means "the whole body".
+  batch that finds them changed is refused with a line naming the edit — and
+  that check is the one an author ever meets: it compares the whole snapshot
+  against the whole body, so a body that lost the step an index names has
+  already drifted by any other measure. The payload builder throws
+  `SectionNarrowingError` on an out-of-range index anyway, and the caller
+  turns it into the same refusal. That is a backstop rather than a rule with
+  its own reachable case; it earns its place by making the builder safe to
+  call from somewhere the snapshot check does not guard, not by firing today.
+  Neither ever clips: the indices that survive a clip are no more trustworthy
+  than the ones that did not, and a clip to nothing means "the whole body".
 - **Where the narrowing is decided.** Inside the run controller's
   `runLinesInner`, not in `runSelected` — F5, the panel's Run and a `runRows`
   carrying `lines` all arrive at that one choke point with the body lines
@@ -975,9 +996,12 @@ drag over the heading depends on.
   `If` in and names it in `addedForChain`; growing the set to the whole body
   stops it being a narrowing; an `If` selected without its `Otherwise` is left
   as picked; a three-member chain unwinds in one pass and reports the link it
-  broke (`{ member: 'Otherwise', needs: 'Else if' }`). Plus the strings — the
-  `running body steps 2 of 2` line with and without `(applies to every call of
-  this section)`, its list and range forms, the `ignored` line, the
+  broke (`{ member: 'Otherwise', needs: 'Else if' }`); two independent chains
+  broken by one selection report BOTH links, each with the steps it brought
+  in; and a predecessor that is not a chain member at all reports no link
+  rather than inventing an `If`. Plus the strings — the
+  `running body step 2 of 2` line with and without `(applies to every call of
+  this section)`, its singular, list and range forms, the `ignored` line, the
   `kept with …` line in each of its three member pairings, both resumed lines
   (body and rows) and the old-server warning.
 - Server (`api-server` suites): a section payload with `rowNumbers`
@@ -1016,9 +1040,17 @@ drag over the heading depends on.
   it added, and a breakpoint above the call still narrows (the call runs on
   Continue, so it was never uncalled) with the continuation's payload carrying
   the same `runSteps` AND the same `rowNumbers`/`rowCount`, and saying both.
+  And the shape in which a run is two things at once: a file with NO data
+  table, an `[input:]` prompt above a breakpoint, the prompt cancelled — the
+  run parks, and its Continue still carries the `runSteps` the cancelled
+  prompt did not own. (No table on purpose: a table's row loop rewrites the
+  end reason to `paused` and would hide the bug.)
   Every `sections` entry any of these record is fed back through the SERVER's
   own `validateSectionEntry`, so a payload the real server would 400 on fails
-  here instead of minutes later.
+  here instead of minutes later — a validator loaded from the repo's built
+  `dist/`, which `runTest.cjs` now builds before launching VS Code and which
+  the `before` hook checks knows about `runSteps` at all, since a stale one
+  would let every check pass while verifying nothing.
   Then the stale narrowing, one test per branch of the drift check — a body
   step edited, the section deleted, a step added — driven through a three-row
   loop, which is the shape in which a second block genuinely meets an edited

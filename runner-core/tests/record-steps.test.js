@@ -1,13 +1,13 @@
 /**
  * Record Steps, runner-core half (stories/steptix-record-steps.md §On the
- * wire): the frame types and their guard, the host/webview messages the
- * panel's Recording block rides on, and the two client calls — the SSE start
- * and the JSON control.
+ * wire): the frame types and their guard, and the two client calls — the SSE
+ * start and the JSON control. The panel's Recording controls ride the
+ * webview guard, which protocol.test.js checks against the whole union.
  */
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { ApiClient, ApiClientError, apiErrorReason, isUserAbort } from '../dist/api-client.js';
-import { isHostMsg, isRecordStepsEvent, isWebviewMsg } from '../dist/protocol.js';
+import { ApiClient, apiErrorReason } from '../dist/api-client.js';
+import { isRecordStepsEvent } from '../dist/protocol.js';
 
 function streamingResponse(chunks, status = 200) {
   const encoder = new TextEncoder();
@@ -71,57 +71,6 @@ test('isRecordStepsEvent: accepts record:edited (stories/steptix-record-edit-ste
   assert.equal(isRecordStepsEvent({ type: 'record:edited', id: 'd4', text: 'Open Payments from the side menu', source: 'toolbar' }), true);
 });
 
-test('streamRecordSteps: a draft\'s ids and edited, record:edited, and the actions a step delete dropped all cross the wire', async () => {
-  const client = new ApiClient({
-    serverUrl: 'http://x',
-    apiKey: 'k',
-    fetch: async () =>
-      streamingResponse([
-        frame({
-          type: 'record:draft',
-          revision: 3,
-          steps: ['Navigate to login.html', 'Open Payments from the side menu', 'Verify the total'],
-          parameters: [],
-          locked: 3,
-          authored: [2],
-          authoredIds: ['s1'],
-          ids: ['d1', 'd2', 's1'],
-          edited: [1],
-        }),
-        frame({ type: 'record:edited', id: 'd2', text: 'Open Payments from the side menu', source: 'editor' }),
-        frame({ type: 'record:dropped', id: 'd3', dropped: true, source: 'editor', actions: ['a4', 'a5'] }),
-        frame({ type: 'done', status: 'passed' }),
-      ]),
-  });
-  const events = await collect(client.streamRecordSteps('s', MINIMAL, new AbortController().signal));
-  assert.deepEqual(events[0].ids, ['d1', 'd2', 's1']);
-  assert.deepEqual(events[0].edited, [1]);
-  assert.deepEqual(events[1], { type: 'record:edited', id: 'd2', text: 'Open Payments from the side menu', source: 'editor' });
-  assert.deepEqual(events[2].actions, ['a4', 'a5']);
-  assert.equal(events[2].source, 'editor');
-});
-
-test('controlRecordSteps: edit-step, and drop / restore of a step by its id, go as sent', async () => {
-  const calls = [];
-  const client = new ApiClient({
-    serverUrl: 'http://x',
-    apiKey: 'k',
-    fetch: async (_url, init) => {
-      calls.push(JSON.parse(init.body));
-      return new Response(JSON.stringify({ ok: true, ignored: 'it holds a secret — write {{password}} in its place' }), { status: 202 });
-    },
-  });
-  const answer = await client.controlRecordSteps('s', { action: 'edit-step', id: 'd2', text: 'Type hunter2 into Password', source: 'editor', revision: 7 });
-  assert.deepEqual(answer, { ignored: true, reason: 'it holds a secret — write {{password}} in its place' });
-  await client.controlRecordSteps('s', { action: 'drop', id: 'd3', source: 'editor' });
-  await client.controlRecordSteps('s', { action: 'restore', id: 'd3', source: 'panel' });
-  assert.deepEqual(calls, [
-    { action: 'edit-step', id: 'd2', text: 'Type hunter2 into Password', source: 'editor', revision: 7 },
-    { action: 'drop', id: 'd3', source: 'editor' },
-    { action: 'restore', id: 'd3', source: 'panel' },
-  ]);
-});
-
 test('isRecordStepsEvent: rejects run frames and garbage', () => {
   assert.equal(isRecordStepsEvent({ type: 'step:pass' }), false);
   assert.equal(isRecordStepsEvent({ type: 'record:crop' }), false);
@@ -129,22 +78,15 @@ test('isRecordStepsEvent: rejects run frames and garbage', () => {
   assert.equal(isRecordStepsEvent('record:action'), false);
 });
 
-test('isHostMsg: the Recording block message is a host message', () => {
-  assert.equal(isHostMsg({ type: 'recording', state: null }), true);
-});
-
-test('isHostMsg: the Add step box\'s answer is a host message', () => {
-  assert.equal(isHostMsg({ type: 'recordAddStepResult', id: 'add-1', accepted: false, reason: 'the recording is finishing' }), true);
-});
-
-test('isWebviewMsg: every Recording control the panel posts is accepted', () => {
-  // runner-view.ts drops whatever this guard rejects, so a button whose type is
-  // missing here would do nothing at all.
-  for (const type of ['recordSteps', 'recordNewTest', 'recordStop', 'recordCancel', 'recordCheck', 'recordDrop', 'recordPause', 'recordAddStep']) {
-    assert.equal(isWebviewMsg({ type }), true, type);
-  }
-  assert.equal(isWebviewMsg({ type: 'recordToggle' }), false);
-});
+// ---------------------------------------------------------------------------
+// streamRecordSteps
+//
+// One `yield* postSse(…)`: the frame loop and the 401 / 404 / 409 / abort
+// mapping are api-client.test.js's, on `streamSteps` and `compileCodeBehind`.
+// What is pinned here is what the record stream adds — its route, that it is
+// not filtered by the guard above, the 400 a headless server answers with,
+// and `onOpen`.
+// ---------------------------------------------------------------------------
 
 test('streamRecordSteps: posts the record-steps route with SSE headers and the body verbatim', async () => {
   let captured;
@@ -175,64 +117,6 @@ test('streamRecordSteps: posts the record-steps route with SSE headers and the b
   assert.deepEqual(JSON.parse(captured.init.body), body);
 });
 
-test('streamRecordSteps: yields every record frame in order, output and done included', async () => {
-  const client = new ApiClient({
-    serverUrl: 'http://x',
-    apiKey: 'k',
-    fetch: async () =>
-      streamingResponse([
-        frame({ type: 'record:started', url: 'http://localhost:8787/', title: 'SecureBank' }),
-        frame({ type: 'record:action', id: 'a1', kind: 'click', summary: 'Clicked link "Reports"', atMs: 1200 }),
-        frame({ type: 'output', msg: 'crop budget spent', kind: 'warn' }),
-        frame({ type: 'record:action', id: 'a2', kind: 'type', action: false, summary: 'Typed into Password (masked)', atMs: 2400, tab: 'popup-1' }),
-        frame({ type: 'record:pick', armed: true }),
-        frame({ type: 'record:drafting', busy: true }),
-        frame({
-          type: 'record:draft',
-          revision: 1,
-          steps: ['Click Reports'],
-          parameters: [],
-          notes: ['n0'],
-          through: 'a2',
-        }),
-        frame({ type: 'record:drafting', busy: false }),
-        frame({ type: 'record:writing' }),
-        frame({
-          type: 'record:result',
-          steps: ['Click Reports'],
-          parameters: [{ name: 'password', value: '$PASSWORD' }],
-          notes: ['n1'],
-        }),
-        frame({ type: 'done', status: 'passed' }),
-      ]),
-  });
-  const events = await collect(client.streamRecordSteps('s', MINIMAL, new AbortController().signal));
-  assert.deepEqual(
-    events.map((e) => e.type),
-    [
-      'record:started',
-      'record:action',
-      'output',
-      'record:action',
-      'record:pick',
-      'record:drafting',
-      'record:draft',
-      'record:drafting',
-      'record:writing',
-      'record:result',
-      'done',
-    ],
-  );
-  assert.equal(events[1].summary, 'Clicked link "Reports"');
-  assert.equal(events[3].tab, 'popup-1');
-  assert.equal(events[3].action, false, 'the event flag survives the wire');
-  assert.deepEqual(
-    [events[5].busy, events[6].revision, events[6].through, events[7].busy],
-    [true, 1, 'a2', false],
-  );
-  assert.deepEqual(events[9].parameters, [{ name: 'password', value: '$PASSWORD' }]);
-});
-
 test('streamRecordSteps: a frame type the client does not know yet is passed through, not dropped', async () => {
   // The stream is not filtered by `isRecordStepsEvent`: a newer server's extra
   // frame reaches the consumer, which decides what to ignore.
@@ -244,18 +128,6 @@ test('streamRecordSteps: a frame type the client does not know yet is passed thr
   });
   const events = await collect(client.streamRecordSteps('s', MINIMAL, new AbortController().signal));
   assert.deepEqual(events.map((e) => e.type), ['record:crop', 'done']);
-});
-
-test('streamRecordSteps: 409 is a conflict carrying the server reason', async () => {
-  const client = new ApiClient({
-    serverUrl: 'http://x',
-    apiKey: 'k',
-    fetch: async () => jsonErrorResponse(409, '{"error":"A run holds this session."}'),
-  });
-  await assert.rejects(
-    () => collect(client.streamRecordSteps('s', MINIMAL, new AbortController().signal)),
-    (err) => err instanceof ApiClientError && err.kind === 'conflict' && err.message === 'A run holds this session.',
-  );
 });
 
 test('streamRecordSteps: a 400 (headless server) is a server-error whose reason apiErrorReason reads out', async () => {
@@ -272,30 +144,6 @@ test('streamRecordSteps: a 400 (headless server) is a server-error whose reason 
   assert.equal(caught.kind, 'server-error');
   assert.equal(caught.status, 400);
   assert.equal(apiErrorReason(caught), 'Record Steps needs a headed browser: set browser.headed to true.');
-});
-
-test('streamRecordSteps: 404 (a server that predates the route) is not-found', async () => {
-  const client = new ApiClient({ serverUrl: 'http://x', apiKey: 'k', fetch: async () => jsonErrorResponse(404, 'Cannot POST') });
-  await assert.rejects(
-    () => collect(client.streamRecordSteps('s', MINIMAL, new AbortController().signal)),
-    (err) => err instanceof ApiClientError && err.kind === 'not-found',
-  );
-});
-
-test('streamRecordSteps: aborting the signal is a user abort', async () => {
-  const controller = new AbortController();
-  const client = new ApiClient({
-    serverUrl: 'http://x',
-    apiKey: 'k',
-    fetch: async () => {
-      controller.abort();
-      throw Object.assign(new Error('aborted'), { name: 'AbortError' });
-    },
-  });
-  await assert.rejects(
-    () => collect(client.streamRecordSteps('s', MINIMAL, controller.signal)),
-    (err) => isUserAbort(err),
-  );
 });
 
 // ---------------------------------------------------------------------------

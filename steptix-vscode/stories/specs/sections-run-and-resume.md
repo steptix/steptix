@@ -170,7 +170,15 @@ Resolution order, and the reason each rung sits where it does:
    main-flow step, the one shape whose frame count is settled.
    And a selected body step brings the rest of its `If … / Otherwise …` chain
    with it: a chain lives on consecutive body lines, and shipping half of one
-   would be refused by the expander in a message that blames the file.
+   would be refused by the expander in a message that blames the file. Said
+   once per link the selection broke, since one body can hold two independent
+   chains — and only when both halves of the link really read as chain members,
+   because a body whose `Otherwise` follows a plain step is a file the run's
+   own pre-flight refuses first, and there is no `If` there to name.
+   Carrying the narrowing across the Continue is keyed on the pause, not on
+   how the run ended: a cancelled `[input:]` prompt above the breakpoint makes
+   the run both "prompt cancelled" and "parked", and only one of those fits in
+   the end reason.
 3. Else, any requested line classifies `section-step` →
    `{ scope: 'section-body', lines: <those body lines> }`. This is the new
    capability, and it activates only when the selection is *entirely* inside

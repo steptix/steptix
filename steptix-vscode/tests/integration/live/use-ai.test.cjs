@@ -33,7 +33,7 @@
  * that a second real run through Steptix asks the model again, as the story
  * promises.
  *
- * Prereq: the API server on $LIVE_SERVER_URL (the parallel runner starts one
+ * Prereq: the API server on $LIVE_STEPTIX_SERVER_URL (the parallel runner starts one
  * per shard and points that shard's templates/.env at it) and the fixture app
  * on :8787 (runLiveTest.cjs boots it; this file starts it if nothing is there).
  *
@@ -360,7 +360,7 @@ describe('Steptix live — [use ai]: generated values reach later steps and are 
     hooks = ext.exports?.__testHooks;
     assert.ok(hooks, '__testHooks missing — activation may have failed');
 
-    const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, { method: 'OPTIONS' });
       assert.ok(

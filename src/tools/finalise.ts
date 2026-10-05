@@ -6,8 +6,11 @@ import { isDeferredTool, type DeferredTool } from './tool-helper.js';
  * Pure transform: given an export from a tool file plus contextual hints,
  * return a fully-formed `ToolDefinition` ready for the registry to register.
  *
- * Returns `null` if the export isn't a tool of any rung (e.g. a type, a
- * helper function from a multi-tool file that wasn't tagged with `tool()`).
+ * Returns `null` only for a non-function value that isn't a tool: a type, a
+ * constant, an object that isn't a `ToolDefinition`. Any exported FUNCTION is
+ * a rung-1 tool named after its export key (or the filename for a default
+ * export), tagged with `tool()` or not — so a helper that should stay private
+ * must not be exported from a tool file.
  *
  * Throws on unrecoverable problems (filename name validation failure, etc.).
  */

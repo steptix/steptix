@@ -42,10 +42,19 @@ export class FakeWebview {
     this.handler(msg);
   }
 
-  /** Resolve once a posted message matches `predicate` (polls, then times out). */
+  /**
+   * Resolve once a posted message matches `predicate` (polls, then times out).
+   *
+   * The timeout is a ceiling, not a wait: a message that comes resolves at
+   * once. It is generous because the host's work between two messages
+   * includes real file writes, and on a loaded machine 3 s was not always
+   * enough. `explain`, when given, adds what the host knows about why the
+   * message never came (its failed background work) to the timeout error.
+   */
   async waitFor<T extends HostToWebview>(
     predicate: (msg: HostToWebview) => boolean,
-    timeoutMs = 3000,
+    timeoutMs = 15_000,
+    explain?: () => string,
   ): Promise<T> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
@@ -53,10 +62,11 @@ export class FakeWebview {
       if (found) return found as T;
       await delay(10);
     }
+    const why = explain?.();
     throw new Error(
       `FakeWebview.waitFor timed out after ${timeoutMs}ms; saw: ${this.messages
         .map((m) => m.type)
-        .join(', ')}`,
+        .join(', ')}${why ? `; ${why}` : ''}`,
     );
   }
 

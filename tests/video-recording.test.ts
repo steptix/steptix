@@ -5,14 +5,21 @@
  * Exercises `finalizeMainPageVideo` against a genuinely-recording context — we
  * build the context with `recordVideo: { dir }` directly (the same way
  * read-pattern builds a real page) rather than mocking, because Playwright only
- * writes a real .webm on context.close and `saveAs` self-synchronises on that.
+ * writes a real .webm on context.close, and what is under test is the rename or
+ * delete of that file once the close has finished writing it.
+ *
+ * Closing a recording context flushes the .webm through Playwright's ffmpeg,
+ * and under a whole-suite run that close is the slow step (tens of seconds has
+ * been measured), so this file gets a 60 s budget per test. Each test's video
+ * dir is removed in `afterEach`, with retries: on Windows the just-closed
+ * file can still be held for a moment.
  *
  *  - mode 'on'                  → finalize returns a stable-named path; file exists
  *  - no recordVideo (off)       → page.video() is null → finalize returns undefined
  *  - 'retain-on-failure' + pass → finalize returns undefined; videoDir holds no .webm
  *  - 'retain-on-failure' + fail → finalize returns a path; file exists
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { chromium, type Browser, type BrowserContext } from 'playwright';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -20,9 +27,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { finalizeMainPageVideo } from '../src/browser/manager.js';
 
-describe('finalizeMainPageVideo — real recording context', () => {
+describe('finalizeMainPageVideo — real recording context', { timeout: 60_000 }, () => {
   let browser: Browser;
-  let videoDir: string;
+  /** This test's recording dir, for `afterEach` to remove. */
+  let created: string | undefined;
 
   beforeAll(async () => {
     browser = await chromium.launch({ headless: true });
@@ -32,9 +40,15 @@ describe('finalizeMainPageVideo — real recording context', () => {
     await browser.close();
   });
 
+  afterEach(async () => {
+    if (created) await fsp.rm(created, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    created = undefined;
+  });
+
   // Fresh recording dir per test so .webm-count assertions don't cross-talk.
   async function freshVideoDir(): Promise<string> {
-    return fsp.mkdtemp(path.join(os.tmpdir(), 'steptix-rec-'));
+    created = await fsp.mkdtemp(path.join(os.tmpdir(), 'steptix-rec-'));
+    return created;
   }
 
   /** Create a recording context + a page that did some painting, so Playwright
@@ -53,7 +67,7 @@ describe('finalizeMainPageVideo — real recording context', () => {
   }
 
   it("mode 'on' saves a stable-named .webm and returns its path", async () => {
-    videoDir = await freshVideoDir();
+    const videoDir = await freshVideoDir();
     const context = await recordingPage(videoDir);
     const page = context.pages()[0]!;
 
@@ -69,15 +83,13 @@ describe('finalizeMainPageVideo — real recording context', () => {
     expect(saved).toBeDefined();
     expect(path.basename(saved!)).toBe('2026-06-02_10-15-03-checkout.webm');
     expect(fs.existsSync(saved!)).toBe(true);
-    // saveAs leaves the hash-named original behind unless we delete it — assert
-    // videoDir holds exactly the one stable-named file.
+    // The hash-named original is renamed, not copied — videoDir holds exactly
+    // the one stable-named file.
     expect(webmsIn(videoDir)).toEqual(['2026-06-02_10-15-03-checkout.webm']);
-
-    await fsp.rm(videoDir, { recursive: true, force: true });
   });
 
   it('mode off (no recordVideo) → video() null → returns undefined, writes nothing', async () => {
-    videoDir = await freshVideoDir();
+    const videoDir = await freshVideoDir();
     // A non-recording context: page.video() is null.
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -94,12 +106,10 @@ describe('finalizeMainPageVideo — real recording context', () => {
 
     expect(saved).toBeUndefined();
     expect(webmsIn(videoDir)).toEqual([]);
-
-    await fsp.rm(videoDir, { recursive: true, force: true });
   });
 
   it("'retain-on-failure' on a PASS → deletes the .webm, returns undefined", async () => {
-    videoDir = await freshVideoDir();
+    const videoDir = await freshVideoDir();
     const context = await recordingPage(videoDir);
     const page = context.pages()[0]!;
 
@@ -115,12 +125,10 @@ describe('finalizeMainPageVideo — real recording context', () => {
     expect(saved).toBeUndefined();
     // Neither the stable file nor the deleted original remains.
     expect(webmsIn(videoDir)).toEqual([]);
-
-    await fsp.rm(videoDir, { recursive: true, force: true });
   });
 
   it("'retain-on-failure' on a FAIL → keeps the .webm, returns its path", async () => {
-    videoDir = await freshVideoDir();
+    const videoDir = await freshVideoDir();
     const context = await recordingPage(videoDir);
     const page = context.pages()[0]!;
 
@@ -137,7 +145,5 @@ describe('finalizeMainPageVideo — real recording context', () => {
     expect(path.basename(saved!)).toBe('failing-run.webm');
     expect(fs.existsSync(saved!)).toBe(true);
     expect(webmsIn(videoDir)).toEqual(['failing-run.webm']);
-
-    await fsp.rm(videoDir, { recursive: true, force: true });
   });
 });

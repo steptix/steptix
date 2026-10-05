@@ -5,7 +5,7 @@
  * containing `.env`, stopping at (and including) the workspace root. If none
  * found, fall back to a workspace-level `defaultEnvFile` setting. If still
  * none, return a miss with the search path: the test has no project `.env`,
- * and the caller falls back to the machine `.env` for SERVER_URL.
+ * and the caller falls back to the machine `.env` for STEPTIX_SERVER_URL.
  *
  * Parser is a small subset of the canonical `.env` format: KEY=VALUE per line,
  * `#` comments, optional surrounding single or double quotes (stripped), no

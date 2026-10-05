@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { getOutputChannel } from './output-channel.js';
+import { describeServerUrlOrigin } from './server-url.js';
 import { SERVER_MENU_COMMAND, type ServerStatusBar } from './server-status-bar.js';
 import {
   decideServerAction,
@@ -9,7 +10,6 @@ import {
   describeServerVersion,
   normalizeBaseUrl,
   readAutoStartSettings,
-  servePortOfCommand,
   startServerAndWait,
   HEALTH_PROBE_TIMEOUT_MS,
   type HealthProbe,
@@ -43,21 +43,21 @@ export function registerServerCommands(args: {
     getOutputChannel().appendLine(`[${new Date().toISOString().slice(11, 23)}] server: ${line}`);
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+  /** The one reason `resolveTarget` comes back empty that a user can act on
+   *  from here; the other (an unreadable machine .env) a Run names as STX007. */
+  const noTarget = (): void => {
+    void vscode.window.showWarningMessage(
+      'Steptix: open a folder first — the server is resolved from its .env.',
+    );
+  };
+
   const startServer = async (): Promise<void> => {
     const target = await statusBar.resolveTarget();
-    if (!target) {
-      void vscode.window.showWarningMessage('Steptix: open a folder to start a server for it.');
-      return;
-    }
+    if (!target) return noTarget();
 
     const result = await probe(target.serverUrl, HEALTH_PROBE_TIMEOUT_MS);
     const config = readAutoStartSettings(vscode.workspace.getConfiguration('steptix'));
-    const action = decideServerAction(
-      target.serverUrl,
-      result,
-      config,
-      servePortOfCommand(config.command),
-    );
+    const action = decideServerAction(target.serverUrl, result, config);
 
     switch (action.kind) {
       case 'proceed':
@@ -82,22 +82,28 @@ export function registerServerCommands(args: {
         return;
       case 'skip':
         // Same preconditions the run path enforces: localhost only, and a
-        // command must be configured.
+        // command setting or an installed runtime to start.
         await offerAutoStartSettings(`Steptix: cannot start a server — ${action.reason}.`);
         return;
-      case 'refuse-port':
-        // The same refusal as the run path's STX033: a server on another port
-        // is one nothing here would talk to.
+      case 'refuse-port': {
+        // The run path's STX033: a server on another port is one nothing
+        // here would talk to.
+        const { servePort } = action;
+        const port = new URL(target.serverUrl).port || '80';
         void vscode.window.showErrorMessage(
-          action.servePort.ok
-            ? `Steptix: ${target.serverUrl} (from ${target.source}) is not running, and ` +
-                `"steptix.serverAutoStart.command" would start a server on port ` +
-                `${action.servePort.port} (from ${action.servePort.source}) instead. ` +
-                `Start one yourself with \`steptix serve -p ${new URL(target.serverUrl).port || 80}\`.`
-            : `Steptix: cannot start a server — it would not start: ${action.servePort.reason}.`,
+          servePort.ok
+            ? `Steptix: ${target.serverUrl} (from ${describeServerUrlOrigin(target.origin)}) is not running, and ` +
+                `"steptix.serverAutoStart.command" would start a server on port ${servePort.port} ` +
+                `(from ${servePort.source}) instead. Start one yourself with \`steptix serve -p ${port}\`, ` +
+                `or add -p ${port} after serve in the command.`
+            : `Steptix: cannot start a server — it would not start: ${servePort.reason}.`,
         );
         return;
+      }
       case 'spawn':
+        if (action.runtime) {
+          log(`using the Steptix runtime ${action.runtime.version} installed in ${action.runtime.dir}`);
+        }
         break;
     }
 
@@ -146,10 +152,7 @@ export function registerServerCommands(args: {
 
   const stopServer = async (force = false): Promise<void> => {
     const target = await statusBar.resolveTarget();
-    if (!target) {
-      void vscode.window.showWarningMessage('Steptix: no SERVER_URL to stop.');
-      return;
-    }
+    if (!target) return noTarget();
     if (!target.apiKey) {
       void vscode.window.showErrorMessage(
         'Steptix: no STEPTIX_SERVER_API_KEY anywhere — not in the workspace .env, the process ' +
@@ -216,10 +219,7 @@ export function registerServerCommands(args: {
 
   const serverStatus = async (): Promise<void> => {
     const target = await statusBar.resolveTarget();
-    if (!target) {
-      void vscode.window.showWarningMessage('Steptix: no SERVER_URL resolved.');
-      return;
-    }
+    if (!target) return noTarget();
     const result = await probe(target.serverUrl, HEALTH_PROBE_TIMEOUT_MS);
     // One probe, two consumers — the toast and the item render the same
     // answer rather than each fetching their own.

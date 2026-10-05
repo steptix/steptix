@@ -1,14 +1,17 @@
 /**
  * The installed runtime, started by the extension the way a user's would be
- * (packaging/runtime/README.md §Use with the current extension).
+ * (packaging/runtime/README.md §Use with the extension): with nothing
+ * configured.
  *
  * Not part of the fast or live suites. scripts/verify-runtime.mjs runs it once
  * per installer, from tests/integration/runRuntimeTest.cjs, after installing
- * that installer into a temporary folder. It hands over everything through the
- * environment — the install folder, the project, the URL nothing is listening
- * on yet — and gives this VS Code a profile of its own: an empty
- * %LOCALAPPDATA%, so there is no machine key, and no STEPTIX_NODE, so
- * steptix.cmd finds Node on PATH the way it does on a user's machine.
+ * that installer where it installs by default, under a temporary
+ * %LOCALAPPDATA%. It hands over everything through the environment — the
+ * install folder, the project, the URL nothing is listening on yet — and gives
+ * this VS Code a profile of its own: no Steptix settings at all; a machine
+ * .env holding only STEPTIX_SERVER_URL, so there is no machine key; a project with no
+ * .env; and no STEPTIX_NODE, so steptix.cmd finds Node on PATH the way it does
+ * on a user's machine.
  *
  * Everything here is real: the auto-start spawn, the shell, steptix.cmd, the
  * launcher, the server, the key the server generates, headless Chrome. No AI —
@@ -92,7 +95,7 @@ describe('Installed runtime, auto-started by the extension through steptix.cmd',
     assert.ok(hooks, '__testHooks not exposed');
   });
 
-  it('starts the installed server on Run and runs the test to a pass', async () => {
+  it('finds and starts the installed server on Run, with nothing configured, and runs the test to a pass', async () => {
     const installDir = required('STEPTIX_E2E_INSTALL_DIR');
     const testFile = required('STEPTIX_E2E_TEST_FILE');
     const serverUrl = required('STEPTIX_E2E_SERVER_URL');
@@ -106,23 +109,37 @@ describe('Installed runtime, auto-started by the extension through steptix.cmd',
     // on its own.
     assert.equal(process.env.STEPTIX_NODE, undefined, 'STEPTIX_NODE must not be set: Node comes from PATH');
     assert.equal(process.env.STEPTIX_SERVER_API_KEY, undefined, 'no inherited API key');
+    assert.equal(process.env.STEPTIX_SERVER_URL, undefined, 'no inherited STEPTIX_SERVER_URL');
+    const machineEnv = path.join(required('LOCALAPPDATA'), 'steptix', '.env');
     assert.equal(
-      fs.existsSync(path.join(required('LOCALAPPDATA'), 'steptix', '.env')),
-      false,
-      'no machine key yet — the started server must generate it',
+      fs.readFileSync(machineEnv, 'utf8').trim(),
+      `STEPTIX_SERVER_URL=${serverUrl}`,
+      'the machine .env names the server and holds no key yet — the started server must generate it',
     );
-    assert.equal(await health(serverUrl), null, `nothing may be listening on ${serverUrl} before Run`);
-
-    // The README's two User settings. `--port` is the one addition: the test
-    // must not take 3100 from a developer's own server. readyTimeoutSeconds
-    // is raised from 20 because a cold start through tsx on a loaded machine
-    // has come close to it; it does not change what is started.
-    const port = new URL(serverUrl).port;
-    const command = `"${path.join(installDir, 'steptix.cmd')}" serve --port ${port} --idle-timeout 5`;
+    assert.equal(
+      fs.existsSync(path.join(path.dirname(testFile), '..', '.env')),
+      false,
+      'the project has no .env of its own',
+    );
+    assert.equal(
+      path.dirname(installDir),
+      path.join(required('LOCALAPPDATA'), 'steptix', 'runtimes'),
+      'installed where the installer puts it by default, which is where the extension looks',
+    );
     const cfg = vscode.workspace.getConfiguration('steptix');
-    await cfg.update('serverAutoStart.command', command, vscode.ConfigurationTarget.Global);
-    await cfg.update('serverAutoStart.cwd', installDir, vscode.ConfigurationTarget.Global);
-    await cfg.update('serverAutoStart.readyTimeoutSeconds', 90, vscode.ConfigurationTarget.Global);
+    // Including readyTimeoutSeconds: the first start is the slow one (a cold
+    // tsx start on a loaded machine has come close to the old 20 s default),
+    // and it is the default a first-time user waits out that must cover it.
+    for (const key of [
+      'serverAutoStart.command',
+      'serverAutoStart.cwd',
+      'serverAutoStart.useInstalledRuntime',
+      'serverAutoStart.readyTimeoutSeconds',
+    ]) {
+      const set = cfg.inspect(key);
+      assert.equal(set?.globalValue, undefined, `steptix.${key} must not be set: a first-time user has not`);
+    }
+    assert.equal(await health(serverUrl), null, `nothing may be listening on ${serverUrl} before Run`);
 
     const uri = vscode.Uri.file(testFile);
     await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), { preview: false });
@@ -159,6 +176,7 @@ describe('Installed runtime, auto-started by the extension through steptix.cmd',
     assert.equal(h.service, 'steptix');
     assert.equal(h.version, version);
     assert.match(h.inspector ?? '', /^ws:\/\/127\.0\.0\.1:/, 'serve runs with the localhost inspector');
+    assert.equal(h.idleTimeoutMinutes, 60, 'started with the idle timeout the extension passes');
 
     const [server, launcher, shell] = ancestry(h.pid, 3);
     assert.ok(server, `no process with the server's pid ${h.pid}`);

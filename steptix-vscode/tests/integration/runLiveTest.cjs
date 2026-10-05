@@ -28,11 +28,13 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const { glob } = require('glob');
+const { pinUserSettings } = require('./userSettings.cjs');
 const { downloadAndUnzipVSCode } = require('@vscode/test-electron');
 const {
   copyWorkspace,
   rebaseConfigPaths,
   pointEnvAtServer,
+  liveAiProblem,
   pickFreePorts,
   probeHealth,
   buildFramework,
@@ -196,6 +198,7 @@ function launchVSCode({
 }) {
   fs.rmSync(reportPath, { force: true });
   fs.rmSync(logPath, { force: true });
+  pinUserSettings(userDataDir);
 
   const args = [
     cliJs,
@@ -215,7 +218,7 @@ function launchVSCode({
     STEPTIX_TEST_REPORT: reportPath,
     STEPTIX_LIVE_LOG: logPath,
     ELECTRON_ENABLE_LOGGING: '1',
-    LIVE_SERVER_URL: serverUrl,
+    LIVE_STEPTIX_SERVER_URL: serverUrl,
   };
   if (files) env.STEPTIX_LIVE_FILES = files.join(',');
 
@@ -312,11 +315,14 @@ async function main() {
   // code a compile emits is bundled from whatever that walk finds.
   const shardRoot = path.resolve(__dirname, '..', '..', '..', '.live-shards');
 
-  if (!fs.existsSync(path.join(templatesDir, '.env'))) {
-    console.error(
-      `templates/.env not found at ${templatesDir}. The live test ` +
-        `requires SERVER_URL, STEPTIX_SERVER_API_KEY, AI_API_KEY in that file.`,
-    );
+  // `templates/.env` is optional: each shard's copy gets its own
+  // STEPTIX_SERVER_URL either way, and the server key lives in the machine
+  // file. What a live run cannot do without is a model, so that is checked
+  // here, before any server or VS Code starts, rather than as a failed step
+  // minutes in.
+  const aiProblem = liveAiProblem({ templatesDir, repoRoot });
+  if (aiProblem) {
+    console.error(aiProblem);
     process.exit(2);
   }
 
@@ -331,7 +337,7 @@ async function main() {
   const installRoot = path.dirname(codeExe);
   const cliJs = path.join(installRoot, 'resources', 'app', 'out', 'cli.js');
 
-  const sharedServer = (opts.server || process.env.LIVE_SERVER_URL || '')
+  const sharedServer = (opts.server || process.env.LIVE_STEPTIX_SERVER_URL || '')
     .trim()
     .replace(/\/+$/, '') || null;
 

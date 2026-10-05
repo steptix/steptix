@@ -1,8 +1,8 @@
 import type { Effort } from '@pkent/aigateway';
 
 export interface AiConfig {
-  /** Base URL for the aiapi gateway */
-  gatewayUrl: string;
+  /** Base URL of the OpenAI-compatible gateway that `aibroker/` and `gateway/` models route to. No default: those models refuse to run until one is set. */
+  gatewayUrl?: string;
   /** Bearer token for authentication */
   apiKey?: string;
   /** Model identifier */

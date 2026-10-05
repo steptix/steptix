@@ -14,7 +14,7 @@
  * show/hide toggle's `type="text"`, `pwd`, the `pass` fence, `pin` tokens, a
  * placeholder that names a password and one that only says "keyword".
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { captureDomSnapshot, expandDomSubtree, loadSecretFieldRule } from '../src/browser/dom-cleaner.js';
 import { PageTracker } from '../src/browser/manager.js';
@@ -67,19 +67,37 @@ describe('isSecretField — the snapshot, expand and the recorder agree with the
   });
 
   it('the recorder withholds exactly the fields the rule calls secret', async () => {
+    // The recorder records a CHANGE from what a field held when it took focus,
+    // so a field that already holds its value records nothing. The snapshot
+    // test below fills them all, and test order is not fixed: start from the
+    // form's defaults.
+    await page.evaluate(() => (document.getElementById('f') as HTMLFormElement).reset());
     const context = page.context();
     const pageTracker = new PageTracker(page);
     const raw: unknown[] = [];
+    const typed = new Set<string>();
     const recorder = new StepRecorder({
       browser: { browser, context, page, pageTracker },
       sendScreenshots: false,
       knownSecrets: () => [],
-      onAction: () => {},
+      onAction: (a) => {
+        if (a.kind === 'type' && a.target?.testId) typed.add(a.target.testId);
+      },
       onPick: () => {},
       tap: (m) => raw.push(m),
     });
     await recorder.start();
     for (const c of CASES) await page.fill(`[data-testid="${c.id}"]`, valueFor(c.id));
+    // Each fill moved focus on and so committed the field before it. Move it
+    // off the last one too, so every field commits through the binding and
+    // none is left to stop()'s collect — a page call that, when the page is
+    // slow to answer, gives up and returns nothing. Then wait for the commits
+    // to arrive, up to a ceiling; anything still missing is named per field
+    // below.
+    await page.locator(`[data-testid="${CASES[CASES.length - 1]!.id}"]`).blur();
+    await vi
+      .waitFor(() => expect(typed.size).toBe(CASES.length), { timeout: 15_000, interval: 50 })
+      .catch(() => {});
     const done = (await recorder.stop()).filter((a): a is RecordedAction => a.kind === 'type');
     const byId = new Map(done.map((a) => [a.target?.testId, a]));
     const wire = JSON.stringify(raw);
@@ -97,8 +115,8 @@ describe('isSecretField — the snapshot, expand and the recorder agree with the
   }, 30_000);
 
   it('the whole-page snapshot and the expand walk mask exactly those fields', async () => {
-    // Values are already filled by the test above; fill again so this test
-    // stands alone when run by name.
+    // The recorder test may or may not have filled them already; fill here so
+    // this test stands alone in any order.
     for (const c of CASES) await page.fill(`[data-testid="${c.id}"]`, valueFor(c.id));
     const snapshot = await captureDomSnapshot(page);
     const expanded = await expandDomSubtree(page, '#f');

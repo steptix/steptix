@@ -8,6 +8,7 @@
  * the author wrote one line above.
  */
 import { describe, it, expect } from 'vitest';
+import path from 'node:path';
 import { renderReport } from '../src/report/generator.js';
 import { mergeRowReports } from '../src/report/merge-rows.js';
 import type { StepResult, TestReport } from '../src/report/types.js';
@@ -26,7 +27,7 @@ function step(overrides: Partial<StepResult> & { index: number }): StepResult {
 function report(overrides: Partial<TestReport> = {}): TestReport {
   return {
     testName: 'Failure outcomes',
-    filePath: 'c:/proj/tests/outcomes.md',
+    filePath: path.resolve(path.sep, 'proj', 'tests', 'outcomes.md'),
     tags: [],
     status: 'passed',
     steps: [],

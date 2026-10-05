@@ -101,7 +101,7 @@ async function setUp() {
   const hooks = ext.exports?.__testHooks;
   assert.ok(hooks, '__testHooks missing — activation may have failed');
 
-  const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+  const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
   try {
     const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, { method: 'OPTIONS' });
     assert.ok(res.status === 204 || res.status === 200, `Server at ${serverUrl} not responding`);
@@ -122,12 +122,12 @@ async function setUp() {
 /**
  * A project folder of the test's own inside the workspace: a
  * `steptix.config.json` whose browser listens for DevTools on `cdpPort`, a `.env`
- * (the workspace's — the shard's SERVER_URL, key and model — plus `extraEnv`),
+ * (the workspace's — the shard's STEPTIX_SERVER_URL, key and model — plus `extraEnv`),
  * and `tests/` holding `files`.
  *
  * The `.env` is a whole copy because Steptix takes the FIRST `.env` walking
  * up from the test file (runner-core env-file.ts): one holding only PASSWORD
- * would hide the shard's SERVER_URL.
+ * would hide the shard's STEPTIX_SERVER_URL.
  */
 function makeProject(workspaceRoot, name, { cdpPort, files = {}, extraEnv = {} }) {
   const dir = path.join(workspaceRoot, name);
@@ -402,10 +402,43 @@ function toolbarButtonAt(page, cmd) {
   });
 }
 
-/** Click a toolbar button with the real (trusted) mouse, waiting for it to show. */
+/**
+ * Where a control of the bar is once it is showing and has stopped moving:
+ * two reads a moment apart that agree (`settledAt` in
+ * tests/record-toolbar-cdp.ts). The bar rebuilds a row whenever what it shows
+ * changes — a step lands, "updating…" comes or goes, a notice shows — and the
+ * server's push can land at any moment, so a control looked up just after a
+ * test's last wait may be mid-rebuild: its node detached before its box is
+ * read, or moved by the time the mouse gets there. A read that throws (the
+ * page navigating under it) counts as not there yet. Fails after `timeoutMs`,
+ * saying what the bar showed instead.
+ */
+async function settledAt(page, locate, label, timeoutMs) {
+  const end = Date.now() + timeoutMs;
+  const read = () => locate().catch(() => null);
+  let at = await read();
+  for (;;) {
+    await sleep(60);
+    const again = await read();
+    if (at && again && Math.abs(again.x - at.x) < 0.5 && Math.abs(again.y - at.y) < 0.5) return again;
+    at = again;
+    if (Date.now() > end) {
+      let seen = 'no toolbar';
+      try {
+        const bar = await readToolbar(page);
+        if (bar) seen = JSON.stringify(bar.all);
+      } catch {
+        /* ignore */
+      }
+      throw new Error(`timeout waiting for: ${label} — the bar shows: ${seen}`);
+    }
+  }
+}
+
+/** Click a toolbar button with the real (trusted) mouse, once it is showing
+ *  and has stopped moving. */
 async function clickToolbar(page, cmd, timeoutMs = 10_000) {
-  let at = null;
-  await waitFor(`the toolbar's "${cmd}" button`, async () => (at = await toolbarButtonAt(page, cmd)) !== null, timeoutMs);
+  const at = await settledAt(page, () => toolbarButtonAt(page, cmd), `the toolbar's "${cmd}" button`, timeoutMs);
   await page.mouse.click(at.x, at.y);
 }
 
@@ -510,24 +543,29 @@ function drawerAt(page, id, cmd) {
 }
 
 /** Use a drawer row's control with the real mouse: the pointer goes over the
- *  row first — its ✕ and + show on hover — then onto the control, once the
- *  bar has stopped moving (a push that adds a row moves every row). */
-async function clickDrawer(page, id, cmd) {
-  const row = await drawerAt(page, id, null);
-  assert.ok(row, `the drawer has no row for ${id}`);
+ *  row first — its ✕ and + show on hover — then onto the control. Both are
+ *  found once they have stopped moving (`settledAt`): a push that adds a row
+ *  ("updating…") moves every row. The pointer's trip and the pause for the
+ *  hover take a moment of their own, so the control is looked for once more
+ *  before the click, and aimed at again if a push moved it meanwhile — a
+ *  click where it was lands on another row, or between them. */
+async function clickDrawer(page, id, cmd, timeoutMs = 10_000) {
+  const end = Date.now() + timeoutMs;
+  const label = `the "${cmd}" of the drawer's row for ${id}`;
+  const row = await settledAt(page, () => drawerAt(page, id, null), `the drawer's row for ${id}`, timeoutMs);
   await page.mouse.move(row.x, row.y);
   await sleep(80);
-  let at = await drawerAt(page, id, cmd);
-  for (let i = 0; i < 10 && at; i++) {
-    await sleep(60);
-    const again = await drawerAt(page, id, cmd);
-    if (again && Math.abs(again.x - at.x) < 0.5 && Math.abs(again.y - at.y) < 0.5) break;
-    at = again;
+  for (;;) {
+    const at = await settledAt(page, () => drawerAt(page, id, cmd), label, Math.max(end - Date.now(), 1_000));
+    await page.mouse.move(at.x, at.y, { steps: 3 });
+    await sleep(50);
+    const now = await drawerAt(page, id, cmd).catch(() => null);
+    if (now && Math.abs(now.x - at.x) < 0.5 && Math.abs(now.y - at.y) < 0.5) {
+      await page.mouse.click(at.x, at.y);
+      return;
+    }
+    if (Date.now() > end) throw new Error(`timeout waiting for: ${label} to hold still under the pointer`);
   }
-  assert.ok(at, `the row for ${id} has no "${cmd}"`);
-  await page.mouse.move(at.x, at.y, { steps: 3 });
-  await sleep(50);
-  await page.mouse.click(at.x, at.y);
 }
 
 /** Where keyboard focus is inside the bar, and whether it shows. */

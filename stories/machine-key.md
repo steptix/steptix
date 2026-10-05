@@ -142,6 +142,12 @@ Clients means all of them: Steptix (both variants), the MCP server, and
 `steptix stop` — which is what finally lets `stop` stop everything `serve` can
 start.
 
+*Amended 2026-10-01.* Steptix resolves `STEPTIX_SERVER_URL` by the same client chain,
+with one rung more: project `.env` → the environment → `STEPTIX_SERVER_URL` in the
+user root's `.env` → `http://127.0.0.1:3100`, where `serve` listens by
+default. With both values at machine level, a project needs no `.env` at all.
+The MCP server's project scope still requires a project to name its server.
+
 **Projects stop *needing* the key, not stop being *allowed* one.** The
 project-`.env`-first order above is unchanged, so a project that sets its
 own key still wins — that is deliberate, and it is why rule (5) exists. The

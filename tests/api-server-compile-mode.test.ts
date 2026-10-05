@@ -15,7 +15,7 @@
  * so the seam under test is "does a compile-mode run produce frames, files and
  * a recording", not "is the model any good".
  */
-import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -129,6 +129,21 @@ const capturedContext = {
   urlAfter: 'https://example.com/dashboard',
 };
 
+/**
+ * Counts every executor call in the file and is never reset, so each captured
+ * DOM is stamped with a number no other call shares. That stamp is how a test
+ * tells a recording slot one run rewrote from one it left alone — asking the
+ * clock instead ties whenever two fast runs land on the same tick.
+ */
+let executeSeq = 0;
+function capturedForThisCall(): typeof capturedContext {
+  executeSeq += 1;
+  return {
+    ...capturedContext,
+    domBefore: capturedContext.domBefore.replace('<body>', `<body data-call="${executeSeq}">`),
+  };
+}
+
 vi.mock('../src/runner/step-executor.js', () => ({
   executeStep: vi.fn(async (
     stepIndex: number,
@@ -156,7 +171,7 @@ vi.mock('../src/runner/step-executor.js', () => ({
           }],
         }],
         durationMs: 5, retried: false, pageUrl: 'https://example.com/dashboard',
-        ...(opts['captureStepContext'] === true && { stepContext: capturedContext }),
+        ...(opts['captureStepContext'] === true && { stepContext: capturedForThisCall() }),
       } as StepResult;
     }
     let flowControl: { kind: 'return'; verb: 'return' | 'stop' } | undefined;
@@ -200,7 +215,7 @@ vi.mock('../src/runner/step-executor.js', () => ({
       aiExplanation: 'ok',
       pageUrl: 'https://example.com/dashboard',
       // What `captureStepContext` retains, and what generation reads.
-      ...(opts['captureStepContext'] === true && { stepContext: capturedContext }),
+      ...(opts['captureStepContext'] === true && { stepContext: capturedForThisCall() }),
     } as StepResult;
   }),
   executeBranchedStep: vi.fn(async () => []),
@@ -354,7 +369,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((r, e) => server.close((err) => (err ? e(err) : r())));
-  await fs.rm(tmpDir, { recursive: true, force: true });
+  await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 beforeEach(async () => {
@@ -366,13 +381,45 @@ beforeEach(async () => {
   deliberateFailures.clear();
   (logger.info as unknown as { mockClear: () => void }).mockClear();
   await fs.rm(stepsFilePath, { force: true });
-  await fs.rm(path.join(tmpDir, '.steptix-codebehind-cache'), { recursive: true, force: true });
+  await fs.rm(path.join(tmpDir, '.steptix-codebehind-cache'), {
+    recursive: true, force: true, maxRetries: 10, retryDelay: 100,
+  });
+});
+
+/**
+ * Every session a case opened, closed when the case ends.
+ *
+ * A `'run'` compile is RETAINED on its session by design (that is what carries
+ * a split run across blocks), and its candidate keeps writing under the shared
+ * cache dir. Left open, it races the next case's `beforeEach` cleanup —
+ * measured as ENOTEMPTY plus a cascade of timeouts. Closing the session
+ * discards the compiler and waits out any generation still in flight, so by
+ * the time the next `beforeEach` runs nothing writes there any more.
+ */
+const openedSessions = new Set<string>();
+function opened(sessionId: string): string {
+  openedSessions.add(sessionId);
+  return sessionId;
+}
+
+afterEach(async () => {
+  const ids = [...openedSessions];
+  openedSessions.clear();
+  await Promise.all(ids.map(async (id) => {
+    const res = await fetch(`${baseUrl}/sessions/${id}`, {
+      method: 'DELETE',
+      headers: { 'x-api-key': API_KEY },
+    });
+    // 404: the session was never made, because the test failed before it was.
+    // That test has already said why; anything else is this cleanup's own failure.
+    expect([200, 404], `closing session ${id} answered ${res.status}`).toContain(res.status);
+  }));
 });
 
 /** A fresh session per run: the server creates it on first POST. */
 function nextSession(): string {
   sessionSeq += 1;
-  return `compile-mode-${sessionSeq}`;
+  return opened(`compile-mode-${sessionSeq}`);
 }
 
 /** POST the step route as a stream and fold the frames. */
@@ -440,7 +487,7 @@ describe('compile on a session that forbids AI', () => {
     sessionId: string,
     body: Record<string, unknown>,
   ): Promise<{ type: string; [k: string]: any }[]> {
-    const res = await fetch(`${baseUrl}/sessions/${sessionId}/steps?stream=1`, {
+    const res = await fetch(`${baseUrl}/sessions/${opened(sessionId)}/steps?stream=1`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, Accept: 'text/event-stream' },
       body: JSON.stringify(body),
@@ -783,10 +830,6 @@ it('puts the tail on the wire: a forecast at run end, then counts and a Review s
     const before = await readRecording(testFilePath);
     expect(before!.steps).toHaveLength(2);
 
-    // The clock has one-millisecond resolution and the two runs are fast;
-    // without this the "fresh vs untouched" comparison could tie.
-    await new Promise((r) => setTimeout(r, 5));
-
     await runSteps(requestBody({ steps: [STEPS[1]!], sourceLines: [5], compile: 'steps' }));
     const after = await readRecording(testFilePath);
 
@@ -795,8 +838,12 @@ it('puts the tail on the wire: a forecast at run end, then counts and a Review s
     // sent one step and it landed in step 2's slot, not step 1's.
     expect(after!.steps[0]!.source).toBe('Open the dashboard');
     expect(after!.steps[1]!.source).toBe('Search for the order');
+    // Fresh vs untouched, told apart by the per-call stamp in the captured DOM
+    // (`capturedForThisCall`) rather than by `recordedAt`: two fast runs can
+    // share a clock tick, and then a rewritten slot reads as untouched.
+    expect(after!.steps[0]!.domBefore).toBe(before!.steps[0]!.domBefore);
     expect(after!.steps[0]!.recordedAt).toBe(before!.steps[0]!.recordedAt);
-    expect(after!.steps[1]!.recordedAt).not.toBe(before!.steps[1]!.recordedAt);
+    expect(after!.steps[1]!.domBefore).not.toBe(before!.steps[1]!.domBefore);
   });
 
   it('a single-step compile proposes exactly one entry', async () => {
@@ -938,7 +985,7 @@ describe('recompiling a step whose entry broke', () => {
     async function block(
       body: Record<string, unknown>,
     ): Promise<{ type: string; [k: string]: any }[]> {
-      const res = await fetch(`${baseUrl}/sessions/${SPLIT_SESSION}/steps?stream=1`, {
+      const res = await fetch(`${baseUrl}/sessions/${opened(SPLIT_SESSION)}/steps?stream=1`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, Accept: 'text/event-stream' },
         body: JSON.stringify(body),
@@ -1038,16 +1085,32 @@ describe('recompiling a step whose entry broke', () => {
     expect(again.status).toBe(200);
   });
 
-  it('folds the drive-letter case, so two spellings of one file take one lock', () => {
-    // Steptix's paths come from `uri.fsPath`, which lower-cases the drive;
-    // a CLI or MCP caller's usually does not.
-    if (process.platform !== 'win32') return;
-    expect(compileLockKey('C:\\Projects\\a\\b.md')).toBe(compileLockKey('c:\\Projects\\a\\b.md'));
-  });
+  it.runIf(process.platform === 'win32')(
+    'folds the drive-letter case, so two spellings of one file take one lock',
+    () => {
+      // Steptix's paths come from `uri.fsPath`, which lower-cases the drive;
+      // a CLI or MCP caller's usually does not.
+      expect(compileLockKey('C:\\Projects\\a\\b.md')).toBe(compileLockKey('c:\\Projects\\a\\b.md'));
+    },
+  );
 
-  it('an ordinary run does not take the compile lock', async () => {
-    await runSteps(requestBody());
-    expect(compileLock.isLocked(testFilePath)).toBe(false);
+  it('an ordinary run is not refused while a compile holds the file', async () => {
+    // The lock is for compiles: a plain Run of a file someone is compiling goes
+    // ahead. Asserted while the lock is HELD, because checking it after a run
+    // has ended cannot tell "never took it" from "took it and gave it back".
+    const release = compileLock.acquire(testFilePath)!;
+    expect(release).toBeTruthy();
+    try {
+      const { status, frames } = await runSteps(requestBody());
+      expect(status).toBe(200);
+      expect(frames.filter((f) => f.type === 'step:pass')).toHaveLength(2);
+      expect(frames.some((f) => f.type === 'output' && f.kind === 'error')).toBe(false);
+      expect(frames.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+      // …and it did not hand back a lock it never took.
+      expect(compileLock.isLocked(testFilePath)).toBe(true);
+    } finally {
+      release();
+    }
   });
 
   it('an ordinary run captures nothing and emits no compile frames', async () => {
@@ -1111,7 +1174,9 @@ describe('recompiling a step whose entry broke', () => {
     beforeEach(async () => {
       await fs.rm(path.join(skillsDir, 'login.steps.ts'), { force: true });
       await fs.rm(path.join(skillsDir, 'repeated.steps.ts'), { force: true });
-      await fs.rm(path.join(skillsDir, '.steptix-codebehind-cache'), { recursive: true, force: true });
+      await fs.rm(path.join(skillsDir, '.steptix-codebehind-cache'), {
+        recursive: true, force: true, maxRetries: 10, retryDelay: 100,
+      });
     });
 
     function sliceBody(line: number, extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -1252,7 +1317,7 @@ describe('recompiling a step whose entry broke', () => {
       // lives in the RETAINED compiler's candidate, not on disk, so the guard's
       // "no entry yet" test would see it missing and kill the user's whole run
       // over a compile bookkeeping rule.
-      const session = `compile-run-slice-${Date.now()}`;
+      const session = opened(`compile-run-slice-${Date.now()}`);
       const post = async (body: Record<string, unknown>) => {
         const res = await fetch(`${baseUrl}/sessions/${session}/steps?stream=1`, {
           method: 'POST',
@@ -1288,16 +1353,8 @@ describe('recompiling a step whose entry broke', () => {
       const result = second.find((f) => f.type === 'compile:result')!;
       expect(result.summary.error ?? '').not.toMatch(/appears more than once/);
       expect(second.find((f) => f.type === 'done')!.status).not.toBe('error');
-
-      // A `'run'` compile is RETAINED on the session by design (that is what
-      // carries a split run across blocks), and its candidate keeps writing
-      // under the shared cache dir. Left open, it races the next case's
-      // `beforeEach` cleanup — measured as ENOTEMPTY plus a cascade of
-      // timeouts. Closing the session discards it.
-      await fetch(`${baseUrl}/sessions/${session}`, {
-        method: 'DELETE',
-        headers: { 'x-api-key': API_KEY },
-      });
+      // The session, and the compile it retains, is closed by the file's
+      // `afterEach` — see `opened`.
     });
 
     it('a plain slice with no compile stays a plain slice — no compile frames, no refusal result', async () => {

@@ -131,16 +131,6 @@ export function countStepLineStatuses(statuses, stepLineIds, notTakenLines) {
 }
 
 /**
- * Filter a list of {id, text, ...} entries to only those whose `id` is
- * a real step line in `text`. Preserves all extra fields on each entry.
- */
-export function filterToStepLines(text, entries) {
-  if (!entries || entries.length === 0) return [];
-  const ids = new Set(extractStepLineIds(text));
-  return entries.filter((e) => ids.has(e.id));
-}
-
-/**
  * 0-based index of the closing `---` of a YAML frontmatter block, or -1.
  *
  * Mirrors runner-core's `findFrontmatterEnd`, including its leniency about an

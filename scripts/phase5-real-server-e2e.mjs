@@ -21,10 +21,13 @@
  */
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { ensureMachineKey } from '../dist/env/user-root.js';
 
 const SERVER_PORT = 3100;
 const INSPECTOR_PORT = 9229;
-const API_KEY = '00000000-0000-0000-0000-000000000000';
+// The key the spawned `serve` will accept: the environment's, else the machine
+// key (stories/machine-key.md), generated now if missing so both sides agree.
+const API_KEY = process.env.STEPTIX_SERVER_API_KEY || ensureMachineKey().key;
 const BASE_URL = `http://127.0.0.1:${SERVER_PORT}`;
 
 let serverProc = null;

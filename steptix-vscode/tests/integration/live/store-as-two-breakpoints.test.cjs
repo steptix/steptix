@@ -13,7 +13,7 @@
  * back) alongside one captured in batch 2 (a batch that is neither first nor
  * last). A one-hop handoff passes the sibling test and fails this one.
  *
- * Prereq: the API server on $LIVE_SERVER_URL, and the fixture app on 8787 —
+ * Prereq: the API server on $LIVE_STEPTIX_SERVER_URL, and the fixture app on 8787 —
  * runLiveTest.cjs boots the latter.
  */
 const assert = require('node:assert/strict');
@@ -110,7 +110,7 @@ describe('Steptix live — captures survive TWO breakpoint pauses', function () 
     hooks = ext.exports?.__testHooks;
     assert.ok(hooks, '__testHooks missing — activation may have failed');
 
-    const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, { method: 'OPTIONS' });
       assert.ok(

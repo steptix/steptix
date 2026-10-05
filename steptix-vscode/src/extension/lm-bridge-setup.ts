@@ -17,6 +17,7 @@ import {
   planEnvUpdate,
 } from './lm-bridge-env.js';
 import { EnvSelector } from './env-selector.js';
+import { resolveServerUrl } from './server-url.js';
 
 /**
  * **Steptix: Use Copilot for AI** — the one command that turns a Copilot
@@ -89,7 +90,7 @@ async function runSetup(bridge: LmBridge): Promise<void> {
   //    that is ALREADY correct is exactly the case the plan short-circuits as
   //    "nothing to write" — the shape of the incident this check exists for.
   //    Read once here because the overlay decides two separate things, and only
-  //    one of them is the write target: it also carries the SERVER_URL a run
+  //    one of them is the write target: it also carries the STEPTIX_SERVER_URL a run
   //    would use, whichever file gets written.
   const overlay = await activeOverlay(baseTarget);
   const target = await chooseTarget(baseTarget, overlay);
@@ -133,22 +134,33 @@ async function runSetup(bridge: LmBridge): Promise<void> {
   }
   log(`wrote ${plan.changes.map((c) => c.key).join(', ')} to ${target.envPath}`);
 
-  // Which SERVER_URL a run would actually use — which is neither "the one in
+  // Which STEPTIX_SERVER_URL a run would actually use — which is neither "the one in
   // the file just written" nor "the one in `.env`". It is `composeEnv`'s
   // answer: the active overlay's when that file sets one, the base's
   // otherwise, and that holds whether or not the overlay was the write target.
   // Consulting the overlay only when it IS the target made the warning a coin
-  // toss: *Continue anyway* over a `.env.uat` that redirects SERVER_URL to
+  // toss: *Continue anyway* over a `.env.uat` that redirects STEPTIX_SERVER_URL to
   // localhost warned "not this machine" about a run that dials localhost, and
   // the reverse said nothing before a connection refused.
   const baseText =
     target.envName === null
       ? existing
       : await readIfPresent(path.join(target.folder.uri.fsPath, '.env'));
-  const serverUrl = effectiveServerUrl(baseText, overlay?.text ?? null);
+  // And when the project names none, the rest of a run's chain does: the
+  // environment, then the machine .env — which may well name a remote server.
+  let serverUrl: string | null = null;
+  try {
+    serverUrl = resolveServerUrl({
+      value: effectiveServerUrl(baseText, overlay?.text ?? null) ?? undefined,
+      path: target.envPath,
+    }).serverUrl;
+  } catch {
+    // An unreadable machine .env: the run reports that (STX007); a warning
+    // here could only guess.
+  }
   if (serverUrl && !isLocalServerUrl(serverUrl)) {
     void vscode.window.showWarningMessage(
-      `Steptix: SERVER_URL for this project is ${serverUrl}, which is not ` +
+      `Steptix: STEPTIX_SERVER_URL for this project is ${serverUrl}, which is not ` +
         'this machine. The bridge binds 127.0.0.1, so a remote Sessions API server ' +
         'will resolve AI_GATEWAY_URL to itself and get a connection refused. Copilot ' +
         'through the bridge only works with a local server.',

@@ -12,7 +12,7 @@
  * real routes and a real page; this file reaches the orderings a page cannot
  * produce on demand, and ends with a random-interleaving property run.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { buildRecordStepsPrompt, RECORD_STEPS_SYSTEM } from '../src/ai/prompts.js';
 import type { ChatMessage, MessageContentBlock } from '../src/ai/types.js';
 import { DraftEngine } from '../src/recorder/draft-engine.js';
@@ -212,8 +212,11 @@ function harness(opts: { mapping?: boolean } = {}): Harness {
       };
     },
     inFlight: async () => {
-      const until = Date.now() + 3_000;
-      while (engine.callsInFlight === 0 && Date.now() < until) await sleep(2);
+      const until = Date.now() + 5_000;
+      while (engine.callsInFlight === 0) {
+        if (Date.now() > until) throw new Error(`no call started: ${calls.length} calls made, none running`);
+        await sleep(2);
+      }
     },
     maxAtOnce: () => most,
   };
@@ -221,9 +224,18 @@ function harness(opts: { mapping?: boolean } = {}): Harness {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** Wait until `calls` model calls have been made and none is running, then a
+ *  moment for the engine to act on the last answer. Throws, saying what it
+ *  saw, when that does not happen — not a silent return that lets the test
+ *  fail later on a draft assertion that does not say why. */
 async function settled(h: Harness, calls: number): Promise<void> {
-  const until = Date.now() + 3_000;
-  while ((h.calls.length < calls || h.engine.callsInFlight > 0) && Date.now() < until) await sleep(3);
+  const until = Date.now() + 5_000;
+  while (h.calls.length < calls || h.engine.callsInFlight > 0) {
+    if (Date.now() > until) {
+      throw new Error(`the engine did not settle: ${h.calls.length} of ${calls} calls made, ${h.engine.callsInFlight} running`);
+    }
+    await sleep(3);
+  }
   await sleep(40);
 }
 
@@ -249,7 +261,8 @@ function actionsOf(h: Harness, id: string): string[] {
 // ── Which actions a step stands for ───────────────────────────────────────
 
 describe('the step → actions mapping', () => {
-  it("the model's stepActions are kept; an event it left out rides with its action", async () => {
+  // An event the model left out riding with its action is the next test's.
+  it("the model's stepActions are kept", async () => {
     const h = harness();
     h.script.set(1, answer(['Type {{email}} into the Email field', 'Click Next'], [[1], [2]]));
     h.engine.setPaused(true);
@@ -259,8 +272,6 @@ describe('the step → actions mapping', () => {
     h.engine.addAction(act(4, 'Go'));
     h.engine.setPaused(false);
     await settled(h, 1);
-    h.script.set(2, answer(['Search it'], [[]], 2));
-    // (the next call is scripted below; this one covers a1..a4)
     const [first, second] = h.engine.inspect().steps;
     expect(first).toMatchObject({ id: 'd1', actions: ['a1'] });
     expect(second).toMatchObject({ id: 'd2', actions: ['a2'] });
@@ -1184,192 +1195,217 @@ describe('a random interleaving of actions, drops, restores, author steps, edits
   const SEEDS = 150;
 
   it(`holds its invariants over ${SEEDS} seeds`, async () => {
-    for (let seed = 1; seed <= SEEDS; seed++) {
-      const r = rng(seed);
-      const frames: RecordStreamEvent[] = [];
-      let running = 0;
-      let most = 0;
-      /** True while one of the author's own operations runs: the only time
-       *  an edited step may leave the draft. */
-      let inOp = false;
-      const authorDrafts = new WeakSet<object>();
-      /** Recorded actions a step delete dropped: never shown to the model again
-       *  until they come back. */
-      const dead = new Set<string>();
-      const model = randomModel(r);
-      /** What happened, in order: the author's operations and the frames. */
-      const log: string[] = [];
-      const fail = (why: string): never => {
-        throw new Error(`seed ${seed}: ${why}\n${log.join('\n')}`);
-      };
-      const engine = new DraftEngine({
-        file: FILE,
-        sendImages: false,
-        secrets: () => [],
-        settleMs: 2,
-        emit: (e) => {
-          frames.push(e);
-          log.push(e.type === 'record:draft' ? `  draft ${e.revision}: ${JSON.stringify(e.steps.map((t, i) => `${e.ids[i]}=${t}`))} locked ${e.locked}` : `  ${JSON.stringify(e)}`);
-          if (e.type === 'record:draft' && inOp) authorDrafts.add(e);
-        },
-        complete: async (messages, signal) => {
-          running++;
-          most = Math.max(most, running);
+    // A seed is one fixed history, so a failure replays from its number on
+    // any machine at any load: the engine's settle window, the model's think
+    // time and the loop's pauses all run on a fake clock the loop advances,
+    // and the model draws from its own random stream — with one shared
+    // stream, which draw went to the model and which to the next operation
+    // depended on how the real timers fell.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      for (let seed = 1; seed <= SEEDS; seed++) {
+        const r = rng(seed);
+        const frames: RecordStreamEvent[] = [];
+        let running = 0;
+        let most = 0;
+        /** True while one of the author's own operations runs: the only time
+         *  an edited step may leave the draft. */
+        let inOp = false;
+        const authorDrafts = new WeakSet<object>();
+        /** Recorded actions a step delete dropped: never shown to the model again
+         *  until they come back. */
+        const dead = new Set<string>();
+        /** Found inside a model call, where a throw would only be a failed call
+         *  the engine shrugs off: reported at the next check. */
+        let violation: string | null = null;
+        const model = randomModel(rng(seed + 1_000_003));
+        /** What happened, in order: the author's operations and the frames. */
+        const log: string[] = [];
+        const fail = (why: string): never => {
+          throw new Error(`seed ${seed}: ${why}\n${log.join('\n')}`);
+        };
+        const engine = new DraftEngine({
+          file: FILE,
+          sendImages: false,
+          secrets: () => [],
+          settleMs: 2,
+          emit: (e) => {
+            frames.push(e);
+            log.push(e.type === 'record:draft' ? `  draft ${e.revision}: ${JSON.stringify(e.steps.map((t, i) => `${e.ids[i]}=${t}`))} locked ${e.locked}` : `  ${JSON.stringify(e)}`);
+            if (e.type === 'record:draft' && inOp) authorDrafts.add(e);
+          },
+          complete: async (messages, signal) => {
+            running++;
+            most = Math.max(most, running);
+            try {
+              // A deleted step's actions are never asked about.
+              for (const a of recordingOf(messages)) {
+                const id = `a${String(a['target']?.name ?? '').slice(1)}`;
+                if (dead.has(id)) violation ??= `${id}, dropped by a step delete, was shown to the model`;
+              }
+              return await model(messages, signal);
+            } finally {
+              running--;
+            }
+          },
+        });
+        const op = <T>(label: string, fn: () => T): T => {
+          inOp = true;
           try {
-            // A deleted step's actions are never asked about.
-            for (const a of recordingOf(messages)) {
-              const id = `a${String(a['target']?.name ?? '').slice(1)}`;
-              if (dead.has(id)) fail(`${id}, dropped by a step delete, was shown to the model`);
-            }
-            return await model(messages, signal);
+            const out = fn();
+            log.push(`${label} -> ${JSON.stringify(out)}  books: ${JSON.stringify(engine.inspect().steps.map((x) => `${x.id}:${x.actions.join(',')}`))} dropped ${engine.inspect().dropped.join(',')}`);
+            return out;
           } finally {
-            running--;
+            inOp = false;
           }
-        },
-      });
-      const op = <T>(label: string, fn: () => T): T => {
-        inOp = true;
-        try {
-          const out = fn();
-          log.push(`${label} -> ${JSON.stringify(out)}  books: ${JSON.stringify(engine.inspect().steps.map((x) => `${x.id}:${x.actions.join(',')}`))} dropped ${engine.inspect().dropped.join(',')}`);
-          return out;
-        } finally {
-          inOp = false;
-        }
-      };
+        };
 
-      /** Each edited id's latest text, from `record:edited`. */
-      const latest = new Map<string, string>();
-      /** Step deletes still in force: id → the actions they dropped. */
-      const deleted = new Map<string, string[]>();
-      let lastDraft: Draft | null = null;
-      let seen = 0;
+        /** Each edited id's latest text, from `record:edited`. */
+        const latest = new Map<string, string>();
+        /** Step deletes still in force: id → the actions they dropped. */
+        const deleted = new Map<string, string[]>();
+        let lastDraft: Draft | null = null;
+        let seen = 0;
 
-      const check = (): void => {
-        for (; seen < frames.length; seen++) {
-          const f = frames[seen]!;
-          if (f.type === 'record:edited') {
-            latest.set(f.id, f.text);
-            continue;
-          }
-          if (f.type === 'record:dropped' && f.actions !== undefined) {
-            if (f.dropped) {
-              deleted.set(f.id, f.actions);
-              for (const a of f.actions) dead.add(a);
-            } else {
-              deleted.delete(f.id);
-              for (const a of f.actions) dead.delete(a);
+        const check = (): void => {
+          if (violation) fail(violation);
+          for (; seen < frames.length; seen++) {
+            const f = frames[seen]!;
+            if (f.type === 'record:edited') {
+              latest.set(f.id, f.text);
+              continue;
             }
-            continue;
-          }
-          if (f.type !== 'record:draft') continue;
-          const d = f;
-          if (d.ids.length !== d.steps.length) fail('ids not parallel to steps');
-          if (new Set(d.ids).size !== d.ids.length) fail(`an id twice: ${JSON.stringify(d.ids)}`);
-          d.ids.forEach((id, i) => {
-            if (d.authored.includes(i) ? !/^s\d+$/.test(id) : !/^d\d+$/.test(id)) fail(`id ${id} at ${i}`);
-          });
-          d.edited.forEach((i) => {
-            if (d.authored.includes(i)) fail(`step ${i} both the author's and reworded`);
-          });
-          // Never written twice.
-          const edits = d.steps.filter((s) => s.startsWith('Edit#'));
-          if (new Set(edits).size !== edits.length) fail(`an edit written twice: ${JSON.stringify(d.steps)}`);
-          // Never undone: a step that was edited shows the latest text it was given.
-          d.ids.forEach((id, i) => {
-            const text = latest.get(id);
-            if (text !== undefined && d.steps[i] !== text) fail(`the edit of ${id} reads "${d.steps[i]}", not "${text}"`);
-          });
-          // Never lost: an edited step leaves only in a draft of the author's own doing.
-          if (lastDraft) {
-            const before = lastDraft;
-            before.ids.forEach((id, i) => {
-              if (!before.steps[i]!.startsWith('Edit#')) return;
-              if (!d.ids.includes(id) && !authorDrafts.has(d)) fail(`the edit ${before.steps[i]} vanished on its own`);
+            if (f.type === 'record:dropped' && f.actions !== undefined) {
+              if (f.dropped) {
+                deleted.set(f.id, f.actions);
+                for (const a of f.actions) dead.add(a);
+              } else {
+                deleted.delete(f.id);
+                for (const a of f.actions) dead.delete(a);
+              }
+              continue;
+            }
+            if (f.type !== 'record:draft') continue;
+            const d = f;
+            if (d.ids.length !== d.steps.length) fail('ids not parallel to steps');
+            if (new Set(d.ids).size !== d.ids.length) fail(`an id twice: ${JSON.stringify(d.ids)}`);
+            d.ids.forEach((id, i) => {
+              if (d.authored.includes(i) ? !/^s\d+$/.test(id) : !/^d\d+$/.test(id)) fail(`id ${id} at ${i}`);
             });
+            d.edited.forEach((i) => {
+              if (d.authored.includes(i)) fail(`step ${i} both the author's and reworded`);
+            });
+            // Never written twice.
+            const edits = d.steps.filter((s) => s.startsWith('Edit#'));
+            if (new Set(edits).size !== edits.length) fail(`an edit written twice: ${JSON.stringify(d.steps)}`);
+            // Never undone: a step that was edited shows the latest text it was given.
+            d.ids.forEach((id, i) => {
+              const text = latest.get(id);
+              if (text !== undefined && d.steps[i] !== text) fail(`the edit of ${id} reads "${d.steps[i]}", not "${text}"`);
+            });
+            // Never lost: an edited step leaves only in a draft of the author's own doing.
+            if (lastDraft) {
+              const before = lastDraft;
+              before.ids.forEach((id, i) => {
+                if (!before.steps[i]!.startsWith('Edit#')) return;
+                if (!d.ids.includes(id) && !authorDrafts.has(d)) fail(`the edit ${before.steps[i]} vanished on its own`);
+              });
+            }
+            // Deleted steps stay out.
+            for (const id of deleted.keys()) if (d.ids.includes(id)) fail(`deleted ${id} is back`);
+            lastDraft = d;
           }
-          // Deleted steps stay out.
-          for (const id of deleted.keys()) if (d.ids.includes(id)) fail(`deleted ${id} is back`);
-          lastDraft = d;
-        }
-        // The engine's own books: no action in two steps.
-        const owner = new Map<string, string>();
-        const snapshot = engine.inspect();
-        const dropped = new Set(snapshot.dropped);
-        for (const s of snapshot.steps) {
-          for (const a of s.actions) {
-            if (dropped.has(a)) continue;
-            if (owner.has(a)) fail(`${a} in ${owner.get(a)} and ${s.id}`);
-            owner.set(a, s.id);
+          // The engine's own books: no action in two steps.
+          const owner = new Map<string, string>();
+          const snapshot = engine.inspect();
+          const dropped = new Set(snapshot.dropped);
+          for (const s of snapshot.steps) {
+            for (const a of s.actions) {
+              if (dropped.has(a)) continue;
+              if (owner.has(a)) fail(`${a} in ${owner.get(a)} and ${s.id}`);
+              owner.set(a, s.id);
+            }
           }
-        }
-      };
+        };
 
-      const liveIds = (): string[] => engine.inspect().steps.map((s) => s.id);
-      const pick = <T>(list: readonly T[]): T | undefined =>
-        list.length > 0 ? list[Math.floor(r() * list.length)] : undefined;
-      const everIds = new Set<string>();
-      let n = 0;
-      let editSeq = 0;
+        const liveIds = (): string[] => engine.inspect().steps.map((s) => s.id);
+        const pick = <T>(list: readonly T[]): T | undefined =>
+          list.length > 0 ? list[Math.floor(r() * list.length)] : undefined;
+        const everIds = new Set<string>();
+        let n = 0;
+        let editSeq = 0;
 
-      for (let step = 0; step < 45; step++) {
-        for (const id of liveIds()) everIds.add(id);
-        const roll = r();
-        if (roll < 0.34) {
-          n++;
-          const a = r() < 0.3 ? typed(n, `F${n}`) : act(n, `B${n}`);
-          log.push(`action ${a.id}${a.action ? '' : ' (event)'}`);
-          engine.addAction(a);
-        } else if (roll < 0.42) {
-          const id = `a${1 + Math.floor(r() * Math.max(1, n))}`;
-          op(`drop ${id}`, () => engine.drop(id));
-        } else if (roll < 0.48) {
-          const id = `a${1 + Math.floor(r() * Math.max(1, n))}`;
-          if (op(`restore ${id}`, () => engine.restore(id)) === true) dead.delete(id);
-        } else if (roll < 0.53) {
-          const steps = liveIds();
-          const between = r() < 0.5 && steps.length > 1;
-          log.push(`author step ${between ? 'between' : 'at the end'}`);
-          void engine.addAuthorSteps([`Author ${step}`], {
-            source: between ? 'editor' : 'panel',
-            boundary: engine.recordedCount,
-            atMs: n * 1000 + 1,
-            ...(between && { afterStep: Math.floor(r() * (steps.length - 1)), revision: engine.currentRevision }),
-          });
-        } else if (roll < 0.72) {
-          // An edit: of a step there now, or of an id the model has since rewritten.
-          const id = r() < 0.75 ? pick(liveIds()) : pick([...everIds]);
-          if (id) {
-            const text = `Edit#${++editSeq}`;
-            const source = r() < 0.5 ? 'editor' : 'toolbar';
-            op(`edit ${id} ${text}`, () => engine.editStep(id, text, { source }));
+        for (let step = 0; step < 45; step++) {
+          for (const id of liveIds()) everIds.add(id);
+          const roll = r();
+          if (roll < 0.34) {
+            n++;
+            const a = r() < 0.3 ? typed(n, `F${n}`) : act(n, `B${n}`);
+            log.push(`action ${a.id}${a.action ? '' : ' (event)'}`);
+            engine.addAction(a);
+          } else if (roll < 0.42) {
+            const id = `a${1 + Math.floor(r() * Math.max(1, n))}`;
+            op(`drop ${id}`, () => engine.drop(id));
+          } else if (roll < 0.48) {
+            const id = `a${1 + Math.floor(r() * Math.max(1, n))}`;
+            if (op(`restore ${id}`, () => engine.restore(id)) === true) dead.delete(id);
+          } else if (roll < 0.53) {
+            const steps = liveIds();
+            const between = r() < 0.5 && steps.length > 1;
+            log.push(`author step ${between ? 'between' : 'at the end'}`);
+            void engine.addAuthorSteps([`Author ${step}`], {
+              source: between ? 'editor' : 'panel',
+              boundary: engine.recordedCount,
+              atMs: n * 1000 + 1,
+              ...(between && { afterStep: Math.floor(r() * (steps.length - 1)), revision: engine.currentRevision }),
+            });
+          } else if (roll < 0.72) {
+            // An edit: of a step there now, or of an id the model has since rewritten.
+            const id = r() < 0.75 ? pick(liveIds()) : pick([...everIds]);
+            if (id) {
+              const text = `Edit#${++editSeq}`;
+              const source = r() < 0.5 ? 'editor' : 'toolbar';
+              op(`edit ${id} ${text}`, () => engine.editStep(id, text, { source }));
+            }
+          } else if (roll < 0.86) {
+            const id = r() < 0.8 ? pick(liveIds()) : pick([...everIds]);
+            if (id) op(`delete ${id}`, () => engine.drop(id, 'toolbar'));
+          } else if (roll < 0.93) {
+            const id = pick([...deleted.keys()]);
+            if (id) op(`restore step ${id}`, () => engine.restore(id));
           }
-        } else if (roll < 0.86) {
-          const id = r() < 0.8 ? pick(liveIds()) : pick([...everIds]);
-          if (id) op(`delete ${id}`, () => engine.drop(id, 'toolbar'));
-        } else if (roll < 0.93) {
-          const id = pick([...deleted.keys()]);
-          if (id) op(`restore step ${id}`, () => engine.restore(id));
+          check();
+          if (r() < 0.5) await vi.advanceTimersByTimeAsync(Math.floor(r() * 4));
+          check();
         }
+        engine.close();
+        const final = lastDraft as Draft | null;
+        // Stop's call runs on the fake clock too: advance it until it is done.
+        const end: { result?: { steps: string[] } | null } = {};
+        const finishing = engine.finish().then(
+          (out) => {
+            end.result = out;
+          },
+          () => {
+            end.result = null; // the model failed Stop's call: an error, and nothing is written
+          },
+        );
+        for (let tick = 0; !('result' in end); tick++) {
+          if (tick > 10_000) fail('Stop never finished');
+          await vi.advanceTimersByTimeAsync(5);
+        }
+        await finishing;
+        const result = end.result ?? null;
         check();
-        if (r() < 0.5) await sleep(Math.floor(r() * 4));
-        check();
-      }
-      engine.close();
-      const final = lastDraft as Draft | null;
-      let result: { steps: string[] } | null = null;
-      try {
-        result = await engine.finish();
-      } catch {
-        result = null; // the model failed Stop's call: an error, and nothing is written
-      }
-      check();
-      if (most > 1) fail('two calls at once');
-      if (result && final) {
-        for (const text of final.steps.filter((s) => s.startsWith('Edit#'))) {
-          if (result.steps.filter((s) => s === text).length !== 1) fail(`result: "${text}" not there exactly once`);
+        if (most > 1) fail('two calls at once');
+        if (result && final) {
+          for (const text of final.steps.filter((s) => s.startsWith('Edit#'))) {
+            if (result.steps.filter((s) => s === text).length !== 1) fail(`result: "${text}" not there exactly once`);
+          }
         }
       }
+    } finally {
+      vi.useRealTimers();
     }
   }, 240_000);
 });

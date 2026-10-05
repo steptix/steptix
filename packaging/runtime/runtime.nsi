@@ -2,12 +2,16 @@ Unicode true
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 !include "FileFunc.nsh"
+!include "Sections.nsh"
 !include "x64.nsh"
 !define PRODUCT "Steptix Runtime"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\SteptixRuntime-${VERSION}"
 ; Names this folder's Installed Apps entry, for the uninstaller: a test install
 ; registers under its own key, and the uninstaller must remove that one.
 !define KEY_FILE ".steptix-runtime-uninstall-key"
+; Names the HKCU key whose Path value the uninstaller cleans up: a test install
+; uses a key of its own (user-path.nsh).
+!define PATH_KEY_FILE ".steptix-runtime-path-key"
 Name "${PRODUCT} ${VERSION}"
 OutFile "${OUTPUT}\SteptixRuntimeSetup-${VERSION}-win-x64.exe"
 InstallDir "$LOCALAPPDATA\steptix\runtimes\${VERSION}"
@@ -24,9 +28,10 @@ Var TestMode
 Var UninstallKey
 Var DisplayName
 Var NodeExe
-!define MUI_WELCOMEPAGE_TEXT "Install the Steptix server and CLI for your Windows user account.$\r$\n$\r$\nRequires an existing x64 Node.js 22.21+ installation. Node.js and browsers are not included.$\r$\n$\r$\nUse installed Chrome/Edge or install Playwright browsers afterwards. The VS Code extension currently needs its server command configured; automatic runtime discovery is planned."
+!define MUI_WELCOMEPAGE_TEXT "Install the Steptix server and CLI for your Windows user account.$\r$\n$\r$\nRequires an existing x64 Node.js 22.21+ installation. Node.js and browsers are not included.$\r$\n$\r$\nUse installed Chrome/Edge or install Playwright browsers afterwards. The Steptix VS Code extension finds this runtime and starts its server when you run a test."
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${PAYLOAD}\server\LICENSE"
+!insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_TEXT "Open runtime setup instructions"
@@ -35,36 +40,53 @@ Var NodeExe
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
+; Functions: they cannot come before SetCompressor.
+!include "user-path.nsh"
+!include "runtime-scan.nsh"
 
+; Every MessageBox that can show during a silent install (/S) or uninstall
+; carries /SD, the answer silent mode takes without showing it. Without one,
+; NSIS shows the box anyway and a script waits on it for good.
 Function .onInit
   SetShellVarContext current
   ${IfNot} ${RunningX64}
-    MessageBox MB_ICONSTOP "This installer requires 64-bit Windows."
+    MessageBox MB_ICONSTOP "This installer requires 64-bit Windows." /SD IDOK
     Abort
   ${EndIf}
   StrCpy $TestMode "0"
   StrCpy $UninstallKey "${UNINSTALL_KEY}"
   StrCpy $DisplayName "${PRODUCT} ${VERSION}"
+  StrCpy $PathKey "Environment"
   ; /TESTMODE=<id> is the end-to-end test's install (scripts/verify-runtime.mjs).
   ; It still registers with Installed Apps, because uninstalling through that
   ; entry is part of what the test proves, but under a key of its own: a real
   ; install of the same version on the same machine is never touched. It
-  ; creates no Start menu folder.
+  ; creates no Start menu folder, and it adds to a Path value of its own, so
+  ; the PATH of whoever runs the test is never touched either.
   ${GetParameters} $0
   ClearErrors
   ${GetOptions} $0 "/TESTMODE=" $1
   ${IfNot} ${Errors}
     ${If} $1 == ""
-      MessageBox MB_ICONSTOP "/TESTMODE needs an id: /TESTMODE=<id>."
+      MessageBox MB_ICONSTOP "/TESTMODE needs an id: /TESTMODE=<id>." /SD IDOK
       Abort
     ${EndIf}
     StrCpy $TestMode "1"
     StrCpy $UninstallKey "${UNINSTALL_KEY}-test-$1"
     StrCpy $DisplayName "${PRODUCT} ${VERSION} (installer test $1)"
+    StrCpy $PathKey "Software\SteptixInstallerTest-$1"
+  ${EndIf}
+  ; /NOPATH starts "Add steptix to PATH" unticked: the way to keep PATH as it
+  ; is on a silent install, which takes every option's default.
+  ClearErrors
+  ${GetOptions} $0 "/NOPATH" $1
+  ${IfNot} ${Errors}
+    Call UntickPathSection
   ${EndIf}
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
   File "${PAYLOAD}\node-check.cjs"
+  File "${PAYLOAD}\runtime-scan.ps1"
   ReadEnvStr $NodeExe "STEPTIX_NODE"
   ${If} $NodeExe == ""
     StrCpy $NodeExe "node"
@@ -73,13 +95,16 @@ Function .onInit
   Pop $0
   Pop $1
   ${If} $0 != "0"
-    IfSilent +2
-    MessageBox MB_ICONINFORMATION "Node.js x64 22.21+ was not found or is incompatible. Install it and restart VS Code before using this runtime. Alternatively set STEPTIX_NODE to your node.exe path.$\r$\n$\r$\nThe runtime can still be installed now."
+    MessageBox MB_ICONINFORMATION "Node.js x64 22.21+ was not found or is incompatible. Install it and restart VS Code before using this runtime. Alternatively set STEPTIX_NODE to your node.exe path.$\r$\n$\r$\nThe runtime can still be installed now." /SD IDOK
   ${EndIf}
+  ; Before any page, so a silent install refuses at once.
+  Call CheckSteptixNotRunning
 FunctionEnd
 
 Section "Steptix Runtime" Main
   SectionIn RO
+  ; Again, before the first file: a server can start while the pages are up.
+  Call CheckSteptixNotRunning
   SetOutPath "$INSTDIR"
   File /r "${PAYLOAD}\*"
   FileOpen $0 "$INSTDIR\.steptix-runtime-install" w
@@ -87,6 +112,9 @@ Section "Steptix Runtime" Main
   FileClose $0
   FileOpen $0 "$INSTDIR\${KEY_FILE}" w
   FileWrite $0 "$UninstallKey"
+  FileClose $0
+  FileOpen $0 "$INSTDIR\${PATH_KEY_FILE}" w
+  FileWrite $0 "$PathKey"
   FileClose $0
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "$UninstallKey" "DisplayName" "$DisplayName"
@@ -101,7 +129,25 @@ Section "Steptix Runtime" Main
     CreateShortCut "$SMPROGRAMS\Steptix Runtime ${VERSION}\Setup instructions.lnk" "$INSTDIR\README.txt"
     CreateShortCut "$SMPROGRAMS\Steptix Runtime ${VERSION}\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
   ${EndIf}
+  ; Once this runtime is in place, so their uninstallers see it and keep the
+  ; PATH folder that now runs it.
+  Call RemoveOlderRuntimes
 SectionEnd
+
+Section "Add steptix to PATH" PathSection
+  Call AddSteptixToPath
+SectionEnd
+
+; For /NOPATH in .onInit, which comes before this section and so cannot name
+; its index itself.
+Function UntickPathSection
+  !insertmacro UnselectSection ${PathSection}
+FunctionEnd
+
+!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
+  !insertmacro MUI_DESCRIPTION_TEXT ${Main} "The Steptix server and CLI, in a folder of this version's own. Older Steptix runtime versions are removed."
+  !insertmacro MUI_DESCRIPTION_TEXT ${PathSection} "Run steptix from any new terminal. Adds %LOCALAPPDATA%\steptix\bin to your user PATH, which needs no administrator rights. Terminals and VS Code windows that are already open need a restart to see it."
+!insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Function OpenReadme
   ExecShell "open" "$INSTDIR\README.txt"
@@ -110,19 +156,26 @@ FunctionEnd
 Section "Uninstall"
   SetShellVarContext current
   IfFileExists "$INSTDIR\.steptix-runtime-install" +3
-    MessageBox MB_ICONSTOP "Runtime installation marker is missing. Refusing to remove files."
+    MessageBox MB_ICONSTOP "Runtime installation marker is missing. Refusing to remove files." /SD IDOK
     Abort
   FileOpen $0 "$INSTDIR\.steptix-runtime-install" r
   FileRead $0 $1
   FileClose $0
   ${If} $1 != "${VERSION}"
-    MessageBox MB_ICONSTOP "Runtime installation marker does not match this version."
+    MessageBox MB_ICONSTOP "Runtime installation marker does not match this version." /SD IDOK
     Abort
   ${EndIf}
+  Call un.CheckSteptixNotRunning
   StrCpy $UninstallKey "${UNINSTALL_KEY}"
   ${If} ${FileExists} "$INSTDIR\${KEY_FILE}"
     FileOpen $0 "$INSTDIR\${KEY_FILE}" r
     FileRead $0 $UninstallKey
+    FileClose $0
+  ${EndIf}
+  StrCpy $PathKey "Environment"
+  ${If} ${FileExists} "$INSTDIR\${PATH_KEY_FILE}"
+    FileOpen $0 "$INSTDIR\${PATH_KEY_FILE}" r
+    FileRead $0 $PathKey
     FileClose $0
   ${EndIf}
   ; Remove only this version's packaged directories. Never remove the shared user root or browser cache.
@@ -131,12 +184,16 @@ Section "Uninstall"
   Delete "$INSTDIR\runtime-launcher.cjs"
   Delete "$INSTDIR\runtime-bootstrap.mjs"
   Delete "$INSTDIR\node-check.cjs"
+  Delete "$INSTDIR\runtime-scan.ps1"
   Delete "$INSTDIR\runtime-manifest.json"
   Delete "$INSTDIR\README.txt"
   Delete "$INSTDIR\.steptix-runtime-install"
   Delete "$INSTDIR\${KEY_FILE}"
+  Delete "$INSTDIR\${PATH_KEY_FILE}"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
+  ; After this version's files: the PATH folder goes only with the last runtime.
+  Call un.RemoveSteptixFromPath
   ReadRegStr $0 HKCU "$UninstallKey" "InstallLocation"
   ${If} $0 == $INSTDIR
     DeleteRegKey HKCU "$UninstallKey"

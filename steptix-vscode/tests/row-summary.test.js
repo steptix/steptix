@@ -21,7 +21,6 @@ import {
   rowSkipHover,
   rowStatusFromLineStatus,
   rowStoppedHover,
-  rowWord,
   withRunRowsNote,
   worseRowStatus,
 } from '../src/extension/row-summary-core.ts';
@@ -309,11 +308,6 @@ test('the panel note and the hover use the same words', () => {
   ]) {
     assert.ok(rowSkipHover('run', 2, reason).startsWith(`Row 2 ${rowSkipDetail(reason)}`));
   }
-});
-
-test('the word for a row depends on the table', () => {
-  assert.equal(rowWord('run'), 'row');
-  assert.equal(rowWord('section'), 'iteration');
 });
 
 // ---------------------------------------------------------------------------

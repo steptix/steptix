@@ -43,11 +43,26 @@ function candidate(over = {}) {
 
 const skillsDirFor = () => SKILLS;
 
-test("samePath folds drive-letter case on win32 only", () => {
+test("samePath compares resolved paths, not spellings", () => {
   assert.equal(samePath(LOGIN, LOGIN), true);
-  if (process.platform === "win32") {
-    assert.equal(samePath("C:\\proj\\skills\\login.md", "c:\\proj\\skills\\login.md"), true);
-  }
+  // Built by hand: path.join would collapse the ".." before samePath saw it.
+  const roundabout = [SKILLS, "..", "skills", "login.md"].join(path.sep);
+  assert.notEqual(roundabout, LOGIN);
+  assert.equal(samePath(roundabout, LOGIN), true);
+  assert.equal(samePath(path.join(SKILLS, "logout.md"), LOGIN), false);
+});
+
+test("samePath folds drive-letter case on win32", { skip: process.platform !== "win32" }, () => {
+  // `uri.fsPath` lower-cases the drive; a server echo may not.
+  assert.equal(samePath("C:\\proj\\skills\\login.md", "c:\\proj\\skills\\login.md"), true);
+});
+
+// Linux only, not POSIX: on Linux two spellings are two files, so folding
+// would merge picker rows for different skills. macOS is left out on purpose —
+// its default filesystem is case-insensitive, so whether two spellings name
+// one skill there is the filesystem's answer, not this function's to pin.
+test("samePath keeps case significant on Linux", { skip: process.platform !== "linux" }, () => {
+  assert.equal(samePath("/proj/skills/Login.md", "/proj/skills/login.md"), false);
 });
 
 test("isSkillDocument: frontmatter type: skill, any case", () => {

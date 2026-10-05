@@ -2,9 +2,9 @@
  * Which port `steptix serve` listens on, and which URL a client falls back to
  * when no project names a server (stories/machine-server-url.md).
  *
- * Both sides read the same line — `SERVER_URL` in the user root's `.env` —
+ * Both sides read the same line — `STEPTIX_SERVER_URL` in the user root's `.env` —
  * which is what makes them agree without either telling the other: a bare
- * `serve` listens on that URL's port, and a client with no project `SERVER_URL`
+ * `serve` listens on that URL's port, and a client with no project `STEPTIX_SERVER_URL`
  * connects to that URL. With no line, both use {@link DEFAULT_SERVER_URL}.
  *
  * A project's own `.env` is deliberately not part of the server's order. It
@@ -21,9 +21,9 @@ export const DEFAULT_SERVER_PORT = 3100;
  *  address family `localhost` resolves to first. */
 export const DEFAULT_SERVER_URL = `http://127.0.0.1:${DEFAULT_SERVER_PORT}`;
 
-export const SERVER_URL_VAR = 'SERVER_URL';
+export const SERVER_URL_VAR = 'STEPTIX_SERVER_URL';
 
-/** `SERVER_URL` from the user root's `.env`, trimmed, or null when absent or blank. */
+/** `STEPTIX_SERVER_URL` from the user root's `.env`, trimmed, or null when absent or blank. */
 export function readMachineServerUrl(deps?: UserRootDeps): string | null {
   const value = readUserRootEnv(deps)[SERVER_URL_VAR];
   if (value === undefined || value.trim() === '') return null;
@@ -38,7 +38,7 @@ export interface ServePort {
   source: string;
 }
 
-/** The user root's `SERVER_URL` cannot give `serve` a port. */
+/** The user root's `STEPTIX_SERVER_URL` cannot give `serve` a port. */
 export class ServePortError extends Error {
   constructor(message: string) {
     super(message);
@@ -48,13 +48,13 @@ export class ServePortError extends Error {
 
 /**
  * The port a `serve` listens on: `-p`, else the port of the user root's
- * `SERVER_URL`, else {@link DEFAULT_SERVER_PORT}.
+ * `STEPTIX_SERVER_URL`, else {@link DEFAULT_SERVER_PORT}.
  *
  * Only the port is taken from that URL. Its host says where clients connect,
  * which is not necessarily an address this machine can bind; `serve` binds
  * `server.host` (or `-H`) as before.
  *
- * Throws {@link ServePortError} when the machine `SERVER_URL` is set but names
+ * Throws {@link ServePortError} when the machine `STEPTIX_SERVER_URL` is set but names
  * no usable port. Falling back to 3100 there would start a server on a port no
  * client is looking at, and a URL without a port implies 80 or 443, which is
  * never what was meant.
@@ -65,7 +65,7 @@ export function resolveServePort(cliPort: number | undefined, deps?: UserRootDep
   const machineUrl = readMachineServerUrl(deps);
   if (machineUrl === null) return { port: DEFAULT_SERVER_PORT, source: 'the default' };
 
-  const where = `SERVER_URL in ${userRootEnvPath(deps)}`;
+  const where = `STEPTIX_SERVER_URL in ${userRootEnvPath(deps)}`;
   let url: URL;
   try {
     url = new URL(machineUrl);

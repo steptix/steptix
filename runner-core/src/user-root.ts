@@ -1,15 +1,14 @@
 /**
- * The machine key and the machine `SERVER_URL`, read from the user root's
- * `.env` (stories/machine-key.md and stories/machine-server-url.md in the
- * Steptix repo).
+ * The user root's `.env` (stories/machine-key.md in the Steptix repo): the
+ * machine key, and the machine's `STEPTIX_SERVER_URL`.
  *
  * READ-ONLY on purpose. Generation belongs to the processes that *start* the
  * Sessions API server (`steptix serve`, the MCP server's auto-start) — a key
  * that Steptix invented would be one no running server holds, and every
- * request sent with it would 401. This module only answers "what key does
- * this machine have?", as the last step of the client chain:
+ * request sent with it would 401. This module only answers "what does this
+ * machine say?", as the last step of each client chain:
  *
- *   project `.env` (walk-up)  →  process.env  →  the machine key
+ *   project `.env` (walk-up)  →  process.env  →  the user root's `.env`
  *
  * A deliberate duplicate of `src/env/user-root.ts` in the framework repo:
  * runner-core is a separate bundle shipped inside the Steptix VSIXes, and
@@ -23,6 +22,7 @@ import * as path from 'node:path';
 import { parseEnv } from './env-file.js';
 
 export const MACHINE_KEY_VAR = 'STEPTIX_SERVER_API_KEY';
+export const MACHINE_SERVER_URL_VAR = 'STEPTIX_SERVER_URL';
 
 /** Injection seam for tests — the path derives entirely from these. */
 export interface UserRootDeps {
@@ -31,8 +31,8 @@ export interface UserRootDeps {
   homedir?: () => string;
 }
 
-/** `%LOCALAPPDATA%\steptix\.env` / `$XDG_CONFIG_HOME/steptix/.env` / `~/.steptix/.env`. */
-export function userRootEnvPath(deps?: UserRootDeps): string {
+/** `%LOCALAPPDATA%\steptix` / `$XDG_CONFIG_HOME/steptix` / `~/.steptix`. */
+export function userRootDir(deps?: UserRootDeps): string {
   const env = deps?.env ?? process.env;
   const platform = deps?.platform ?? process.platform;
   const homedir = deps?.homedir ?? os.homedir;
@@ -43,25 +43,52 @@ export function userRootEnvPath(deps?: UserRootDeps): string {
       localAppData !== undefined && localAppData.trim() !== ''
         ? localAppData
         : path.join(homedir(), 'AppData', 'Local');
-    return path.join(base, 'steptix', '.env');
+    return path.join(base, 'steptix');
   }
 
   const xdg = env['XDG_CONFIG_HOME'];
-  if (xdg !== undefined && xdg.trim() !== '') return path.join(xdg, 'steptix', '.env');
-  return path.join(homedir(), '.steptix', '.env');
+  if (xdg !== undefined && xdg.trim() !== '') return path.join(xdg, 'steptix');
+  return path.join(homedir(), '.steptix');
 }
 
-/** The user root's `.env` parsed, `{}` when the file is absent. Anything but
- *  ENOENT (EACCES, EISDIR, an EBUSY lock) throws. */
-function readUserRootEnv(deps?: UserRootDeps): Record<string, string> {
+/** `%LOCALAPPDATA%\steptix\.env` / `$XDG_CONFIG_HOME/steptix/.env` / `~/.steptix/.env`. */
+export function userRootEnvPath(deps?: UserRootDeps): string {
+  return path.join(userRootDir(deps), '.env');
+}
+
+/**
+ * One value from the user root's `.env`, or null when the file is absent or
+ * has no usable value. Trimmed-empty reads as absent — a blanked-out line must
+ * not become the literal empty string.
+ *
+ * Throws on any read error but "no such file" (EACCES, EISDIR, an EBUSY lock)
+ * and on a malformed line: the value may well be in there, and "absent" would
+ * send the caller down the wrong branch.
+ */
+function readUserRootValue(key: string, deps?: UserRootDeps): string | null {
   let content: string;
   try {
     content = fs.readFileSync(userRootEnvPath(deps), 'utf-8');
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw err;
   }
-  return parseEnv(content);
+  const value = parseEnv(content)[key];
+  if (value === undefined || value.trim() === '') return null;
+  return value.trim();
+}
+
+/** The machine key, or null when there is none. */
+export function readMachineKey(deps?: UserRootDeps): string | null {
+  return readUserRootValue(MACHINE_KEY_VAR, deps);
+}
+
+/**
+ * The machine's `STEPTIX_SERVER_URL`, or null when there is none — the server every
+ * project on this machine talks to unless its own `.env` names another.
+ */
+export function readMachineServerUrl(deps?: UserRootDeps): string | null {
+  return readUserRootValue(MACHINE_SERVER_URL_VAR, deps);
 }
 
 /**
@@ -82,97 +109,37 @@ export function userRootEnvExposed(deps?: UserRootDeps): boolean {
   }
 }
 
-/** `KEY` from the user root's `.env`, trimmed; null when absent or blank. */
-function readUserRootValue(key: string, deps?: UserRootDeps): string | null {
-  const value = readUserRootEnv(deps)[key];
-  if (value === undefined || value.trim() === '') return null;
-  return value.trim();
-}
-
-/**
- * The machine key, or null when the file is absent or has no usable value.
- * Trimmed-empty reads as absent — a blanked-out `STEPTIX_SERVER_API_KEY=` line
- * must not become the literal empty-string key every request fails to match.
- */
-export function readMachineKey(deps?: UserRootDeps): string | null {
-  return readUserRootValue(MACHINE_KEY_VAR, deps);
-}
-
 // ---------------------------------------------------------------------------
-// The machine's server (stories/machine-server-url.md in the Steptix repo)
+// Where a bare `steptix serve` listens (stories/machine-server-url.md)
 // ---------------------------------------------------------------------------
 //
-// Mirrors `src/env/server-url.ts` in the framework, for the same reason the
-// key reader above mirrors `src/env/user-root.ts`. The two must agree: a bare
-// `steptix serve` listens on the port this file's `SERVER_URL` names (else
-// 3100), and a client with no project `SERVER_URL` connects to that URL (else
-// the default) — which is why neither side has to tell the other.
+// Mirrors `resolveServePort` in the framework's `src/env/server-url.ts`, for
+// the same reason the readers above mirror `src/env/user-root.ts`. The two
+// must agree: a bare `serve` listens on the port of this file's
+// `STEPTIX_SERVER_URL` (else 3100), and a client with no project
+// `STEPTIX_SERVER_URL` connects to that URL (else the default) — which is why
+// neither side has to tell the other.
 
 export const DEFAULT_SERVER_PORT = 3100;
-
-/** Loopback by address, so it names exactly what a default `serve` binds
- *  whichever address family `localhost` resolves to first. */
-export const DEFAULT_SERVER_URL = `http://127.0.0.1:${DEFAULT_SERVER_PORT}`;
-
-/** `SERVER_URL` from the user root's `.env`, or null when absent or blank. */
-export function readMachineServerUrl(deps?: UserRootDeps): string | null {
-  return readUserRootValue('SERVER_URL', deps);
-}
-
-/** Which server a client uses, and the file (or default) that said so. */
-export interface ServerUrlChoice {
-  serverUrl: string;
-  /** For logs and error text: `SERVER_URL in <path>`, or `the default`. */
-  source: string;
-  /** The file it came from; null for the default. */
-  path: string | null;
-}
-
-/**
- * A client's `SERVER_URL`: the project's, else the machine `.env`'s, else
- * {@link DEFAULT_SERVER_URL}. `projectEnvPath` names the file the project map
- * was read from, for `source`.
- *
- * Throws only when the machine `.env` exists and cannot be read — the caller
- * reports that against {@link userRootEnvPath}.
- */
-export function chooseServerUrl(
-  projectEnv: Readonly<Record<string, string>>,
-  projectEnvPath: string | null,
-  deps?: UserRootDeps,
-): ServerUrlChoice {
-  const fromProject = projectEnv['SERVER_URL']?.trim();
-  if (fromProject) {
-    return {
-      serverUrl: fromProject,
-      source: `SERVER_URL in ${projectEnvPath ?? "the project's .env"}`,
-      path: projectEnvPath,
-    };
-  }
-  const fromMachine = readMachineServerUrl(deps);
-  if (fromMachine !== null) {
-    const machinePath = userRootEnvPath(deps);
-    return { serverUrl: fromMachine, source: `SERVER_URL in ${machinePath}`, path: machinePath };
-  }
-  return { serverUrl: DEFAULT_SERVER_URL, source: 'the default', path: null };
-}
 
 /** Where a `steptix serve` started without `-p` will listen, and why. */
 export type BareServePort =
   | { ok: true; port: number; source: string }
-  /** The machine `SERVER_URL` is set but names no usable port: that `serve`
-   *  refuses to start, for this reason. */
+  /** The machine `STEPTIX_SERVER_URL` is set but names no usable port: that
+   *  `serve` refuses to start, for this reason. */
   | { ok: false; reason: string };
 
 /**
- * The port a bare `serve` takes: the machine `SERVER_URL`'s, else
+ * The port a bare `serve` takes: the machine `STEPTIX_SERVER_URL`'s, else
  * {@link DEFAULT_SERVER_PORT}. The same rule as `resolveServePort` in the
  * framework minus `-p`, which only the caller can know about.
+ *
+ * Throws what {@link readMachineServerUrl} throws: an unreadable machine `.env`.
  */
 export function bareServePort(deps?: UserRootDeps): BareServePort {
   const machineUrl = readMachineServerUrl(deps);
   if (machineUrl === null) return { ok: true, port: DEFAULT_SERVER_PORT, source: 'the default' };
-  const where = `SERVER_URL in ${userRootEnvPath(deps)}`;
+  const where = `${MACHINE_SERVER_URL_VAR} in ${userRootEnvPath(deps)}`;
   let url: URL;
   try {
     url = new URL(machineUrl);

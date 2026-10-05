@@ -20,7 +20,7 @@
 ## Context
 
 Today the Steptix native extension is a pure HTTP client: it reads
-`SERVER_URL` + `STEPTIX_SERVER_API_KEY` from the project's `.env.<name>` fixture and
+`STEPTIX_SERVER_URL` + `STEPTIX_SERVER_API_KEY` from the project's `.env.<name>` fixture and
 calls the Sessions API. If the server isn't running, the run fails with
 STX010 (connect-failed, mapped in
 [run-controller.ts §mapApiErrorToPayload](../steptix-vscode/src/extension/run-controller.ts))
@@ -57,8 +57,20 @@ as a side effect of health reporting.
   shutdown closes them (browsers included) on its way out.
 - **Auto-start launch recipe is a VS Code setting** (command + cwd), not
   inferred. Unset ⇒ auto-start never fires, so the feature can't misfire
-  against a remote `SERVER_URL` or on machines without the framework
+  against a remote `STEPTIX_SERVER_URL` or on machines without the framework
   checkout.
+
+  *Amended 2026-10-01.* The Windows runtime installer gave the recipe a
+  well-known place: `<user root>/runtimes/<version>/`. With `command` unset,
+  auto-start now starts the newest runtime found there
+  (`serve --port <STEPTIX_SERVER_URL's port> --idle-timeout 60`, cwd = the runtime's
+  folder), unless the machine-scoped `serverAutoStart.useInstalledRuntime` is
+  off. The reasons above still hold: it fires for a localhost `STEPTIX_SERVER_URL`
+  only, and a folder under the user root is one no workspace can write, so a
+  repo still cannot decide what Run executes. A `command`, when set, wins.
+  The run's `STEPTIX_SERVER_URL` gained machine-level fallbacks at the same time —
+  the user root's `.env`, then `http://127.0.0.1:3100` — so a project needs
+  no `.env` (stories/machine-key.md).
 - **Auto-start runs `dist/`**, not the tsx dev entry point. (User accepts
   the stale-build tradeoff; no build-on-start in the default command.)
 - **The extension attaches the debugger to what `/health` reports**, and
@@ -85,7 +97,7 @@ sensitive). Response:
   "ok": true,
   "service": "steptix",
   "version": "<package.json version>",
-  "commit": "b700473",
+  "commit": "02d968b",
   "modified": false,
   "pid": 12345,
   "startedAt": "2026-07-23T10:00:00.000Z",
@@ -182,7 +194,7 @@ Behind the auth middleware. Body: `{ "force": true }` optional.
 ### 4. CLI: `steptix status`, `steptix stop`
 
 Both new commands resolve the target URL the same way: `--url <url>` flag
-if given, else `SERVER_URL` from the machine `.env`, else
+if given, else `STEPTIX_SERVER_URL` from the machine `.env`, else
 `http://<config.server.host>:3100` — the order `serve` picks its port in
 ([machine-server-url.md](machine-server-url.md); `server.port` was dropped
 from the config).
@@ -213,7 +225,7 @@ New settings (all under `steptix-vscode.`):
 | --- | --- | --- | --- |
 | `serverAutoStart.command` | string | `""` | Full shell command to launch the server. Empty ⇒ auto-start disabled. |
 | `serverAutoStart.cwd` | string | `""` | Working directory for the command. **Required when `command` is set** — spawn is refused otherwise (see below). |
-| `serverAutoStart.readyTimeoutSeconds` | number | `20` | How long to poll `/health` after spawning before giving up. |
+| `serverAutoStart.readyTimeoutSeconds` | number | `60` | How long to poll `/health` after spawning before giving up. |
 
 `command` and `cwd` are declared with `"scope": "machine"` in
 `contributes.configuration` — they can only be set in **user** settings,
@@ -227,7 +239,7 @@ For the same reason, **`cwd` must be explicitly set when `command` is**:
 the suggested command is cwd-relative (`dist/index.js`), so defaulting a
 blank `cwd` to the open workspace folder would let a hostile repo control
 *what the command resolves to* even though it can't set the settings —
-opening a repo whose `SERVER_URL` points at a down localhost port would
+opening a repo whose `STEPTIX_SERVER_URL` points at a down localhost port would
 execute that repo's `dist/index.js`. If `command` is set and `cwd` is
 blank, the spawn is refused with the STX028 diagnostic
 ("serverAutoStart.cwd is not set").
@@ -253,15 +265,15 @@ against", not "the checkout". Same for STX010's fix text, which names
 ([issue 050](../issues/resolved/050-codebehind-compile-fetch-failed.md)).
 
 Pre-run flow (in the run controller, after env resolution gives
-`SERVER_URL`, before session creation). The run's `AbortController` is
+`STEPTIX_SERVER_URL`, before session creation). The run's `AbortController` is
 created **before** this phase so the Stop button cancels a wedged health
 wait/spawn poll — abort during this phase yields status `aborted`, not an
 auto-start error:
 
-1. `GET SERVER_URL/health`, ~1 s timeout.
+1. `GET STEPTIX_SERVER_URL/health`, ~1 s timeout.
 2. **2xx JSON + `service` matches** ⇒ proceed; remember `inspector` for §7.
 3. **2xx JSON but `service` mismatches** ⇒ fail the run with STX027
-   ("SERVER_URL responds but is not a Steptix server"). Never
+   ("STEPTIX_SERVER_URL responds but is not a Steptix server"). Never
    spawn on top of a foreign process's port.
 4. **Reachable but non-2xx or non-JSON** (e.g. an older Steptix server whose
    Express 404s `/health` — indistinguishable from a foreign server by
@@ -269,7 +281,7 @@ auto-start error:
    run on the legacy path (settings-based inspector fallback, §7.4).
    Never spawn, never refuse. The subsequent authenticated calls sort out
    whether it's really our server (existing TB01x mapping).
-5. **Down (connect-failed/timeout)**: if `SERVER_URL` host is not
+5. **Down (connect-failed/timeout)**: if `STEPTIX_SERVER_URL` host is not
    localhost, or `serverAutoStart.command` is unset ⇒ current behaviour
    (STX010), whose message gains a hint: "configure
    steptix.serverAutoStart to start it automatically".
@@ -295,10 +307,10 @@ auto-start error:
    the log.
 
 **Error codes.** STX026 is taken (Monaco inline-sections refusal), so the
-new codes are **STX027** (foreign service on SERVER_URL) and **STX028**
+new codes are **STX027** (foreign service on STEPTIX_SERVER_URL) and **STX028**
 (auto-start failed). Both go into the runner-core error catalogue with
 sample contexts carrying `serverUrl` verbatim (house pattern per the
-SERVER_URL-audit test in
+STEPTIX_SERVER_URL-audit test in
 [runner-core/tests/errors.test.js](../runner-core/tests/errors.test.js)),
 and need the runner-core `node --test` audit run.
 
@@ -318,7 +330,7 @@ substitute a tiny fixture script or a spy.
   flight on hover) / `STEPTIX ○` (stopped) / `STEPTIX ⚠` (unrecognized
   response). The ⚠ hover must not imply the port is foreign — per §5.4 it
   may be an older Steptix server without `/health`: "unrecognized response
-  on SERVER_URL — may be an older Steptix server without /health; runs will
+  on STEPTIX_SERVER_URL — may be an older Steptix server without /health; runs will
   still be attempted". Poll `/health` every 30 s and immediately after
   run start/end and Start/Stop commands. Health polling is free of
   idle-timer side effects (§3).
@@ -327,8 +339,8 @@ substitute a tiny fixture script or a spy.
   Start/Stop commands' URL + key sourcing) reads the **workspace root's**
   `.env` composed with `.env.<activeEnv>` overlay (the same overlay
   mechanism runs use; active env name from the existing env-selector).
-  The item hides only when that composition yields no `SERVER_URL` —
-  note the common case of no active env selected and `SERVER_URL` in the
+  The item hides only when that composition yields no `STEPTIX_SERVER_URL` —
+  note the common case of no active env selected and `STEPTIX_SERVER_URL` in the
   base `.env` must still show the item.
 - **Commands** (palette + status-bar click menu):
   - `Steptix: Start Server` — same spawn+poll as §5.6, without a run.
@@ -384,7 +396,7 @@ suppresses our attach.
 ## Out of scope
 
 - Stopping the server when VS Code closes (idle timeout covers cleanup).
-- Auto-start for remote `SERVER_URL`s, or provisioning the framework
+- Auto-start for remote `STEPTIX_SERVER_URL`s, or provisioning the framework
   checkout / running `npm install` / `npm run build` from the extension.
 - Build-freshness detection (dist mtime in `/health`) — user explicitly
   not worried about stale builds.
@@ -392,7 +404,7 @@ suppresses our attach.
   shutdown closes sessions; nothing expires them while the server stays
   up).
 - Monaco-variant auto-start.
-- Multi-server management (one `SERVER_URL` at a time per window).
+- Multi-server management (one `STEPTIX_SERVER_URL` at a time per window).
 
 ## Tests
 
@@ -582,9 +594,9 @@ contract is testable against a stub server.
 
 Files: `runner-core/src/errors.ts`, `runner-core/tests/errors.test.js`.
 
-STX027 (foreign service on SERVER_URL) + STX028 (auto-start failed), sample
+STX027 (foreign service on STEPTIX_SERVER_URL) + STX028 (auto-start failed), sample
 contexts carrying `serverUrl` verbatim — mirror the existing STX010–STX014
-entries and the SERVER_URL-audit test pattern. **Run `node --test` in
+entries and the STEPTIX_SERVER_URL-audit test pattern. **Run `node --test` in
 runner-core** — root vitest does not cover it.
 
 ### W4 — extension run-controller plumbing
@@ -614,7 +626,7 @@ Two additions the plan didn't anticipate:
   and the manual Start Server command. They were written separately first
   and disagreed immediately: the command path lost the "only auto-start a
   localhost URL" rule and would spawn a local server for a remote
-  `SERVER_URL`.
+  `STEPTIX_SERVER_URL`.
 - **`AutoStartGuard`** — a failed start suppresses retries for that URL for
   60s. Every batch test re-runs the pre-run phase, so a broken command
   otherwise means one detached shell and one full `readyTimeoutSeconds`
@@ -670,7 +682,7 @@ Files: `steptix-vscode/src/extension/extension.ts`,
 `steptix-vscode/src/extension/server-commands.ts` (new) rather than in
 `commands/index.ts`, and `resolveServerTarget` is a free function in
 `server-status-bar.ts` so the command layer doesn't need a UI widget to
-find `SERVER_URL`. `readyTimeoutSeconds` is machine-scoped too — a
+find `STEPTIX_SERVER_URL`. `readyTimeoutSeconds` is machine-scoped too — a
 workspace-settable value lets a cloned repo stretch a failed start into a
 very long wait. The 30s poll stands down while the window is unfocused
 (with an `onDidChangeWindowState` catch-up); explicit refreshes — run

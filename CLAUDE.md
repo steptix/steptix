@@ -9,6 +9,10 @@ top CHANGELOG entry for the full map. Resolved issues and older CHANGELOG
 entries keep the old names on purpose; read `aiui` there as `steptix` and
 `TB028` as `STX028`.
 
+The server address variable `SERVER_URL` became `STEPTIX_SERVER_URL` the same
+way, with no fallback, and the live tests' `LIVE_SERVER_URL` became
+`LIVE_STEPTIX_SERVER_URL`. Resolved issues keep the old names.
+
 The checkout folder was renamed from `ai-ui-automation` to `steptix` as well.
 Anything that stored the old absolute path went stale with the rename rather
 than failing loudly — notably the two `node_modules` junctions in the main
@@ -20,10 +24,11 @@ So commands here don't hardcode where the checkout lives: they write it as
 (git worktree list --porcelain)[0] -replace '^worktree ', ''
 ```
 
-The GitHub repo is `pkent/steptix` (renamed from `pkent/ai-ui-automation` on
-2026-09-30). GitHub redirects the old URL, so the links to it in resolved
-issues, stories and older CHANGELOG entries keep working and were left as
-written.
+The GitHub repo is `steptix/steptix`. Links to `pkent/steptix` and
+`pkent/ai-ui-automation` in resolved issues, stories and older CHANGELOG
+entries, and `pkent/steptix-archive#N` in commit messages, lead to the
+private archive of the repo before the move, which only maintainers can
+open. Leave them as written.
 
 ## Flick: one client
 
@@ -152,7 +157,9 @@ extension isn't on the path at all.
 Build the Windows runtime installer only with `node scripts/build-runtime.mjs`.
 It runs `scripts/verify-runtime.mjs` on every installer it compiles: install,
 the CLI through `steptix.cmd`, a VS Code Run that auto-starts the installed
-server through `steptix.cmd`, and uninstall through the Installed Apps entry.
+server through `steptix.cmd`, refusals while that server runs, `steptix` on
+PATH, an upgrade to a newer version that removes it and a rollback, and
+uninstall through the Installed Apps entry.
 The installer only moves into `dist-runtime/` if all of that passes. Never
 compile `packaging/runtime/runtime.nsi` by hand, never add a way to skip the
 test, and never ship anything from `dist-runtime/unverified/`. See
@@ -199,6 +206,66 @@ Playwright browser, so ignore the root suite's real-browser tests there (they
 fail with `browserType.launch: Executable doesn't exist`) and judge Linux on
 everything else.
 
+## Unit tests are not timed and share nothing
+
+A unit test must give the same answer on a loaded CI runner, in any order,
+and on any developer's machine.
+
+- **Never wait with a sleep or assert on elapsed time.** Wait on the condition
+  itself — an event, a promise gate, or a poll with a generous ceiling. When
+  the code under test is timed, inject `now`/`sleep` or use
+  `vi.useFakeTimers({ toFake: [...] })`.
+- **Let the server pick its port.** Have the child bind port 0 and report the
+  port it got; `tests/fixture-server.ts` does this for the SecureBank app.
+  Never close a port-0 listener and hand its number on.
+- **Give each run its own scratch directory** with `fs.mkdtemp`. Put it under
+  `tests/` when package self-resolution needs an in-repo path. Remove it
+  recursively with `maxRetries`.
+- **Leave nothing behind.** Restore every global you change (`process.env`,
+  `process.stdout.isTTY`, page globals) in `finally` or `afterEach`. Clear
+  module-level mocks in `beforeEach`. Give a test that changes a shared page
+  its own page. The weekly `Unit tests (shuffled)` workflow runs the root
+  suite in a random order to catch what slips through.
+- **Don't read the developer's machine.**
+  - Point `LOCALAPPDATA` / `XDG_CONFIG_HOME` at a temp dir before anything
+    resolves the user root.
+  - Pass `loadConfig` an explicit project root.
+  - Don't depend on the locale or on a fixed calendar year.
+
+## No real secrets in tracked files
+
+Treat every commit as public, history included: deleting a line later does
+not unpublish it. Keep every real credential — `STEPTIX_SERVER_API_KEY`, `AI_API_KEY`, gateway
+and provider keys, GitHub, npm and Marketplace tokens, passwords — out of
+tracked files: code, tests, scripts, docs, issues, stories and fixtures.
+
+- **Read keys from where they live.** The server key is the machine key in
+  `%LOCALAPPDATA%\steptix\.env` (`~/.steptix/.env` elsewhere); AI keys come
+  from a gitignored `.env` or the environment. A script that talks to a
+  server reads `process.env.STEPTIX_SERVER_API_KEY`, else `readMachineKey()`
+  or `ensureMachineKey()` from `src/env/user-root.ts` — the same chain
+  `serve` uses, so the two always agree.
+- **Use fakes that say what they are in tests.** Name the key after the test
+  (`'compile-api-key'`, `'integration-test-key'`), never a random-looking
+  string, so neither a reader nor a scanner mistakes it for a real one.
+- **Paste nothing real into docs.** Redact keys, tokens and `Authorization`
+  headers from logs, stack traces and request dumps before they go into an
+  issue, story or report.
+- **Keep `.env` files untracked.** Add new variables to `.env.example` with an
+  empty value.
+- **Rotate a key that was ever committed.** Deleting it from the file or from
+  history does not unpublish it; rotating does. For the server key, remove
+  its line from the machine `.env` and restart `serve`, which writes a new
+  one; then update every client that holds a copy, such as `flick.apiKey`.
+
+When reviewing a diff, `/code-review` included, report as a blocking finding
+any string literal that looks like a real credential: one assigned to a
+`*KEY*`, `*TOKEN*`, `*SECRET*` or `*PASSWORD*` name, sent as `x-api-key` or
+`Authorization`, or shaped like a known key (`steptix_` + hex, a bare UUID,
+`sk-`, `ghp_`, `github_pat_`, `npm_`, `AKIA`, a PEM block). Also report a
+tracked `.env`, and a real value added to `.env.example`. A fake that names
+its own test is not a finding.
+
 ## Seed gitignored files into a new worktree
 
 After creating a worktree (via `git worktree add` or the `EnterWorktree`
@@ -221,7 +288,7 @@ the script itself sits in — which is why it's the main checkout's copy you
 run, not the new worktree's — so the worktree is
 independent and safe if `package.json` diverges between branches. It then
 re-points the runner-core junction, builds `dist/` in all three projects, and
-rewrites `SERVER_URL` in the worktree's `.env` files to the port it allocated.
+rewrites `STEPTIX_SERVER_URL` in the worktree's `.env` files to the port it allocated.
 
 `-AutoPort` takes the lowest free port from 3101 up, treating a port any other
 registered worktree was seeded with as taken even when nothing is listening on
@@ -235,11 +302,11 @@ Other switches: `-SkipBuilds` copies only the env files (docs-only changes);
 `npm run test:integration` doesn't re-download it.
 
 To recall a worktree's port later, read it back off the file that decides it:
-`grep SERVER_URL .env`.
+`grep STEPTIX_SERVER_URL .env`.
 
 ### Which server does the worktree talk to?
 
-A bare `serve` listens on the port of `SERVER_URL` in
+A bare `serve` listens on the port of `STEPTIX_SERVER_URL` in
 `%LOCALAPPDATA%\steptix\.env`, else 3100 — never on a port a project's `.env`
 names — so two checkouts can't both serve bare; the second exits naming the
 taken port. You only need a second
@@ -322,7 +389,7 @@ Three things are per shard, and each one is load-bearing rather than tidy:
   just used. Grouping those conflicts onto one worker would put the five
   slowest suites back in a queue. So each worker copies `templates/` to
   `.live-shards/wN/templates` at the repo root (minus `reports/`, the caches
-  and any stray `.steps.ts`) and the copy's `.env` gets `SERVER_URL` rewritten
+  and any stray `.steps.ts`) and the copy's `.env` gets `STEPTIX_SERVER_URL` rewritten
   to that shard's port. That line, not any flag, is what decides which server
   the extension drives.
 
@@ -361,7 +428,7 @@ Three things are per shard, and each one is load-bearing rather than tidy:
 
 To drive a server you started yourself — for `--inspect`, or to watch one
 failure against the `src/` you are editing — pass `--server=<url>`, which
-`LIVE_SERVER_URL` still means too. Every shard then shares it, log cross-talk
+`LIVE_STEPTIX_SERVER_URL` still means too. Every shard then shares it, log cross-talk
 included, which is why `--shards=1` is the usual companion:
 
 ```powershell
@@ -388,8 +455,8 @@ and be current. That is the whole difference in ownership: the parallel path
 starts the servers so it builds them, this one does not so it does not.
 
 It is also the one mode that still has *two* independent notions of
-where the server is — the extension reads `SERVER_URL` by walking up from the
-test file to `templates/.env`, while the assertions read `LIVE_SERVER_URL` and
+where the server is — the extension reads `STEPTIX_SERVER_URL` by walking up from the
+test file to `templates/.env`, while the assertions read `LIVE_STEPTIX_SERVER_URL` and
 fall back to `:3100` regardless. Set only one and the tests assert against a
 different server than the extension is driving. The parallel path writes both
 from the same value, so it cannot drift.
@@ -464,15 +531,12 @@ arrangement:
   2026-09-11: a gate failed twice on exactly this while another session's
   live run was adopting the app.
 
-There used to be an exception here: `templates/init/tests/github.md` drove a
-real github.com login, so two worktrees ran it with the same credentials from
-the same IP, and one run's sign-out could invalidate the other's session
-mid-test. That is gone — `pause-resume` and `stop-report` now drive
-`templates/init/tests/securebank.md` against the fixture app instead. Same
-shape of flow (navigate, sign in, read a list, sign out), no external account,
-no rate limit, no 2FA challenge. `github.md` itself stays on disk: the fast
-suite opens it as a parse fixture, and it remains a worked example of testing
-a real site.
+Tests under `templates/init/tests/` drive only applications this repo
+controls: the `fixtures/test-app` site (SecureBank) or the local desktop. Do
+not add tests against third-party sites. Two runs would share one external
+account and IP, so one run's sign-out can invalidate the other's session, and
+rate limits and 2FA challenges fail runs for reasons unrelated to the code
+under test.
 
 The AI gateway key is still shared, and now by eight shards rather than two
 runs. Not a correctness problem, but they share whatever rate limit it
@@ -516,7 +580,7 @@ npm run test:live -- --shards=1 --files=computer-use.test.cjs --server=http://lo
 `--server=<url>` is not optional here even though `--shards=1` defaults to
 `:3100`: the serial path is the one mode with two independent notions of where
 the server is (see above), so pass the same URL that this worktree's
-`templates/.env` carries as `SERVER_URL`.
+`templates/.env` carries as `STEPTIX_SERVER_URL`.
 
 **Start that server from a normal terminal or from VS Code**, not from a
 sandboxed tool runner. Measured 2026-09-23: a process started by the Claude

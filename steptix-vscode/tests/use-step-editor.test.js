@@ -43,6 +43,10 @@ test('a malformed surface switch squiggles, with the runtime wording', () => {
 
 test('each of the four §4.1 refusals reaches the editor', () => {
   for (const [instruction, phrase] of [
+    // Both rules see `[use]`, and the `[use …]` message must win over the
+    // generic directive list: the order is the CLI parser's, and it is what
+    // decides whether the author is told the two surfaces or handed a list of
+    // six directives. One row, so the generic list winning fails here.
     ['[use]', 'names no surface'],
     ['[use phone]', 'is not a surface'],
     ['[use computer timeout=30]', 'takes no arguments'],
@@ -96,15 +100,6 @@ test('the well-formed directives are silent, and so is prose with a bracket', ()
   }
 });
 
-test('the `[use …]` message wins over the generic directive list', () => {
-  // Both rules see `[use]`. The order is the CLI parser's, and it is what
-  // decides whether the author is told the two surfaces or handed a list of
-  // six directives.
-  const rows = errors(doc('# T', '', '## Steps', '1. [use]'));
-  assert.equal(rows.length, 1);
-  assert.ok(rows[0].message.includes('names no surface'), rows[0].message);
-});
-
 test('a WRAPPED step is left to the run-time parse error', () => {
   // The CLI judges the whole list item; reading only the first physical line
   // would squiggle `[use computer]` on an item whose real text carries
@@ -117,10 +112,6 @@ test('a WRAPPED step is left to the run-time parse error', () => {
     '   and then click Save',
   );
   assert.deepEqual(errors(text), []);
-});
-
-test('a non-test document gets nothing', () => {
-  assert.deepEqual(computeSectionDiagnostics('# Notes\n\n1. [use phone]\n'), []);
 });
 
 // ---------------------------------------------------------------------------

@@ -123,9 +123,24 @@ npx steptix ui --config ./custom.config.ts
 | `npm run ui` | Build all and launch the Runner UI |
 | `npm run dev:ui` | Dev mode with hot-reload for the renderer |
 | `npm run dev` | Run the CLI directly via tsx (no build needed) |
+| `npm run setup` | Install all five projects and Playwright's Chromium — run once after cloning (see below) |
 | `npm test` | Run the test suite |
 | `npm run lint` | Type-check without emitting |
 | `npm run clean` | Remove build artifacts |
+
+### Set up a clone to run the tests
+
+The repo is five npm projects — the framework at the root, `runner-core/`,
+`steptix-vscode/`, `flick-vscode/` and `fixtures/tools/` — and the root suite
+uses all of them, plus Playwright's Chromium. One command, once:
+
+```bash
+npm run setup
+```
+
+After that the four unit suites (`npm test` at the root and in `runner-core/`,
+`flick-vscode/` and `steptix-vscode/`) and `npm run test:integration` need no
+keys or `.env` files. The live suite needs a model key; see below.
 
 ### Testing the Steptix extension
 
@@ -147,8 +162,22 @@ worker on a free port from 3200 up, boots the `fixtures/test-app` site on
 8787, runs the suite across four VS Code instances, prints a merged report
 and tears everything down — about five and a half minutes for 33 tests.
 
-It needs `templates/.env` to carry `AI_API_KEY` and `SERVER_URL`; the model
-calls are real and are billed. Useful variants:
+It needs one thing you supply: a model key. The model calls are real and are
+billed. Put your OpenAI key in the machine-wide `.env` —
+`%LOCALAPPDATA%\steptix\.env` on Windows, `~/.steptix/.env` elsewhere — and
+every checkout on the machine uses it:
+
+```
+AI_API_KEY=<your OpenAI API key>
+```
+
+The default model (`openai/…`) goes straight to OpenAI. To use another
+provider or a gateway, set `AI_MODEL` (and `AI_GATEWAY_URL` for a
+gateway-routed model) there too; see `.env.example`. A `templates/.env` with
+the same lines overrides the machine file for this repo only. Nothing else
+needs setting up: the runner gives each worker its own `STEPTIX_SERVER_URL`,
+and the server generates its own key on first start. If the key is missing, the
+runner says so and stops before it starts anything. Useful variants:
 
 ```bash
 npm run test:live -- --shards=2                       # fewer workers
@@ -383,9 +412,9 @@ refused.
 - Hosts run `dist/`, so **run `npm run build`** after changing the source — and
   once on a fresh clone, or the configs above point at a file that isn't there.
 - If you let the MCP server auto-start the API server for a project whose
-  `.env` names its own `SERVER_URL`, check on it with
-  `steptix status --url $SERVER_URL`. Plain `steptix status` looks where a bare
-  `steptix serve` listens — the machine `.env`'s `SERVER_URL`, else port 3100.
+  `.env` names its own `STEPTIX_SERVER_URL`, check on it with
+  `steptix status --url $STEPTIX_SERVER_URL`. Plain `steptix status` looks where a bare
+  `steptix serve` listens — the machine `.env`'s `STEPTIX_SERVER_URL`, else port 3100.
 - The Codex VS Code extension currently has an open bug picking up MCP servers
   from `config.toml`. Verify with Codex CLI first — a no-show in the extension
   is not a problem with this server.
@@ -732,7 +761,7 @@ export const slugify = tool<{ s: string }>(({ s }) =>
 export const upper = tool<{ s: string }>(({ s }) => s.toUpperCase());
 ```
 
-Call them path-qualified: `[tool: strings/slugify s="Hello World"]` and `[tool: strings/upper s="quiet"]`. A bare `[tool: slugify …]` does not resolve — only a default export answers to the file name alone.
+Call them as `[tool: strings/slugify s="Hello World"]` and `[tool: strings/upper s="quiet"]`. A tool reference is `<file>/<tool>` — the file's path under `toolsDir` without its extension, then the tool's name; a bare `[tool: uuid]` is sugar only for a top-level file whose tool is named after it, so it can't pick one tool out of a multi-tool file.
 
 #### Rung 3 — `defineTool({...})` (full schema)
 
@@ -910,18 +939,18 @@ Some settings are read from `.env` (see [.env.example](./.env.example) for the f
 
 | Variable | Purpose |
 | --- | --- |
-| `AI_API_KEY` | API key for the aiapi gateway. Required for anything that calls a model — compiling, healing a broken entry, AI-executed steps, errands. A fully compiled test replays without it (see [stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md)). One exception: a `bedrock/` model supplies its own credentials, so a run with no key here is still treated as having AI — see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). The runner now uses aiapi v2 endpoints. |
-| `AI_MODEL` | Overrides `ai.model` from the config file. Optional — falls back to the project default when unset. The first segment decides routing: `gateway/<model>` routes to whatever `AI_GATEWAY_URL` names (your own gateway, a local bridge, Ollama) and **refuses to run when that variable is unset**, rather than quietly sending the traffic elsewhere; `aibroker/<provider>/<model>` is the hosted broker on the built-in endpoint and needs no URL; `bedrock/<model>` is Claude in your own AWS account, needs `AWS_REGION` and no key; anything else (`openai/…`, `anthropic/…`) goes direct to the provider. |
+| `AI_API_KEY` | The key for wherever `AI_MODEL` routes: an OpenAI key for the default `openai/…` model, a gateway token for an `aibroker/` or `gateway/` one. Required for anything that calls a model — compiling, healing a broken entry, AI-executed steps, errands. A fully compiled test replays without it (see [stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md)). One exception: a `bedrock/` model supplies its own credentials, so a run with no key here is still treated as having AI — see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). The runner now uses aiapi v2 endpoints. |
+| `AI_MODEL` | Overrides `ai.model` from the config file. Optional — falls back to the project default when unset. The first segment decides routing: `gateway/<model>` and `aibroker/<provider>/<model>` route to whatever `AI_GATEWAY_URL` names (a hosted broker, your own gateway, a local bridge, Ollama) and **refuse to run when that variable is unset** — there is no built-in endpoint; `bedrock/<model>` is Claude in your own AWS account, needs `AWS_REGION` and no key; anything else (`openai/…`, `anthropic/…`) goes direct to the provider. |
 | `AWS_REGION` | Only for a `bedrock/` model, and then **required** — the client does not read `~/.aws/config`, so an SSO profile carrying a region is not enough. Read by the AWS SDK straight from `process.env`, not by this framework, so unlike every other row in this table it belongs in the **machine environment** — the shell that starts `steptix serve`, or the CI job — rather than in a project `.env`. Same for `AWS_DEFAULT_REGION`, `AWS_PROFILE` and the rest of the credential chain, which work exactly as they do for any AWS tool. A project `.env` reaches it on `steptix run` and the Electron UI only; see [Using Amazon Bedrock](#using-amazon-bedrock-claude-in-your-own-aws-account). |
-| `AI_GATEWAY_URL` | Overrides `ai.gatewayUrl` from the config file — the OpenAI-compatible endpoint gateway-routed models go through. Optional; set it when your org runs its own internal gateway, so pointing a shared repo at it stays a one-line `.env` change with nothing tracked to edit. Pair it with `AI_MODEL=gateway/<model>`: that spelling says "route here", and a `gateway/` model with this variable unset is refused rather than sent to the default host. Same precedence as `AI_MODEL` (environment → `steptix.config.json` → machine `.env` → built-in default), and it reaches the server path too: the Steptix extension ships the project's `.env` with each run. |
+| `AI_GATEWAY_URL` | Overrides `ai.gatewayUrl` from the config file — the OpenAI-compatible endpoint gateway-routed models go through. Required for `gateway/` and `aibroker/` models and unused by any other; there is no built-in default, so a gateway-routed model with this unset is refused before anything is sent. Setting it in a `.env` keeps pointing a shared repo at your org's gateway a one-line change with nothing tracked to edit. Same precedence as `AI_MODEL` (environment → `steptix.config.json` → machine `.env`), and it reaches the server path too: the Steptix extension ships the project's `.env` with each run. |
 | `AI_EFFORT` | How hard the model thinks on **routine** steps: `low`, `medium`, `high`, `xhigh`, `max` — plus `none` and `minimal`, but see the warning below before using `none`. Optional — **unset is the default and changes nothing on the wire**. Setting it also raises the routine output cap to 8192, since reasoning tokens count against the same cap. Authoring calls (code-behind generation/review, assertions, failure diagnosis) already run at `high` and are deliberately *not* lowered by this. A level the bound model doesn't support fails on the first AI call with `invalid_effort`. Process-level like `maxInputTokens`, not per-session overridable. |
-| `SERVER_URL` | Which Sessions API server a client talks to. In a project `.env` it says where *that project* connects. Optional: with none, clients use `SERVER_URL` from the machine `.env` (`%LOCALAPPDATA%\steptix\.env`, `~/.steptix/.env` elsewhere), else `http://127.0.0.1:3100`. `steptix serve` listens on `-p`, else that machine `SERVER_URL`'s port, else 3100 — never on a port a project `.env` names, so a server for a project on another port is started with `-p`. See [stories/machine-server-url.md](./stories/machine-server-url.md). |
+| `STEPTIX_SERVER_URL` | Which Sessions API server a client talks to. In a project `.env` it says where *that project* connects. Optional: with none, clients use the `STEPTIX_SERVER_URL` environment variable, else `STEPTIX_SERVER_URL` from the machine `.env` (`%LOCALAPPDATA%\steptix\.env`, `~/.steptix/.env` elsewhere), else `http://127.0.0.1:3100`. `steptix serve` listens on `-p`, else that machine `STEPTIX_SERVER_URL`'s port, else 3100 — never on a port a project `.env` names, so a server for a project on another port is started with `-p`. See [stories/machine-server-url.md](./stories/machine-server-url.md). |
 | `STEPTIX_SERVER_API_KEY` | Shared secret between the Sessions API server and its clients. **Not usually set anywhere**: `steptix serve` generates a machine key at `%LOCALAPPDATA%\steptix\.env` (`~/.steptix/.env` elsewhere) on first start, and every client falls back to it. Set per-project only to pin a dedicated server's key. |
 | `INTERACTIVE_ON_FAILURE` | `true`/`false`. Pause the runner on failure so you can inspect the browser. |
 | `OPEN_REPORT_IN_BROWSER_AFTER_RUN` | `true`/`false`. Open the generated HTML report in your OS default browser after `run` completes. Skipped automatically when `CI` is set. |
 | `APPEND_RUN_HISTORY_TO_TEST_FILE` | `true`/`false`. Append a "Latest runs" section at the bottom of each test `.md` file after it runs, linking to its HTML report (keeps the most recent 10). Default `false`. |
 
-**The machine `.env`** is the fallback for `SERVER_URL`, `STEPTIX_SERVER_API_KEY`, `AI_API_KEY` and `AI_MODEL` when a project sets none:
+**The machine `.env`** is the fallback for `STEPTIX_SERVER_URL`, `STEPTIX_SERVER_API_KEY`, `AI_API_KEY` and `AI_MODEL` when a project sets none:
 
 - **Windows:** `%LOCALAPPDATA%\steptix\.env`, private to your account like everything in `%LOCALAPPDATA%`.
 - **Linux and macOS:** `$XDG_CONFIG_HOME/steptix/.env` when `XDG_CONFIG_HOME` is set, else `~/.steptix/.env`. Steptix creates the folder `0700` and the file `0600`. If you create the file yourself to add `AI_API_KEY`, run `chmod 600` on it; Steptix warns when other users can read it.
@@ -970,7 +999,7 @@ MCP client config that launches the server. A project's `.env` deliberately
 **cannot** supply `NODE_EXTRA_CA_CERTS`; it is filtered by
 `UNSAFE_CHILD_ENV_KEYS` in
 [src/mcp/server-start.ts](./src/mcp/server-start.ts). One Sessions API server
-serves *every* project pointing at that `SERVER_URL` and holds each one's
+serves *every* project pointing at that `STEPTIX_SERVER_URL` and holds each one's
 credentials, so a CA installed by one project would be trusted for every other
 project's calls.
 
@@ -978,8 +1007,8 @@ To keep model traffic inside your own network, point
 [`AI_GATEWAY_URL`](#environment-variables) at an in-tenant or self-hosted
 OpenAI-compatible endpoint and set `AI_MODEL=gateway/<model>`. The `gateway/`
 prefix means "route to `AI_GATEWAY_URL`", and it refuses to run when that
-variable is unset — so a forgotten URL line fails loudly instead of sending the
-key and the page payload to the default host. A fully compiled test replays with
+variable is unset — there is no default host to fall back to, so a forgotten
+URL line fails loudly. A fully compiled test replays with
 **no AI calls at all** and needs no key — see
 [stories/keyless-replay-and-gateway-env.md](./stories/keyless-replay-and-gateway-env.md).
 
@@ -1136,7 +1165,7 @@ Three limits worth knowing before you set it up. Screenshots are dropped: the
 bridge speaks text only, so an image block is replaced with a short note (the
 diagnosis pass still works, text-only). The bridge is loopback — a **remote**
 Sessions API server would resolve `127.0.0.1` to itself, so this only works with
-a server on the same machine; the setup command warns when `SERVER_URL` is not
+a server on the same machine; the setup command warns when `STEPTIX_SERVER_URL` is not
 local. And the `gateway/` prefix is resolved by `@pkent/aigateway` inside the server
 process, so the server has to be running a build whose dependency ships it —
 `1.4.0-beta.5` or later. If it answers `Unsupported model "gateway/…"` and lists
@@ -1258,6 +1287,11 @@ To avoid that:
 
 - headed mode uses `windowSize`
 - headless mode uses `viewport`
+
+## Security
+
+To report a vulnerability, use GitHub's private reporting rather than a public
+issue. [SECURITY.md](SECURITY.md) says how, and what counts.
 
 ## License
 

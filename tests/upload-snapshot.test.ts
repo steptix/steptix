@@ -36,7 +36,7 @@ afterAll(async () => {
   // Defensive: a teardown throw here fails the whole file even when every
   // test passed.
   try { await browser?.close(); } catch { /* noop */ }
-}, 15_000);
+}, 60_000);
 
 describe('the DOM snapshot', () => {
   it('keeps a hidden file input nameable, with the attributes that matter', async () => {

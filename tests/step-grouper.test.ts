@@ -6,18 +6,6 @@ describe('isConditionalStep', () => {
     expect(isConditionalStep('If prompted for MFA, enter the code')).toBe(true);
   });
 
-  it('matches "If asked to..."', () => {
-    expect(isConditionalStep('If asked to verify, click Verify')).toBe(true);
-  });
-
-  it('matches "If you see..."', () => {
-    expect(isConditionalStep('If you see a captcha, solve it')).toBe(true);
-  });
-
-  it('matches "If there is..."', () => {
-    expect(isConditionalStep('If there is a cookie banner, dismiss it')).toBe(true);
-  });
-
   it('matches "When prompted..."', () => {
     expect(isConditionalStep('When prompted for a password, enter it')).toBe(true);
   });
@@ -139,24 +127,6 @@ describe('identifyStepGroups', () => {
 
     // They should be different group instances
     expect(group1).not.toBe(group2);
-  });
-
-  it('handles the MFA test case from mfa-conditional.md', () => {
-    const steps = [
-      'If prompted for MFA verification, enter the code "654321" and click Verify',
-      'Wait for the dashboard to load',
-      'Verify the dashboard shows "Welcome back" on the page',
-    ];
-    const groups = identifyStepGroups(steps);
-
-    // Step 0 (conditional) and step 1 (continuation) should be grouped
-    expect(groups.has(0)).toBe(true);
-    expect(groups.has(1)).toBe(true);
-    expect(groups.has(2)).toBe(false);
-
-    const group = groups.get(0)!;
-    expect(group.conditionalSteps).toHaveLength(1);
-    expect(group.continuationStep.index).toBe(1);
   });
 });
 

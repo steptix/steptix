@@ -290,7 +290,7 @@ action restored on its own, redrafted, and dropped again let the step back in
 beside the new one — now the delete remembers that its actions came back.
 
 **Review round 2** (a reviewer's proof scripts, each turned into a case that
-failed on 0b8b8fe first). Restore of two neighbours in the order they were
+failed on a75228d first). Restore of two neighbours in the order they were
 deleted put them back swapped (Restore now goes by where the step's actions
 are, after the step that was before it). Against a real model a deleted
 `Type … into the Email field` came back as `Click the Email field` on the

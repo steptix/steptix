@@ -139,23 +139,23 @@ export function envNameStaysInFolder(envName: string): boolean {
 }
 
 /**
- * The `SERVER_URL` a run would actually use, given the base `.env` and the
+ * The `STEPTIX_SERVER_URL` a run would actually use, given the base `.env` and the
  * active environment's overlay (`null` when there is no active overlay).
  *
  * This is `composeEnv`'s rule and nothing else: the overlay's value when it
  * sets one, the base's otherwise. Which file setup happens to be writing does
  * not enter into it — reading only the write target would make the "not this
- * machine" warning a coin toss, firing on a base `SERVER_URL` the overlay has
+ * machine" warning a coin toss, firing on a base `STEPTIX_SERVER_URL` the overlay has
  * already redirected to localhost and staying silent on the reverse.
  */
 export function effectiveServerUrl(baseText: string, overlayText: string | null): string | null {
   return (overlayText === null ? null : serverUrlIn(overlayText)) ?? serverUrlIn(baseText);
 }
 
-/** Last `SERVER_URL` assignment in a `.env`, or null — later wins, as a run does. */
+/** Last `STEPTIX_SERVER_URL` assignment in a `.env`, or null — later wins, as a run does. */
 export function serverUrlIn(text: string): string | null {
   let value: string | null = null;
-  for (const a of scanServerEnv(text)) if (a.key === 'SERVER_URL') value = a.value;
+  for (const a of scanServerEnv(text)) if (a.key === 'STEPTIX_SERVER_URL') value = a.value;
   return value;
 }
 
@@ -200,7 +200,7 @@ export interface EnvUpdatePlan {
    * left to be spotted in a diff.
    */
   flipsKeylessToKeyed: boolean;
-  /** `SERVER_URL` as the file has it, or null. */
+  /** `STEPTIX_SERVER_URL` as the file has it, or null. */
   serverUrl: string | null;
 }
 
@@ -300,7 +300,7 @@ function renderPreview(changes: EnvChange[]): string {
 }
 
 /**
- * Is this `SERVER_URL` on the same machine as the bridge?
+ * Is this `STEPTIX_SERVER_URL` on the same machine as the bridge?
  *
  * The bridge binds 127.0.0.1, so a remote Sessions API server told to reach
  * `http://127.0.0.1:<port>` dials ITSELF and gets a connection refused — with

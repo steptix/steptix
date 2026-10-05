@@ -60,7 +60,6 @@ import { PageCaptureError } from '../browser/dom-cleaner.js';
 import { createLoginBroker, type FieldHint, type LoginBroker } from '../credentials/index.js';
 import { IdleMonitor, startIdleReaper } from './idle-monitor.js';
 import { HEALTH_SERVICE_ID, type HealthResponse } from './health.js';
-import { matchText } from '../parser/section-match.js';
 // Its own module so a CLIENT-side test can run a payload it just built through
 // the exact rules that would 400 it here. Behaviour is unchanged — this is the
 // same function, moved.
@@ -2653,7 +2652,7 @@ export function installCrashGuards(target: CrashGuardTarget = process): void {
  * Listen on `listen.port` and serve until shut down.
  *
  * The port is an argument rather than a config value: it comes from `serve`'s
- * own order (`-p`, the machine `SERVER_URL`, 3100 — src/env/server-url.ts),
+ * own order (`-p`, the machine `STEPTIX_SERVER_URL`, 3100 — src/env/server-url.ts),
  * and `listen.source` is what a taken port is reported against.
  */
 export async function startServer(config: Config, listen: ServePort): Promise<void> {

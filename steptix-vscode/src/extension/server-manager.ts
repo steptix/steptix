@@ -1,15 +1,22 @@
 import { spawn } from 'node:child_process';
 import {
   appendFileSync,
+  existsSync,
   openSync,
   closeSync,
+  readdirSync,
   readSync,
   statSync,
   truncateSync,
   mkdirSync,
 } from 'node:fs';
 import * as path from 'node:path';
-import { bareServePort, describeFetchError, type BareServePort } from 'steptix-runner-core';
+import {
+  bareServePort,
+  describeFetchError,
+  userRootDir,
+  type BareServePort,
+} from 'steptix-runner-core';
 
 /**
  * Server lifecycle helpers for the extension: the `/health` identity probe and
@@ -78,7 +85,7 @@ export function normalizeBaseUrl(serverUrl: string): string {
 
 /**
  * True for a URL whose host is loopback — the only case auto-start fires for.
- * A remote SERVER_URL is somebody else's machine; starting a server here would
+ * A remote STEPTIX_SERVER_URL is somebody else's machine; starting a server here would
  * produce one that nothing is going to talk to.
  *
  * Lives here rather than in run-controller.ts so it is (a) reachable by the
@@ -322,29 +329,35 @@ function openLogFile(logPath: string): number {
 // Spawn + wait-until-healthy
 // ---------------------------------------------------------------------------
 
-/** The §5 settings table, already read and trimmed. */
+/** What to start and where: the command setting, or the installed runtime. */
 export interface AutoStartConfig {
   command: string;
   cwd: string;
   readyTimeoutSeconds: number;
 }
 
+/** The §5 settings table, already read and trimmed. */
+export interface AutoStartSettings extends AutoStartConfig {
+  /** Start the installed runtime when `command` is empty. */
+  useInstalledRuntime: boolean;
+}
+
 /** Default ready-timeout when the setting is absent or nonsense. */
-const DEFAULT_READY_TIMEOUT_SECONDS = 20;
+const DEFAULT_READY_TIMEOUT_SECONDS = 60;
 
 /**
  * Read the §5 settings.
  *
- * `command` and `cwd` are declared `"scope": "machine"` in
- * `contributes.configuration`, so `getConfiguration` can only ever return a
- * USER value for them — a workspace's `.vscode/settings.json` is ignored by
- * VS Code itself. That is a security property, not a convenience: this
- * extension executes `command` verbatim, so a workspace-settable value would
- * let any cloned repo run arbitrary code the moment the user pressed Run.
+ * All four are declared `"scope": "machine"` in `contributes.configuration`,
+ * so `getConfiguration` can only ever return a USER value for them — a
+ * workspace's `.vscode/settings.json` is ignored by VS Code itself. That is a
+ * security property, not a convenience: this extension executes `command`
+ * verbatim, so a workspace-settable value would let any cloned repo run
+ * arbitrary code the moment the user pressed Run.
  */
 export function readAutoStartSettings(
   cfg: { get<T>(key: string, fallback: T): T; get<T>(key: string): T | undefined },
-): AutoStartConfig {
+): AutoStartSettings {
   const seconds = cfg.get<number>(
     'serverAutoStart.readyTimeoutSeconds',
     DEFAULT_READY_TIMEOUT_SECONDS,
@@ -354,7 +367,150 @@ export function readAutoStartSettings(
     cwd: (cfg.get<string>('serverAutoStart.cwd') ?? '').trim(),
     readyTimeoutSeconds:
       Number.isFinite(seconds) && seconds > 0 ? seconds : DEFAULT_READY_TIMEOUT_SECONDS,
+    useInstalledRuntime: cfg.get<boolean>('serverAutoStart.useInstalledRuntime', true) !== false,
   };
+}
+
+// ---------------------------------------------------------------------------
+// The installed runtime (packaging/runtime)
+// ---------------------------------------------------------------------------
+
+/** A Steptix runtime the installer put under the user root. */
+export interface InstalledRuntime {
+  version: string;
+  /** Its folder: `<user root>/runtimes/<version>`. */
+  dir: string;
+}
+
+export interface RuntimeSearch {
+  /** Where installed runtimes live — named when there is none. */
+  runtimesDir: string;
+  /** The newest startable one there, or null. */
+  runtime: InstalledRuntime | null;
+}
+
+export type RuntimeDiscovery = () => RuntimeSearch;
+
+/**
+ * The files a runtime folder must hold to be started. A folder missing one is
+ * not a runtime to pick: an uninstall that could not finish — a running server
+ * holds files open — leaves one behind.
+ */
+function runtimeLaunchFiles(platform: NodeJS.Platform): string[] {
+  return [
+    'runtime-launcher.cjs',
+    path.join('server', 'dist', 'index.js'),
+    // What the Windows installer ships for finding Node; elsewhere the
+    // launcher is run by `node` directly (runtimeServeCommand).
+    ...(platform === 'win32' ? ['steptix.cmd'] : []),
+  ];
+}
+
+/**
+ * The newest startable runtime in `runtimesDir`, or null.
+ *
+ * Newest rather than any: the installer puts each version in a folder of its
+ * own and leaves the others, so after an upgrade both are there, and the one
+ * just installed is the one meant.
+ */
+export function findInstalledRuntime(
+  runtimesDir: string,
+  platform: NodeJS.Platform = process.platform,
+): InstalledRuntime | null {
+  let names: string[];
+  try {
+    names = readdirSync(runtimesDir);
+  } catch {
+    return null;
+  }
+  const files = runtimeLaunchFiles(platform);
+  const newest = names
+    .filter((name) => files.every((file) => existsSync(path.join(runtimesDir, name, file))))
+    .sort(compareVersions)
+    .at(-1);
+  return newest === undefined ? null : { version: newest, dir: path.join(runtimesDir, newest) };
+}
+
+/**
+ * Where the installer puts runtimes: `<user root>/runtimes`, beside the
+ * machine key. A location the user's own installer wrote, outside every
+ * workspace — which is what makes it safe to start without a setting: no repo
+ * the user merely opened can put a runtime there.
+ */
+export const defaultRuntimeDiscovery: RuntimeDiscovery = () => {
+  const runtimesDir = path.join(userRootDir(), 'runtimes');
+  return { runtimesDir, runtime: findInstalledRuntime(runtimesDir) };
+};
+
+const VERSION_PATTERN = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+
+/**
+ * Semver precedence: a prerelease sorts below its release, and prerelease
+ * identifiers compare numerically when both are numbers. A folder name that is
+ * not a version sorts below every one that is.
+ */
+export function compareVersions(a: string, b: string): number {
+  const va = VERSION_PATTERN.exec(a);
+  const vb = VERSION_PATTERN.exec(b);
+  if (!va || !vb) {
+    if (va || vb) return va ? 1 : -1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  }
+  for (let i = 1; i <= 3; i++) {
+    const diff = Number(va[i]) - Number(vb[i]);
+    if (diff !== 0) return diff;
+  }
+  const pa = va[4]?.split('.') ?? [];
+  const pb = vb[4]?.split('.') ?? [];
+  // A release outranks every prerelease of itself.
+  if (pa.length === 0 || pb.length === 0) return pb.length - pa.length;
+  for (let i = 0; i < Math.min(pa.length, pb.length); i++) {
+    const x = pa[i]!;
+    const y = pb[i]!;
+    if (x === y) continue;
+    const xNumeric = /^\d+$/.test(x);
+    const yNumeric = /^\d+$/.test(y);
+    if (xNumeric && yNumeric) return Number(x) - Number(y);
+    if (xNumeric !== yNumeric) return xNumeric ? -1 : 1;
+    return x < y ? -1 : 1;
+  }
+  return pa.length - pb.length;
+}
+
+/** How long a server Steptix started waits, with no work, before it stops
+ *  itself — the value the setting descriptions suggest. */
+const AUTO_START_IDLE_TIMEOUT_MINUTES = 60;
+
+/**
+ * The command that starts `runtime`'s server on `serverUrl`'s port.
+ *
+ * `--port` because the URL is what the run is about to dial and the server's
+ * own default (3100) need not be it — a `STEPTIX_SERVER_URL` naming another port
+ * would otherwise start a server where nobody is looking and time out.
+ *
+ * On Windows through `steptix.cmd`, which is how the installer means the
+ * runtime to be run and where its "Node from STEPTIX_NODE, else PATH" rule
+ * lives. Elsewhere there is no such script, so the same rule is applied here
+ * and the launcher run by Node directly. The launcher adds the localhost
+ * inspector for `serve` either way.
+ */
+export function runtimeServeCommand(
+  runtime: InstalledRuntime,
+  serverUrl: string,
+  opts: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv } = {},
+): string {
+  const platform = opts.platform ?? process.platform;
+  const url = new URL(serverUrl);
+  const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+  const args = `serve --port ${port} --idle-timeout ${AUTO_START_IDLE_TIMEOUT_MINUTES}`;
+  if (platform === 'win32') return `"${path.join(runtime.dir, 'steptix.cmd')}" ${args}`;
+  const node = (opts.env ?? process.env)['STEPTIX_NODE']?.trim() || 'node';
+  return `${shellQuote(node)} ${shellQuote(path.join(runtime.dir, 'runtime-launcher.cjs'))} ${args}`;
+}
+
+/** One POSIX `sh` word, whatever it holds. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
@@ -378,7 +534,7 @@ export type StartServerResult =
  * pre-run check and the manual Start Server command. When each made its own
  * triage they drifted immediately — the command path lost the "only auto-start
  * a LOCALHOST url" rule and would spawn a local server for a remote
- * SERVER_URL. Each caller now maps this union onto its own vocabulary
+ * STEPTIX_SERVER_URL. Each caller now maps this union onto its own vocabulary
  * (STX027/STX028 for a run, toasts for a command), which is the only part that
  * legitimately differs.
  */
@@ -391,22 +547,34 @@ export type ServerAction =
    *  predating /health. Proceed with no health data; never spawn, never
    *  refuse. */
   | { kind: 'legacy'; detail: string }
-  /** Nothing listening, and we are allowed to start one. */
-  | { kind: 'spawn'; config: AutoStartConfig }
-  /** Nothing listening, and the configured command would not serve this URL:
-   *  it listens on another port (`servePort.ok`), or would refuse to start at
-   *  all. Never spawn — a server we will not connect to is a stray. */
+  /** Nothing listening, and we are allowed to start one. `runtime` is set
+   *  when `config` was made for the installed runtime rather than read from
+   *  the command setting. */
+  | { kind: 'spawn'; config: AutoStartConfig; runtime?: InstalledRuntime }
+  /** Nothing listening, and the command setting would not serve this URL: it
+   *  listens on another port (`servePort.ok`), or would refuse to start at
+   *  all. Never spawn — a server nobody will connect to is a stray. */
   | { kind: 'refuse-port'; servePort: BareServePort }
   /** Nothing listening and we must not start one. `reason` explains which
    *  precondition failed, for the log/toast. */
   | { kind: 'skip'; reason: string };
 
+/**
+ * `settings.command` wins whenever it is set: a user who wrote one (a
+ * framework checkout, a pinned runtime) meant it. Only an empty one falls to
+ * the installed runtime, and `discover` is called only then — a healthy
+ * server costs no directory scan.
+ *
+ * A command is started only when it will listen on `serverUrl`'s port
+ * ({@link servePortOfCommand}, asked only then). The installed runtime needs
+ * no such check: its command passes that port itself.
+ */
 export function decideServerAction(
   serverUrl: string,
   probe: HealthProbeResult,
-  config: AutoStartConfig,
-  /** Where the configured command will listen — {@link servePortOfCommand}. */
-  servePort: BareServePort,
+  settings: AutoStartSettings,
+  discover: RuntimeDiscovery = defaultRuntimeDiscovery,
+  servePortOf: (command: string) => BareServePort = servePortOfCommand,
 ): ServerAction {
   switch (probe.kind) {
     case 'healthy':
@@ -415,17 +583,41 @@ export function decideServerAction(
       return { kind: 'refuse-foreign', service: probe.service };
     case 'unknown':
       return { kind: 'legacy', detail: probe.detail };
-    case 'down':
+    case 'down': {
       if (!isLoopbackUrl(serverUrl)) {
         return { kind: 'skip', reason: `${serverUrl} is not a localhost URL` };
       }
-      if (!config.command) {
-        return { kind: 'skip', reason: '"steptix.serverAutoStart.command" is not set' };
+      const { readyTimeoutSeconds } = settings;
+      if (settings.command) {
+        const servePort = servePortOf(settings.command);
+        if (!servePort.ok || servePort.port !== portOfUrl(serverUrl)) {
+          return { kind: 'refuse-port', servePort };
+        }
+        return { kind: 'spawn', config: { command: settings.command, cwd: settings.cwd, readyTimeoutSeconds } };
       }
-      if (!servePort.ok || servePort.port !== portOfUrl(serverUrl)) {
-        return { kind: 'refuse-port', servePort };
+      if (!settings.useInstalledRuntime) {
+        return {
+          kind: 'skip',
+          reason:
+            '"steptix.serverAutoStart.command" is not set and ' +
+            '"steptix.serverAutoStart.useInstalledRuntime" is off',
+        };
       }
-      return { kind: 'spawn', config };
+      const { runtimesDir, runtime } = discover();
+      if (!runtime) {
+        return {
+          kind: 'skip',
+          reason:
+            '"steptix.serverAutoStart.command" is not set and no Steptix runtime ' +
+            `is installed in ${runtimesDir}`,
+        };
+      }
+      return {
+        kind: 'spawn',
+        config: { command: runtimeServeCommand(runtime, serverUrl), cwd: runtime.dir, readyTimeoutSeconds },
+        runtime,
+      };
+    }
   }
 }
 
@@ -438,8 +630,8 @@ function portOfUrl(url: string): number {
 
 /**
  * Where the auto-start command will listen: the `-p` / `--port` it passes to
- * `serve`, else wherever a bare `serve` listens — the machine `SERVER_URL`'s
- * port, else 3100 (stories/machine-server-url.md).
+ * `serve`, else wherever a bare `serve` listens — the machine
+ * `STEPTIX_SERVER_URL`'s port, else 3100 (stories/machine-server-url.md).
  *
  * Only arguments after a `serve` word are read, so a flag belonging to the
  * launcher (`npx -p <package>`) is never mistaken for the server's. A command
@@ -558,7 +750,7 @@ export async function startServerAndWait(args: {
   // A blank cwd is refused rather than defaulted to the workspace folder.
   // The suggested command is cwd-relative (`dist/index.js`), so defaulting
   // would let a hostile repo decide WHAT the (user-scoped, workspace-unsettable)
-  // command actually resolves to: opening a repo whose SERVER_URL points at a
+  // command actually resolves to: opening a repo whose STEPTIX_SERVER_URL points at a
   // down localhost port would run that repo's dist/index.js. See §5.
   if (!config.cwd) {
     return {

@@ -9,7 +9,6 @@ import {
   GATEWAY_URL_REQUIRED_MESSAGE,
 } from '../src/ai/client.js';
 import type { AiConfig } from '../src/config/types.js';
-import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { logger } from '../src/utils/logger.js';
 
 vi.mock('../src/utils/logger.js', () => ({
@@ -82,6 +81,12 @@ function makeStream(deltas: string[], final: any) {
   };
 }
 
+/** `config` as it resolves when nothing sets a gateway URL — there is no default. */
+function withoutGatewayUrl(config: AiConfig): AiConfig {
+  const { gatewayUrl: _unset, ...rest } = config;
+  return rest;
+}
+
 describe('AiClient — @pkent/aigateway integration', () => {
   const tokenTracker = {
     addUsage: vi.fn(),
@@ -95,7 +100,7 @@ describe('AiClient — @pkent/aigateway integration', () => {
 
   beforeEach(() => {
     baseConfig = {
-      gatewayUrl: 'https://llm.corp.example',
+      gatewayUrl: 'https://broker.example',
       apiKey: 'test-key',
       model: 'aibroker/openai/chatgpt-5.5',
       maxInputTokens: 1_000_000,
@@ -118,12 +123,18 @@ describe('AiClient — @pkent/aigateway integration', () => {
     });
 
     it('builds the gateway with the bound model+key and { baseURL } for an aibroker/ model', async () => {
+      // Also the control for the gateway/ guard and the keyless backstop
+      // below: the default URL with an aibroker/ model and a key, and the
+      // request goes through untouched. A guard that matched both prefixes, or
+      // a key check that refused a real key, fails here.
       const client = new AiClient(baseConfig, tokenTracker as any);
-      await client.complete([{ role: 'user', content: 'Hi' }]);
+      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
 
+      expect(result.text).toBe('{}');
+      expect(chatMock).toHaveBeenCalledTimes(1);
       expect(constructorMock).toHaveBeenCalledTimes(1);
       expect(constructorMock).toHaveBeenCalledWith('aibroker/openai/chatgpt-5.5', 'test-key', {
-        baseURL: 'https://llm.corp.example/v1',
+        baseURL: 'https://broker.example/v1',
       });
     });
 
@@ -161,16 +172,28 @@ describe('AiClient — @pkent/aigateway integration', () => {
       expect(constructorMock).toHaveBeenCalledWith('openai/chatgpt-5.5', 'test-key', {});
     });
 
-    it('stays quiet for a direct model on the built-in gateway URL', async () => {
-      // Nobody chose that URL — it is the default every resolved config
-      // carries — so warning about it would fire on every ordinary run.
+    it('stays quiet for a direct model when no gateway URL is set — the default', async () => {
+      // The ordinary run: no URL anywhere, so there is nothing being ignored.
       const client = new AiClient(
-        { ...baseConfig, model: 'openai/chatgpt-5.5', gatewayUrl: `${DEFAULT_CONFIG.ai.gatewayUrl}/` },
+        { ...withoutGatewayUrl(baseConfig), model: 'openai/chatgpt-5.5' },
         tokenTracker as any,
       );
       await client.complete([{ role: 'user', content: 'Hi' }]);
 
       expect(logger.warn).not.toHaveBeenCalled();
+      expect(constructorMock).toHaveBeenCalledWith('openai/chatgpt-5.5', 'test-key', {});
+    });
+
+    it('logs a direct model as going to its provider, not to a gateway URL', async () => {
+      const client = new AiClient(
+        { ...withoutGatewayUrl(baseConfig), model: 'openai/chatgpt-5.5' },
+        tokenTracker as any,
+      );
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+
+      const debug = vi.mocked(logger.debug).mock.calls.map((c) => String(c[0])).join('\n');
+      expect(debug).toContain('POST openai (direct)');
+      expect(debug).not.toContain('/v1/chat/completions');
     });
 
     it('stays quiet for an aibroker/ model, where the URL is doing its job', async () => {
@@ -192,27 +215,12 @@ describe('AiClient — @pkent/aigateway integration', () => {
       await client.complete([{ role: 'user', content: 'Hi again' }]);
       expect(constructorMock).toHaveBeenCalledTimes(1);
     });
-
-    it('refuses the request rather than building a gateway with no key', async () => {
-      // It used to build one with `''` and let the gateway answer
-      // `invalid_api_key` (stories/keyless-replay-and-gateway-env.md §Part B):
-      // an auth error on a machine that was never meant to have a key.
-      const cfg = { ...baseConfig };
-      delete (cfg as Partial<AiConfig>).apiKey;
-      const client = new AiClient(cfg as AiConfig, tokenTracker as any);
-
-      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
-        AiNotConfiguredError,
-      );
-      expect(constructorMock).not.toHaveBeenCalled();
-    });
   });
 
   describe('gateway/ — the explicit-destination prefix', () => {
     // stories/copilot-lm-bridge.md §Part B. `gateway/` says what the mechanism
     // does — route to AI_GATEWAY_URL — where `aibroker/` names the hosted broker
-    // application. The alias routes identically; the one behavioural difference
-    // is that `gateway/` demands a URL somebody chose.
+    // application. The two route identically, and both demand a URL.
     const corp = 'https://llm.corp.example';
 
     it('builds the gateway with { baseURL } for a gateway/ model, model string verbatim', async () => {
@@ -252,28 +260,28 @@ describe('AiClient — @pkent/aigateway integration', () => {
       });
     });
 
-    it('refuses a gateway/ model when AI_GATEWAY_URL was never set, and sends nothing', async () => {
-      // The guard: the loader keeps no provenance, so "unset" is a value
-      // comparison against the built-in default. Refusing beats silently
-      // shipping the key and the DOM payload to the default host.
-      const client = new AiClient(
-        { ...baseConfig, model: 'gateway/copilot/gpt-4.1' },
-        tokenTracker as any,
-      );
+    it.each(['gateway/copilot/gpt-4.1', 'aibroker/openai/chatgpt-5.5'])(
+      'refuses %s when AI_GATEWAY_URL was never set, and sends nothing',
+      async (model) => {
+        // There is no built-in endpoint, so both routing prefixes need one set.
+        // Refusing beats building a client with nowhere chosen to send the key
+        // and the DOM payload.
+        const client = new AiClient({ ...withoutGatewayUrl(baseConfig), model }, tokenTracker as any);
 
-      await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
-        GatewayUrlRequiredError,
-      );
-      expect(constructorMock).not.toHaveBeenCalled();
-      expect(chatMock).not.toHaveBeenCalled();
-      expect(streamMock).not.toHaveBeenCalled();
-    });
+        await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
+          GatewayUrlRequiredError,
+        );
+        expect(constructorMock).not.toHaveBeenCalled();
+        expect(chatMock).not.toHaveBeenCalled();
+        expect(streamMock).not.toHaveBeenCalled();
+      },
+    );
 
     it('names AI_GATEWAY_URL and .env, and never AI_API_KEY, in the refusal', async () => {
       // A key is not the problem here, and naming one would send the reader to
       // edit a line that is already correct.
       const client = new AiClient(
-        { ...baseConfig, model: 'gateway/copilot/gpt-4.1' },
+        { ...withoutGatewayUrl(baseConfig), model: 'gateway/copilot/gpt-4.1' },
         tokenTracker as any,
       );
       await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toThrow(
@@ -285,13 +293,9 @@ describe('AiClient — @pkent/aigateway integration', () => {
       expect(GATEWAY_URL_REQUIRED_MESSAGE).not.toContain('AI_API_KEY');
     });
 
-    it('refuses a default URL that only differs by a trailing slash', async () => {
+    it('treats a blank URL as no URL', async () => {
       const client = new AiClient(
-        {
-          ...baseConfig,
-          model: 'gateway/copilot/gpt-4.1',
-          gatewayUrl: `${DEFAULT_CONFIG.ai.gatewayUrl}/`,
-        },
+        { ...baseConfig, model: 'gateway/copilot/gpt-4.1', gatewayUrl: '   ' },
         tokenTracker as any,
       );
       await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
@@ -300,26 +304,14 @@ describe('AiClient — @pkent/aigateway integration', () => {
       expect(constructorMock).not.toHaveBeenCalled();
     });
 
-    it('lets aibroker/ fall through to the default endpoint, guard or no guard', async () => {
-      // The case the guard must not break: `aibroker/` is the zero-config
-      // hosted-broker spelling, so the same config that refuses above proceeds
-      // here. Testing the refusal alone would not have caught a guard that
-      // matched both prefixes.
-      const client = new AiClient(
-        { ...baseConfig, model: 'aibroker/openai/chatgpt-5.5' },
-        tokenTracker as any,
-      );
-      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
-
-      expect(result.text).toBe('{}');
-      expect(constructorMock).toHaveBeenCalledWith('aibroker/openai/chatgpt-5.5', 'test-key', {
-        baseURL: 'https://llm.corp.example/v1',
-      });
-    });
+    // The case the guard must not break — a direct model with no URL goes
+    // straight to its provider — is the "no gateway URL is set" test under
+    // "construction". Testing the refusal alone would not catch a guard that
+    // matched every model.
 
     it('lets a gateway/ model through the moment a URL is chosen', async () => {
       const client = new AiClient(
-        { ...baseConfig, model: 'gateway/copilot/gpt-4.1' },
+        { ...withoutGatewayUrl(baseConfig), model: 'gateway/copilot/gpt-4.1' },
         tokenTracker as any,
       );
       await expect(client.complete([{ role: 'user', content: 'Hi' }])).rejects.toBeInstanceOf(
@@ -370,6 +362,11 @@ describe('AiClient — @pkent/aigateway integration', () => {
             'the machine key.)',
         );
         expect(AI_NOT_CONFIGURED_MESSAGE).toBe(new AiNotConfiguredError().message);
+        // Refused before a gateway is built at all. It used to build one with
+        // `''` and let the gateway answer `invalid_api_key`
+        // (stories/keyless-replay-and-gateway-env.md §Part B): an auth error on
+        // a machine that was never meant to have a key.
+        expect(constructorMock).not.toHaveBeenCalled();
         expect(chatMock).not.toHaveBeenCalled();
         expect(streamMock).not.toHaveBeenCalled();
       });
@@ -406,18 +403,9 @@ describe('AiClient — @pkent/aigateway integration', () => {
       expect(streamMock).not.toHaveBeenCalled();
     });
 
-    it('leaves a keyed client on exactly today\'s behaviour', async () => {
-      // The control the keyless cases are only meaningful against: one
-      // character of key and the request goes through untouched.
-      const client = new AiClient({ ...baseConfig, apiKey: 'k' }, tokenTracker as any);
-      const result = await client.complete([{ role: 'user', content: 'Hi' }]);
-
-      expect(result.text).toBe('{}');
-      expect(constructorMock).toHaveBeenCalledWith('aibroker/openai/chatgpt-5.5', 'k', {
-        baseURL: 'https://llm.corp.example/v1',
-      });
-      expect(chatMock).toHaveBeenCalledTimes(1);
-    });
+    // The control the keyless cases are only meaningful against — a keyed
+    // client whose request goes through untouched — is the aibroker/ test
+    // under "construction".
   });
 
   describe('setAiPolicy — the run-forbids-AI veil', () => {
@@ -701,19 +689,8 @@ describe('AiClient — @pkent/aigateway integration', () => {
   });
 
   describe('buildSignal — 120s timeout + instant stop', () => {
-    it('forwards a timeout-only AbortSignal when no run signal is passed', async () => {
-      let sawOpts: any;
-      chatImpl = async (_messages: any, opts: any) => {
-        sawOpts = opts;
-        return v2Response({ text: '{}', usage: { input_tokens: 1, output_tokens: 1 } });
-      };
-
-      const client = new AiClient(baseConfig, tokenTracker as any);
-      await client.complete([{ role: 'user', content: 'Hi' }]);
-
-      expect(sawOpts.signal).toBeInstanceOf(AbortSignal);
-      expect(sawOpts.signal.aborted).toBe(false);
-    });
+    // The timeout-only signal, with no run signal passed, is checked by the
+    // first non-streaming test above.
 
     it('forwards an AbortSignal.any combining the run signal with the timeout', async () => {
       let sawSignal: AbortSignal | undefined;
@@ -809,13 +786,6 @@ describe('AiClient — @pkent/aigateway integration', () => {
       );
     });
 
-    it('reports both a model AND key change together', () => {
-      const client = new AiClient(baseConfig, tokenTracker as any);
-      const change = client.syncAuth('openai/chatgpt-5.5', 'new-key');
-      expect(change).toBe('AI model aibroker/openai/chatgpt-5.5 → openai/chatgpt-5.5; AI API key changed');
-      expect(change).not.toContain('new-key');
-    });
-
     it('returns null, mutates nothing, and does NOT rebuild when model and key are unchanged', async () => {
       const client = new AiClient(baseConfig, tokenTracker as any);
       await client.complete([{ role: 'user', content: 'Hi' }]); // build once
@@ -836,11 +806,11 @@ describe('AiClient — @pkent/aigateway integration', () => {
       const client = new AiClient(baseConfig, tokenTracker as any);
       await client.complete([{ role: 'user', content: 'Hi' }]);
       expect(constructorMock).toHaveBeenCalledWith(baseConfig.model, 'test-key', {
-        baseURL: 'https://llm.corp.example/v1',
+        baseURL: 'https://broker.example/v1',
       });
 
       const change = client.syncAuth(baseConfig.model, baseConfig.apiKey, 'https://llm.corp.example');
-      expect(change).toBe('AI gateway https://llm.corp.example → https://llm.corp.example');
+      expect(change).toBe('AI gateway https://broker.example → https://llm.corp.example');
 
       await client.complete([{ role: 'user', content: 'Hi again' }]);
       expect(constructorMock).toHaveBeenCalledTimes(2);
@@ -862,8 +832,23 @@ describe('AiClient — @pkent/aigateway integration', () => {
       expect(constructorMock).toHaveBeenCalledTimes(1);
       // And the omitted form did not blank the config out from under the build.
       expect(constructorMock).toHaveBeenLastCalledWith(baseConfig.model, 'test-key', {
-        baseURL: 'https://llm.corp.example/v1',
+        baseURL: 'https://broker.example/v1',
       });
+    });
+
+    it('clears the URL on null, so a project that stops setting one stops using it', async () => {
+      // The server passes `null` when nothing resolves a URL. With no default to
+      // fall back to, keeping the old one would route a session somewhere its
+      // `.env` no longer says.
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      await client.complete([{ role: 'user', content: 'Hi' }]);
+
+      const change = client.syncAuth(baseConfig.model, baseConfig.apiKey, null);
+      expect(change).toBe('AI gateway https://broker.example → (none)');
+      await expect(client.complete([{ role: 'user', content: 'Hi again' }])).rejects.toBeInstanceOf(
+        GatewayUrlRequiredError,
+      );
+      expect(client.syncAuth(baseConfig.model, baseConfig.apiKey, null)).toBeNull();
     });
 
     it('reports a model, key AND gateway change together, without the key', () => {
@@ -876,7 +861,7 @@ describe('AiClient — @pkent/aigateway integration', () => {
       expect(change).toBe(
         'AI model aibroker/openai/chatgpt-5.5 → aibroker/openai/chatgpt-6; ' +
           'AI API key changed; ' +
-          'AI gateway https://llm.corp.example → https://llm.corp.example',
+          'AI gateway https://broker.example → https://llm.corp.example',
       );
       expect(change).not.toContain('new-key');
     });

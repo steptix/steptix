@@ -292,6 +292,29 @@ describe.runIf(process.platform === 'win32')('path-shaped session ids on win32',
   });
 });
 
+// The other side of the gate: on Linux two casings of a path are two files, so
+// they must stay two sessions — the win32 fold must not leak off win32. macOS
+// is left out on purpose: its default filesystem is case-insensitive, so which
+// answer is right there is a product question, not one for a test to settle
+// by pinning today's (CLAUDE.md: on macOS a test must not depend on case
+// either way).
+describe.runIf(process.platform === 'linux')('path-shaped session ids on Linux', () => {
+  it('two casings of one path are two sessions', async () => {
+    const lower = '/fake/aitests/checkout.md';
+    const upper = '/fake/aitests/Checkout.md';
+    await createSession(lower);
+    expect((await get(upper)).status).toBe(404);
+
+    await createSession(upper);
+    expect((await openIds()).filter((id) => id.toLowerCase() === lower)).toHaveLength(2);
+
+    // Closing one spelling leaves the other open.
+    await del(upper);
+    expect((await get(lower)).status).toBe(200);
+    await del(lower);
+  });
+});
+
 describe('non-path session ids', () => {
   it('stay case-sensitive on every platform', async () => {
     await createSession('MySession');

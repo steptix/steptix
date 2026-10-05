@@ -25,7 +25,7 @@
  * a sandboxed tool runner: a process spawned by one can enumerate windows and
  * get a screen DC but cannot blit from it, so `screen.grab()` fails with
  * BitBlt error 6 and every computer-mode step is blind (measured — spec §5.1
- * item 4). `--server=<url>` also has to match the `SERVER_URL` in
+ * item 4). `--server=<url>` also has to match the `STEPTIX_SERVER_URL` in
  * `templates/.env`, because the serial path is the one mode where the
  * extension and these assertions read the server's address from two
  * independent places (CLAUDE.md, "Live integration tests in a worktree").
@@ -51,7 +51,7 @@
  * surface. Step 10 runs after `[use browser]` and proves the tab was still
  * there.
  *
- * Prereqs: the API server on $LIVE_SERVER_URL, and the fixture app on :8787
+ * Prereqs: the API server on $LIVE_STEPTIX_SERVER_URL, and the fixture app on :8787
  * (runLiveTest.cjs boots it) serving `/statement.pdf`. The `before` hook
  * checks that last one by name — the fixture app is SHARED across worktrees
  * (first run in wins the port, later runs adopt it), so an app started from a
@@ -98,7 +98,7 @@ async function waitFor(label, predicate, timeoutMs = 60_000) {
 const PASSED = new Set(['pass', 'pass-code-behind', 'pass-stale']);
 const passed = (status) => PASSED.has(status);
 
-const serverUrl = () => process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+const serverUrl = () => process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
 
 async function activate() {
   const ext = vscode.extensions.getExtension(EXT_ID);

@@ -8,25 +8,43 @@
  * is what an older Steptix server whose Express 404s /health looks like — must
  * proceed on the legacy path instead.
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { createServer } from 'node:http';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
+import { createServer as createTcpServer, connect } from 'node:net';
+import { once } from 'node:events';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   AutoStartGuard,
+  compareVersions,
   decideServerAction,
   defaultHealthProbe,
   describeHealth,
   describeServerVersion,
+  findInstalledRuntime,
   isLoopbackUrl,
   readAutoStartSettings,
   readLogTail,
+  runtimeServeCommand,
   servePortOfCommand,
   startServerAndWait,
   HEALTH_SERVICE_ID,
 } from '../src/extension/server-manager.ts';
+
+/** A fresh temp dir, removed when the file is done. `maxRetries`: on Windows
+ *  antivirus or the indexer can still hold a file written moments ago, and
+ *  `force` does not cover EBUSY/EPERM. */
+const made = [];
+function tempDir(prefix) {
+  const dir = mkdtempSync(path.join(tmpdir(), prefix));
+  made.push(dir);
+  return dir;
+}
+after(() => {
+  for (const dir of made) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+});
 
 /** Stand up a throwaway http server; returns { url, close }. */
 async function stub(handler) {
@@ -38,6 +56,34 @@ async function stub(handler) {
   return {
     url: `http://127.0.0.1:${server.address().port}`,
     close: () => new Promise((r) => server.close(() => r())),
+  };
+}
+
+/**
+ * A loopback URL that refuses connections for as long as it is held: the local
+ * end of a client connection to a throwaway server. Nothing listens on that
+ * port, so a probe gets a genuine ECONNREFUSED — and unlike a port a stub just
+ * let go of, it stays in use until `release()`, so another listener cannot be
+ * handed it mid-test and answer in its place.
+ */
+async function refusingPort() {
+  const accepted = new Set();
+  const server = createTcpServer((socket) => {
+    socket.on('error', () => {});
+    accepted.add(socket);
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const client = connect(server.address().port, '127.0.0.1');
+  client.on('error', () => {});
+  await once(client, 'connect');
+  return {
+    url: `http://127.0.0.1:${client.localPort}`,
+    port: client.localPort,
+    release: async () => {
+      client.destroy();
+      for (const socket of accepted) socket.destroy();
+      await new Promise((r) => server.close(() => r()));
+    },
   };
 }
 
@@ -63,11 +109,19 @@ const json = (res, status, body) => {
 // defaultHealthProbe
 // ---------------------------------------------------------------------------
 
+/** The per-probe budget for every test that is not about the timeout. A
+ *  loopback round trip takes milliseconds, but the first `fetch` in the
+ *  process pays for undici's start-up and a loaded box can stall past a
+ *  second — and a budget that fires turns every arm below into `down`. It
+ *  only bounds a wait that ends early; the timeout itself is pinned at 50 ms
+ *  in its own test. */
+const PROBE_MS = 10_000;
+
 test('probe: our server reads as healthy and carries the inspector url', async () => {
   const s = await stub((_req, res) => json(res, 200, healthJson()));
   try {
-    const result = await defaultHealthProbe(s.url, 1000);
-    assert.equal(result.kind, 'healthy');
+    const result = await defaultHealthProbe(s.url, PROBE_MS);
+    assert.equal(result.kind, 'healthy', result.detail);
     assert.equal(result.health.inspector, 'ws://127.0.0.1:53012/abc');
     assert.equal(result.health.version, '1.2.3');
   } finally {
@@ -80,8 +134,8 @@ test('probe: inspector null survives as null, not undefined', async () => {
   // undefined means "no health data, use the settings".
   const s = await stub((_req, res) => json(res, 200, healthJson({ inspector: null })));
   try {
-    const result = await defaultHealthProbe(s.url, 1000);
-    assert.equal(result.kind, 'healthy');
+    const result = await defaultHealthProbe(s.url, PROBE_MS);
+    assert.equal(result.kind, 'healthy', result.detail);
     assert.equal(result.health.inspector, null);
   } finally {
     await s.close();
@@ -91,8 +145,8 @@ test('probe: inspector null survives as null, not undefined', async () => {
 test('probe: a different service is FOREIGN (never spawn on top of it)', async () => {
   const s = await stub((_req, res) => json(res, 200, JSON.stringify({ service: 'grafana' })));
   try {
-    const result = await defaultHealthProbe(s.url, 1000);
-    assert.equal(result.kind, 'foreign');
+    const result = await defaultHealthProbe(s.url, PROBE_MS);
+    assert.equal(result.kind, 'foreign', result.detail);
     assert.equal(result.service, 'grafana');
   } finally {
     await s.close();
@@ -102,8 +156,8 @@ test('probe: a different service is FOREIGN (never spawn on top of it)', async (
 test('probe: a 404 is UNKNOWN, not foreign — that is what an older Steptix server looks like', async () => {
   const s = await stub((_req, res) => json(res, 404, JSON.stringify({ error: 'Not Found' })));
   try {
-    const result = await defaultHealthProbe(s.url, 1000);
-    assert.equal(result.kind, 'unknown');
+    const result = await defaultHealthProbe(s.url, PROBE_MS);
+    assert.equal(result.kind, 'unknown', result.detail);
     assert.match(result.detail, /404/);
   } finally {
     await s.close();
@@ -116,41 +170,41 @@ test('probe: non-JSON and JSON-without-service are both UNKNOWN', async () => {
     res.end('<html>hi</html>');
   });
   try {
-    assert.equal((await defaultHealthProbe(s1.url, 1000)).kind, 'unknown');
+    const result = await defaultHealthProbe(s1.url, PROBE_MS);
+    assert.equal(result.kind, 'unknown', result.detail);
   } finally {
     await s1.close();
   }
 
   const s2 = await stub((_req, res) => json(res, 200, JSON.stringify({ ok: true })));
   try {
-    const result = await defaultHealthProbe(s2.url, 1000);
-    assert.equal(result.kind, 'unknown');
+    const result = await defaultHealthProbe(s2.url, PROBE_MS);
+    assert.equal(result.kind, 'unknown', result.detail);
     assert.match(result.detail, /service/);
   } finally {
     await s2.close();
   }
 });
 
-test('probe: nothing listening is DOWN', async () => {
-  const s = await stub(() => {});
-  await s.close();
-  const result = await defaultHealthProbe(s.url, 1000);
-  assert.equal(result.kind, 'down');
+test('probe: nothing listening is DOWN', async (t) => {
+  const gone = await refusingPort();
+  t.after(() => gone.release());
+  const result = await defaultHealthProbe(gone.url, PROBE_MS);
+  assert.equal(result.kind, 'down', result.detail);
 });
 
-test('probe: a DOWN detail names the refusal, not just "fetch failed"', async () => {
+test('probe: a DOWN detail names the refusal, not just "fetch failed"', async (t) => {
   // Node reports every transport failure as `TypeError: fetch failed` and
   // hides the reason on `cause`. The detail is what the run log prints for
   // "server down at <url> (<detail>)", so it has to carry the cause — the
   // port that refused — or the reader is left guessing which URL was tried
   // and why it did not answer.
-  const s = await stub(() => {});
-  await s.close();
-  const port = new URL(s.url).port;
-  const result = await defaultHealthProbe(s.url, 1000);
-  assert.equal(result.kind, 'down');
+  const gone = await refusingPort();
+  t.after(() => gone.release());
+  const result = await defaultHealthProbe(gone.url, PROBE_MS);
+  assert.equal(result.kind, 'down', result.detail);
   assert.match(result.detail, /ECONNREFUSED/);
-  assert.match(result.detail, new RegExp(`:${port}`));
+  assert.match(result.detail, new RegExp(`:${gone.port}`));
 });
 
 test('probe: a server that never answers is DOWN with a detail that says it timed out', async () => {
@@ -173,14 +227,14 @@ test('probe: a server that never answers is DOWN with a detail that says it time
   }
 });
 
-test('probe: a trailing slash on SERVER_URL does not produce //health', async () => {
+test('probe: a trailing slash on STEPTIX_SERVER_URL does not produce //health', async () => {
   let seen = null;
   const s = await stub((req, res) => {
     seen = req.url;
     json(res, 200, healthJson());
   });
   try {
-    await defaultHealthProbe(`${s.url}/`, 1000);
+    await defaultHealthProbe(`${s.url}/`, PROBE_MS);
     assert.equal(seen, '/health');
   } finally {
     await s.close();
@@ -208,10 +262,29 @@ test('probe: a caller abort ends it without needing AbortSignal.any', async () =
 // ---------------------------------------------------------------------------
 
 const noSleep = async () => {};
+/**
+ * Time that only the injected sleep moves, for the tests that are not about
+ * the budget. Wall time then plays no part — a loaded box that takes seconds
+ * over three probes cannot run the budget out — yet a loop that stopped
+ * ending on its answer would still use up the fake budget and fail. (A clock
+ * frozen at 0 would spin that loop forever on microtasks, past any test
+ * timeout.)
+ */
+function fakeTime() {
+  let clock = 0;
+  return {
+    sleep: async (ms) => {
+      clock += ms;
+    },
+    now: () => clock,
+  };
+}
 const config = (over = {}) => ({
   command: 'node server.js',
   cwd: '/repo',
-  readyTimeoutSeconds: 1,
+  // Far more polls than any test here needs, so the budget is never what
+  // ends a test that is not about it.
+  readyTimeoutSeconds: 60,
   ...over,
 });
 
@@ -259,7 +332,7 @@ test('start: spawns with the configured command/cwd/log and reports ready', asyn
         : { kind: 'healthy', health: { service: HEALTH_SERVICE_ID, inspector: 'ws://x:1/y' } };
     },
     spawn: (args) => calls.push(args),
-    sleep: noSleep,
+    ...fakeTime(),
   });
 
   assert.deepEqual(calls, [{ command: 'node server.js', cwd: '/repo', logPath: '/tmp/server.log' }]);
@@ -282,7 +355,7 @@ test('start: an unknown response keeps polling rather than giving up', async () 
         : { kind: 'healthy', health: { service: HEALTH_SERVICE_ID } };
     },
     spawn: () => {},
-    sleep: noSleep,
+    ...fakeTime(),
   });
   assert.equal(result.kind, 'ready');
   assert.ok(probes >= 3);
@@ -295,14 +368,14 @@ test('start: a foreign service taking the port mid-start stops the attempt', asy
     logPath: '/tmp/server.log',
     probe: async () => ({ kind: 'foreign', service: 'grafana' }),
     spawn: () => {},
-    sleep: noSleep,
+    ...fakeTime(),
   });
   assert.equal(result.kind, 'foreign');
   assert.equal(result.service, 'grafana');
 });
 
 test('start: a never-healthy server times out and quotes the log tail', async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'tb-log-'));
+  const dir = tempDir('tb-log-');
   const logPath = path.join(dir, 'server.log');
   writeFileSync(logPath, 'booting\nError: Cannot find module dist/index.js\n');
 
@@ -364,48 +437,49 @@ test('start: a spawn that throws is refused, not a timeout', async () => {
 
 const LOCAL = 'http://127.0.0.1:3100';
 const CONFIGURED = { command: 'node x.js', cwd: '/repo', readyTimeoutSeconds: 20 };
-/** Where the configured command listens — the same port as LOCAL. */
+/** Where the configured command listens — the same port as LOCAL. Passed as
+ *  the `servePortOf` seam so no test reads this machine's .env. */
 const SERVES_3100 = { ok: true, port: 3100, source: 'the default' };
+const serves = (servePort) => () => servePort;
+const noDiscovery = () => {
+  throw new Error('a command setting must not look for a runtime');
+};
 
 test('decide: healthy ⇒ proceed, carrying the health through', () => {
   const health = { service: HEALTH_SERVICE_ID, inspector: 'ws://x:1/y' };
-  const action = decideServerAction(LOCAL, { kind: 'healthy', health }, CONFIGURED, SERVES_3100);
+  const action = decideServerAction(LOCAL, { kind: 'healthy', health }, CONFIGURED);
   assert.equal(action.kind, 'proceed');
   assert.equal(action.health.inspector, 'ws://x:1/y');
 });
 
 test('decide: foreign ⇒ refuse, even when auto-start is configured', () => {
-  const action = decideServerAction(LOCAL, { kind: 'foreign', service: 'grafana' }, CONFIGURED, SERVES_3100);
+  const action = decideServerAction(LOCAL, { kind: 'foreign', service: 'grafana' }, CONFIGURED);
   assert.deepEqual(action, { kind: 'refuse-foreign', service: 'grafana' });
 });
 
 test('decide: unknown ⇒ legacy (never refuse, never spawn)', () => {
-  const action = decideServerAction(LOCAL, { kind: 'unknown', detail: 'HTTP 404' }, CONFIGURED, SERVES_3100);
+  const action = decideServerAction(LOCAL, { kind: 'unknown', detail: 'HTTP 404' }, CONFIGURED);
   assert.equal(action.kind, 'legacy');
 });
 
 test('decide: down + localhost + configured ⇒ spawn', () => {
-  const action = decideServerAction(LOCAL, { kind: 'down', detail: 'refused' }, CONFIGURED, SERVES_3100);
+  const action = decideServerAction(
+    LOCAL,
+    { kind: 'down', detail: 'refused' },
+    CONFIGURED,
+    noDiscovery,
+    serves(SERVES_3100),
+  );
   assert.equal(action.kind, 'spawn');
   assert.deepEqual(action.config, CONFIGURED);
 });
 
 test('decide: down + REMOTE url ⇒ skip, however configured', () => {
   // The rule the manual Start Server command used to be missing: starting a
-  // local server for a remote SERVER_URL produces one nothing will talk to.
-  const action = decideServerAction('http://build-box:3100', { kind: 'down', detail: 'refused' }, CONFIGURED, SERVES_3100);
+  // local server for a remote STEPTIX_SERVER_URL produces one nothing will talk to.
+  const action = decideServerAction('http://build-box:3100', { kind: 'down', detail: 'refused' }, CONFIGURED);
   assert.equal(action.kind, 'skip');
   assert.match(action.reason, /not a localhost URL/);
-});
-
-test('decide: down + no command ⇒ skip (auto-start is opt-in)', () => {
-  const action = decideServerAction(LOCAL, { kind: 'down', detail: 'refused' }, {
-    command: '',
-    cwd: '',
-    readyTimeoutSeconds: 20,
-  }, SERVES_3100);
-  assert.equal(action.kind, 'skip');
-  assert.match(action.reason, /serverAutoStart\.command/);
 });
 
 test('decide: down + the command would listen on another port ⇒ refuse-port, never spawn', () => {
@@ -415,14 +489,15 @@ test('decide: down + the command would listen on another port ⇒ refuse-port, n
     'http://localhost:3104',
     { kind: 'down', detail: 'refused' },
     CONFIGURED,
-    SERVES_3100,
+    noDiscovery,
+    serves(SERVES_3100),
   );
   assert.deepEqual(action, { kind: 'refuse-port', servePort: SERVES_3100 });
 });
 
 test('decide: down + the command would not start at all ⇒ refuse-port carrying why', () => {
-  const servePort = { ok: false, reason: 'SERVER_URL in /m/.env has no port: "http://x"' };
-  const action = decideServerAction(LOCAL, { kind: 'down', detail: 'refused' }, CONFIGURED, servePort);
+  const servePort = { ok: false, reason: 'STEPTIX_SERVER_URL in /m/.env has no port: "http://x"' };
+  const action = decideServerAction(LOCAL, { kind: 'down', detail: 'refused' }, CONFIGURED, noDiscovery, serves(servePort));
   assert.deepEqual(action, { kind: 'refuse-port', servePort });
 });
 
@@ -431,7 +506,8 @@ test('decide: a URL with no port is compared as its scheme default', () => {
     'http://localhost',
     { kind: 'down', detail: 'refused' },
     CONFIGURED,
-    { ok: true, port: 80, source: '-p' },
+    noDiscovery,
+    serves({ ok: true, port: 80, source: '-p' }),
   );
   assert.equal(action.kind, 'spawn');
 });
@@ -439,8 +515,81 @@ test('decide: a URL with no port is compared as its scheme default', () => {
 test('decide: a running server is used whatever port the command would pick', () => {
   // The port check only guards a spawn; it must never refuse a healthy server.
   const health = { service: HEALTH_SERVICE_ID };
-  const action = decideServerAction('http://localhost:3104', { kind: 'healthy', health }, CONFIGURED, SERVES_3100);
+  const asked = [];
+  const action = decideServerAction('http://localhost:3104', { kind: 'healthy', health }, CONFIGURED, noDiscovery, (c) => {
+    asked.push(c);
+    return SERVES_3100;
+  });
   assert.equal(action.kind, 'proceed');
+  assert.deepEqual(asked, [], 'the port is worked out only for a spawn');
+});
+
+const UNCONFIGURED = { command: '', cwd: '', readyTimeoutSeconds: 20, useInstalledRuntime: true };
+const DOWN = { kind: 'down', detail: 'refused' };
+const RUNTIMES_DIR = path.resolve(path.sep, 'lad', 'steptix', 'runtimes');
+const RUNTIME = { version: '1.0.0-beta.1', dir: path.join(RUNTIMES_DIR, '1.0.0-beta.1') };
+/** A discovery that finds `runtime`, counting how often it was asked. */
+function discovery(runtime) {
+  const fn = () => {
+    fn.calls++;
+    return { runtimesDir: RUNTIMES_DIR, runtime };
+  };
+  fn.calls = 0;
+  return fn;
+}
+
+test('decide: down + no command + no runtime installed ⇒ skip, naming where it looked', () => {
+  const action = decideServerAction(LOCAL, DOWN, UNCONFIGURED, discovery(null));
+  assert.equal(action.kind, 'skip');
+  assert.match(action.reason, /serverAutoStart\.command/);
+  assert.ok(action.reason.includes(RUNTIMES_DIR), action.reason);
+});
+
+test('decide: down + no command + a runtime installed ⇒ spawn that runtime on the URL\'s port', () => {
+  const action = decideServerAction('http://127.0.0.1:3207', DOWN, UNCONFIGURED, discovery(RUNTIME));
+  assert.equal(action.kind, 'spawn');
+  assert.deepEqual(action.runtime, RUNTIME);
+  assert.equal(action.config.cwd, RUNTIME.dir, 'the runtime starts in its own folder');
+  assert.equal(action.config.readyTimeoutSeconds, 20);
+  assert.match(action.config.command, /serve --port 3207 --idle-timeout 60$/);
+});
+
+test('decide: a command setting wins over an installed runtime, which is not even looked for', () => {
+  const discover = discovery(RUNTIME);
+  const action = decideServerAction(
+    LOCAL,
+    DOWN,
+    { ...CONFIGURED, useInstalledRuntime: true },
+    discover,
+    serves(SERVES_3100),
+  );
+  assert.equal(action.kind, 'spawn');
+  assert.deepEqual(action.config, CONFIGURED);
+  assert.equal(action.runtime, undefined);
+  assert.equal(discover.calls, 0);
+});
+
+test('decide: the installed runtime is never port-checked — its command passes the URL\'s port', () => {
+  const action = decideServerAction('http://127.0.0.1:3207', DOWN, UNCONFIGURED, discovery(RUNTIME), () => {
+    throw new Error('the runtime command must not be port-checked');
+  });
+  assert.equal(action.kind, 'spawn');
+});
+
+test('decide: useInstalledRuntime off ⇒ skip, however many runtimes are installed', () => {
+  const discover = discovery(RUNTIME);
+  const action = decideServerAction(LOCAL, DOWN, { ...UNCONFIGURED, useInstalledRuntime: false }, discover);
+  assert.equal(action.kind, 'skip');
+  assert.match(action.reason, /useInstalledRuntime/);
+  assert.equal(discover.calls, 0);
+});
+
+test('decide: a healthy server costs no runtime scan, and a REMOTE url never starts the runtime', () => {
+  const discover = discovery(RUNTIME);
+  decideServerAction(LOCAL, { kind: 'healthy', health: { service: HEALTH_SERVICE_ID } }, UNCONFIGURED, discover);
+  const remote = decideServerAction('http://build-box:3100', DOWN, UNCONFIGURED, discover);
+  assert.equal(remote.kind, 'skip');
+  assert.equal(discover.calls, 0);
 });
 
 /** Point the machine `.env` at a temp dir for `fn`, holding `content` (or no file). */
@@ -460,11 +609,12 @@ function withMachineEnv(content, fn) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
   }
 }
 
 test('servePortOfCommand: a -p / --port after serve wins, in every spelling', () => {
-  withMachineEnv('SERVER_URL=http://127.0.0.1:3200\n', () => {
+  withMachineEnv('STEPTIX_SERVER_URL=http://127.0.0.1:3200\n', () => {
     for (const command of [
       'node dist/index.js serve -p 3104 --idle-timeout 60',
       'node dist/index.js serve --port 3104',
@@ -490,23 +640,112 @@ test('servePortOfCommand: a launcher flag before serve is not the server port', 
   });
 });
 
-test('servePortOfCommand: no -p ⇒ the machine SERVER_URL port, else 3100', () => {
+test('servePortOfCommand: no -p ⇒ the machine STEPTIX_SERVER_URL port, else 3100', () => {
   const bare = 'node --inspect=0 dist/index.js serve --idle-timeout 60';
   withMachineEnv(null, () => {
     assert.deepEqual(servePortOfCommand(bare), { ok: true, port: 3100, source: 'the default' });
   });
-  withMachineEnv('SERVER_URL=http://localhost:3200\n', (envPath) => {
+  withMachineEnv('STEPTIX_SERVER_URL=http://localhost:3200\n', (envPath) => {
     assert.deepEqual(servePortOfCommand(bare), {
       ok: true,
       port: 3200,
-      source: `SERVER_URL in ${envPath}`,
+      source: `STEPTIX_SERVER_URL in ${envPath}`,
     });
   });
-  withMachineEnv('SERVER_URL=http://localhost\n', () => {
+  withMachineEnv('STEPTIX_SERVER_URL=http://localhost\n', () => {
     const result = servePortOfCommand(bare);
     assert.equal(result.ok, false);
     assert.match(result.reason, /has no port/);
   });
+});
+
+// ---------------------------------------------------------------------------
+// The installed runtime
+// ---------------------------------------------------------------------------
+
+/** A runtimes folder holding `versions`, each with the files named (default:
+ *  everything a startable runtime has on any platform). */
+function runtimesFolder(versions, files = ['runtime-launcher.cjs', 'server/dist/index.js', 'steptix.cmd']) {
+  const dir = tempDir('steptix-runtimes-');
+  for (const version of versions) {
+    for (const file of files) {
+      const full = path.join(dir, version, ...file.split('/'));
+      mkdirSync(path.dirname(full), { recursive: true });
+      writeFileSync(full, '');
+    }
+  }
+  return dir;
+}
+
+test('runtime: the newest version wins, by semver rather than by spelling', () => {
+  const dir = runtimesFolder(['1.0.0-beta.2', '1.0.0-beta.10', '0.9.0', '1.0.0-alpha.3']);
+  const runtime = findInstalledRuntime(dir);
+  assert.deepEqual(runtime, { version: '1.0.0-beta.10', dir: path.join(dir, '1.0.0-beta.10') });
+});
+
+test('runtime: a release outranks its prereleases', () => {
+  const dir = runtimesFolder(['1.0.0-beta.1', '1.0.0', '1.0.0-rc.1']);
+  assert.equal(findInstalledRuntime(dir).version, '1.0.0');
+});
+
+test('runtime: a folder missing a launch file is skipped — the leftovers of an unfinished uninstall', () => {
+  const dir = runtimesFolder(['1.0.0-beta.1']);
+  // A newer folder an uninstall could not finish removing: its server is gone.
+  mkdirSync(path.join(dir, '1.0.0-beta.2'), { recursive: true });
+  writeFileSync(path.join(dir, '1.0.0-beta.2', 'runtime-launcher.cjs'), '');
+  assert.equal(findInstalledRuntime(dir).version, '1.0.0-beta.1');
+});
+
+test('runtime: steptix.cmd is required on Windows only', () => {
+  const dir = runtimesFolder(['1.0.0'], ['runtime-launcher.cjs', 'server/dist/index.js']);
+  assert.equal(findInstalledRuntime(dir, 'win32'), null);
+  assert.equal(findInstalledRuntime(dir, 'linux').version, '1.0.0');
+  assert.equal(findInstalledRuntime(dir, 'darwin').version, '1.0.0');
+});
+
+test('runtime: no runtimes folder at all is null, not a throw', () => {
+  assert.equal(findInstalledRuntime(path.join(tmpdir(), 'steptix-no-such-runtimes-dir')), null);
+});
+
+test('compareVersions: semver precedence, and names that are not versions sort first', () => {
+  const sorted = ['1.0.0', 'scratch', '1.0.0-beta.2', '1.0.0-beta', '0.10.0', '1.0.0-beta.11', '0.9.9', '1.0.0-beta.alpha']
+    .sort(compareVersions);
+  assert.deepEqual(sorted, [
+    'scratch',
+    '0.9.9',
+    '0.10.0',
+    '1.0.0-beta',
+    '1.0.0-beta.2',
+    '1.0.0-beta.11',
+    '1.0.0-beta.alpha',
+    '1.0.0',
+  ]);
+});
+
+test('runtime command: Windows goes through steptix.cmd, quoted for a path with spaces', () => {
+  const runtime = { version: '1.0.0', dir: path.join(tmpdir(), 'local app data', 'steptix', 'runtimes', '1.0.0') };
+  assert.equal(
+    runtimeServeCommand(runtime, 'http://localhost:3100', { platform: 'win32' }),
+    `"${path.join(runtime.dir, 'steptix.cmd')}" serve --port 3100 --idle-timeout 60`,
+  );
+});
+
+test('runtime command: elsewhere the launcher runs under Node — STEPTIX_NODE when set, as steptix.cmd does', () => {
+  const runtime = { version: '1.0.0', dir: path.join(tmpdir(), "it's here", '1.0.0') };
+  const launcher = path.join(runtime.dir, 'runtime-launcher.cjs').replace(/'/g, `'\\''`);
+  assert.equal(
+    runtimeServeCommand(runtime, 'http://127.0.0.1:3200/', { platform: 'linux', env: {} }),
+    `'node' '${launcher}' serve --port 3200 --idle-timeout 60`,
+  );
+  assert.equal(
+    runtimeServeCommand(runtime, 'http://127.0.0.1:3200', { platform: 'darwin', env: { STEPTIX_NODE: '/opt/node 22/bin/node' } }),
+    `'/opt/node 22/bin/node' '${launcher}' serve --port 3200 --idle-timeout 60`,
+  );
+});
+
+test('runtime command: a URL with no port starts the server on its scheme\'s', () => {
+  const runtime = { version: '1.0.0', dir: path.join(tmpdir(), '1.0.0') };
+  assert.match(runtimeServeCommand(runtime, 'http://localhost', { platform: 'linux', env: {} }), /--port 80 /);
 });
 
 test('isLoopbackUrl accepts both IPv6 loopback spellings', () => {
@@ -591,7 +830,7 @@ const cfg = (values) => ({
   get: (key, fallback) => (key in values ? values[key] : fallback),
 });
 
-test('settings: values are trimmed and a bad timeout falls back to 20s', () => {
+test('settings: values are trimmed and a bad timeout falls back to 60s', () => {
   assert.deepEqual(
     readAutoStartSettings(
       cfg({
@@ -600,19 +839,24 @@ test('settings: values are trimmed and a bad timeout falls back to 20s', () => {
         'serverAutoStart.readyTimeoutSeconds': -1,
       }),
     ),
-    { command: 'node x.js', cwd: '/repo', readyTimeoutSeconds: 20 },
+    { command: 'node x.js', cwd: '/repo', readyTimeoutSeconds: 60, useInstalledRuntime: true },
   );
 });
 
-test('settings: everything unset means auto-start is off', () => {
+test('settings: everything unset means no command, and the installed runtime is used', () => {
   const settings = readAutoStartSettings(cfg({}));
   assert.equal(settings.command, '');
   assert.equal(settings.cwd, '');
-  assert.equal(settings.readyTimeoutSeconds, 20);
+  assert.equal(settings.readyTimeoutSeconds, 60);
+  assert.equal(settings.useInstalledRuntime, true);
+  assert.equal(
+    readAutoStartSettings(cfg({ 'serverAutoStart.useInstalledRuntime': false })).useInstalledRuntime,
+    false,
+  );
 });
 
 test('log tail: reads only the end of a large file', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'tb-log2-'));
+  const dir = tempDir('tb-log2-');
   const logPath = path.join(dir, 'server.log');
   // 3 MB of noise plus a distinctive final line — the tail must not depend on
   // reading the whole file, which can be 5 MB by design.
@@ -622,7 +866,7 @@ test('log tail: reads only the end of a large file', () => {
 });
 
 test('log tail: a missing or empty log yields undefined, never a throw', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'tb-log3-'));
+  const dir = tempDir('tb-log3-');
   assert.equal(readLogTail(path.join(dir, 'nope.log')), undefined);
   const empty = path.join(dir, 'empty.log');
   writeFileSync(empty, '');
@@ -646,6 +890,7 @@ test('the serverAutoStart settings are machine-scoped in contributes.configurati
     'steptix.serverAutoStart.command',
     'steptix.serverAutoStart.cwd',
     'steptix.serverAutoStart.readyTimeoutSeconds',
+    'steptix.serverAutoStart.useInstalledRuntime',
   ]) {
     assert.ok(props[key], `${key} must be declared`);
     assert.equal(props[key].scope, 'machine', `${key} must be machine-scoped`);
@@ -653,12 +898,11 @@ test('the serverAutoStart settings are machine-scoped in contributes.configurati
 });
 
 test('log tail: does not include the whole file when it is short', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'tb-log4-'));
+  const dir = tempDir('tb-log4-');
   const logPath = path.join(dir, 'server.log');
   writeFileSync(logPath, ['a', 'b', 'c', 'd', 'e', 'f', 'g'].join('\n'));
   const tail = readLogTail(logPath);
-  assert.equal(tail, 'c | d | e | f | g'); // last 5 lines
-  assert.equal(readFileSync(logPath, 'utf8').includes('a'), true);
+  assert.equal(tail, 'c | d | e | f | g'); // last 5 lines; a and b are dropped
 });
 
 test('describeServerVersion: the commit after the version, and modified for uncommitted changes', () => {
@@ -676,5 +920,9 @@ test('describeHealth: the headline names the build', () => {
     kind: 'healthy',
     health: { service: HEALTH_SERVICE_ID, version: '1.0.0-beta.1', commit: 'b700473', modified: true },
   });
-  assert.equal(headline, `Steptix server on ${LOCAL} — v1.0.0-beta.1 (b700473, modified)`);
+  // The build as describeServerVersion spells it (all four forms are pinned
+  // above), and the URL it was found on. The words around them are free to
+  // change: no doc or spec quotes this sentence.
+  assert.match(headline, /v1\.0\.0-beta\.1 \(b700473, modified\)/);
+  assert.ok(headline.includes(LOCAL), headline);
 });

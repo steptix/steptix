@@ -389,7 +389,6 @@ test('Ctrl+Z after a revert brings back a draft from before the recording starte
 // ---------------------------------------------------------------------------
 
 test('an unfinished recording is taken back out exactly — and not at all once its lines were edited', () => {
-  assert.equal(typeof core.removeUnfinishedRecording, 'function');
   const s = new Session(FIXTURE, '2. Click Sign in');
   s.write({ ...D2, parameters: PW });
   const kept = JSON.parse(JSON.stringify(core.unfinishedRecordingOf(s.live)));

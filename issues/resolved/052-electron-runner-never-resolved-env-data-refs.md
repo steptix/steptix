@@ -41,7 +41,7 @@ Checked against the tree:
 
 1. **The parser only ever resolved `${…}` when the caller handed it a
    context.** `parseTestFile` has gated the whole env/data pass on
-   `options.envData` since the commit that introduced it (`22d9dcb`), and
+   `options.envData` since the commit that introduced it (`1714ff0`), and
    the adapter's call has been `parseTestFile(filePath, { skillsDir })` —
    no context — since that same commit. So for this runner there was never
    a rewrite to lose: no validation, no `dataSources`, no hook or parameter
@@ -178,7 +178,7 @@ overclaims. Each was reproduced before it was acted on.
    is for. `resolveStepText` is now in the canary's name list, so its
    callers count.
 
-Checked and found true: the diagnosis at 22d9dcb; that this runner runs no
+Checked and found true: the diagnosis at 1714ff0; that this runner runs no
 hooks; that the Set threading is live; that a test step cannot reach the
 steer refusal, because the parse validates its references first; that the
 two-pass parse is no worse than the CLI's; and that the test exercises the

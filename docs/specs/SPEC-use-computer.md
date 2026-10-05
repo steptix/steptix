@@ -1035,7 +1035,7 @@ a settings toggle — with no zoom needed for those. The model reached for
 `zoom` twice on its own, both times to read small text (an address bar and a
 download bubble) while diagnosing why a dialog had not appeared.
 
-**A defect the first attempt found, fixed in 7494518:** after
+**A defect the first attempt found, fixed in 1e5f72c:** after
 `focus_window` succeeded on turn 1 the next turn showed the same step and the
 same screen with no record of the action, so the model repeated it until the
 stall detector ended the step. Each attempt now carries an "Actions already
@@ -1059,7 +1059,8 @@ rather than the framework:
 2. Against that real Chrome the dialog still did not appear, before AND after
    the "Ask where to save each file before downloading" setting was turned
    on. The setting was turned on by the framework itself:
-   `templates/init/tests/chrome-ask-where-to-save.md` ran 7/7 in 60 s on the
+   a `chrome-ask-where-to-save.md` test (since removed: it changed a real
+   Chrome setting) ran 7/7 in 60 s on the
    computer surface alone — no browser launched, Chrome focused by title,
    Ctrl+L, the URL typed, the toggle judged off from the screenshot by an
    `If … then` condition and clicked, the assertion held. Why the PDF viewer

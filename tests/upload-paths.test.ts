@@ -245,13 +245,16 @@ describe('a rooted path', () => {
   });
 
   it.runIf(posix)('on POSIX, still fences an absolute path outside the project', async () => {
-    const outside = path.join(os.tmpdir(), 'steptix-upload-outside.png');
+    // A folder of this run's own: a fixed name in the shared temp folder is
+    // one another run on the machine can delete mid-test.
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-upload-outside-'));
+    const outside = path.join(dir, 'outside.png');
     await fs.writeFile(outside, 'png-bytes');
     try {
       const result = await resolveUploadPaths([outside], ctx);
       expect(err(result)).toContain('outside the project folder');
     } finally {
-      await fs.rm(outside, { force: true });
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 

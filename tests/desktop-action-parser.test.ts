@@ -417,12 +417,10 @@ describe('parseComputerActions — the envelope (mirrors the page parser)', () =
     expect(parseComputerActions('{"actions":{"action":"noop"}}').actions).toHaveLength(1);
   });
 
-  it('strips a markdown code fence', () => {
-    expect(
-      parseComputerActions('```json\n{"action":"click","x":1,"y":2}\n```').actions,
-    ).toHaveLength(1);
-  });
-
+  // Fences, prose around the JSON and a response with no JSON at all are
+  // `extractJson`'s, shared by import with the page parser and tested there
+  // (action-parser.test.ts). One case proves the seam — the one that decides
+  // which click runs.
   it('takes the FIRST JSON value when an indecisive model emits two', () => {
     const parsed = parseComputerActions(
       '{"action":"click","x":1,"y":2}\n{"actions":[{"action":"click","x":9,"y":9}]}',
@@ -431,18 +429,8 @@ describe('parseComputerActions — the envelope (mirrors the page parser)', () =
     expect(parsed.actions[0]).toMatchObject({ x: 1, y: 2 });
   });
 
-  it('ignores prose before the JSON', () => {
-    expect(
-      parseComputerActions('Sure — here you go:\n{"action":"noop"}').actions,
-    ).toHaveLength(1);
-  });
-
   it('defaults the reasoning when the model gave none', () => {
     expect(parseComputerActions('{"action":"noop"}').reasoning).toBe('No reasoning provided');
-  });
-
-  it('throws when the response holds no JSON at all', () => {
-    expect(() => parseComputerActions('I cannot see the screen.')).toThrow(/No JSON object/);
   });
 
   it('throws when the JSON is malformed', () => {

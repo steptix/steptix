@@ -217,8 +217,21 @@ let client: Client;
 let tmpDir: string;
 let testFilePath: string;
 let previousRoots: string | undefined;
+/** The user root this file resolves against, and the values it displaced. */
+let userRootTmp: string;
+const savedUserRoot: Record<string, string | undefined> = {};
 
 beforeAll(async () => {
+  // Every `resolveProject` reads the machine key from the user root's `.env`
+  // and confines paths against that root, so point it into an empty tmp dir —
+  // this machine's real %LOCALAPPDATA%\steptix must not decide an outcome here.
+  // LOCALAPPDATA is what win32 reads, XDG_CONFIG_HOME what everything else does.
+  userRootTmp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-seam-user-root-')));
+  for (const key of ['LOCALAPPDATA', 'XDG_CONFIG_HOME'] as const) {
+    savedUserRoot[key] = process.env[key];
+    process.env[key] = userRootTmp;
+  }
+
   const { app } = createApiServer(cfg);
   server = createServer(app);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
@@ -226,13 +239,13 @@ beforeAll(async () => {
   if (typeof addr !== 'object' || addr === null) throw new Error('no port');
   const baseUrl = `http://127.0.0.1:${addr.port}`;
 
-  // Ordering matters: the project's .env carries SERVER_URL, and the port only
+  // Ordering matters: the project's .env carries STEPTIX_SERVER_URL, and the port only
   // exists once the server is listening. Writing the fixture first would bake
   // in a port nobody is on.
   tmpDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-seam-')));
   await fs.writeFile(
     path.join(tmpDir, '.env'),
-    `SERVER_URL=${baseUrl}\nSTEPTIX_SERVER_API_KEY=${API_KEY}\nAI_API_KEY=project-ai-key\nAI_MODEL=project-model\n`,
+    `STEPTIX_SERVER_URL=${baseUrl}\nSTEPTIX_SERVER_API_KEY=${API_KEY}\nAI_API_KEY=project-ai-key\nAI_MODEL=project-model\n`,
   );
   // The environment overlay, so `${env.GREETING}` has something to resolve to
   // — and resolving it is the evidence that `envName` survived the wire.
@@ -269,9 +282,11 @@ beforeAll(async () => {
     createApiClient,
     // The server is already up; this test is about the request path.
     ensureServerReady: async () => {},
-    // The real app under test is a bare `createApiServer`, which serves no
-    // /health route through this harness — so the identity probe would refuse
-    // a server we know is ours.
+    // Never called: `withProject` only reaches this dep when a tool passes
+    // `autoStart: false` (none does), and the one tool that calls it directly
+    // is `get_run_settings`, which this suite never drives. It is here because
+    // `McpDeps` requires it — the /health route it would probe IS served by
+    // this app, `createApiServer` registering it unconditionally.
     assertServerRecognized: async () => {},
     resolveProject,
   });
@@ -283,10 +298,16 @@ beforeAll(async () => {
 afterAll(async () => {
   if (previousRoots === undefined) delete process.env['STEPTIX_MCP_ROOTS'];
   else process.env['STEPTIX_MCP_ROOTS'] = previousRoots;
+  for (const [key, value] of Object.entries(savedUserRoot)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   await client?.close();
   await new Promise<void>((r) => server?.close(() => r()));
   resetRegistry();
-  await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  for (const dir of [tmpDir, userRootTmp]) {
+    if (dir) await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).catch(() => {});
+  }
 });
 
 describe('run_test_file over the real HTTP seam', () => {

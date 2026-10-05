@@ -73,6 +73,8 @@ const HALF_WRITTEN = doc(
 );
 
 test('every table is found: the run table first, then each section’s', () => {
+  // Exact row lines: each header and its delimiter (4/5, 13/14) are not rows,
+  // so they never take a status.
   assert.deepEqual(
     dataTablesOf(BOTH).map((t) => [t.kind, t.section, t.headerLine, t.rowLines]),
     [
@@ -82,27 +84,11 @@ test('every table is found: the run table first, then each section’s', () => {
   );
 });
 
-test('the header and the delimiter are not rows — they never take a status', () => {
-  const rowLines = dataTablesOf(BOTH).flatMap((t) => t.rowLines);
-  assert.deepEqual(rowLines, [6, 7, 15]);
-  for (const line of [4, 5, 13, 14]) {
-    assert.ok(!rowLines.includes(line), `line ${line} must not be paintable`);
-  }
-});
-
-test('…but they DO reserve the same invisible cell, or the pipes stop lining up', () => {
+test('the header and delimiter DO reserve the same invisible cell, or the pipes stop lining up', () => {
   // The bug this pins: rows get a 1.2em `before` and the header does not, so
   // every data row is indented relative to its own header, in every
   // data-driven file, run or not.
   assert.deepEqual(alignmentLinesOf(dataTablesOf(BOTH)), [4, 5, 13, 14]);
-});
-
-test('the reserved lines and the row lines never overlap', () => {
-  const tables = dataTablesOf(BOTH);
-  const rows = new Set(tables.flatMap((t) => t.rowLines));
-  for (const line of alignmentLinesOf(tables)) {
-    assert.ok(!rows.has(line), `line ${line} cannot both reserve and take a status`);
-  }
 });
 
 test('a file with no table reserves nothing and paints nothing', () => {

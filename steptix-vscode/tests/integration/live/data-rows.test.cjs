@@ -22,7 +22,7 @@
  * rows it did not select keep the ✓ scenario 1 left, and scenario 3 runs on
  * the session scenario 2 left open. Mocha runs `it`s in declaration order.
  *
- * Prereq: the API server running at $LIVE_SERVER_URL (the parallel runner
+ * Prereq: the API server running at $LIVE_STEPTIX_SERVER_URL (the parallel runner
  * starts one per shard and points the shard's templates/.env at it), and the
  * fixture app on :8787 (runLiveTest.cjs boots it).
  */
@@ -30,6 +30,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
 const vscode = require('vscode');
+const { serverApiKey } = require('./credentials.cjs');
 
 const EXT_ID = 'pkent.steptix-vscode';
 
@@ -127,14 +128,6 @@ function reportsIn(workspaceRoot) {
   return fs.readdirSync(dir).filter((f) => f.endsWith('.html'));
 }
 
-/** `STEPTIX_SERVER_API_KEY` from the (shard's) workspace .env. */
-function apiKeyFrom(workspaceRoot) {
-  const envPath = path.resolve(workspaceRoot, '.env');
-  const text = fs.readFileSync(envPath, 'utf8');
-  const m = /^\s*STEPTIX_SERVER_API_KEY\s*=\s*(.+)$/m.exec(text);
-  return m ? m[1].trim().replace(/^["']|["']$/g, '') : '';
-}
-
 /** The server's own view of its live sessions. */
 async function listSessions(serverUrl, apiKey) {
   const res = await fetch(`${serverUrl}/sessions`, { headers: { 'x-api-key': apiKey } });
@@ -165,7 +158,7 @@ async function openTestFile(hooks, workspaceRoot, name) {
   return uri;
 }
 
-const serverUrl = () => process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+const serverUrl = () => process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
 
 async function activate() {
   const ext = vscode.extensions.getExtension(EXT_ID);
@@ -391,7 +384,7 @@ describe('Steptix live — a run-level data table', function () {
   it('rows 1-2 with step 2 selected runs the step twice, on the session it is on', async function () {
     this.timeout(420_000);
 
-    const apiKey = apiKeyFrom(workspaceRoot);
+    const apiKey = serverApiKey(workspaceRoot);
     const sessionsBefore = await listSessions(serverUrl(), apiKey);
     say(`sessions before: ${JSON.stringify(
         sessionsBefore.map((s) => [s.sessionId, s.totalStepsExecuted, s.tab?.targetId]),
@@ -695,7 +688,7 @@ describe('Steptix live — a selection narrows a section\'s body', function () {
   it('runs the flow once, for row 2, entering only the password', async function () {
     this.timeout(300_000);
 
-    const apiKey = apiKeyFrom(workspaceRoot);
+    const apiKey = serverApiKey(workspaceRoot);
     const tap = startOutputTap(hooks);
     const editor = vscode.window.activeTextEditor;
     // Three ranges, the gesture the story describes: drag the main flow,
@@ -767,7 +760,7 @@ describe('Steptix live — a selection narrows a section\'s body', function () {
 
     // Both narrowings said out loud, in the same voice.
     assert.ok(
-      tap.output.includes('Log In — running body steps 2 of 2'),
+      tap.output.includes('Log In — running body step 2 of 2'),
       `expected the body narrowing line. Got:\n${tap.output
         .filter((l) => l.startsWith('Log In —'))
         .join('\n')}`,

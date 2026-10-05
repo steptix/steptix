@@ -9,41 +9,246 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
-### Changed — a test runs without a `.env`; one default server per machine
+### Changed — one default server per machine: `serve`, MCP and the CLI agree
 
-A Markdown file with a `## Steps` heading now runs in Steptix with no `.env`
-and no `steptix.config.json` around it. When nothing names a server, every
-client and `steptix serve` itself use the same one: `SERVER_URL` in the machine
-`.env` (`%LOCALAPPDATA%\steptix\.env`, `~/.steptix/.env` elsewhere), else
-`http://127.0.0.1:3100`. See
+Steptix already runs a test with no `.env`: it uses `STEPTIX_SERVER_URL`
+from the machine `.env` (`%LOCALAPPDATA%\steptix\.env`, `~/.steptix/.env`
+elsewhere), else `http://127.0.0.1:3100`. The rest of Steptix now uses the
+same server, so nothing has to say which one. See
 [stories/machine-server-url.md](stories/machine-server-url.md).
 
-- **`steptix serve`** listens on `-p`, else that machine `SERVER_URL`'s port,
-  else 3100. A project's files never decide it any more: `server.port` in
-  `steptix.config.json` is ignored with a warning (delete it), and the schema
-  flags it. A taken port now exits naming the port and where it came from; a
-  machine `SERVER_URL` with no port stops `serve` before it binds.
-- **Steptix** falls back to the machine `SERVER_URL`, then the default, when
-  a test has no project `.env` or its `.env` has no `SERVER_URL`. STX001 and
-  STX002 are retired. The run log names where the URL came from. The server
-  status bar item now shows in every open folder.
+- **`steptix serve`** listens on `-p`, else that machine
+  `STEPTIX_SERVER_URL`'s port, else 3100. A project's files no longer decide
+  the port: `server.port` in `steptix.config.json` is ignored with a warning
+  (delete it), and the schema flags it. A taken port now exits naming the port
+  and where it came from. A machine `STEPTIX_SERVER_URL` with no port stops
+  `serve` before it binds.
 - **Auto-start** no longer starts a server on a port the run will not connect
-  to: when `serverAutoStart.command` would listen elsewhere, Run fails with the
-  new **STX033**, naming both ports, instead of timing out with STX028 and
-  leaving a stray server behind.
+  to. When `steptix.serverAutoStart.command` would listen elsewhere, Run fails
+  with the new **STX033**, naming both ports. Before, it timed out with STX028
+  and left a stray server behind. The installed runtime is not affected: it is
+  always started on the run's port.
 - **MCP**: a project-less call defaults to `http://127.0.0.1:3100` instead of
-  3141, and a project `.env` without `SERVER_URL` falls back the same way
-  instead of being refused.
+  3141. A project `.env` without `STEPTIX_SERVER_URL` now falls back the same
+  way instead of being refused.
 - **`steptix status` / `steptix stop`** look at `--url`, else the machine
-  `SERVER_URL`, else port 3100 on the config's `server.host`.
+  `STEPTIX_SERVER_URL`, else port 3100 on the config's `server.host`.
 - **Linux and macOS:** the machine folder (`$XDG_CONFIG_HOME/steptix` or
-  `~/.steptix`) is now private, as `%LOCALAPPDATA%` already is on Windows.
-  It is created `0700` and the key file `0600`, an existing `.env` is set
-  `0600` before the key is added to it, and reading one other users can read
-  warns once with the `chmod 600` command — from the CLI, the server and MCP,
-  and in Steptix's run log.
+  `~/.steptix`) is now private, as `%LOCALAPPDATA%` already is on Windows:
+  - It is created `0700` and the key file `0600`.
+  - An existing `.env` is set `0600` before the key is added to it.
+  - Reading a `.env` other users can read warns once with the `chmod 600`
+    command: from the CLI, the server and MCP, and in Steptix's run log.
 
-Steptix extension 0.5.167.
+Steptix extension 0.5.173.
+
+### Changed — `SERVER_URL` is now `STEPTIX_SERVER_URL`
+
+The variable that names the Steptix server is now `STEPTIX_SERVER_URL`, so it
+cannot be mistaken for some other server's address. It matches
+`STEPTIX_SERVER_API_KEY` beside it. It is read from the same places as before:
+the project's `.env` or `.env.<name>`, the environment, and the machine `.env`
+(`%LOCALAPPDATA%\steptix\.env`, `~/.steptix/.env` elsewhere). Error messages,
+the MCP server's usage text and the runtime's readme use the new name too
+(extension 0.5.170).
+
+There is no fallback to the old name. A `SERVER_URL` line is ignored: the VS
+Code extension and the MCP server then use the default,
+`http://127.0.0.1:3100`. Rename the line in
+each `.env`, `.env.<name>` and the machine `.env`, and rename a `SERVER_URL`
+environment variable if you set one.
+
+For the same reason, the live integration tests' `LIVE_SERVER_URL` is now
+`LIVE_STEPTIX_SERVER_URL`. Set the new name when you point a live run at a
+server yourself; the old one is ignored and the tests check against `:3100`.
+
+### Fixed — a fresh clone can run every test suite
+
+On a fresh clone, each suite failed before it tested anything:
+- **Unit suites:** the README's one `npm install` left four of the five
+  projects uninstalled, so 25 root tests could not load their packages.
+- **`test:integration`:** 374 of 516 tests failed with STX003. Their fixture
+  project's `.env` was gitignored.
+- **`test:live`:** the runner exited because `templates/.env` was missing. The
+  two `data-rows` tests that call the server got 401, because they looked for
+  the server key in `templates/.env`, and that key now lives in the machine
+  file.
+
+Now:
+- **`npm run setup`** installs all five projects and Playwright's Chromium.
+- **The integration fixture's `.env` is tracked.** It holds only fake values.
+- **The live tests find the server key the way the extension does.**
+- **The live runner needs only a model key.** Put `AI_API_KEY` in the machine
+  `.env`. If the key is missing, the runner says so before it starts anything.
+
+### Changed — the default model is openai/gpt-6-luna
+
+The built-in default model, the one `steptix init` writes into a new
+project's config, and the template project's model all moved from
+`openai/gpt-5.6-luna` to `openai/gpt-6-luna`. An `openai/` model goes
+straight to OpenAI, so it needs an OpenAI key in `AI_API_KEY`. A project
+that already names a model in its `steptix.config.json` keeps that one.
+
+### Changed — no built-in AI gateway
+
+Steptix no longer has a default gateway URL. Before, `ai.gatewayUrl` defaulted
+to a hosted broker, and `aibroker/` models used it without being told to. Now
+`aibroker/` models refuse to run until `AI_GATEWAY_URL` is set, as `gateway/`
+models already did, and nothing is sent. To keep using a gateway, set its URL
+in the project `.env`, or once in the machine `.env`
+(`%LOCALAPPDATA%\steptix\.env`, `~/.steptix/.env` elsewhere):
+
+```
+AI_GATEWAY_URL=https://llm.corp.example
+```
+
+Direct models (`openai/…`, `anthropic/…`, `bedrock/…`) are unaffected. They
+never used the gateway URL, and the default model is one of them. A session
+whose `.env` stops setting `AI_GATEWAY_URL` now drops it rather than keeping
+the last one. The request log names a direct model's provider
+(`POST openai (direct)`) rather than a gateway address the request never went
+to.
+
+### Changed — runtime upgrades remove older versions, and wait while Steptix runs
+
+Installing a version of the Windows runtime now removes every installed
+version older than it, each with its own uninstaller, so its Installed Apps
+entry goes too. Before, every version stayed installed, at about 170 MB each,
+although only the newest ever ran. Installing an older version again, as a
+rollback, leaves newer ones in place.
+
+The installer and uninstaller also refuse to change a runtime folder that
+Steptix is running from. Removing a running server's files did not fail: the
+server broke later, the next time it loaded one. An interactive install asks
+you to stop it (Steptix: Stop Server, or `steptix stop`) and press Retry. A
+silent one exits with code 3 and changes nothing. If Windows PowerShell cannot
+run the check, the install goes ahead as before but removes no older version.
+See [packaging/runtime/README.md](packaging/runtime/README.md#upgrades).
+
+### Fixed — Add check outlines what the pointer already rests on
+
+Turning on Add check while the pointer was resting on an element drew no
+outline or label until the pointer moved. Pick mode reaches the page a moment
+after it is armed, and the page only drew the outline on a pointer move that
+arrived after that. Now the element under the last pointer position is
+outlined as soon as pick mode comes on. This was also why the root test *the
+pick outline and label are never in the crop of what was picked* sometimes
+timed out on CI with `last seen: 0` (#194).
+
+### Fixed — unit tests that failed for no reason, and four things they found
+
+A review of all four unit suites (9,338 tests) cut them to 8,945 and made
+them hold under load and in any order (extension 0.5.169).
+- **Gone:** duplicates and tests of code nothing calls.
+- **Fixed:** the 17 tests the review found could never fail now check what
+  they claim, or are gone. Sleeps and elapsed-time checks became injected
+  clocks and event gates, and ports are picked by the server.
+- **No sharing:** each run gets its own scratch directory, and no state
+  carries from one test to the next or comes from the developer's machine.
+
+A weekly CI job now runs the root suite in a shuffled order. CLAUDE.md
+states the rules.
+
+Fixed along the way:
+
+- **STX020's catalogue entry no longer offers a "Reopen as Text" button.** It
+  named `steptix.reopenAsText`, a command the extension never registered.
+  Nothing raises STX020 today, so the button was never shown.
+- **A run's "Latest runs" line is written whole.** The test file is written
+  beside itself and renamed over, so an editor or another reader never sees
+  it half-written. A symlinked test file is still updated at its target, a
+  read-only one is still refused, and the file keeps its permissions.
+- **Flick's saves of one file land in the order they were made.** Flick
+  already wrote a temp file and renamed it. Now each save gets its own temp
+  name, a save waits for the one before it to the same file, and on Windows
+  the rename is retried while another process briefly holds the file.
+- **An HTML report's token counts read the same on every machine.** They now
+  use the `en-AU` format the report's date already used.
+
+### Added — `steptix` on PATH from the runtime installer
+
+The Windows runtime installer has a new option, "Add steptix to PATH", ticked
+by default. It adds `%LOCALAPPDATA%\steptix\bin` to the user's own `Path`,
+which needs no administrator rights, so `steptix` works in any new terminal.
+That folder serves every installed version. It runs the newest runtime under
+`%LOCALAPPDATA%\steptix\runtimes`, the same one the VS Code extension starts.
+Other `Path` entries stay as written, including unexpanded `%VARIABLE%`
+entries. A `Path` too long to change safely is left alone, and the installer
+says how to add the folder by hand. Uninstalling the last runtime removes the
+folder and its `Path` entry. See
+[packaging/runtime/README.md](packaging/runtime/README.md#on-path).
+
+A silent install (`/S`) takes the option too. Pass `/NOPATH` to leave `PATH`
+alone. Silent installs and uninstalls also no longer wait on a dialog nobody
+can see: the 64-bit check and the uninstaller's marker checks used to show
+theirs even under `/S`. Now they stop without one: the installer exits with
+code 2, and the uninstaller removes nothing. See
+[Silent install](packaging/runtime/README.md#silent-install).
+
+### Security — no high or critical `npm audit` findings, dev tooling included
+
+`npm audit` is clean of high and critical findings in all five projects.
+Every fix is a patch or minor release inside the existing ranges, except
+`vitest` and `@vitest/coverage-v8`, whose floor moves from `^4.1.4` to
+`^4.1.11` (GHSA-82fw-gwwq-j7x9).
+
+- **Framework runtime:** `electron` 41.10.7 (three sandbox and cross-origin
+  advisories), `undici` 7.30.0 (via `openai` and `@electron/get`), `qs`
+  6.16.0 (via `express`), and `hono` 4.13.12, `fast-uri` 3.1.8 and
+  `ip-address` 10.7.2 (via `@modelcontextprotocol/sdk`). Also `js-yaml`
+  3.15.2 (via `gray-matter`) and `brace-expansion` 5.0.12 (via `glob`).
+- **Dev tooling:** `electron-builder`'s `@xmldom/xmldom`, `js-yaml`,
+  `brace-expansion` and `node-gyp`'s `undici`; in `steptix-vscode` and
+  `flick-vscode`, the `@vscode/vsce`, `mocha` and `@vscode/test-electron`
+  trees. Neither extension's bundle changes: their production audit was
+  already clean.
+- **Still open, moderate:** `file-type` 16 (GHSA-5v7r-6r5c-r473, an infinite
+  loop on malformed ASF input), reached through `jimp` 0.22 and
+  `@nut-tree-fork/nut-js`, which pins `jimp` exactly. Steptix only hands
+  `jimp` PNGs it captured itself, so the ASF parser never sees outside input.
+  Clearing it needs `jimp` 1.x and a `nut-js` release that drops 0.22.
+
+### Changed — Steptix runs a test with nothing configured
+
+Running a test used to need two things set up by hand: a `.env` in the
+project naming `STEPTIX_SERVER_URL`, and the `steptix.serverAutoStart.command` and
+`.cwd` User settings pointing at a server to start. Neither is needed now
+(extension 0.5.168).
+
+- **The server address has a machine-level home.** `STEPTIX_SERVER_URL` comes from
+  the project's `.env` (and the active `.env.<name>`) as before, then the
+  `STEPTIX_SERVER_URL` environment variable, then `STEPTIX_SERVER_URL` in
+  `%LOCALAPPDATA%\steptix\.env` (`~/.steptix/.env` elsewhere) — the file that
+  already holds the machine key — and finally `http://127.0.0.1:3100`, where
+  `steptix serve` listens by default. The run log says which one it used.
+- **A project needs no `.env`.** One without a `.env` now runs instead of
+  failing with STX001. STX001 remains only for a `steptix.defaultEnvFile` that
+  names a missing file, and a project `.env` without `STEPTIX_SERVER_URL` no longer
+  fails with STX002.
+- **The installed runtime starts itself.** With
+  `steptix.serverAutoStart.command` empty, a run that finds no server on a
+  localhost `STEPTIX_SERVER_URL` starts the newest runtime under
+  `%LOCALAPPDATA%\steptix\runtimes` (`~/.steptix/runtimes` elsewhere) as
+  `serve --port <STEPTIX_SERVER_URL's port> --idle-timeout 60`, in the runtime's own
+  folder. The new `steptix.serverAutoStart.useInstalledRuntime` User setting
+  (on by default) turns this off. A command setting, when set, still wins.
+- Start Server, Stop Server, Server Status and the Copilot setup's
+  "server is not on this machine" check resolve the server the same way. The
+  status-bar item shows in a folder whose own env names a server or that has
+  a `steptix.config.json`.
+- STX003, STX010 and STX028 name the installed runtime in their fixes. STX028
+  for a runtime that would not start names its folder and says it needs
+  Node.js.
+- **A started server gets 60 seconds to come up, not 20.** The
+  `steptix.serverAutoStart.readyTimeoutSeconds` default rises to 60. A first
+  start is the slow one, and on a busy machine it could exceed 20 seconds and
+  fail with STX028. A server that comes up sooner is used as soon as it
+  answers; only one that never does waits out the full 60 seconds.
+
+The runtime installer's end-to-end test now proves this: a fresh profile with
+no Steptix settings at all and a project with no `.env` runs a test, and the
+server is started from the installed runtime on the port the machine `.env`
+names.
 
 ### Added — the version names the build: commit, and whether it was modified
 
@@ -53,8 +258,8 @@ longer says which code is answering. `npm run build` now stamps
 working tree had uncommitted changes (tracked or untracked), and that is
 reported beside the version:
 
-- `steptix --version` and `steptix status`: `1.0.0-beta.1 (b700473)`, or
-  `1.0.0-beta.1 (b700473, modified)`.
+- `steptix --version` and `steptix status`: `1.0.0-beta.1 (02d968b)`, or
+  `1.0.0-beta.1 (02d968b, modified)`.
 - `GET /health` and the MCP `server_status` tool: new `commit` and `modified`
   fields; `version` is unchanged.
 - The Steptix status bar keeps the short version; its tooltip, the "server
@@ -111,12 +316,8 @@ one go and with no fallback to the old names:
 | folder `testbench-native/` | `steptix-vscode/` |
 
 The new extension ID is a different extension to VS Code: uninstall the old
-one, and move settings across. `scripts/migrate-to-steptix.ps1` does that and
-the rest of one machine's state (the user-root folder and its `.env`, user
-environment variables, VS Code settings, and each checkout's `.env` files,
-config file and `.aiui/` folders); run it with `-WhatIf` first. The Copilot
-bridge token lives in the old extension's secret storage, so run "Steptix: Use
-Copilot for AI" once more.
+one, and move settings across. The Copilot bridge token lives in the old
+extension's secret storage, so run "Steptix: Use Copilot for AI" once more.
 
 Entries below this one, and resolved issues, keep the names they were written
 with.

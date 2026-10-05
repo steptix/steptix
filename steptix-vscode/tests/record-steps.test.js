@@ -1104,7 +1104,9 @@ test('the new test directory: config tests.dir, else the server default beside t
 
 test('the projects inside a workspace: a shallow search that skips dependencies, build output and dot-folders', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'record-projects-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  // maxRetries: `force` does not cover the EBUSY/EPERM Windows can raise on
+  // files written moments ago.
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const put = (rel) => {
     const file = path.join(root, ...rel.split('/'), 'steptix.config.json');
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -1146,6 +1148,8 @@ test('the panel copies of the time and heading text match the core (recording-pa
     assert.equal(inline.formatRecordTimeInline(ms), formatRecordTime(ms), String(ms));
   }
   const a = (dropped) => ({ dropped });
+  // Every heading state in one table, paused ones included, so the next state
+  // is added here once.
   for (const state of [
     { phase: 'starting', actions: [] },
     { phase: 'recording', actions: [] },
@@ -1153,6 +1157,10 @@ test('the panel copies of the time and heading text match the core (recording-pa
     { phase: 'recording', actions: [a(false), a(true), a(false)] },
     { phase: 'recording', actions: [a(false), { dropped: false, action: false }, { dropped: false, action: true }] },
     { phase: 'finishing', actions: [a(false)] },
+    { phase: 'recording', paused: true, actions: [a(false), { dropped: false, action: false }] },
+    { phase: 'recording', paused: false, actions: [a(false)] },
+    { phase: 'recording', paused: true, actions: [] },
+    { phase: 'finishing', paused: true, actions: [a(false)] },
   ]) {
     assert.equal(inline.recordingStatusTextInline(state), recordingStatusText(state), JSON.stringify(state));
   }
@@ -1200,19 +1208,6 @@ test('a result that could not be inserted, as text to paste: numbered steps, par
 
 const fresh = () => newRecordingState({ uri: 'file:///t.md', file: 't.md', mode: 'cursor' });
 
-test('a fresh block is starting, with no actions, no draft and nothing drafting', () => {
-  assert.deepEqual(fresh(), {
-    uri: 'file:///t.md',
-    file: 't.md',
-    mode: 'cursor',
-    phase: 'starting',
-    pickArmed: false,
-    actions: [],
-    draft: null,
-    drafting: false,
-  });
-});
-
 test('started, actions and picks fold in; an action restated keeps its ✕', () => {
   const s = fresh();
   assert.equal(applyRecordFrame(s, { type: 'record:started', url: 'https://x/', title: 'X' }), true);
@@ -1238,6 +1233,9 @@ test('started, actions and picks fold in; an action restated keeps its ✕', () 
 
 test('an action before record:started still moves the block to recording', () => {
   const s = fresh();
+  assert.equal(s.phase, 'starting');
+  assert.equal(s.pickArmed, false);
+  assert.equal(s.drafting, false);
   applyRecordFrame(s, { type: 'record:action', id: 'a1', kind: 'click', summary: 'x', atMs: 0 });
   assert.equal(s.phase, 'recording');
 });

@@ -8,7 +8,7 @@
  * derived from a decision made in this file. An agent — or a page that
  * prompt-injects one — can name any path on the machine; without confinement
  * the next request would load tool code from it and ship its `.env` to
- * whatever is listening on `SERVER_URL`.
+ * whatever is listening on `STEPTIX_SERVER_URL`.
  *
  * The rules are deliberately paranoid in ways a `startsWith` check is not:
  * symlinks are followed before comparing, comparison happens on segment
@@ -387,7 +387,7 @@ export function resolveTestsGlob(project: ProjectContext): { dir: string; patter
 /**
  * Everything about a project except which server it talks to.
  *
- * The split exists so `SERVER_URL` and `STEPTIX_SERVER_API_KEY` are read exactly once,
+ * The split exists so `STEPTIX_SERVER_URL` and `STEPTIX_SERVER_API_KEY` are read exactly once,
  * *after* any `.env.<name>` overlay: an overlay may name a different server
  * than the base `.env` does, and checking before it lands would both refuse a
  * project whose URL lives only in the overlay and report the wrong file in the
@@ -414,7 +414,7 @@ function firstNonEmpty(...values: (string | undefined)[]): string | null {
  * per-server configuration surface a user has, and `STEPTIX_MCP_ROOTS` is already
  * read from exactly that channel.
  *
- * Below those, `SERVER_URL` falls back the way every client's does
+ * Below those, `STEPTIX_SERVER_URL` falls back the way every client's does
  * (stories/machine-server-url.md): the user root's `.env`, then
  * {@link DEFAULT_SERVER_URL} — the same two a bare `steptix serve` takes its
  * port from, so the server auto-start spawns for a project that names none is
@@ -424,8 +424,8 @@ function firstNonEmpty(...values: (string | undefined)[]): string | null {
 function withServerDiscovery(fields: ProjectDraft): ProjectContext {
   const serverUrl =
     firstNonEmpty(
-      fields.env['SERVER_URL'],
-      process.env['SERVER_URL'],
+      fields.env['STEPTIX_SERVER_URL'],
+      process.env['STEPTIX_SERVER_URL'],
       readMachineServerUrl() ?? undefined,
     ) ?? DEFAULT_SERVER_URL;
 
@@ -449,7 +449,7 @@ function withServerDiscovery(fields: ProjectDraft): ProjectContext {
  * A separate step because the name may come from the test file's frontmatter,
  * which is not known until the parse — resolving the env any earlier would
  * silently ignore `env: uat` and run the test against the base `.env`: wrong
- * `SERVER_URL`, wrong AI key, wrong interpolation, and rule 6 never applied.
+ * `STEPTIX_SERVER_URL`, wrong AI key, wrong interpolation, and rule 6 never applied.
  * Both `serverUrl` and `apiKey` are re-derived, because `.env.uat` may name a
  * different server than `.env` does.
  */

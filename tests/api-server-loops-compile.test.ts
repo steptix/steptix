@@ -326,7 +326,12 @@ const cfg: Config = {
 const CASE_TIMEOUT = 30_000;
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpDir = path.join(repoRoot, 'tests', '.tmp-loops-compile');
+/**
+ * In the repo for package self-resolution (see the header), and fresh every
+ * run: a fixed name, wiped in `beforeAll`, let two runs in one checkout — a
+ * watcher beside a full run — delete each other's fixtures mid-compile.
+ */
+let tmpDir: string;
 
 let server: Server;
 let baseUrl: string;
@@ -337,13 +342,12 @@ beforeAll(async () => {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const addr = server.address();
   if (typeof addr === 'object' && addr !== null) baseUrl = `http://127.0.0.1:${addr.port}`;
-  await fs.rm(tmpDir, { recursive: true, force: true });
-  await fs.mkdir(tmpDir, { recursive: true });
+  tmpDir = await fs.mkdtemp(path.join(repoRoot, 'tests', '.tmp-loops-compile-'));
 });
 
 afterAll(async () => {
   await new Promise<void>((r, e) => server.close((err) => (err ? e(err) : r())));
-  await fs.rm(tmpDir, { recursive: true, force: true });
+  if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 beforeEach(() => {
@@ -732,9 +736,16 @@ describe('what a clean looped entry counts as', () => {
 
 describe('steps a decision skipped', () => {
   it('a While that runs no passes names its body, with the decision sentence', async () => {
-    const { md } = await project('while-none');
+    // Also the case that says a whole-file compile of a loop is no longer
+    // refused (the server used to refuse any compile whose slice touched one,
+    // before anything ran): the `While` decides "no" on its first visit, and
+    // the run goes straight on to the end.
+    const { md, steps } = await project('while-none');
     run.judgeScript = [null];
     const frames = await collect(whileBody(md));
+
+    expect(frames.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+    expect(run.executed).toEqual(['Open the statements page', 'Verify the last page is shown']);
 
     const result = compileResult(frames);
     expect(result.summary.notAttempted).toEqual([3, 4]);
@@ -745,8 +756,11 @@ describe('steps a decision skipped', () => {
       'the step did not run — the run decided against it',
       'the step did not run — the run decided against it',
     ]);
-    // …and the guard, asked once, is generated from that one visit.
+    // …and the guard, asked once, is generated from that one visit — the one
+    // where it did not hold.
     expect(conditionPrompts()).toHaveLength(1);
+    expect(conditionPrompts()[0]).toContain('### Observation 1 — the condition did NOT hold');
+    expect(result.files[steps]).toContain('async condition(');
     expect(result.status).toBe('partial');
   }, CASE_TIMEOUT);
 

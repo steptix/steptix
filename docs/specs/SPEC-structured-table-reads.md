@@ -2916,8 +2916,8 @@ The implementing agent should inspect and update at least these areas:
 - `docs/test-writing-handbook.md` — structured table-read authoring and limits.
 - `README.md` — short example near captures/control flow.
 - Fixtures and template tests — **built**, on branch
-  `claude/loop-table-rows-56d19f` (fixtures in commit 75f0438, baselines in
-  a6ce4ce, acceptance tests in a667126). Under `fixtures/test-app/`:
+  `claude/loop-table-rows-56d19f` (fixtures in commit de02663, baselines in
+  789770b, acceptance tests in 429da73). Under `fixtures/test-app/`:
   `tables.html` (the index), `structured-orders.html` (§5.1, with filter,
   sort, expandable rows, tfoot and a "Swap the Order ID and Status columns"
   button),

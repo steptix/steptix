@@ -106,12 +106,7 @@ describe('the combination the story names', () => {
     expect(identifyStepGroups(steps).size).toBe(0);
   });
 
-  it('runs all three steps as themselves', () => {
-    const ran = ranAs(steps);
-    for (let i = 0; i < steps.length; i++) {
-      expect(ran.get(i), `index ${i}`).toBe(steps[i]);
-    }
-  });
+  // That all three run as themselves is the first row of the table below.
 });
 
 describe('a return step in every position around a conditional', () => {

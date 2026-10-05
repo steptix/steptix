@@ -558,10 +558,10 @@ session's next batch succeeded afterwards — the two-client coexistence
 re-proved through the real tool.
 
 Two observations from the same pass, neither an errand defect: a project
-`.env` carrying a `SERVER_URL` routes every tool at that project to the
+`.env` carrying a `STEPTIX_SERVER_URL` routes every tool at that project to the
 server it names — the first driver attempt inherited the repo's own
 `.env` and reached the developer's live server (caught before any errand
-ran; a throwaway project must mint its own `SERVER_URL`); and directly
+ran; a throwaway project must mint its own `STEPTIX_SERVER_URL`); and directly
 after a same-process `close_session`, `close_cdp_tab` on that session's
 tab still refused naming it — a second attempt moments later (fresh MCP
 process, `allow_foreign_session` close, ~3s settle) closed the session,

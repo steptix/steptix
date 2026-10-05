@@ -20,7 +20,7 @@
  * and that a later step in the same run applies it before anything else is
  * tried.
  */
-import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { Express } from 'express';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
@@ -446,6 +446,23 @@ const STEP_AGAIN = 'Read the Payee column as payee and the Amount column as amou
 /** The same region, DIFFERENT columns — a different structure to answer. */
 const STEP_OTHER_COLUMNS = 'Read the Payee column as payee and the Reference column as reference from every row in the legacy payees table [store as: refs]';
 
+/** Sessions a test opened and has not closed. `afterEach` closes what is
+ *  left, so a test that fails before its own clean-up leaves nothing behind. */
+const openSessions = new Set<string>();
+
+async function closeSession(sessionId: string): Promise<void> {
+  openSessions.delete(sessionId);
+  await api('DELETE', `/sessions/${sessionId}`);
+}
+
+afterEach(async () => {
+  // The logger spies call through, but one left in place by a failed test
+  // would collect the next test's lines. The module mocks are `vi.fn`s in
+  // `vi.mock` factories, which `restoreAllMocks` leaves alone.
+  vi.restoreAllMocks();
+  for (const id of [...openSessions]) await closeSession(id).catch(() => {});
+});
+
 /** One batch holding `STEP` alone — one run, so nothing is remembered from a
  *  previous call. */
 async function run(
@@ -453,6 +470,7 @@ async function run(
   testFilePath: string,
   extra: Record<string, unknown> = {},
 ): Promise<{ status: number; body: any }> {
+  openSessions.add(sessionId);
   return api('POST', `/sessions/${sessionId}/steps`, {
     steps: [STEP],
     testFilePath,
@@ -467,6 +485,7 @@ async function runAll(
   steps: string[],
   extra: Record<string, unknown> = {},
 ): Promise<{ status: number; body: any }> {
+  openSessions.add(sessionId);
   return api('POST', `/sessions/${sessionId}/steps`, { steps, testFilePath, ...extra });
 }
 
@@ -509,9 +528,8 @@ describe('the structure question through the real Sessions API entry', () => {
     // a run log checks when a read suddenly costs a model call.
     const lines = info.mock.calls.map((c) => String(c[0]));
     expect(lines.some((l) => l.includes('readTable: structure asked of the model'))).toBe(true);
-    info.mockRestore();
 
-    await api('DELETE', `/sessions/ts-table`);
+    await closeSession('ts-table');
   });
 
   it('puts the validated mapping on the RECORDED action, not on the model\'s own', async () => {
@@ -529,7 +547,7 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(recordedAction(res.body).selector).toBe('#legacy-payees');
     expect(recordedAction(res.body).as).toBe('payees');
 
-    await api('DELETE', `/sessions/ts-record`);
+    await closeSession('ts-record');
   });
 
   it('reads a card list from a collection answer, showing the region markup', async () => {
@@ -566,7 +584,7 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(asked).toContain('class=\\"account-card\\"');
     expect(asked).toContain('only answers available are "collection" and "none"');
 
-    await api('DELETE', `/sessions/ts-collection`);
+    await closeSession('ts-collection');
   });
 
   it('sends no region markup, rather than expand\'s error text, when the region cannot be expanded', async () => {
@@ -592,7 +610,7 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(asked).not.toContain('[expand]');
     expect(asked).toMatch(/\\?"regionMarkup\\?":\s*\\?"\\?"/);
 
-    await api('DELETE', `/sessions/ts-expand-miss`);
+    await closeSession('ts-expand-miss');
   });
 
   it('fails with the original refusal and the reason when the model answers none', async () => {
@@ -613,7 +631,7 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(ai.structureCalls).toBe(1);
     expect(extractor.reads).toHaveLength(1);
 
-    await api('DELETE', `/sessions/ts-none`);
+    await closeSession('ts-none');
   });
 
   it('asks nothing under `## Config: tableStructure: strict`', async () => {
@@ -630,7 +648,7 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(ai.structureCalls).toBe(0);
     expect(extractor.reads).toHaveLength(1);
 
-    await api('DELETE', `/sessions/ts-strict`);
+    await closeSession('ts-strict');
   });
 
   it('asks nothing under a project whose steptix.config.json sets tables.structure: strict', async () => {
@@ -648,7 +666,7 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(res.body.results[0].status).toBe('failed');
     expect(ai.structureCalls).toBe(0);
 
-    await api('DELETE', `/sessions/ts-strict-project`);
+    await closeSession('ts-strict-project');
   });
 
   it('never asks about an author\'s own mistake', async () => {
@@ -668,7 +686,7 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(ai.structureCalls).toBe(0);
     expect(extractor.reads).toHaveLength(1);
 
-    await api('DELETE', `/sessions/ts-typo`);
+    await closeSession('ts-typo');
   });
 
   it('recognises a shape refusal that is THROWN rather than returned', async () => {
@@ -690,7 +708,7 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(ai.structureCalls).toBe(1);
     expect(extractor.reads[1]!.mapping).toEqual(TD_MAPPING);
 
-    await api('DELETE', `/sessions/ts-thrown`);
+    await closeSession('ts-thrown');
   });
 
 
@@ -715,7 +733,6 @@ describe('the structure question through the real Sessions API entry', () => {
     const lines = info.mock.calls.map((c) => String(c[0]));
     expect(lines).toContain('readTable: structure reused from step 1');
     expect(lines.filter((l) => l.includes('structure asked of the model'))).toHaveLength(1);
-    info.mockRestore();
 
     // …and the extractor was told which, for the §7.6 summary line: it cannot
     // tell a fresh answer from a remembered one (they are the same object by
@@ -730,7 +747,7 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(extractor.reads.at(-1)!.mapping).toEqual(TD_MAPPING);
     expect(res.body.results[1].actions[0].mapping).toEqual(TD_MAPPING);
 
-    await api('DELETE', `/sessions/ts-memo`);
+    await closeSession('ts-memo');
   });
 
   it('asks again for the same region read with DIFFERENT columns', async () => {
@@ -755,7 +772,7 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(res.body.status).toBe('passed');
     expect(ai.structureCalls).toBe(2);
 
-    await api('DELETE', `/sessions/ts-memo-columns`);
+    await closeSession('ts-memo-columns');
   });
 
   it('asks again when a remembered structure no longer validates', async () => {
@@ -789,7 +806,7 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(ai.structureCalls).toBe(2);
     expect(res.body.results[1].actions[0].mapping).toEqual(LATER_MAPPING);
 
-    await api('DELETE', `/sessions/ts-memo-stale`);
+    await closeSession('ts-memo-stale');
   });
 
   it('fails with BOTH answers when a remembered structure and the new answer both miss', async () => {
@@ -826,7 +843,7 @@ describe('the structure question through the real Sessions API entry', () => {
     // Step 2 tried the memo before it asked, and asked once.
     expect(extractor.sources).toEqual([undefined, 'model', undefined, 'memo', 'model']);
 
-    await api('DELETE', `/sessions/ts-both`);
+    await closeSession('ts-both');
   });
 
   it('strips a mapping the model emitted before the read ever sees it', async () => {
@@ -852,7 +869,7 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(extractor.reads[1]!.mapping).toEqual(TD_MAPPING);
     expect(recordedAction(res.body).mapping).toEqual(TD_MAPPING);
 
-    await api('DELETE', `/sessions/ts-stripped`);
+    await closeSession('ts-stripped');
   });
 });
 
@@ -886,7 +903,7 @@ describe('the structure question and the run\'s secrets', () => {
     // sketch JSON.
     expect(asked).toContain('Selector: #account-cards-***');
 
-    await api('DELETE', `/sessions/ts-secret`);
+    await closeSession('ts-secret');
   });
 });
 
@@ -986,7 +1003,7 @@ describe('turning a structure answer into a mapping (§7.10)', () => {
       return PAYEE_RECORDS;
     };
     const res = await run(sessionId, newTestFile());
-    await api('DELETE', `/sessions/${sessionId}`);
+    await closeSession(sessionId);
     return res;
   }
 

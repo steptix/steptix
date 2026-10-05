@@ -2,7 +2,7 @@
  * Live end-to-end CDP tab focus (stories/cdp-tab-focus.md).
  *
  * Drives a REAL Chrome over CDP through the REAL Steptix Sessions API
- * server ($LIVE_SERVER_URL, default http://localhost:3100). Most of it needs no
+ * server ($LIVE_STEPTIX_SERVER_URL, default http://localhost:3100). Most of it needs no
  * AI and no session; the last scenario runs real steps to prove focusing does
  * not disturb them.
  *
@@ -65,9 +65,9 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
-const os = require('node:os');
 const http = require('node:http');
 const vscode = require('vscode');
+const { readEnvValue, resolveCredential, serverApiKey } = require('./credentials.cjs');
 
 const PROFILE = 'focus-live';
 
@@ -96,48 +96,6 @@ async function readJson(res) {
   return { status: res.status, body, raw };
 }
 
-/** Read one key out of an env file without pulling in a dotenv dependency.
- *  Missing file or missing key both read as absent — every caller here sits at
- *  one rung of a resolution chain and only asks "is there a value". */
-function readEnvValue(envPath, key) {
-  let content;
-  try {
-    content = fs.readFileSync(envPath, 'utf8');
-  } catch {
-    return '';
-  }
-  const line = content.split(/\r?\n/).find((l) => l.trim().startsWith(`${key}=`));
-  if (!line) return '';
-  return line.slice(line.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '');
-}
-
-/** `%LOCALAPPDATA%\steptix\.env` / `$XDG_CONFIG_HOME/steptix/.env` / `~/.steptix/.env`,
- *  mirroring `src/env/user-root.ts`. */
-function userRootEnvPath() {
-  if (process.platform === 'win32') {
-    const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-    return path.join(base, 'steptix', '.env');
-  }
-  const xdg = process.env.XDG_CONFIG_HOME;
-  return xdg ? path.join(xdg, 'steptix', '.env') : path.join(os.homedir(), '.steptix', '.env');
-}
-
-/**
- * Resolve a credential the way the framework does: project `.env`, then the
- * environment, then the machine-wide file.
- *
- * The chain is not optional politeness. stories/machine-key.md moved
- * `STEPTIX_SERVER_API_KEY` out of per-project `.env` files and into one
- * self-provisioned machine key, so a test that reads only `templates/.env`
- * finds nothing and takes the whole suite down in `before()`.
- */
-function resolveCredential(projectEnvPath, key) {
-  return (
-    readEnvValue(projectEnvPath, key) ||
-    (process.env[key] ?? '') ||
-    readEnvValue(userRootEnvPath(), key)
-  );
-}
 
 describe('Steptix live — CDP tab focus (stories/cdp-tab-focus.md)', function () {
   this.timeout(180_000);
@@ -261,12 +219,7 @@ describe('Steptix live — CDP tab focus (stories/cdp-tab-focus.md)', function (
     );
 
     const projectEnv = path.join(workspaceRoot, '.env');
-    apiKey = resolveCredential(projectEnv, 'STEPTIX_SERVER_API_KEY');
-    assert.ok(
-      apiKey,
-      'No STEPTIX_SERVER_API_KEY in templates/.env, the environment, or the machine key ' +
-        `file (${userRootEnvPath()}). Start the server once and it provisions one.`,
-    );
+    apiKey = serverApiKey(workspaceRoot);
 
     // AI credentials prefer the REPO ROOT `.env` over `templates/.env`, and the
     // difference is the MODEL rather than the key. Both files carry the same
@@ -280,7 +233,7 @@ describe('Steptix live — CDP tab focus (stories/cdp-tab-focus.md)', function (
     aiKey = resolveCredential(preferred, 'AI_API_KEY') || resolveCredential(projectEnv, 'AI_API_KEY');
     aiModel = readEnvValue(preferred, 'AI_MODEL') || readEnvValue(projectEnv, 'AI_MODEL');
 
-    serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/health`);
       assert.ok(res.ok, `Server at ${serverUrl} not healthy (status=${res.status})`);

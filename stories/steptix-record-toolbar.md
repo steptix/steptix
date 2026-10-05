@@ -120,7 +120,9 @@ container and current text or value. For example:
 
 The outline is drawn around exactly the element the click will pick, because
 the function that picks it (`actionable(target) || target`) also draws the
-outline. The pointer is a crosshair. Moving over the toolbar shows no outline,
+outline. That holds from the moment pick mode comes on: a pointer already
+resting on an element outlines it without having to move. The pointer is a
+crosshair. Moving over the toolbar shows no outline,
 since the toolbar can't be picked. Pressing Add check again, or Esc, disarms
 it. That Esc goes to the recorder and not to the page, so a dialog you were
 about to check stays open.

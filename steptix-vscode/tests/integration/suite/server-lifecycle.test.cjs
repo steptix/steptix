@@ -25,11 +25,11 @@ const FIXTURES_DIR =
   process.env.STEPTIX_FIXTURES_DIR || path.resolve(__dirname, '..', 'fixtures');
 const fixtureUri = (name) => vscode.Uri.file(path.resolve(FIXTURES_DIR, name));
 
-/** The auto-start command, naming the fixture SERVER_URL's port with -p — a
+/** The auto-start command, naming the fixture STEPTIX_SERVER_URL's port with -p — a
  *  command without it listens on 3100, and Steptix refuses to start a server
  *  on a port the run will not connect to (stories/machine-server-url.md). */
 const SERVE_CMD = `node dist/index.js serve -p ${new URL(
-  /^SERVER_URL=(.*)$/m.exec(fs.readFileSync(path.join(FIXTURES_DIR, '.env'), 'utf8'))[1].trim(),
+  /^STEPTIX_SERVER_URL=(.*)$/m.exec(fs.readFileSync(path.join(FIXTURES_DIR, '.env'), 'utf8'))[1].trim(),
 ).port}`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -83,14 +83,24 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
   });
 
   /** Set the machine-scoped auto-start settings (Global target — the test
-   *  instance has its own user-data-dir, so this touches nothing real). */
-  async function setAutoStart({ command, cwd, readyTimeoutSeconds }) {
+   *  instance has its own user-data-dir, so this touches nothing real).
+   *
+   *  `useInstalledRuntime` defaults to OFF, which is what runTest.cjs pins for
+   *  the whole suite: the extension host's %LOCALAPPDATA% is the developer's,
+   *  and a runtime installed there must not decide what a test spawns. The
+   *  tests about the runtime turn it on and point the user root elsewhere. */
+  async function setAutoStart({ command, cwd, readyTimeoutSeconds, useInstalledRuntime = false }) {
     const cfg = vscode.workspace.getConfiguration('steptix');
     await cfg.update('serverAutoStart.command', command, vscode.ConfigurationTarget.Global);
     await cfg.update('serverAutoStart.cwd', cwd, vscode.ConfigurationTarget.Global);
     await cfg.update(
       'serverAutoStart.readyTimeoutSeconds',
       readyTimeoutSeconds,
+      vscode.ConfigurationTarget.Global,
+    );
+    await cfg.update(
+      'serverAutoStart.useInstalledRuntime',
+      useInstalledRuntime,
       vscode.ConfigurationTarget.Global,
     );
   }
@@ -121,7 +131,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
       // just the timer's existence.
       keepAliveIntervalMs: 60,
     });
-    await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 20 });
+    await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 60 });
 
     const uri = fixtureUri('test-with-steps.md');
     await vscode.commands.executeCommand('vscode.open', uri);
@@ -139,7 +149,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
   // (Consolidating this into a single `after` hook looks like a saving and is
   // not: it only holds when every test in this suite completes normally.)
   afterEach(async () => {
-    await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 20 });
+    await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 60 });
     // The probe and cadence are registry-wide too, and this suite does not run
     // last. Leaving a closure that answers `foreign` (or a 60ms keep-alive)
     // behind would break every later suite with no clue pointing back here.
@@ -237,9 +247,9 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
 
   it('down + the command would listen elsewhere: STX033, nothing spawned', async () => {
     // stories/machine-server-url.md: with no -p, `serve` listens on the
-    // machine SERVER_URL's port or 3100 — not the fixture's — so starting it
+    // machine STEPTIX_SERVER_URL's port or 3100 — not the fixture's — so starting it
     // would leave a stray server and time out. The test instance has no
-    // machine SERVER_URL of its own to lean on, so -p 1 makes the mismatch
+    // machine STEPTIX_SERVER_URL of its own to lean on, so -p 1 makes the mismatch
     // certain whatever this machine's .env says.
     probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
     await setAutoStart({ command: 'node dist/index.js serve -p 1', cwd: FIXTURES_DIR, readyTimeoutSeconds: 10 });
@@ -291,8 +301,8 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
       const serverUrlLine = fs
         .readFileSync(path.join(FIXTURES_DIR, '.env'), 'utf-8')
         .split(/\r?\n/)
-        .find((l) => l.startsWith('SERVER_URL='));
-      assert.ok(serverUrlLine, 'fixtures/.env must carry SERVER_URL');
+        .find((l) => l.startsWith('STEPTIX_SERVER_URL='));
+      assert.ok(serverUrlLine, 'fixtures/.env must carry STEPTIX_SERVER_URL');
       fs.mkdirSync(PROJECT_DIR, { recursive: true });
       fs.writeFileSync(path.join(PROJECT_DIR, '.env'), `${serverUrlLine}\n`);
       fs.copyFileSync(path.join(FIXTURES_DIR, 'test-with-steps.md'), TEST_MD);
@@ -407,6 +417,189 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
 
       assert.match(hooks.lastRunError().diagnosis, /EISDIR/, 'names the read error');
       assert.equal(fake.streamCallCount, 0, 'no session should be created');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Nothing configured: STEPTIX_SERVER_URL and the server both come from the machine
+  // -------------------------------------------------------------------------
+
+  /** STEPTIX_SERVER_URL as the suite's fixture .env has it. */
+  function fixtureServerUrl() {
+    const line = fs
+      .readFileSync(path.join(FIXTURES_DIR, '.env'), 'utf-8')
+      .split(/\r?\n/)
+      .find((l) => l.startsWith('STEPTIX_SERVER_URL='));
+    assert.ok(line, 'fixtures/.env must carry STEPTIX_SERVER_URL');
+    return line.slice('STEPTIX_SERVER_URL='.length).trim();
+  }
+
+  /**
+   * Point the user root (%LOCALAPPDATA%\steptix, or $XDG_CONFIG_HOME/steptix)
+   * at a fresh temp folder for each test. The extension host is this process,
+   * so the runtime discovery and the machine .env read these very variables.
+   */
+  function withUserRoot(extraVars = []) {
+    const vars = ['LOCALAPPDATA', 'XDG_CONFIG_HOME', ...extraVars];
+    const saved = {};
+    const state = { base: '' };
+    beforeEach(() => {
+      state.base = fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-userroot-'));
+      for (const name of vars) saved[name] = process.env[name];
+      process.env.LOCALAPPDATA = state.base;
+      process.env.XDG_CONFIG_HOME = state.base;
+      for (const name of extraVars) delete process.env[name];
+    });
+    afterEach(() => {
+      for (const name of vars) {
+        if (saved[name] === undefined) delete process.env[name];
+        else process.env[name] = saved[name];
+      }
+      fs.rmSync(state.base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    });
+    return state;
+  }
+
+  describe('the installed runtime, with no command setting', () => {
+    const userRoot = withUserRoot();
+    /** Where the installer would have put version 1.0.0 under that root. */
+    let runtimeDir;
+
+    beforeEach(() => {
+      const runtimes = path.join(userRoot.base, 'steptix', 'runtimes');
+      runtimeDir = path.join(runtimes, '1.0.0');
+      for (const [version, file] of [
+        ['1.0.0', 'runtime-launcher.cjs'],
+        ['1.0.0', 'steptix.cmd'],
+        ['1.0.0', path.join('server', 'dist', 'index.js')],
+        // An older one beside it, as an upgrade leaves: the newest must win.
+        ['1.0.0-beta.1', 'runtime-launcher.cjs'],
+        ['1.0.0-beta.1', 'steptix.cmd'],
+        ['1.0.0-beta.1', path.join('server', 'dist', 'index.js')],
+      ]) {
+        const full = path.join(runtimes, version, file);
+        fs.mkdirSync(path.dirname(full), { recursive: true });
+        fs.writeFileSync(full, '');
+      }
+    });
+
+    it('down: starts the newest installed runtime, in its own folder, on STEPTIX_SERVER_URL\'s port', async () => {
+      probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
+      spawnBringsServerUp = true;
+      await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 10, useInstalledRuntime: true });
+
+      void vscode.commands.executeCommand('steptix.runAll');
+      await waitFor('stream active', () => fake.hasActiveStream);
+
+      assert.equal(spawns.length, 1, 'exactly one spawn');
+      assert.equal(spawns[0].cwd, runtimeDir, 'never the workspace folder');
+      assert.ok(spawns[0].command.includes(runtimeDir), spawns[0].command);
+      const port = new URL(fixtureServerUrl()).port;
+      assert.ok(
+        spawns[0].command.endsWith(`serve --port ${port} --idle-timeout 60`),
+        `the server must listen where the run will look: ${spawns[0].command}`,
+      );
+      assert.equal(hooks.lastRunError(), null);
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('useInstalledRuntime off: the run goes ahead with nothing started', async () => {
+      probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
+      await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 10, useInstalledRuntime: false });
+
+      void vscode.commands.executeCommand('steptix.runAll');
+      // Reaching the (fake) server means the pre-run phase decided, and it
+      // decided not to spawn.
+      await waitFor('stream active', () => fake.hasActiveStream);
+      assert.deepEqual(spawns, []);
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('a runtime that never comes up: STX028 names the runtime, not a setting nobody wrote', async () => {
+      probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
+      await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 1, useInstalledRuntime: true });
+
+      await vscode.commands.executeCommand('steptix.runAll');
+      await waitFor('STX028 reported', () => hooks.lastRunError()?.code === 'STX028');
+
+      assert.equal(spawns.length, 1);
+      const { fix } = hooks.lastRunError();
+      assert.ok(fix?.includes(runtimeDir), fix);
+      assert.match(fix, /Node\.js/);
+    });
+  });
+
+  describe('a project .env that names no server', () => {
+    const PROJECT_DIR = path.join(FIXTURES_DIR, 'no-url-project');
+    const TEST_MD = path.join(PROJECT_DIR, 'no-url.md');
+    const userRoot = withUserRoot(['STEPTIX_SERVER_URL']);
+    /** Every server URL a client was built for. */
+    let urls;
+
+    // Once, not per test — see 'no API key anywhere' for why.
+    before(() => {
+      fs.mkdirSync(PROJECT_DIR, { recursive: true });
+      // A key, so the run gets past resolveApiKey; no STEPTIX_SERVER_URL.
+      fs.writeFileSync(path.join(PROJECT_DIR, '.env'), 'STEPTIX_SERVER_API_KEY=project-key\n');
+      fs.copyFileSync(path.join(FIXTURES_DIR, 'test-with-steps.md'), TEST_MD);
+    });
+
+    after(() => {
+      fs.rmSync(TEST_MD, { force: true });
+      fs.rmSync(path.join(PROJECT_DIR, '.env'), { force: true });
+      try {
+        fs.rmSync(PROJECT_DIR, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+      } catch (err) {
+        console.warn(`[server-lifecycle] could not remove ${PROJECT_DIR}: ${err.message}`);
+      }
+    });
+
+    beforeEach(async () => {
+      urls = [];
+      hooks.setApiClientFactory((config) => {
+        urls.push(config.serverUrl);
+        return fake;
+      });
+      const uri = vscode.Uri.file(TEST_MD);
+      await vscode.commands.executeCommand('vscode.open', uri);
+      await waitFor('no-url fixture active', () => {
+        const editor = vscode.window.activeTextEditor;
+        return editor && editor.document.uri.toString() === uri.toString();
+      });
+      await waitFor('active file detected', () => hooks.tracker.snapshot().isTestFile);
+    });
+
+    afterEach(async () => {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    });
+
+    it('takes STEPTIX_SERVER_URL from the machine .env', async () => {
+      fs.mkdirSync(path.join(userRoot.base, 'steptix'), { recursive: true });
+      fs.writeFileSync(path.join(userRoot.base, 'steptix', '.env'), 'STEPTIX_SERVER_URL=http://127.0.0.1:3299\n');
+
+      void vscode.commands.executeCommand('steptix.runAll');
+      await waitFor('stream active', () => fake.hasActiveStream);
+
+      assert.equal(hooks.lastRunError(), null);
+      assert.deepEqual([...new Set(urls)], ['http://127.0.0.1:3299']);
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('and with none there either, the address `steptix serve` listens on by default', async () => {
+      void vscode.commands.executeCommand('steptix.runAll');
+      await waitFor('stream active', () => fake.hasActiveStream);
+
+      assert.equal(hooks.lastRunError(), null);
+      assert.deepEqual([...new Set(urls)], ['http://127.0.0.1:3100']);
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
     });
   });
 

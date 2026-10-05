@@ -54,7 +54,7 @@ What makes a once-per-project approval the right price: the friction is a
 protection is against a **per-page-load** event. This framework drives
 browsers across untrusted pages by design, and a page that talks the agent
 into `run_test_file("C:\Users\…\.aws\config")` gets that directory's `.env`
-shipped to whatever `SERVER_URL` it names, and its `toolsDir` JavaScript
+shipped to whatever `STEPTIX_SERVER_URL` it names, and its `toolsDir` JavaScript
 executed. A human action once per project, against an attack surface that
 reloads every few seconds, is a good trade.
 

@@ -4,16 +4,16 @@
  *   - `to`        → absolute, pointer-independent, eased
  *   - `direction` → the original mouse-wheel path, byte-identical to before
  *
- * Three layers, deliberately:
+ * Two layers, deliberately:
  *   1. Routing, with the mocked Page/FrameLocator pattern from iframe.test.ts.
- *   2. The motion maths, as pure functions — no browser needed.
- *   3. The browser-side animator itself, run for real against a fake scroller,
- *      which is the only way to check that "scroll to the bottom" lands on
- *      scrollHeight − clientHeight and that an already-at-bottom page is a
- *      clean no-op rather than a jump.
+ *   2. The browser-side animator itself, run for real against a fake scroller
+ *      and frame loop: the only way to check that "scroll to the bottom" lands
+ *      on scrollHeight − clientHeight, that an already-at-bottom page is a
+ *      clean no-op rather than a jump — and the motion itself, its duration
+ *      and its curve, which live only inside the serialized callback.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { executeAction, scrollDurationMs, easeOutCubic } from '../src/browser/actions.js';
+import { executeAction } from '../src/browser/actions.js';
 import {
   buildStepMessage,
   buildContinuationMessage,
@@ -213,53 +213,6 @@ describe('executeScroll — precedence when fields are combined', () => {
   });
 });
 
-// ─── Motion, as arithmetic ───────────────────────────────────────────────────
-
-describe('scrollDurationMs', () => {
-  it('is 250ms of fixed cost plus a quarter-millisecond per pixel', () => {
-    expect(scrollDurationMs(0)).toBe(250);
-    expect(scrollDurationMs(400)).toBe(350);
-    expect(scrollDurationMs(2000)).toBe(750);
-  });
-
-  it('caps at 1200ms however tall the page is', () => {
-    expect(scrollDurationMs(3800)).toBe(1200); // exactly at the cap
-    expect(scrollDurationMs(4000)).toBe(1200);
-    expect(scrollDurationMs(400_000)).toBe(1200);
-  });
-
-  it('ignores the sign of the distance', () => {
-    expect(scrollDurationMs(-400)).toBe(scrollDurationMs(400));
-  });
-});
-
-describe('easeOutCubic', () => {
-  it('runs from 0 to exactly 1', () => {
-    expect(easeOutCubic(0)).toBe(0);
-    expect(easeOutCubic(1)).toBe(1);
-  });
-
-  it('is monotonically increasing', () => {
-    let prev = -Infinity;
-    for (let t = 0; t <= 1.0001; t += 0.01) {
-      const v = easeOutCubic(Math.min(1, t));
-      expect(v).toBeGreaterThan(prev);
-      prev = v;
-    }
-  });
-
-  it('decelerates: per-interval displacement falls across the back half', () => {
-    const step = 0.05;
-    let prevDisplacement = Infinity;
-    for (let t = 0.5; t < 1; t += step) {
-      const displacement = easeOutCubic(Math.min(1, t + step)) - easeOutCubic(t);
-      expect(displacement).toBeGreaterThan(0);
-      expect(displacement).toBeLessThan(prevDisplacement);
-      prevDisplacement = displacement;
-    }
-  });
-});
-
 // ─── The browser-side animator, run for real ─────────────────────────────────
 
 /** A stand-in for `document.scrollingElement` that records every write. */
@@ -275,26 +228,32 @@ function makeFakeScroller(init: { scrollTop: number; clientHeight: number; scrol
   return { el, writes, current: () => value };
 }
 
+/** The fake frame loop's frame interval. */
+const FRAME_MS = 50;
+
 /**
  * Install a fake document + frame loop, and a page whose `evaluate` actually
  * invokes the serialized callback instead of recording it.
  *
  * `performance` is left alone on purpose — stubbing the clock vitest itself
- * uses is not worth it. The synthetic frame times are the real clock plus a
- * growing offset, so elapsed time is dominated by the offset and the curve is
- * still walked frame by frame.
+ * uses is not worth it. Frame k is stamped `FRAME_MS × k` after the clock as
+ * the first frame was asked for, which is the animator's own start reading
+ * give or take a statement — so a glide of D ms takes exactly D / 50 frames.
+ * Frames are delivered as microtasks, so all of them arrive before the
+ * animator's deadline timer could ever fire.
  */
 function installFakeBrowser(
   scroller: ReturnType<typeof makeFakeScroller>,
   opts: { frames: boolean } = { frames: true },
 ): Page {
   vi.stubGlobal('document', { scrollingElement: scroller.el, documentElement: scroller.el });
-  let offset = 0;
+  let base: number | null = null;
+  let frame = 0;
   vi.stubGlobal('requestAnimationFrame', (cb: (t: number) => void) => {
     if (!opts.frames) return 1; // a hidden page: rAF is throttled to zero
-    offset += 50;
-    const at = performance.now() + offset;
-    setTimeout(() => cb(at), 0);
+    base ??= performance.now();
+    const at = base + FRAME_MS * ++frame;
+    queueMicrotask(() => cb(at));
     return 1;
   });
 
@@ -338,6 +297,43 @@ describe('browser-side scroll animator', () => {
     for (let i = 1; i < scroller.writes.length; i++) {
       expect(scroller.writes[i]!).toBeGreaterThanOrEqual(scroller.writes[i - 1]!);
     }
+  });
+
+  /** Run one absolute scroll on a fresh fake scroller; answer every write. */
+  async function glide(
+    init: { scrollTop: number; clientHeight: number; scrollHeight: number },
+    to: 'top' | 'bottom',
+  ): Promise<number[]> {
+    const scroller = makeFakeScroller(init);
+    const page = installFakeBrowser(scroller);
+    await executeAction(page, { action: 'scroll', to, description: `To the ${to}` });
+    return scroller.writes;
+  }
+
+  // The duration is computed in the page, so it is read off the frames: the
+  // animator writes once per frame, and a frame is 50 ms.
+  it('takes 250 ms plus a quarter-millisecond per pixel, up or down', async () => {
+    // 400 px: 350 ms. 2000 px: 750 ms. 400 px back up: 350 ms.
+    expect(await glide({ scrollTop: 0, clientHeight: 800, scrollHeight: 1200 }, 'bottom')).toHaveLength(7);
+    expect(await glide({ scrollTop: 0, clientHeight: 800, scrollHeight: 2800 }, 'bottom')).toHaveLength(15);
+    expect(await glide({ scrollTop: 400, clientHeight: 800, scrollHeight: 2800 }, 'top')).toHaveLength(7);
+  });
+
+  it('stops gliding at 1200 ms however far it goes', async () => {
+    for (const distance of [3_800, 4_600, 40_000]) { // 3800 px is exactly at the cap
+      const writes = await glide({ scrollTop: 0, clientHeight: 800, scrollHeight: 800 + distance }, 'bottom');
+      expect(writes, `${distance} px`).toHaveLength(1200 / FRAME_MS);
+      expect(writes.at(-1), `${distance} px`).toBe(distance);
+    }
+  });
+
+  it('decelerates: every frame moves it less than the frame before, the first one most', async () => {
+    const writes = await glide({ scrollTop: 0, clientHeight: 800, scrollHeight: 5400 }, 'bottom');
+    const moves = writes.map((y, i) => y - (i === 0 ? 0 : writes[i - 1]!));
+    for (let i = 1; i < moves.length; i++) expect(moves[i]!, `frame ${i + 1}`).toBeLessThan(moves[i - 1]!);
+    // Fast off the mark: over twice the even share a linear glide's first
+    // frame would cover.
+    expect(moves[0]!).toBeGreaterThan((2 * 4600) / writes.length);
   });
 
   it('returns to y=0 for "top"', async () => {

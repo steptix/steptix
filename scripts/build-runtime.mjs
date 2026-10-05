@@ -109,7 +109,7 @@ for (const relative of templateFiles) {
 }
 fs.cpSync(path.join(root, 'src/browser/scripts'), path.join(server, 'dist/browser/scripts'), { recursive: true });
 for (const name of ['LICENSE', 'NOTICE']) fs.copyFileSync(path.join(root, name), path.join(server, name));
-for (const name of ['node-check.cjs', 'steptix.cmd', 'runtime-launcher.cjs', 'runtime-bootstrap.mjs']) fs.copyFileSync(path.join(root, 'packaging/runtime', name), path.join(payload, name));
+for (const name of ['node-check.cjs', 'steptix.cmd', 'runtime-launcher.cjs', 'runtime-bootstrap.mjs', 'runtime-scan.ps1']) fs.copyFileSync(path.join(root, 'packaging/runtime', name), path.join(payload, name));
 fs.writeFileSync(path.join(server, 'THIRD-PARTY-NOTICES.txt'), 'Dependencies included in this runtime. License files are retained in each package.\n\n' +
   [...installed.values()].map((pkg) => `${pkg.name}@${pkg.version}: ${typeof pkg.license === 'string' ? pkg.license : JSON.stringify(pkg.license)}`).join('\n') + '\n');
 const playwright = JSON.parse(fs.readFileSync(path.join(server, 'node_modules/playwright/package.json'), 'utf8'));
@@ -119,19 +119,20 @@ const manifest = {
   node: { bundled: false, required: sourcePackage.engines.node, executableOverride: 'STEPTIX_NODE' },
   entryPoint: 'server/dist/index.js', cli: 'steptix.cmd', playwrightVersion: playwright.version,
   browsers: { bundled: false, cache: '%LOCALAPPDATA%/ms-playwright', revisions: browsers.browsers },
-  extensionAutoDiscovery: false,
+  extensionAutoDiscovery: true,
 };
 fs.writeFileSync(path.join(payload, 'runtime-manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 const readme = `Steptix Runtime ${version} - Windows x64 beta\n\n` +
 `PREREQUISITES\nNode.js x64 22.21 or later must be installed and available on PATH.\nYou can instead set STEPTIX_NODE to the absolute path of node.exe.\nNode.js, browsers and the VS Code extension are not included.\n\n` +
-`CLI\nIn PowerShell, run: & "$env:LOCALAPPDATA\\steptix\\runtimes\\${version}\\steptix.cmd" --help\nRun the CLI from your test project's directory so configuration and tools are resolved there.\nThis installer does not modify PATH or VS Code settings.\n\n` +
-`SERVER\nsteptix.cmd serve --idle-timeout 60\nThe launcher enables a localhost Node inspector on a free port for TypeScript debugging.\nThe server generates/reuses its local key at %LOCALAPPDATA%\\steptix\\.env.\nNo real credentials are included in this package.\n\n` +
-`VS CODE (CURRENT EXTENSION)\nAutomatic runtime discovery is not yet implemented. In VS Code User settings set:\n` +
-`steptix.serverAutoStart.command: "<installation folder>\\steptix.cmd" serve --idle-timeout 60\n` +
-`steptix.serverAutoStart.cwd: <installation folder>\n` +
-`SERVER_URL is optional: with none, Steptix uses http://127.0.0.1:3100, the port serve listens on.\nUse the extension's Server Status / Start Server commands.\n\n` +
-`BROWSERS\nDefault Chromium-based runs use your installed Google Chrome; Edge is also supported.\nInstall the runtime's matching Playwright browser builds with:\nsteptix.cmd browsers install chromium\nsteptix.cmd browsers install firefox\nsteptix.cmd browsers install webkit\nPlaywright uses %LOCALAPPDATA%\\ms-playwright unless PLAYWRIGHT_BROWSERS_PATH is set.\nInstalling Chromium does not change Steptix's existing Chrome-channel default.\nBrowser installation downloads require network access.\n\n` +
-`UNINSTALL / VERSIONS\nEach version has its own folder and Windows Installed Apps entry.\nStop servers using this version before uninstalling.\nUninstall.exe removes runtime files only; projects, shared keys and browsers are preserved.\nThe beta installer is unsigned. Inspect the checksum supplied beside it.\n`;
+`CLI\nOpen a new terminal and run: steptix --help\nThe installer adds %LOCALAPPDATA%\\steptix\\bin to your user PATH unless you untick "Add steptix to PATH"\n(or install with /NOPATH).\nsteptix there runs the newest runtime installed under %LOCALAPPDATA%\\steptix\\runtimes.\nTerminals and VS Code windows that were open during the install need a restart to see it.\nTo run this version without PATH, in PowerShell: & "$env:LOCALAPPDATA\\steptix\\runtimes\\${version}\\steptix.cmd" --help\nRun the CLI from your test project's directory so configuration and tools are resolved there.\nThis installer does not modify VS Code settings.\n\n` +
+`SERVER\nsteptix serve --idle-timeout 60\nThe launcher enables a localhost Node inspector on a free port for TypeScript debugging.\nThe server generates/reuses its local key at %LOCALAPPDATA%\\steptix\\.env.\nNo real credentials are included in this package.\n\n` +
+`VS CODE\nNothing to configure. When you run a test and no server is listening, the Steptix extension\nstarts the newest runtime under %LOCALAPPDATA%\\steptix\\runtimes on the port STEPTIX_SERVER_URL names.\n` +
+`STEPTIX_SERVER_URL comes from the project's .env, else the STEPTIX_SERVER_URL environment variable,\nelse %LOCALAPPDATA%\\steptix\\.env, else it is http://127.0.0.1:3100. A project needs no .env of its own.\n` +
+`Setting steptix.serverAutoStart.command in VS Code User settings starts something else instead.\nUse the extension's Server Status / Start Server / Stop Server commands.\n\n` +
+`BROWSERS\nDefault Chromium-based runs use your installed Google Chrome; Edge is also supported.\nInstall the runtime's matching Playwright browser builds with:\nsteptix browsers install chromium\nsteptix browsers install firefox\nsteptix browsers install webkit\nPlaywright uses %LOCALAPPDATA%\\ms-playwright unless PLAYWRIGHT_BROWSERS_PATH is set.\nInstalling Chromium does not change Steptix's existing Chrome-channel default.\nBrowser installation downloads require network access.\n\n` +
+`UNINSTALL / VERSIONS\nEach version has its own folder and Windows Installed Apps entry. Installing a version removes older ones;\ninstalling an older version again (a rollback) leaves newer ones, and the newest still runs.\nThe installer and uninstaller wait while Steptix runs from a version they would change. Stop it first:\nin VS Code run Steptix: Stop Server, or run steptix stop.\nUninstall.exe removes runtime files only; projects, shared keys and browsers are preserved.\nUninstalling the last runtime also removes %LOCALAPPDATA%\\steptix\\bin and its PATH entry.\n\n` +
+`SILENT INSTALL\nSteptixRuntimeSetup-${version}-win-x64.exe /S installs with no window; add /NOPATH to leave PATH alone.\nUninstall.exe /S uninstalls with no window. Neither shows a dialog. A silent install exits with code 3\nwhile Steptix runs from a version it would change, and with code 2 when it cannot proceed for another reason.\nAn uninstall that cannot proceed removes nothing.\nIn PowerShell, Start-Process <installer> -ArgumentList '/S' -Wait waits for the install to finish.\n\n` +
+`The beta installer is unsigned. Inspect the checksum supplied beside it.\n`;
 fs.writeFileSync(path.join(payload, 'README.txt'), readme.replaceAll('\n', '\r\n'));
 const inventory = [];
 function walk(directory) {
@@ -144,11 +145,31 @@ function walk(directory) {
 walk(payload);
 fs.writeFileSync(path.join(output, `inventory-${version}.json`), JSON.stringify({ version, packages: installed.size, files: inventory }, null, 2));
 fs.mkdirSync(unverified, { recursive: true });
-execFileSync(compiler, ['/V2', `/DVERSION=${version}`, `/DPRODUCT_VERSION=${version.split('-')[0]}.0`, `/DPAYLOAD=${payload}`, `/DOUTPUT=${unverified}`, path.join(root, 'packaging/runtime/runtime.nsi')], { stdio: 'inherit' });
+const compile = (asVersion, into) => execFileSync(compiler, ['/V2', `/DVERSION=${asVersion}`, `/DPRODUCT_VERSION=${asVersion.split('-')[0]}.0`, `/DPAYLOAD=${payload}`, `/DOUTPUT=${into}`, path.join(root, 'packaging/runtime/runtime.nsi')], { stdio: 'inherit' });
+compile(version, unverified);
+// A newer version of the same runtime, for the test's two-version steps:
+// installed beside the candidate, with the candidate then uninstalled while
+// it stays. Its version is bumped where `--version` and the manifest report
+// it, so the test can tell which runtime ran, and the payload is put back
+// before anything else reads it. It stays in unverified/ and is never released.
+const [, major, minor, patch] = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+const newerVersion = `${major}.${minor}.${Number(patch) + 1}-verify`;
+const newerDir = path.join(unverified, 'newer');
+fs.rmSync(newerDir, { recursive: true, force: true });
+fs.mkdirSync(newerDir, { recursive: true });
+const stamped = ['server/package.json', 'runtime-manifest.json'].map((file) => path.join(payload, file));
+const originals = stamped.map((file) => fs.readFileSync(file, 'utf8'));
+try {
+  stamped.forEach((file, i) => fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(originals[i]), version: newerVersion }, null, 2) + '\n'));
+  compile(newerVersion, newerDir);
+} finally {
+  stamped.forEach((file, i) => fs.writeFileSync(file, originals[i]));
+}
+const newer = path.join(newerDir, `SteptixRuntimeSetup-${newerVersion}-win-x64.exe`);
 // Every installer is tested end to end before it is released: installed,
 // started from VS Code through steptix.cmd to run a test, and uninstalled
 // (scripts/verify-runtime.mjs). There is no flag to skip it.
-const verify = spawnSync(process.execPath, [path.join(root, 'scripts/verify-runtime.mjs'), candidate], { stdio: 'inherit' });
+const verify = spawnSync(process.execPath, [path.join(root, 'scripts/verify-runtime.mjs'), candidate, newer], { stdio: 'inherit' });
 if (verify.status !== 0) {
   throw new Error(`The end-to-end test failed, so the installer was not released. It is left at ${candidate} for diagnosis.`);
 }

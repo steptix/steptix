@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { AiClient } from '../src/ai/client.js';
 import type { ChatMessage } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
@@ -20,6 +19,7 @@ import {
 } from '../src/codebehind/compile.js';
 import { buildCodeBehindRegistry } from '../src/codebehind/loader.js';
 import { lastRunPathFor, readLastRun, writeLastRun } from '../src/codebehind/last-run.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * The compile pipeline (stories/codebehind-compile.md, "The compile
@@ -33,11 +33,16 @@ import { lastRunPathFor, readLastRun, writeLastRun } from '../src/codebehind/las
  * that must not be faked.
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-compile');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
 
 let counter = 0;
 let dir: string;
+
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('codebehind-compile');
+});
 
 beforeEach(async () => {
   clearSkillCache();
@@ -46,7 +51,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true });
+  await removeScratchBase(tmpBase);
 });
 
 async function write(rel: string, contents: string): Promise<string> {
@@ -598,82 +603,6 @@ export default defineSteps([
   });
 
   // ── Control flow (stories/control-flow.md, decision 12) ──────────────────
-
-  it('compiles a test that loops — the refusal is gone (stories/codebehind-loops-and-conditions.md)', async () => {
-    const md = await write(
-      'looping.md',
-      [
-        '# Looping',
-        '',
-        '## Steps',
-        '1. Open the statements page',
-        '2. While the Next button is enabled, Click Next',
-        '',
-      ].join('\n'),
-    );
-    const test = await parseTestFile(md);
-    // Expanded: 1 Open · 2 While · 3 Click Next. One pass, then the loop ends.
-    const judgedAt = (holds: boolean): StepResult => ({
-      index: 2,
-      instruction: 'While the Next button is enabled, Click Next',
-      status: 'passed',
-      turns: [],
-      durationMs: 1,
-      retried: false,
-      guard: {
-        decidedBy: 'model',
-        holds,
-        evidence: { dom: `<button id="next"${holds ? '' : ' disabled'}>Next</button>`, url: 'https://app.test/s', members: [{ index: 1, holds }] },
-      },
-    });
-    const record: CompileRunOutcome = {
-      status: 'passed',
-      ...outcomeRows([stepResult(1), judgedAt(true), stepResult(3), judgedAt(false)], 3),
-      resolvedParameters: {},
-      tokensUsed: 0,
-    };
-    const coded = (holds: boolean): StepResult => ({
-      ...judgedAt(holds), guard: { decidedBy: 'code', holds }, fromCodeBehind: true,
-    });
-    const replay: CompileRunOutcome = {
-      status: 'passed',
-      ...outcomeRows(
-        [stepResult(1, { fromCodeBehind: true }), coded(true), stepResult(3, { fromCodeBehind: true }), coded(false)],
-        3,
-      ),
-      resolvedParameters: {},
-      tokensUsed: 0,
-    };
-    const requests: CompileRunRequest[] = [];
-    const runner: CompileRunner = async (request) => {
-      requests.push(request);
-      return request.purpose === 'record' ? record : replay;
-    };
-    const { client } = scriptedClient([
-      entryEnvelope('Open the statements page'),
-      JSON.stringify({
-        entry:
-          "{ source: 'While the Next button is enabled, Click Next', async condition({ page }) { " +
-          "return (await page.locator('#next:enabled').count()) > 0; } }",
-      }),
-      entryEnvelope('Click Next'),
-      REVIEW_NOOP,
-    ]);
-    const { events, onEvent } = collect();
-
-    const result = await compileTest({
-      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
-    });
-
-    expect(result.status).toBe('green');
-    // It recorded and replayed, where it used to refuse before running anything.
-    expect(requests.map((r) => r.purpose)).toEqual(['record', 'replay']);
-    // The guard is a compile step now: its condition entry, and the body's.
-    expect(generatedSteps(events)).toEqual([1, 2, 3]);
-    const written = await fs.readFile(path.join(dir, 'looping.steps.ts'), 'utf-8');
-    expect(written).toContain("source: 'While the Next button is enabled, Click Next'");
-    expect(written).toContain('async condition({ page })');
-  });
 
   it('compiles a chain: the tails, the If as a condition, never the Otherwise', async () => {
     const md = await write(

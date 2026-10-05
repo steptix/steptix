@@ -15,7 +15,7 @@ import { resolveServerUrl } from '../src/cli/server-target.js';
 
 /**
  * stories/machine-server-url.md — `serve` listens on -p, else the machine
- * SERVER_URL's port, else 3100; `status` / `stop` look in the same order.
+ * STEPTIX_SERVER_URL's port, else 3100; `status` / `stop` look in the same order.
  */
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -48,26 +48,26 @@ describe('resolveServePort', () => {
     expect(DEFAULT_SERVER_URL).toBe('http://127.0.0.1:3100');
   });
 
-  it("takes the machine SERVER_URL's port, and names the file", () => {
-    const envPath = writeMachineEnv('SERVER_URL=http://localhost:3200\n');
+  it("takes the machine STEPTIX_SERVER_URL's port, and names the file", () => {
+    const envPath = writeMachineEnv('STEPTIX_SERVER_URL=http://localhost:3200\n');
     expect(resolveServePort(undefined, deps())).toEqual({
       port: 3200,
-      source: `SERVER_URL in ${envPath}`,
+      source: `STEPTIX_SERVER_URL in ${envPath}`,
     });
   });
 
-  it('lets -p win over the machine SERVER_URL', () => {
-    writeMachineEnv('SERVER_URL=http://localhost:3200\n');
+  it('lets -p win over the machine STEPTIX_SERVER_URL', () => {
+    writeMachineEnv('STEPTIX_SERVER_URL=http://localhost:3200\n');
     expect(resolveServePort(3104, deps())).toEqual({ port: 3104, source: '-p' });
   });
 
-  it('takes only the port: a remote host in SERVER_URL still binds locally on that port', () => {
-    writeMachineEnv('SERVER_URL=http://build-box:3300\n');
+  it('takes only the port: a remote host in STEPTIX_SERVER_URL still binds locally on that port', () => {
+    writeMachineEnv('STEPTIX_SERVER_URL=http://build-box:3300\n');
     expect(resolveServePort(undefined, deps()).port).toBe(3300);
   });
 
-  it('refuses a machine SERVER_URL with no port rather than guessing one', () => {
-    const envPath = writeMachineEnv('SERVER_URL=http://localhost\n');
+  it('refuses a machine STEPTIX_SERVER_URL with no port rather than guessing one', () => {
+    const envPath = writeMachineEnv('STEPTIX_SERVER_URL=http://localhost\n');
     expect(() => resolveServePort(undefined, deps())).toThrow(ServePortError);
     expect(() => resolveServePort(undefined, deps())).toThrow(envPath);
     expect(() => resolveServePort(undefined, deps())).toThrow(/has no port/);
@@ -75,13 +75,13 @@ describe('resolveServePort', () => {
     expect(resolveServePort(3104, deps()).port).toBe(3104);
   });
 
-  it('refuses a machine SERVER_URL that is not a URL', () => {
-    writeMachineEnv('SERVER_URL=not a url\n');
+  it('refuses a machine STEPTIX_SERVER_URL that is not a URL', () => {
+    writeMachineEnv('STEPTIX_SERVER_URL=not a url\n');
     expect(() => resolveServePort(undefined, deps())).toThrow(/not a valid URL/);
   });
 
-  it('reads a blank SERVER_URL line as absent', () => {
-    writeMachineEnv('SERVER_URL=   \n');
+  it('reads a blank STEPTIX_SERVER_URL line as absent', () => {
+    writeMachineEnv('STEPTIX_SERVER_URL=   \n');
     expect(readMachineServerUrl(deps())).toBeNull();
     expect(resolveServePort(undefined, deps()).port).toBe(3100);
   });
@@ -105,12 +105,12 @@ describe('resolveServerUrl (status / stop)', () => {
   });
 
   it('--url wins', async () => {
-    writeMachineEnv('SERVER_URL=http://127.0.0.1:3200\n');
+    writeMachineEnv('STEPTIX_SERVER_URL=http://127.0.0.1:3200\n');
     expect(await resolveServerUrl({ url: 'http://127.0.0.1:4000/' })).toBe('http://127.0.0.1:4000');
   });
 
-  it('then the machine SERVER_URL', async () => {
-    writeMachineEnv('SERVER_URL=http://127.0.0.1:3200/\n');
+  it('then the machine STEPTIX_SERVER_URL', async () => {
+    writeMachineEnv('STEPTIX_SERVER_URL=http://127.0.0.1:3200/\n');
     expect(await resolveServerUrl({})).toBe('http://127.0.0.1:3200');
   });
 
@@ -156,17 +156,17 @@ describe('steptix serve — port errors', () => {
     const address = blocker.address();
     const port = typeof address === 'object' && address !== null ? address.port : 0;
     try {
-      const envPath = writeMachineEnv(`SERVER_URL=http://127.0.0.1:${port}\n`);
+      const envPath = writeMachineEnv(`STEPTIX_SERVER_URL=http://127.0.0.1:${port}\n`);
       const { code, output } = await runServe([]);
       expect(code).toBe(1);
-      expect(output).toContain(`Port ${port} (from SERVER_URL in ${envPath}) is already in use`);
+      expect(output).toContain(`Port ${port} (from STEPTIX_SERVER_URL in ${envPath}) is already in use`);
     } finally {
       await new Promise<void>((r) => blocker.close(() => r()));
     }
   }, 40_000);
 
-  it('exits 1 before binding anything when the machine SERVER_URL has no port', async () => {
-    const envPath = writeMachineEnv('SERVER_URL=http://127.0.0.1\n');
+  it('exits 1 before binding anything when the machine STEPTIX_SERVER_URL has no port', async () => {
+    const envPath = writeMachineEnv('STEPTIX_SERVER_URL=http://127.0.0.1\n');
     const { code, output } = await runServe([]);
     expect(code).toBe(1);
     expect(output).toContain(envPath);

@@ -1169,7 +1169,7 @@ export function registerCommands(
           return;
         }
         // Continue runs from startLine to end-of-document. Passing
-        // `[startLine]` alone would collapse through resolveRunLines
+        // `[startLine]` alone would collapse through resolveRunSelection
         // to a one-step run — useful for Step Over but not Continue.
         const resumeLines = extractSteps(editor.document.getText())
           .map((s) => s.line)
@@ -1433,7 +1433,7 @@ export function registerCommands(
     vscode.commands.registerCommand('steptix.revealEnvFile', async () => {
       const controller = registry.active();
       if (!controller) return notifyNoActive();
-      // A test with no project .env takes SERVER_URL and the key from the
+      // A test with no project .env takes STEPTIX_SERVER_URL and the key from the
       // machine .env, so that is the file the error's "Reveal .env" means.
       const machineEnv = userRootEnvPath();
       const path = controller.lastEnvPath ?? (fs.existsSync(machineEnv) ? machineEnv : null);

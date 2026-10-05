@@ -1,12 +1,25 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { ALL_ERROR_CODES, reportError } from '../dist/errors.js';
 
+/** The extension that renders these payloads, and owns their commands. */
+const STEPTIX_PACKAGE = JSON.parse(
+  readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'steptix-vscode', 'package.json'),
+    'utf-8',
+  ),
+);
+
 const SAMPLE_CONTEXTS = {
+  STX001: { searchedDirs: ['/ws/a/b', '/ws/a', '/ws'], fallbackSetting: '' },
+  STX002: { envPath: '/ws/.env' },
   STX003: { envPath: '/ws/.env', machineEnvPath: '/home/x/.steptix/.env' },
   STX004: { envPath: '/ws/.env', value: 'not-a-url' },
   STX005: { envPath: '/ws/.env', lineNumber: 4, line: 'bad line' },
-  STX006: { envName: 't2', expectedPath: '/ws/.env.t2' },
+  STX006: { envName: 't2', expectedPath: '/ws/.env.t2', baseEnvPath: '/ws/base/.env' },
   STX007: {
     machineEnvPath: '/home/x/.steptix/.env',
     reason: "EACCES: permission denied, open '/home/x/.steptix/.env'",
@@ -32,7 +45,7 @@ const SAMPLE_CONTEXTS = {
   STX031: {},
   STX033: {
     serverUrl: 'http://localhost:3101',
-    urlSource: 'SERVER_URL in /ws/.env',
+    urlSource: '/ws/.env',
     servePort: 3100,
     servePortSource: 'the default',
   },
@@ -52,25 +65,18 @@ test('every code in catalogue has a sample context (audit)', () => {
   assert.deepEqual(missing, []);
 });
 
-test('every code produces a payload with code + non-empty message + non-empty fix', () => {
+test('every code has a message led by its code, a diagnosis, and a fix sentence that ends with a period', () => {
   for (const code of ALL_ERROR_CODES) {
     const payload = reportError(code, SAMPLE_CONTEXTS[code]);
-    assert.equal(payload.code, code, `${code}: round-trips code`);
-    assert.ok(payload.message.startsWith(`${code}:`), `${code}: message starts with code`);
+    assert.ok(payload.message.startsWith(`${code}: `), `${code}: message starts with "${code}: " — got "${payload.message}"`);
     assert.ok(payload.diagnosis.length > 0, `${code}: has diagnosis`);
-    assert.ok(payload.fix.length > 0, `${code}: has fix`);
-  }
-});
-
-test('every fix sentence ends with a period', () => {
-  for (const code of ALL_ERROR_CODES) {
-    const payload = reportError(code, SAMPLE_CONTEXTS[code]);
     assert.ok(payload.fix.endsWith('.'), `${code}: fix ends with period — got "${payload.fix}"`);
   }
 });
 
 test('errors involving a file path mention the path verbatim', () => {
   const cases = [
+    ['STX002', '/ws/.env'],
     ['STX003', '/ws/.env'],
     ['STX004', '/ws/.env'],
     ['STX005', '/ws/.env'],
@@ -85,38 +91,28 @@ test('errors involving a file path mention the path verbatim', () => {
   }
 });
 
-test('errors involving SERVER_URL mention it verbatim', () => {
+test('errors involving STEPTIX_SERVER_URL mention it verbatim', () => {
   const cases = ['STX010', 'STX011', 'STX012', 'STX013', 'STX014', 'STX027', 'STX028'];
   for (const code of cases) {
     const payload = reportError(code, SAMPLE_CONTEXTS[code]);
     assert.ok(
       payload.message.includes('http://localhost:3100'),
-      `${code}: message must include SERVER_URL`,
+      `${code}: message must include STEPTIX_SERVER_URL`,
     );
   }
 });
 
-test('STX001 and STX002 are retired: a test without a project .env or SERVER_URL is not an error', () => {
-  // stories/machine-server-url.md — SERVER_URL falls back to the machine .env,
-  // then the default, so neither "no .env" nor "no SERVER_URL" refuses a run.
-  assert.ok(!ALL_ERROR_CODES.includes('STX001'));
-  assert.ok(!ALL_ERROR_CODES.includes('STX002'));
-});
-
-test('codes that name the project .env say so plainly when there is none', () => {
-  const stx003 = reportError('STX003', { envPath: null, machineEnvPath: '/home/x/.steptix/.env' });
-  assert.ok(stx003.message.includes('this test has no project .env'));
-  assert.ok(!stx003.message.includes('null'));
-
-  const stx011 = reportError('STX011', { envPath: null, serverUrl: 'http://localhost:3100' });
-  assert.ok(stx011.message.includes('from the process environment'));
-  assert.ok(!stx011.message.includes('null'));
+test('STX001 lists searched directories and the fallback setting name', () => {
+  const payload = reportError('STX001', SAMPLE_CONTEXTS.STX001);
+  assert.ok(payload.message.includes('/ws/a/b'));
+  assert.ok(payload.message.includes('/ws'));
+  assert.ok(payload.message.includes('steptix.defaultEnvFile'));
 });
 
 test('STX033 names both ports, where each came from, and the serve command that fixes it', () => {
   const payload = reportError('STX033', SAMPLE_CONTEXTS.STX033);
   assert.ok(payload.message.includes('http://localhost:3101'));
-  assert.ok(payload.message.includes('SERVER_URL in /ws/.env'));
+  assert.ok(payload.message.includes('/ws/.env'));
   assert.ok(payload.message.includes('port 3100'));
   assert.ok(payload.message.includes('the default'));
   assert.ok(payload.message.includes('steptix serve -p 3101'));
@@ -132,6 +128,9 @@ test('STX006 names the selected env and the expected .env.<name> path', () => {
   const payload = reportError('STX006', SAMPLE_CONTEXTS.STX006);
   assert.ok(payload.message.includes('t2'), 'mentions the env name');
   assert.ok(payload.message.includes('/ws/.env.t2'), 'mentions the expected overlay path');
+  // Distinct from expectedPath so this proves baseEnvPath is actually surfaced
+  // (not trivially satisfied as a substring of /ws/.env.t2).
+  assert.ok(payload.message.includes('/ws/base/.env'), 'mentions the base .env path');
 });
 
 test('STX007 carries the read error, so the cause is not a guess', () => {
@@ -174,12 +173,34 @@ test('STX028 still names both settings when no log is available', () => {
   assert.ok(!payload.message.includes('undefined'), 'no undefined leaks into the message');
 });
 
-test('actions reference real-looking command ids', () => {
+test('STX028 for the installed runtime names its folder and what usually breaks it', () => {
+  // No command setting was involved, so a fix that only said "fix the
+  // command setting" would send the user to a setting they never wrote.
+  const payload = reportError('STX028', {
+    ...SAMPLE_CONTEXTS.STX028,
+    runtimeDir: '/home/x/.steptix/runtimes/1.0.0',
+  });
+  assert.ok(payload.message.includes('/home/x/.steptix/runtimes/1.0.0'), 'names the runtime folder');
+  assert.ok(payload.message.includes('/ws/globalStorage/server.log'), 'still names the log');
+  assert.ok(/Node\.js/.test(payload.fix), 'says the runtime needs Node');
+  assert.ok(payload.fix.endsWith('.'));
+});
+
+test('every action runs a VS Code built-in or a command the extension contributes', () => {
+  // A button whose command nobody registers fails with "command not found" at
+  // the moment the user reaches for help — the one time it must work.
+  const contributed = new Set(STEPTIX_PACKAGE.contributes.commands.map((c) => c.command));
+  let checked = 0;
   for (const code of ALL_ERROR_CODES) {
     const payload = reportError(code, SAMPLE_CONTEXTS[code]);
     for (const action of payload.actions) {
       assert.ok(action.label.length > 0, `${code}: action label non-empty`);
-      assert.ok(action.command.length > 0, `${code}: action command non-empty`);
+      assert.ok(
+        action.command.startsWith('workbench.') || contributed.has(action.command),
+        `${code}: "${action.command}" is neither a workbench.* built-in nor in steptix-vscode/package.json contributes.commands`,
+      );
+      checked++;
     }
   }
+  assert.ok(checked > 0, 'no action was checked');
 });

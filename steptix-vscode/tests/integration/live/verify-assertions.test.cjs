@@ -45,7 +45,7 @@
  *     told what the assertion expected or what it got, so it cannot aim at
  *     the expectation.
  *
- * Prereq: Sessions API server running on $LIVE_SERVER_URL (default :3100),
+ * Prereq: Sessions API server running on $LIVE_STEPTIX_SERVER_URL (default :3100),
  * and fixtures/test-app on :8787 (runLiveTest.cjs boots it).
  */
 const assert = require('node:assert/strict');
@@ -139,7 +139,7 @@ describe('Steptix live — verify steps', function () {
     workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     assert.ok(workspaceRoot, 'no workspace folder — live runner must pass templates/');
 
-    const serverUrl = process.env.LIVE_SERVER_URL || 'http://localhost:3100';
+    const serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
       const res = await fetch(`${serverUrl}/sessions/healthcheck/steps`, { method: 'OPTIONS' });
       assert.ok(

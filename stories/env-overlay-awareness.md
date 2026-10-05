@@ -51,7 +51,7 @@ where `.env.uat` sets `AI_API_KEY`.
 > whose `.env.<name>` sets its own AI_API_KEY over `.env`.
 
 **You look at the run output** for any run with an active env.
-**You see** `.env.uat overlaid (2 keys: AI_API_KEY, SERVER_URL)` — the keys it
+**You see** `.env.uat overlaid (2 keys: AI_API_KEY, STEPTIX_SERVER_URL)` — the keys it
 overrode, not just a count.
 
 ## Why this is worth doing
@@ -178,7 +178,7 @@ So: no state, no hint. Two changes, each correct by construction:
    leak-guard test is unchanged.
 2. **The run controller's existing overlay log line names the overridden
    keys.** `.env.<name> overlaid (N key(s))` already prints on every run with an
-   active env; extending it to `overlaid (2 keys: AI_API_KEY, SERVER_URL)` is one
+   active env; extending it to `overlaid (2 keys: AI_API_KEY, STEPTIX_SERVER_URL)` is one
    line, per-window-correct because it runs in the window that owns the
    workspace, and puts the signal where the user is already looking when a run
    fails.
@@ -223,7 +223,7 @@ server rebuild, no framework change, no library change.
 
 1. **RESOLVED — *Write both* is dropped.** One file, one truth; the CLI uses
    `--env`. Reasoning in Part A.
-2. **Should the overlay check also flag `SERVER_URL` / `STEPTIX_SERVER_API_KEY`?**
+2. **Should the overlay check also flag `STEPTIX_SERVER_URL` / `STEPTIX_SERVER_API_KEY`?**
    Not bridge-related, but an overlay that redirects the server is the other
    silent-override that reads as "the bridge is broken". Probably a separate
    change.

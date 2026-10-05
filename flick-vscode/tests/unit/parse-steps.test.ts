@@ -33,9 +33,11 @@ test('handles CRLF line endings', () => {
   assert.deepEqual(parseSteps('Navigate\r\nClick'), ['Navigate', 'Click']);
 });
 
-test('quoted content inside a step is preserved', () => {
-  assert.deepEqual(parseSteps('Enter "user@example.com" in the email field'), [
-    'Enter "user@example.com" in the email field',
+test('asterisk bullets and multi-digit numbers are stripped too', () => {
+  assert.deepEqual(parseSteps('* Open the menu\n10) Pick Settings\n12. Save'), [
+    'Open the menu',
+    'Pick Settings',
+    'Save',
   ]);
 });
 

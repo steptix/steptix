@@ -184,11 +184,10 @@ function withMachineAiFloor(config: Config, fileAi: UserConfig['ai'] | null): Co
     result = { ...result, ai: { ...result.ai, model: machineModel.trim() } };
   }
 
-  // Same floor, same shape — and the same trap, only sharper: `gatewayUrl` has
-  // a built-in default, so `result.ai.gatewayUrl` is never undefined and a
-  // "did anyone set this?" check against the merged config can only ever
-  // answer yes. The question has to be asked of the RAW file config, or a
-  // machine-wide gateway would quietly beat every project that pinned one.
+  // Same floor, same shape: the machine-wide gateway fills in only when neither
+  // the environment nor the project's config file set one. Asked of the RAW
+  // file config, like the model above, so a project that pinned a gateway keeps
+  // it.
   const envGatewayUrl = process.env['AI_GATEWAY_URL'];
   const envSetGatewayUrl = envGatewayUrl !== undefined && envGatewayUrl.trim() !== '';
   const fileGatewayUrl = fileAi?.gatewayUrl;
@@ -368,8 +367,8 @@ const RETIRED_KEYS: Readonly<Record<string, string>> = {
     + 'is how a step replays without a model call now.',
   'server.port':
     '"server.port" in steptix.config.json does nothing — delete it. `steptix serve` '
-    + 'listens on -p, else the port of SERVER_URL in the machine .env, else 3100; '
-    + 'a project\'s SERVER_URL says which server it connects to '
+    + 'listens on -p, else the port of STEPTIX_SERVER_URL in the machine .env, else 3100; '
+    + 'a project\'s STEPTIX_SERVER_URL says which server it connects to '
     + '(stories/machine-server-url.md).',
 };
 

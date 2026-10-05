@@ -72,7 +72,7 @@ describe('code-behind in a project without node_modules', () => {
       expect(registry.loadErrors).toEqual([]);
       expect(registry.bindingFor(0)?.entry).toBeDefined();
     } finally {
-      await fs.rm(dir, { recursive: true, force: true });
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -86,7 +86,7 @@ describe('code-behind in a project without node_modules', () => {
       expect(contents).toContain(expected);
       expect(contents).not.toContain(`from "steptix/codebehind"`);
     } finally {
-      await fs.rm(dir, { recursive: true, force: true });
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -103,8 +103,8 @@ describe('code-behind in a project without node_modules', () => {
       expect(contents).toContain(`from "steptix/codebehind"`);
       expect(contents).not.toContain('file:///');
     } finally {
-      await fs.rm(inRepo, { recursive: true, force: true });
-      await fs.rm(dir, { recursive: true, force: true });
+      await fs.rm(inRepo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });

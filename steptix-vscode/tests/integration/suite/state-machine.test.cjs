@@ -1084,7 +1084,7 @@ describe('Steptix debug state machine', function () {
   it('resume sends ALL steps from the pause point onward, not just the paused step', async () => {
     // Audit gap: existing resume test asserts a stream re-opens, but doesn't
     // check *which* steps it carries. With runLines([startLine]) and a
-    // step-line startLine, resolveRunLines collapses to a single-step run —
+    // step-line startLine, resolveRunSelection collapses to a single-step run —
     // so resume only re-executes the paused step then ends, instead of
     // continuing forward. The user's spec promise is "Resume continues
     // from the pause point" (analogous to F5 in a debugger), which means

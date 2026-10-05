@@ -28,6 +28,13 @@ const ACCEPT: Array<[string, ParsedFlowControlStep]> = [
   // two drift, and it is the LONG unconditional lines (`Stop running the
   // remaining steps` with no `If` in front of it) that a reader is most likely
   // to think must be conditional.
+  //
+  // The unconditional form is the ABSENCE of a condition, not a short line.
+  // Both docs and story used to describe it as "a step that is just `Return` or
+  // `Stop`", which reads as a length rule; the loops actually dispatch on
+  // `body === undefined`, and so does compile ineligibility. `toEqual` with no
+  // `body` fails on any string body, the empty one included, so every row
+  // below pins that for its tail, the long ones too.
   ['Return', { verb: 'return' }],
   ['Stop', { verb: 'stop' }],
   ['return', { verb: 'return' }],
@@ -166,21 +173,6 @@ const ACCEPT: Array<[string, ParsedFlowControlStep]> = [
   ['IF WE ARE DONE THEN FAIL', { verb: 'fail', body: 'WE ARE DONE' }],
 ];
 
-/**
- * The unconditional form is the ABSENCE of a condition, not a short line.
- *
- * Both docs and story used to describe it as "a step that is just `Return` or
- * `Stop`", which reads as a length rule; the loops actually dispatch on
- * `body === undefined`, and so does compile ineligibility. These are the long
- * lines that rule has to keep answering "unconditional" for.
- */
-const LONG_UNCONDITIONAL = [
-  'Return here',
-  'Stop running the steps',
-  'Stop running the remaining steps',
-  'Return running the following steps',
-];
-
 /** Refused line → why it stays prose. */
 const REFUSE: Array<[string, string]> = [
   [
@@ -289,14 +281,6 @@ describe('the shape a runner branches on', () => {
     expect(parsed!.body).toBeUndefined();
   });
 
-  it('reads a LONG tail with no head as unconditional too', () => {
-    for (const line of LONG_UNCONDITIONAL) {
-      const parsed = parseFlowControlStep(line);
-      expect(parsed, line).not.toBeNull();
-      expect(Object.hasOwn(parsed!, 'body'), line).toBe(false);
-    }
-  });
-
   it('keeps the body verbatim, placeholders included', () => {
     // The claim is read off the AUTHORED line, before interpolation, so a
     // body may still hold `{{…}}`. It is diagnostics only; the model reads
@@ -331,13 +315,6 @@ describe('the `fail` verb (stories/step-failure-outcomes.md, decision 1)', () =>
       verb: 'fail',
       message: '',
     });
-  });
-
-  it('marks the unconditional form the same way the other two verbs do', () => {
-    // The loops dispatch it with NO model call, on `body === undefined`.
-    const parsed = parseFlowControlStep('Fail the test with error "No balance was shown"');
-    expect(Object.hasOwn(parsed!, 'body')).toBe(false);
-    expect(parseFlowControlStep('If x then fail')!.body).toBe('x');
   });
 });
 

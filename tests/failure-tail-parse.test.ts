@@ -305,7 +305,7 @@ describe('the contradiction of decision 8', () => {
   });
 });
 
-describe('the `## Steps` validator refuses a contradiction at parse time', () => {
+describe('the validator refuses a contradiction at parse time', () => {
   const withStep = (step: string) => md('Navigate to /', step, 'Click Save');
 
   it('throws, naming the line and the file', () => {
@@ -320,6 +320,19 @@ describe('the `## Steps` validator refuses a contradiction at parse time', () =>
     expectRefusal(
       withStep('If the balance is zero then fail the test with error "m" otherwise continue'),
       FAILURE_TAIL_CONTRADICTION,
+    );
+  });
+
+  it('refuses it in a `### Section` body as well, naming the line', () => {
+    // `validateControlFlow` runs over every section body too, so no file
+    // delivers one of these to a run loop; the loops' own backstop stays for
+    // the validator-less paths, and api-server-failure-outcomes.test.ts pins
+    // it firing there in this same sentence — decision 8's actual requirement.
+    const line = 'If the page is ready then return otherwise continue';
+    expectRefusal(
+      md('Navigate to /', 'Check it', 'Click "Sign out"') + section('Check it', line),
+      FAILURE_TAIL_CONTRADICTION,
+      line,
     );
   });
 

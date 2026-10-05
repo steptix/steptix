@@ -187,17 +187,20 @@ const userText = (calls: ChatMessage[][], n = 0): unknown => calls[n]![1]!.conte
 describe('runUseAiStep — what the model is sent', () => {
   it('exactly the resolved text: one system message, one user message, nothing else from the test', async () => {
     // A date that is NOT today, so "the framework added no date" can be
-    // checked against the real one.
-    const scope = { today: '2031-01-05', email: 'demo@bank.test' };
+    // checked against the real one. Its year is built from the clock: a fixed
+    // future year would become the current year one day, and the "no current
+    // year in the request" check below would then fail on every run.
+    const year = new Date().getFullYear() + 5;
+    const scope = { today: `${year}-01-05`, email: 'demo@bank.test' };
     const { outcome, calls } = await run(
       '[use ai] Today is {{today}}. Give the date 3 days later as yyyymmdd [store as: days_from_now]',
-      ['{"value": "20310108"}'],
+      [`{"value": "${year}0108"}`],
       { scope },
     );
     expect(outcome.result.status).toBe('passed');
     expect(calls).toHaveLength(1);
     expect(calls[0]!.map((m) => m.role)).toEqual(['system', 'user']);
-    expect(userText(calls)).toBe('Today is 2031-01-05. Give the date 3 days later as yyyymmdd');
+    expect(userText(calls)).toBe(`Today is ${year}-01-05. Give the date 3 days later as yyyymmdd`);
     // Nothing from the run leaks in anywhere: no other variable, no
     // `## Values` block, no history, no clock.
     const all = JSON.stringify(calls);

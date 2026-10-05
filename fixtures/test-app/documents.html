@@ -732,7 +732,11 @@
       await refreshDocuments();
     });
 
-    refreshDocuments();
+    // `data-loaded` marks the first render from the server. Until it lands the
+    // table shows the static empty row above, which looks exactly like a real
+    // empty list — and when it lands it replaces whatever is in the table, so a
+    // test that uploads before then can see its new row wiped by this render.
+    refreshDocuments().then(function () { bodyEl.dataset.loaded = 'true'; });
   </script>
 </body>
 </html>

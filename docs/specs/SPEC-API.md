@@ -1,6 +1,6 @@
 # Steptix — API Testing Extension Specification v1.0
 
-**Author:** Greg (AI Tech Lead) / Paul Kent
+**Author:** Paul Kent
 **Date:** 2026-03-27
 **Status:** Draft
 **Depends on:** SPEC.md (core UI testing specification)
@@ -180,6 +180,8 @@ The framework recognises different API types, each with distinct authentication 
 
 The AI reads the API type and auth description from the context file and applies the correct authentication method automatically. The test author does not need to specify auth details in test steps.
 
+> **As implemented:** no framework code resolves auth per API type. The AI reads the type and auth description from the context file and writes the auth into its `api_call` action itself — `apiHeaders`, `apiMode`, and an `extract_csrf` action first where CSRF is needed ([src/ai/prompts.ts](../../src/ai/prompts.ts), "API Actions"). The runner's only type-aware step is defaulting `apiMode` to `browser` when the context says Front Proxy or Experience ([src/runner/step-executor.ts](../../src/runner/step-executor.ts), the `api_call` branch). A module meant to do this in code, `src/api/auth-resolver.ts`, was never called and has been removed.
+
 ---
 
 ## 4. API Step Execution
@@ -220,6 +222,8 @@ For each API step:
    - Private: read API key from environment variable
    - Serverless: use Bearer token (from prior auth step or env var)
    - Public: no auth needed
+   (As implemented, the AI does this step from the context file — see the
+   note under §3.3. None of the per-type rules above is code.)
 
 3. Build the request
    - AI determines: HTTP method, URL path, query params, request body
@@ -628,7 +632,6 @@ steptix/
 │   ├── api/
 │   │   ├── client.ts                 # HTTP client (standalone + browser context)
 │   │   ├── spec-loader.ts            # OpenAPI spec download, cache, parse
-│   │   ├── auth-resolver.ts          # Determine and apply auth per API type
 │   │   ├── csrf-handler.ts           # CSRF token extraction logic
 │   │   ├── response-store.ts         # Store and query prior API responses
 │   │   └── types.ts                  # API-specific type definitions

@@ -1,0 +1,73 @@
+# The root unit suite in a shuffled order, once a week.
+#
+# A test that passes only because an earlier test in its file left the right
+# state behind — a page DOM, a mock's call count, a global it never put back —
+# is green in file order and red the day someone inserts a test above it, or
+# runs it alone with `-t`. A shuffled run is what finds those before then.
+# The seed is the run number, so a red run reproduces locally with:
+#
+#   npx vitest run --config vitest.config.ts --sequence.shuffle --sequence.seed=<run number>
+#
+# Root suite only: the node:test suites run their files in separate
+# processes, so their order dependence cannot cross a file.
+name: Unit tests (shuffled)
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shuffled:
+    name: root suite, shuffled (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            runner-core/package-lock.json
+            steptix-vscode/package-lock.json
+            fixtures/tools/package-lock.json
+
+      # As in unit-tests.yml: runner-core first (steptix-vscode's file: dep
+      # links to its dist/), the root before fixtures/tools. steptix-vscode
+      # because root tests import its extension cores, which resolve
+      # `steptix-runner-core` through its node_modules; flick-vscode is left
+      # out because nothing in the root suite imports it.
+      - name: Install
+        shell: bash
+        run: |
+          npm ci
+          npm ci --prefix runner-core
+          npm ci --prefix fixtures/tools
+          npm ci --prefix steptix-vscode
+
+      - name: Playwright version
+        id: pw
+        shell: bash
+        run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/AppData/Local/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Build
+        run: npm run build
+
+      # --maxWorkers as in unit-tests.yml; see the note on its Root step.
+      - name: Root, shuffled (seed ${{ github.run_number }})
+        run: npx vitest run --config vitest.config.ts --maxWorkers=4 --sequence.shuffle --sequence.seed=${{ github.run_number }}

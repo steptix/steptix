@@ -27,7 +27,7 @@ Plus: a **Variables panel** that shows the current frame's variable scope
 - Stepping inside an *AI-driven* natural-language step. Those remain atomic.
 - Editing variable values while paused. Read-only inspection for now.
 - Conditional / hit-count breakpoints. The existing breakpoint model stays.
-- Remote `SERVER_URL` support for tool step-into. Tool descent requires a
+- Remote `STEPTIX_SERVER_URL` support for tool step-into. Tool descent requires a
   local server running with `--inspect`; remote setups get a clear
   "feature unavailable" error and skill step-into continues to work.
 
@@ -276,7 +276,7 @@ the `debugger;` statement is reached.
 ### Client side: attach + handoff
 
 1. User paused at a `[tool: ...]` line, hits F11.
-2. Extension validates the server is local (its `SERVER_URL` resolves to
+2. Extension validates the server is local (its `STEPTIX_SERVER_URL` resolves to
    `127.0.0.1` / `localhost`). If not, errors with "Tool step-into
    requires a local server" and bails.
 3. Extension issues a resume request with `stepMode.pauseAtNextTool = true`.
@@ -521,7 +521,7 @@ The work is large enough to benefit from horizontal slices.
 - **Manual (tool step-into):** run a fixture that calls a real tool
   with the server launched `--inspect`. Verify F11 attaches, pauses,
   stepping works, resume returns control to the Steptix run.
-- **Manual (degraded modes):** remote `SERVER_URL` → tool step-into
+- **Manual (degraded modes):** remote `STEPTIX_SERVER_URL` → tool step-into
   errors gracefully; server without `--inspect` → tool step-into
   errors gracefully; older server without frame events → skill step-
   into reports as unsupported.

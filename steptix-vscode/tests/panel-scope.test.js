@@ -22,14 +22,6 @@ const A = "file:///w/securebank.md";
 const B = "file:///w/github.md";
 const line = (msg) => ({ msg, kind: "info", ts: "00:00:00" });
 
-test("a file's lines are visible only in that file's view", () => {
-  let logs = {};
-  logs = appendLogLine(logs, A, line("generating step 1"));
-  logs = appendLogLine(logs, B, line("Running step on line 4"));
-  assert.deepEqual(logFor(logs, A).map((e) => e.msg), ["generating step 1"]);
-  assert.deepEqual(logFor(logs, B).map((e) => e.msg), ["Running step on line 4"]);
-});
-
 test("two concurrent compiles never interleave in one view", () => {
   // The frames arrive interleaved, because both streams are live at once.
   let logs = {};
@@ -85,9 +77,14 @@ test("the strip renders for its own file and no other", () => {
 });
 
 test("switching away and back finds the strip at its current count", () => {
+  // A's compile keeps sending frames while github.md is in view. Those
+  // updates land on A's strip, not the visible one, and are not dropped for
+  // being off-screen.
   let strips = setStrip({}, A, { file: "securebank.md", done: 2, total: 8, phase: "generate" });
+  strips = setStrip(strips, B, { file: "github.md", done: 1, total: 3, phase: "generate" });
   strips = setStrip(strips, A, { file: "securebank.md", done: 6, total: 8, phase: "generate" });
-  assert.equal(stripFor(strips, A).done, 6);
+  assert.equal(stripFor(strips, B).done, 1, "the file in view is untouched");
+  assert.equal(stripFor(strips, A).done, 6, "back on securebank.md: the latest count");
 });
 
 test("the result takes down that file's strip and leaves the other's up", () => {

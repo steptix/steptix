@@ -35,23 +35,13 @@ describe('parseToolCall — optional colon (parity with skill calls)', () => {
   });
 });
 
+// The grammar below is the shared `parseInvocation` (src/parser/invocation-parser.ts),
+// which tests/skill-call-parser.test.ts covers case by case. Here: one
+// representative per area, so a tool grammar that forked from the shared one
+// would still be caught, plus what is the tool's own — slash-qualified refs
+// (`allowSlashInName`) and the ToolCall shape the wrapper builds.
+
 describe('parseToolCall — label prefix', () => {
-  it('captures text before `[tool:` as the step label, trimmed', () => {
-    const result = parseToolCall('Fetch the CSRF token [tool: fetch_csrf_token]');
-    expect(result?.name).toBe('fetch_csrf_token');
-    expect(result?.label).toBe('Fetch the CSRF token');
-  });
-
-  it('omits the label when the call sits at start-of-line', () => {
-    const result = parseToolCall('[tool: foo]');
-    expect(result?.label).toBeUndefined();
-  });
-
-  it('omits the label when only whitespace precedes the call', () => {
-    const result = parseToolCall('   [tool: foo]');
-    expect(result?.label).toBeUndefined();
-  });
-
   it('combines label, args, output alias, and shorthand', () => {
     const result = parseToolCall(
       'Print all repos [tool: print_all repos out.summary]',
@@ -61,10 +51,18 @@ describe('parseToolCall — label prefix', () => {
     expect(result?.args).toEqual({ repos: '{{repos}}' });
     expect(result?.outputAliases).toEqual({ summary: 'summary' });
   });
+
+  it('has no label when only whitespace precedes the call, and ignores trailing text', () => {
+    const result = parseToolCall('   [tool: foo]   trailing notes');
+    expect(result?.name).toBe('foo');
+    expect(result?.label).toBeUndefined();
+  });
 });
 
 describe('parseToolCall — happy path', () => {
   it('parses a tool with no arguments', () => {
+    // toEqual, so it also pins that the wrapper adds no `label` key when
+    // there is none.
     const result = parseToolCall('[tool: read_page_title]');
     expect(result).toEqual({
       name: 'read_page_title',
@@ -73,24 +71,10 @@ describe('parseToolCall — happy path', () => {
     });
   });
 
-  it('parses an explicit `key="value"` argument', () => {
-    const result = parseToolCall('[tool: fetch_csrf_token baseUrl="http://localhost:8787"]');
+  it('parses an explicit `key="value"` argument and an `out.name="alias"` rename', () => {
+    const result = parseToolCall('[tool: fetch_csrf_token baseUrl="http://localhost:8787" out.csrf="my_token"]');
     expect(result?.args).toEqual({ baseUrl: 'http://localhost:8787' });
-  });
-
-  it('parses an `out.name="alias"` rename', () => {
-    const result = parseToolCall('[tool: foo out.csrf="my_token"]');
     expect(result?.outputAliases).toEqual({ csrf: 'my_token' });
-  });
-
-  it('tolerates leading whitespace and discards trailing comment text', () => {
-    const result = parseToolCall('   [tool: foo]   trailing notes');
-    expect(result?.name).toBe('foo');
-  });
-
-  it('accepts hyphens in the tool name', () => {
-    const result = parseToolCall('[tool: my-cool-tool]');
-    expect(result?.name).toBe('my-cool-tool');
   });
 
   it('accepts a path-qualified tool reference (file/tool)', () => {
@@ -106,16 +90,6 @@ describe('parseToolCall — happy path', () => {
 });
 
 describe('parseToolCall — bare-identifier shorthand (parity with skill calls)', () => {
-  it('desugars a bare param to `{{param}}`', () => {
-    const result = parseToolCall('[tool: fetch_csrf_token baseUrl]');
-    expect(result?.args).toEqual({ baseUrl: '{{baseUrl}}' });
-  });
-
-  it('desugars a bare `out.name` to alias = name', () => {
-    const result = parseToolCall('[tool: fetch_csrf_token out.csrf]');
-    expect(result?.outputAliases).toEqual({ csrf: 'csrf' });
-  });
-
   it('mixes shorthand and explicit args in one call', () => {
     const result = parseToolCall(
       '[tool: do_thing username password role="admin" out.session_id]',

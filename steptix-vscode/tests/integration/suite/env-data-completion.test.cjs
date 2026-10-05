@@ -223,8 +223,8 @@ describe('Steptix ${...} env/data completion', function () {
     assert.equal(byLabel.DC_OVERLAY.detail, 'from-overlay');
     assert.equal(byLabel.DC_TOKEN.detail, '********', 'secret-named env vars are masked');
     // Both env files live at the steptix.config.json root — the fixture
-    // workspace root's .env (SERVER_URL etc.) is not this project's.
-    assert.ok(!byLabel.SERVER_URL, 'outer .env must not leak into the project');
+    // workspace root's .env (STEPTIX_SERVER_URL etc.) is not this project's.
+    assert.ok(!byLabel.STEPTIX_SERVER_URL, 'outer .env must not leak into the project');
 
     // Server parity: ${env.X} resolves from <projectRoot>/.env only, so a
     // test-adjacent tests/.env contributes nothing — and the project root's

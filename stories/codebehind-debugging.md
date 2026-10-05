@@ -2,7 +2,7 @@
 
 **Status: built + verified 2026-08-26** (branch
 `claude/codebehind-debugging-breakpoints-8a9128`, Steptix 0.5.98, rebased
-onto main at 95aa7e9). Root vitest 3044/3044, runner-core 472/472, extension
+onto main at 064bfde). Root vitest 3044/3044, runner-core 472/472, extension
 unit 399/399 + integration 259/259, `tsc --noEmit` clean on both roots. Live
 proof:
 [scripts/codebehind-debugger-e2e.mjs](../scripts/codebehind-debugger-e2e.mjs)
@@ -258,7 +258,7 @@ sourcemapped loader; nothing to add.
   points there, not at your `.steps.ts`. Debug via a normal run/replay. F11's
   cooperative pause is line-based, not sourcemap-based, but compile runs
   never send the flag either.
-- **Remote `SERVER_URL`** ⇒ both flows decline with the same status-bar
+- **Remote `STEPTIX_SERVER_URL`** ⇒ both flows decline with the same status-bar
   message tool step-into uses. The inspector URL from `/health` is only ever
   dialled when it parses to a loopback host.
 - **Breakpoint on module top-level code** (outside any `run()`): binds and

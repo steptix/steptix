@@ -708,14 +708,6 @@ describe('control lines inside a skill body', () => {
  * because the something else was not in the batch.
  */
 describe('a dangling chain member is refused here too', () => {
-  it('an Otherwise with an ordinary step above it', async () => {
-    await expect(
-      expandInline(doc('1. If a, then X', '2. Click Save', '3. Otherwise, Y')),
-    ).rejects.toThrow(
-      /"Otherwise, Y" has no decision to be the alternative of.*\(## Steps\)/s,
-    );
-  });
-
   it('an Otherwise as the very first step of a batch', async () => {
     await expect(expandInline(doc('1. Otherwise, Y', '2. Click Save'))).rejects.toThrow(
       /has no decision to be the alternative of/,
@@ -738,7 +730,7 @@ describe('a dangling chain member is refused here too', () => {
     ).rejects.toThrow(/\(### Pay\)/);
   });
 
-  it('the parser`s wording, character for character', async () => {
+  it('an Otherwise with an ordinary step above it, in the parser`s wording, character for character', async () => {
     const expected = danglingChainMemberMessage({
       line: 'Otherwise, Y',
       word: 'Otherwise',
@@ -770,12 +762,6 @@ describe('a dangling chain member is refused here too', () => {
  * then again from the CLI must read the same sentence about the same line.
  */
 describe('a chain member under a flow-control step is refused here too', () => {
-  it('an Otherwise under an `If … then return`', async () => {
-    await expect(
-      expandInline(doc('1. If the balance is zero, then return', '2. Otherwise, Y')),
-    ).rejects.toThrow(/ends the flow rather than choosing a branch/);
-  });
-
   it('an Else if under a `then stop here`', async () => {
     await expect(
       expandInline(doc('1. If the list is empty, then stop here', '2. Else if b, then Y')),
@@ -790,7 +776,7 @@ describe('a chain member under a flow-control step is refused here too', () => {
     );
   });
 
-  it('the parser`s wording, character for character', async () => {
+  it('an Otherwise under an `If … then return`, in the parser`s wording, character for character', async () => {
     const expected = chainAfterFlowControlMessage({
       line: 'Otherwise, Y',
       word: 'Otherwise',
@@ -824,19 +810,13 @@ describe('a chain member under a flow-control step is refused here too', () => {
  * while an `Else if` written under one is still evaluated.
  */
 describe('a chain member below the Otherwise is refused here too', () => {
-  it('an Else if under an Otherwise', async () => {
-    await expect(
-      expandInline(doc('1. If a, then X', '2. Otherwise, Y', '3. Else if b, then Z')),
-    ).rejects.toThrow(/"Else if b, then Z" follows an `Otherwise`, which ends a chain/);
-  });
-
   it('a second Otherwise', async () => {
     await expect(
       expandInline(doc('1. If a, then X', '2. Otherwise, Y', '3. Otherwise, Z')),
     ).rejects.toThrow(/"Otherwise, Z" follows an `Otherwise`, which ends a chain/);
   });
 
-  it('the parser`s wording, character for character', async () => {
+  it('an Else if under an Otherwise, in the parser`s wording, character for character', async () => {
     const expected = closedChainMemberMessage({
       line: 'Else if b, then Z',
       where: '/t/inline.md:7',

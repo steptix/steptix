@@ -183,8 +183,8 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
       );
       return undefined;
     }
-    // The registry indexes `.ts`, `.mts`, `.js` and `.mjs` alike, so probe them
-    // in the same order rather than assuming a TypeScript project.
+    // The registry indexes `.ts`, `.mts`, `.js` and `.mjs` alike, so probe all
+    // four rather than assuming a TypeScript project.
     const base = path.join(toolsDir, rel);
     for (const ext of TOOL_FILE_EXTS) {
       const file = `${base}${ext}`;

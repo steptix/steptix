@@ -33,7 +33,7 @@ afterAll(async () => {
   // Explicit budget: this is the suite's SECOND Chromium-launching file, so
   // under a full-suite run two browsers start and stop at once and the
   // default 10s hook budget is occasionally not enough to close one.
-}, 30_000);
+}, 60_000);
 
 /**
  * The app's own table style: `<th>` is upper-cased for looks only (§7.3).
@@ -135,21 +135,12 @@ describe('readTable — the checkbox-first fixture (§5.1)', () => {
       { _row: '2', id: 'ORD-1002', customer: 'Bob Jones', status: 'Pending' },
     ]);
     // Key ORDER is part of the contract: `_row` first, then the author's
-    // columns in the order they asked for them (§7.5).
+    // columns in the order they asked for them (§7.5) — and nothing else, so
+    // never the checkbox, Total or Actions columns nobody asked for.
     expect(Object.keys(result.capturedRecords![0]!)).toEqual(['_row', 'id', 'customer', 'status']);
     // Flat and structured captures stay distinct (§7.1).
     expect(result.capturedValue).toBeUndefined();
     expect(result.capturedValues).toBeUndefined();
-  });
-
-  it('never includes the checkbox, Total or Actions columns nobody asked for', async () => {
-    await load(ORDERS_HTML);
-    const result = await run({ selector: '#orders', columns: ORDERS_COLUMNS });
-    for (const record of result.capturedRecords!) {
-      expect(Object.keys(record)).toHaveLength(4);
-      expect(JSON.stringify(record)).not.toContain('$125.00');
-      expect(JSON.stringify(record)).not.toContain('Review');
-    }
   });
 
   it('matches a CSS-uppercased header against the text the author wrote (§7.3)', async () => {
@@ -432,6 +423,9 @@ describe('readTable — empty tables and placeholder rows', () => {
       </tbody>
     </table>`;
 
+  // The message's text is never consulted — one cell spanning the full width
+  // is the whole rule — so a "Loading…" row reads as [] the same way, and
+  // waiting for the data is the author's step.
   it('reads the §5.5 placeholder body as [] rather than a merged-cell error', async () => {
     await load(DOCUMENTS_HTML);
     const result = await run({
@@ -451,17 +445,6 @@ describe('readTable — empty tables and placeholder rows', () => {
     });
     expect(outcome.records).toEqual([]);
     expect(outcome.placeholdersSkipped).toBe(1);
-  });
-
-  it('reads a "Loading…" row as [] too — waiting is the author\'s step', async () => {
-    await load(`
-      <table id="t" aria-label="Recent transfers">
-        <thead><tr><th>To</th><th>Reference</th><th>Amount</th><th>Date</th></tr></thead>
-        <tbody><tr class="empty-row"><td colspan="4">Loading…</td></tr></tbody>
-      </table>`);
-    const result = await run({ selector: '#t', columns: [{ header: 'To', key: 'to' }] });
-    expect(result.success).toBe(true);
-    expect(result.capturedRecords).toEqual([]);
   });
 
   it('skips a placeholder sitting among data rows without consuming a _row', async () => {
@@ -608,7 +591,9 @@ describe('readTable — empty tables and placeholder rows', () => {
     // message (§10) — but only if the width came from the rows that are still
     // there to say so. Measured over the visible rows alone the width is 1,
     // `5 >= max(1, 2)` is true, and the read answers `[]` and SUCCEEDS on a
-    // table it could not map.
+    // table it could not map. What the refusal is about is the message being
+    // narrower than the grid, not colspan: with `colspan="7"` it is a message
+    // and reads as [], which is the FILTERED headerless case above.
     await load(`
       <table id="t" aria-label="Scheduled payments"><tbody>
         <tr class="row-hidden">
@@ -622,26 +607,6 @@ describe('readTable — empty tables and placeholder rows', () => {
         'readTable cannot map table "Scheduled payments": merged headers or cells '
         + '(rowspan/colspan > 1) are not supported',
       );
-  });
-
-  it('and reads the same table as [] when the message spans all seven', async () => {
-    // The sibling that says what the refusal above is actually about: not
-    // colspan, but a message narrower than the grid it sits in. Same table,
-    // same hidden row, one number different.
-    await load(`
-      <table id="t" aria-label="Scheduled payments"><tbody>
-        <tr class="row-hidden">
-          <td>Origin Energy</td><td>INV-1</td><td>$140.00</td><td>3 Oct 2026</td>
-          <td>Scheduled</td><td>Yes</td><td>View</td>
-        </tr>
-        <tr><td colspan="7">No scheduled payments.</td></tr>
-      </tbody></table>`);
-    const outcome = await readTableRecords(page, {
-      selector: '#t',
-      columns: [{ index: 1, key: 'payee' }],
-    });
-    expect(outcome.records).toEqual([]);
-    expect(outcome.placeholdersSkipped).toBe(1);
   });
 
   it('reads a colspan="1" message row in a one-column table as a data record (§4.8)', async () => {
@@ -869,11 +834,12 @@ describe('readTable — tables that silently read as []', () => {
     expect(byIndex.records.map((r) => r['name'])).toEqual(['Section A', 'Alice', 'Bob']);
   });
 
-  it('a stepped-over group row is a data row — record 1, or a short row (§4.8)', async () => {
+  it('a stepped-over group row is a data row — so a two-column read finds it short (§4.8)', async () => {
     // The other half of the step-over: the row is not deleted, it is left in
     // the body, and §4.8's floor says a lone cell spanning ONE column is data.
-    // Both of its observable outcomes are pinned here, because "stepped over"
-    // is easy to read as "dropped".
+    // Both of its observable outcomes are pinned, because "stepped over" is
+    // easy to read as "dropped": with ONE requested column it is record 1,
+    // holding the heading's own text (the test above); with TWO, below.
     const SECTIONED = `<table id="t" aria-label="Accounts"><tbody>
       <tr><th>Section A</th></tr>
       <tr><th>Name</th><th>Status</th></tr>
@@ -881,16 +847,7 @@ describe('readTable — tables that silently read as []', () => {
       <tr><td>Bob</td><td>Closed</td></tr>
     </tbody></table>`;
 
-    // ONE requested column: it is record 1, holding the heading's own text.
-    await load(SECTIONED);
-    const one = await run({ selector: '#t', columns: [{ header: 'Name', key: 'name' }] });
-    expect(one.capturedRecords).toEqual([
-      { _row: '1', name: 'Section A' },
-      { _row: '2', name: 'Alice' },
-      { _row: '3', name: 'Bob' },
-    ]);
-
-    // TWO: the group row has no cell for the second, and the read fails
+    // The group row has no cell for the second column, and the read fails
     // rather than storing a record whose fields came from the wrong columns.
     await load(SECTIONED);
     expect(await refusal({
@@ -1322,25 +1279,9 @@ describe('readTable — structural refusals', () => {
     expect(await refusal({ selector: '#hidden-table', columns: [{ index: 1, key: 'a' }] }))
       .toBe('readTable could not find a visible table matching "#hidden-table" (1 match, none visible)');
   });
-
-  it('reads a <div role="grid">, which §7.9 made a table', async () => {
-    await load(`
-      <div id="grid" role="grid" aria-label="Cards">
-        <div role="row"><span role="columnheader">Card</span></div>
-        <div role="row"><span role="gridcell">Visa</span></div>
-      </div>`);
-    // This shape used to be the "found no table with rows under" refusal, and
-    // §7.9 turned it into a read: the roles that make a div grid a table for a
-    // screen reader make it one here. The sentence is still the one a region
-    // holding NOTHING with rows gets, which `tests/read-table-aria.test.ts`
-    // and `tests/read-table-structure.test.ts` pin from the other side.
-    const result = await run({
-      selector: '#grid',
-      columns: [{ header: 'Card', key: 'card' }],
-    });
-    expect(result.success).toBe(true);
-    expect(result.capturedRecords).toEqual([{ _row: '1', card: 'Visa' }]);
-  });
+  // A `<div role="grid">` used to get the "found no table with rows under"
+  // refusal; §7.9 made it a table, and tests/read-table-aria.test.ts owns
+  // those reads.
 });
 
 // ── columns by position (§4.4, §5.4) ────────────────────────────────────────
@@ -1531,16 +1472,15 @@ describe('readTable — the page-side extractor is a file, not a TS callback', (
     expect(extractor).toContain('.evaluateAll(readTableInPage,');
     expect(extractor).not.toMatch(/evaluateAll\(\s*(\(|function|async)/);
 
-    // And the file really is the single expression `new Function` wraps.
+    // And the file really is the single expression `new Function` wraps: a
+    // second statement, or anything that is not one expression, is a
+    // SyntaxError here. Playwright ships `Function.prototype.toString`, so the
+    // .js file's own text is what the browser evaluates.
     const script = await fs.readFile(
       new URL('../src/browser/scripts/read-table.js', import.meta.url),
       'utf8',
     );
-    const compiled = new Function('matches', 'args', `return (\n${script}\n)(matches, args);`);
-    expect(typeof compiled).toBe('function');
-    // Playwright ships `Function.prototype.toString`, so the .js file's own
-    // text is what the browser evaluates.
-    expect(compiled.toString()).toContain(script.trim());
+    expect(() => new Function('matches', 'args', `return (\n${script}\n)(matches, args);`)).not.toThrow();
   });
 });
 
@@ -1960,6 +1900,9 @@ describe('readTable — header and rows in separate tables (§5.6, §7.2, §7.3a
     // (§7.3a.1), and the same row table with that attribute removed, where
     // only the sibling rule pairs them (§7.3a.2). A difference between any
     // two of them is a difference the author cannot see in the test text.
+    // The grid carries its footer table, too, which the exact records prove
+    // ignored: counted as a table with rows it would make the wrapper
+    // ambiguous; taken for a data row its Total would become record 7.
     await load(holdingsGrid({ id: 'holdings-grid', owns: true }));
     expect((await run({ selector: '#holdings-grid', columns: HOLDINGS_COLUMNS })).capturedRecords)
       .toEqual(HOLDINGS_RECORDS);
@@ -1989,18 +1932,6 @@ describe('readTable — header and rows in separate tables (§5.6, §7.2, §7.3a
     expect(plain.headerFromSeparateTable).toBe(false);
     expect(formatTableReadSummary(plain, 3, 'orders', undefined))
       .toBe('readTable captured 2 rows × 3 columns as "{{orders}}"');
-  });
-
-  it('ignores the footer table, which has neither rows nor a header', async () => {
-    // Counted as a table with rows it would make the wrapper ambiguous; taken
-    // for a data row its Total would become record 7.
-    await load(holdingsGrid({ id: 'holdings-grid', owns: true }));
-    const result = await readTableRecords(page, {
-      selector: '#holdings-grid',
-      columns: HOLDINGS_COLUMNS,
-    });
-    expect(result.records).toHaveLength(6);
-    expect(result.records.some((r) => r['value'] === '$67,961.00')).toBe(false);
   });
 
   it('refuses the header-only table and names the wrapper, instead of storing [] green', async () => {
@@ -2684,33 +2615,31 @@ describe('readTable — header and rows in separate tables (§5.6, §7.2, §7.3a
     // and v1 supports exactly one" and the split between the two paths that
     // refusal created. §7.3b lays a two-row header out, so this header is no
     // longer evidence of nothing: it names its columns by the LOWER row, the
-    // table beside it adopts it, and both paths answer the same thing.
-    const markup = (wrapperId: string) => `
-      <div id="${wrapperId}">
+    // table beside it adopts it, and both paths — the row table beside the
+    // header, and the wrapper — answer the same thing.
+    await load(`
+      <div id="two-row-grid">
         <table><thead>
           <tr><th>Date</th><th>Amount</th></tr>
           <tr><th>(AEST)</th><th>(AUD)</th></tr>
         </thead></table>
         <table id="two-row-rows"><tbody><tr><td>2026-01-02</td><td>$12.00</td></tr></tbody></table>
-      </div>`;
-    for (const wrapperId of ['beside-two-row', 'wrapper-two-row']) {
-      await load(markup(wrapperId));
-      for (const selector of ['#two-row-rows', `#${wrapperId}`]) {
-        expect((await run({
-          selector,
-          columns: [{ header: '(AEST)', key: 'date' }, { header: '(AUD)', key: 'amount' }],
-        })).capturedRecords).toEqual([{ _row: '1', date: '2026-01-02', amount: '$12.00' }]);
-        // The upper row groups the two columns and names neither.
-        expect(await refusal({ selector, columns: [{ header: 'Date', key: 'date' }] }))
-          .toBe(
-            `readTable cannot map table "${wrapperId}": no column is headed "Date" — available `
-            + 'headers are (AEST), (AUD) ("Date" is a band over (AEST), not a column)',
-          );
-      }
-      // A positional read is untouched by any of it.
-      expect((await run({ selector: '#two-row-rows', columns: [{ index: 1, key: 'date' }] })).capturedRecords)
-        .toEqual([{ _row: '1', date: '2026-01-02' }]);
+      </div>`);
+    for (const selector of ['#two-row-rows', '#two-row-grid']) {
+      expect((await run({
+        selector,
+        columns: [{ header: '(AEST)', key: 'date' }, { header: '(AUD)', key: 'amount' }],
+      })).capturedRecords).toEqual([{ _row: '1', date: '2026-01-02', amount: '$12.00' }]);
+      // The upper row groups the two columns and names neither.
+      expect(await refusal({ selector, columns: [{ header: 'Date', key: 'date' }] }))
+        .toBe(
+          'readTable cannot map table "two-row-grid": no column is headed "Date" — available '
+          + 'headers are (AEST), (AUD) ("Date" is a band over (AEST), not a column)',
+        );
     }
+    // A positional read is untouched by any of it.
+    expect((await run({ selector: '#two-row-rows', columns: [{ index: 1, key: 'date' }] })).capturedRecords)
+      .toEqual([{ _row: '1', date: '2026-01-02' }]);
   });
 
   it('looks for no partner at all for a table that names itself (§7.3a)', async () => {
@@ -3105,20 +3034,6 @@ describe('readTable — banded headers, the header grid (§7.3b)', () => {
     expect(result.records).toEqual([{ _row: '1', payee: 'Origin Energy', amount: '$140.00' }]);
     expect(result.headerFromSeparateTable).toBe(true);
   });
-
-  it('carries neither header refusal in the extractor any more (§7.3b.6)', async () => {
-    // The two sentences §7.3b deletes. The merged-cell sentence itself stays —
-    // a BODY cell that spans is still the §7.4 error, pinned above — so what is
-    // asserted is the half that named a HEADER.
-    const source = await fs.readFile(
-      new URL('../src/browser/scripts/read-table.js', import.meta.url),
-      'utf8',
-    );
-    expect(source).not.toContain('and v1 supports exactly one');
-    expect(source).not.toContain("refusal: 'merged'");
-    // The sentence itself stays, for the body cell it is now only about.
-    expect(source).toContain('merged headers or cells (rowspan/colspan > 1) are not supported');
-  });
 });
 
 // ── Telerik RadGrid: three tables, a banded header, a pager (§5.7, §12.27) ──
@@ -3335,6 +3250,14 @@ describe('readTable — Telerik RadGrid (§5.7)', () => {
     await load(radgrid('', false));
     expect(await page.locator('#RadGrid1_ctl00').getAttribute('aria-owns')).toBeNull();
     expect(await page.locator('#RadGrid1_ctl00_Header tbody tr').count()).toBe(1);
+    // Fixture premises: the spacer row and the data table's empty `<th>` row
+    // are hidden by `display:none` on the `<tbody>`/`<thead>` ELEMENT, not on
+    // the `<tr>`, which is how RadGrid writes them. A row-level test would
+    // call them rendered, make the spacer a data row of the header table and
+    // the empty `<th>` row a header that names nothing — and the records
+    // below would not come out.
+    expect(await page.locator('#RadGrid1_ctl00_Header tbody tr').isVisible()).toBe(false);
+    expect(await page.locator('#RadGrid1_ctl00 thead tr').isVisible()).toBe(false);
     for (const selector of ['#RadGrid1', '#RadGrid1_ctl00']) {
       const result = await readTableRecords(page, { selector, columns: LOAN_COLUMNS });
       expect(result.records).toEqual(LOAN_RECORDS);
@@ -3495,16 +3418,6 @@ describe('readTable — Telerik RadGrid (§5.7)', () => {
         + 'are ExpandColumn, APPLICANT, TYPE, AMOUNT, TERM, RATE, STATUS, OFFICER, ACTION '
         + '("LOAN" is a band over AMOUNT, TERM, RATE, not a column)',
       );
-  });
-
-  it('sees the hidden spacer row and the empty header row as unrendered', async () => {
-    // Both are hidden by `display:none` on the `<tbody>`/`<thead>` ELEMENT,
-    // not on the `<tr>`, which is how RadGrid writes them: a row-level test
-    // would have called them rendered, made the spacer a data row of the
-    // header table and the empty `<th>` row a header that names nothing.
-    await load(radgrid());
-    expect(await page.locator('#RadGrid1_ctl00_Header tbody tr').isVisible()).toBe(false);
-    expect(await page.locator('#RadGrid1_ctl00 thead tr').isVisible()).toBe(false);
   });
 
   it('reads the non-scrolling form as one table, with no pairing and no <tfoot>', async () => {

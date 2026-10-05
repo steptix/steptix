@@ -15,17 +15,17 @@ All commits sit on a linear stack of feature branches off `main`.
 **Nothing is on `main` yet.**
 
 ```
-main (356547f, unchanged)
-└─ feat/step-into-phase1-frames        → 56a9a40
-   └─ feat/step-into-phase2-callstack  → 36e6d96   (Phase 2 + follow-up)
-      └─ feat/step-into-phase2.1-cleanup        → bfcb53e
-         └─ feat/step-into-phase3-stepmode      → 3484d86
-            └─ feat/step-into-phase3.1-cleanup  → 5b97d7b
-               └─ feat/step-into-phase4-variables   → c8f84f7
-                  └─ feat/step-into-phase4.1-cleanup  → 7d2edd0
-                     └─ docs/step-into-status          → ce8f596
+main (05df0a6, unchanged)
+└─ feat/step-into-phase1-frames        → f9ba24c
+   └─ feat/step-into-phase2-callstack  → ffec982   (Phase 2 + follow-up)
+      └─ feat/step-into-phase2.1-cleanup        → ce8df97
+         └─ feat/step-into-phase3-stepmode      → 0df374e
+            └─ feat/step-into-phase3.1-cleanup  → 5b15690
+               └─ feat/step-into-phase4-variables   → 7fed755
+                  └─ feat/step-into-phase4.1-cleanup  → bfeb529
+                     └─ docs/step-into-status          → d38c9d3
                         └─ feat/step-into-phase5-tool-debugger ← this file
-                           (5.A → 9f8703f, 5.B → HEAD)
+                           (5.A → baa2a93, 5.B → HEAD)
 ```
 
 The chain is cherry-pick-clean. To land it, fast-forward `main` to the
@@ -36,14 +36,14 @@ incrementally.
 
 | Phase | Commit | Ships |
 | --- | --- | --- |
-| **1** — frames over the wire | `56a9a40` | `FrameInfo` type + `frame:push` / `frame:pop` / `frame:scope` events + optional `frame?` on step events. `skillsDir` / `testFilePath` on the request body. Server-side skill expansion (and **fixed a latent bug** where `[skill: ...]` from the extension previously went to the AI as a literal string — skills didn't actually work via the extension before this). |
-| **2** — frame stack + Call Stack view | `6870c72` + `36e6d96` | Extension consumes frame events, multi-file status decorations (test file + skill `.md`), aggregate pass/fail on `[skill:]` lines, auto-reveal of skill files on descent, Call Stack TreeView in the activity-bar container. Tests + dead-code cleanup in the follow-up. |
-| **2.1** — frame state hardening | `bfcb53e` | `markFrameFailed` walks ancestry via a persistent `frameParents` map so a late `step:fail` (after `frame:pop`) still propagates. Per-controller `revealedFrameUris`. `markAllRunningStopped` clears every URI on Stop. Steps-summary suppressed on non-test files. |
-| **3** — Step Into / Over / Out | `3484d86` | `StepMode` type + `step:awaiting` event + `stepMode?` on the request body. Server pause-between-steps state machine with depth-aware decisions. New `POST /sessions/:id/run-control` endpoint. Extension commands stepInto / stepOver / stepOut / continueRun + F11 / F10 / Shift+F11 keybindings. **Fixed a Phase 1 gap** — the api-server's request validator was silently dropping `skillsDir` / `testFilePath` / `stepMode` from the JSON body, so Phase 1's wire-level work didn't reach the server until this commit. |
-| **3.1** — step-pause polish | `5b97d7b` | Stop clears step-paused marker on its actual URI (not just the active editor). `sendRunControl` swallows `not-found` (409) silently. `dispatchStep` detects running-but-not-step-paused. Step Out at root frame redirects to Continue. End-to-end Step-Over-a-skill test. |
-| **4** — Variables panel | `c8f84f7` | Server emits `frame:scope` after every `step:pass` / `step:fail`. `RunController.scopesByFrame` map + `currentScope()` accessor. New `VariablesTreeProvider` (flat scope, alphabetical, `maskIfSecret` for secret-named entries) registered alongside Call Stack. |
-| **4.1** — Variables polish | `7d2edd0` | View title flips between "Variables (test)" / "Variables (skill: name)" via `createTreeView`. Test-frame view hides `__skill\d+_` skill-internal names (which the expander never garbage-collects after a skill exits). Render-path secret-mask test. STORIES doc: [variables-panel-scope-semantics.md](variables-panel-scope-semantics.md). |
-| **5.A** — server-side tool dispatch | `9f8703f` | `toolsDir` request field; `session-manager.executeStepsInternal` parses `[tool: ...]` lines via `parseToolCall` and dispatches through `executeToolStep` with the session's live `page` / `context` / `browser`. Tool outputs surface as `capture` SSE events. **Discovered + fixed a latent gap**: tools previously didn't work via the extension at all — `[tool: ...]` reached the AI as plain text because the server's step loop had no tool-call recognition. Same shape as Phase 1's skill gap. New test file `tests/api-server-tools.test.ts`. |
+| **1** — frames over the wire | `f9ba24c` | `FrameInfo` type + `frame:push` / `frame:pop` / `frame:scope` events + optional `frame?` on step events. `skillsDir` / `testFilePath` on the request body. Server-side skill expansion (and **fixed a latent bug** where `[skill: ...]` from the extension previously went to the AI as a literal string — skills didn't actually work via the extension before this). |
+| **2** — frame stack + Call Stack view | `b8a6e78` + `ffec982` | Extension consumes frame events, multi-file status decorations (test file + skill `.md`), aggregate pass/fail on `[skill:]` lines, auto-reveal of skill files on descent, Call Stack TreeView in the activity-bar container. Tests + dead-code cleanup in the follow-up. |
+| **2.1** — frame state hardening | `ce8df97` | `markFrameFailed` walks ancestry via a persistent `frameParents` map so a late `step:fail` (after `frame:pop`) still propagates. Per-controller `revealedFrameUris`. `markAllRunningStopped` clears every URI on Stop. Steps-summary suppressed on non-test files. |
+| **3** — Step Into / Over / Out | `0df374e` | `StepMode` type + `step:awaiting` event + `stepMode?` on the request body. Server pause-between-steps state machine with depth-aware decisions. New `POST /sessions/:id/run-control` endpoint. Extension commands stepInto / stepOver / stepOut / continueRun + F11 / F10 / Shift+F11 keybindings. **Fixed a Phase 1 gap** — the api-server's request validator was silently dropping `skillsDir` / `testFilePath` / `stepMode` from the JSON body, so Phase 1's wire-level work didn't reach the server until this commit. |
+| **3.1** — step-pause polish | `5b15690` | Stop clears step-paused marker on its actual URI (not just the active editor). `sendRunControl` swallows `not-found` (409) silently. `dispatchStep` detects running-but-not-step-paused. Step Out at root frame redirects to Continue. End-to-end Step-Over-a-skill test. |
+| **4** — Variables panel | `7fed755` | Server emits `frame:scope` after every `step:pass` / `step:fail`. `RunController.scopesByFrame` map + `currentScope()` accessor. New `VariablesTreeProvider` (flat scope, alphabetical, `maskIfSecret` for secret-named entries) registered alongside Call Stack. |
+| **4.1** — Variables polish | `bfeb529` | View title flips between "Variables (test)" / "Variables (skill: name)" via `createTreeView`. Test-frame view hides `__skill\d+_` skill-internal names (which the expander never garbage-collects after a skill exits). Render-path secret-mask test. STORIES doc: [variables-panel-scope-semantics.md](variables-panel-scope-semantics.md). |
+| **5.A** — server-side tool dispatch | `baa2a93` | `toolsDir` request field; `session-manager.executeStepsInternal` parses `[tool: ...]` lines via `parseToolCall` and dispatches through `executeToolStep` with the session's live `page` / `context` / `browser`. Tool outputs surface as `capture` SSE events. **Discovered + fixed a latent gap**: tools previously didn't work via the extension at all — `[tool: ...]` reached the AI as plain text because the server's step loop had no tool-call recognition. Same shape as Phase 1's skill gap. New test file `tests/api-server-tools.test.ts`. |
 | **5.B** — tool step-into | HEAD | Wire-level pieces: `tool:awaiting-debugger` event + `pauseAtNextTool` flag (on initial request body AND `run-control` body) + `POST /sessions/:id/tool-debugger-ack` endpoint. Server emits the event before the next `[tool: ...]` step and parks on a per-session debugger-ack Promise; resumes on ack and hits a cooperative `debugger;` statement which Node's V8 inspector traps. Extension: F11 on a tool line detects the invocation and sends `pauseAtNextTool: true`; the `tool:awaiting-debugger` handler calls `vscode.debug.startDebugging` with a `pwa-node` attach config (settings: `steptix.inspectorPort` / `inspectorHost`); fails gracefully with ack-and-exit when the server isn't local or the inspector isn't reachable. |
 
 ## What works end-to-end right now

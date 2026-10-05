@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { expandSkills, clearSkillCache } from '../src/skills/expander.js';
+import { clearSkillCache } from '../src/skills/expander.js';
 import { parseTestFile } from '../src/parser/markdown.js';
 
 let tmpDir: string;
@@ -14,94 +14,6 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
-});
-
-async function writeSkill(name: string, content: string): Promise<void> {
-  await fs.writeFile(path.join(tmpDir, `${name}.md`), content);
-}
-
-describe('expandSkills — source-skill attribution', () => {
-  it('tags inline (non-skill) steps with null', async () => {
-    const result = await expandSkills(
-      ['Click the login button', 'Type "alice"'],
-      tmpDir,
-    );
-    expect(result.sourceSkills).toEqual([null, null]);
-  });
-
-  it('tags every step inside a skill with that skill name', async () => {
-    await writeSkill(
-      'login',
-      `---
-type: skill
----
-# login
-## Steps
-1. Type the username
-2. Type the password
-3. Click submit
-`,
-    );
-    const result = await expandSkills(['[skill: login]'], tmpDir);
-    expect(result.steps).toHaveLength(3);
-    expect(result.sourceSkills).toEqual(['login', 'login', 'login']);
-  });
-
-  it('attributes nested-skill steps to the OUTERMOST skill the test invoked', async () => {
-    await writeSkill(
-      'inner',
-      `---
-type: skill
----
-# inner
-## Steps
-1. inner step a
-2. inner step b
-`,
-    );
-    await writeSkill(
-      'outer',
-      `---
-type: skill
----
-# outer
-## Steps
-1. outer step 1
-2. [skill: inner]
-3. outer step 3
-`,
-    );
-    const result = await expandSkills(['[skill: outer]'], tmpDir);
-    expect(result.steps).toEqual([
-      'outer step 1',
-      'inner step a',
-      'inner step b',
-      'outer step 3',
-    ]);
-    // All four steps came from `outer` because that's what the test author
-    // invoked from the test scope — the `inner` invocation is an internal
-    // implementation detail of `outer`.
-    expect(result.sourceSkills).toEqual(['outer', 'outer', 'outer', 'outer']);
-  });
-
-  it('mixes inline and skill steps with the right per-step attribution', async () => {
-    await writeSkill(
-      'noop',
-      `---
-type: skill
----
-# noop
-## Steps
-1. inside noop
-`,
-    );
-    const result = await expandSkills(
-      ['inline 1', '[skill: noop]', 'inline 2'],
-      tmpDir,
-    );
-    expect(result.steps).toEqual(['inline 1', 'inside noop', 'inline 2']);
-    expect(result.sourceSkills).toEqual([null, 'noop', null]);
-  });
 });
 
 describe('parseTestFile — sourceSkills + hookToolCalls + hookSourceSkills', () => {

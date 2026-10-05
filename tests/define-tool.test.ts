@@ -3,33 +3,15 @@ import { defineTool } from '../src/tools/define-tool.js';
 
 describe('defineTool — happy path', () => {
   it('returns the same definition object passed in', () => {
-    const def = defineTool({
-      name: 'noop',
-      parameters: {},
-      outputs: {},
-      run: () => undefined,
-    });
-    expect(def.name).toBe('noop');
-    expect(typeof def.run).toBe('function');
-  });
-
-  it('preserves parameter and output schema verbatim', () => {
-    const def = defineTool({
+    // Identity, not a copy: the generic types of `parameters` and `outputs`
+    // ride on this object, and a copy would be free to drop or reshape them.
+    const input = {
       name: 'add',
-      parameters: {
-        a: { type: 'number' },
-        b: { type: 'number' },
-      },
-      outputs: {
-        sum: { type: 'number' },
-      },
+      parameters: { a: { type: 'number' as const }, b: { type: 'number' as const } },
+      outputs: { sum: { type: 'number' as const } },
       run: () => undefined,
-    });
-    expect(def.parameters).toEqual({
-      a: { type: 'number' },
-      b: { type: 'number' },
-    });
-    expect(def.outputs).toEqual({ sum: { type: 'number' } });
+    };
+    expect(defineTool(input)).toBe(input);
   });
 
   it('accepts hyphens and underscores in tool names', () => {

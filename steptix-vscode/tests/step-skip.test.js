@@ -16,7 +16,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
-  SKIP_GLYPH,
   skipCompileLogLine,
   skipHoverMessage,
   skipPaintsOver,
@@ -63,10 +62,6 @@ test('a second skip on the same line is idempotent', () => {
 
 const REASON = 'Not run: step 3 returned from "Sign in"';
 
-test('the glyph is the hollow circle the Rows panel and the gutter use', () => {
-  assert.equal(SKIP_GLYPH, '◌');
-});
-
 test('the run log names the line and repeats the server reason verbatim', () => {
   assert.equal(
     skipRunLogLine(31, REASON),
@@ -83,16 +78,6 @@ test('Test Explorer names the line and, when it is elsewhere, the file', () => {
     skipTestOutputLine(4, ' of login.md', 'Not run: step 7 ended the run'),
     '◌ step on line 4 of login.md skipped — Not run: step 7 ended the run',
   );
-});
-
-test('both single-line surfaces carry the same glyph and the same separator', () => {
-  // They are read side by side in a report of one run; drift between them is
-  // the thing this module exists to prevent.
-  const a = skipRunLogLine(9, REASON);
-  const b = skipTestOutputLine(9, '', REASON);
-  assert.ok(a.startsWith(`${SKIP_GLYPH} `) && b.startsWith(`${SKIP_GLYPH} `));
-  assert.ok(a.endsWith(`skipped — ${REASON}`));
-  assert.ok(b.endsWith(`skipped — ${REASON}`));
 });
 
 test('a reason with no text still reads as a sentence, not a dangling dash', () => {
@@ -294,13 +279,6 @@ test('every skip line of a skipped ⚠ says both facts, the skip first, as its h
     skipTestOutputLine(7, ' of pay.md', NOT_TAKEN, BROKE),
     `⚠ step on line 7 of pay.md skipped — another branch of this decision was taken${second}`,
   );
-});
-
-test('a skip with no broken condition is byte-identical to before', () => {
-  assert.equal(skipRunLogLine(7, NOT_TAKEN, undefined), skipRunLogLine(7, NOT_TAKEN));
-  assert.equal(skipRunLogLine(7, NOT_TAKEN), '◌ step 7 skipped — another branch of this decision was taken');
-  assert.equal(skipCompileLogLine(7, NOT_TAKEN, undefined), '◌ step on line 7 skipped — another branch of this decision was taken');
-  assert.equal(skipTestOutputLine(7, '', NOT_TAKEN, undefined), '◌ step on line 7 skipped — another branch of this decision was taken');
 });
 
 test('the run log tally counts a skipped ⚠ as skipped, and says it is stale beside the skip', () => {

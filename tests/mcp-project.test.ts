@@ -27,7 +27,7 @@ import {
 } from '../src/mcp/project.js';
 import { PreflightFailure } from '../src/mcp/types.js';
 
-const BASE_ENV = { SERVER_URL: 'http://127.0.0.1:3100', STEPTIX_SERVER_API_KEY: 'project-key' };
+const BASE_ENV = { STEPTIX_SERVER_URL: 'http://127.0.0.1:3100', STEPTIX_SERVER_API_KEY: 'project-key' };
 
 interface ProjectSpec {
   /** `null` writes no steptix.config.json at all. */
@@ -105,8 +105,11 @@ function seedUserRoot(spec: { config?: Record<string, unknown>; env?: Record<str
   return root;
 }
 
-/** Directory symlinks need a junction on win32 and are outright unavailable
- *  in some sandboxes; a test that cannot create one has nothing to assert. */
+/** Directory symlinks need a junction on win32, FILE symlinks need admin or
+ *  Developer Mode there, and both are outright unavailable in some sandboxes.
+ *  A test that cannot create one has nothing to assert — so it calls
+ *  `ctx.skip()` on a false return, and reports skipped rather than passing
+ *  green about a security boundary it never touched. */
 function trySymlink(target: string, link: string, type: 'dir' | 'file'): boolean {
   try {
     symlinkSync(target, link, type === 'dir' && process.platform === 'win32' ? 'junction' : type);
@@ -119,9 +122,9 @@ function trySymlink(target: string, link: string, type: 'dir' | 'file'): boolean
 const originalEnv = { ...process.env };
 
 beforeEach(() => {
-  // A developer shell with SERVER_URL set would silently satisfy the
+  // A developer shell with STEPTIX_SERVER_URL set would silently satisfy the
   // discovery-fallback tests that are meant to fail.
-  delete process.env['SERVER_URL'];
+  delete process.env['STEPTIX_SERVER_URL'];
   delete process.env['STEPTIX_SERVER_API_KEY'];
   // The key chain ends at the machine key file — redirect the user root into
   // an empty per-test dir so this machine's real key never leaks in. The
@@ -204,12 +207,12 @@ describe('allowed roots (§4a)', () => {
     expect(text).toContain('outside every allowed root');
   });
 
-  it('refuses a symlink inside the root that points outside it', async () => {
+  it('refuses a symlink inside the root that points outside it', async (ctx) => {
     const parent = makeTmp();
     const root = seedProject(path.join(parent, 'proj'));
     const secrets = seedProject(path.join(parent, 'secrets'), { files: { 'x.md': '# x\n' } });
     process.env['STEPTIX_MCP_ROOTS'] = root;
-    if (!trySymlink(secrets, path.join(root, 'link'), 'dir')) return;
+    if (!trySymlink(secrets, path.join(root, 'link'), 'dir')) ctx.skip('cannot create a directory link here');
 
     const text = await refusalText(() =>
       resolveProject({ testFilePath: path.join(root, 'link', 'x.md') }),
@@ -467,7 +470,7 @@ describe('environment composition (§4)', () => {
     const root = seedProject(makeTmp(), {
       env: { ...BASE_ENV, BASE_URL: 'https://base.example.com' },
       envFiles: {
-        uat: { BASE_URL: 'https://uat.example.com', SERVER_URL: 'http://127.0.0.1:3999' },
+        uat: { BASE_URL: 'https://uat.example.com', STEPTIX_SERVER_URL: 'http://127.0.0.1:3999' },
       },
     });
     process.env['STEPTIX_MCP_ROOTS'] = root;
@@ -492,10 +495,10 @@ describe('environment composition (§4)', () => {
     expect(project.env['HOST_ONLY_SECRET']).toBeUndefined();
   });
 
-  it('falls back to process.env for SERVER_URL/STEPTIX_SERVER_API_KEY without putting them in the map', async () => {
+  it('falls back to process.env for STEPTIX_SERVER_URL/STEPTIX_SERVER_API_KEY without putting them in the map', async () => {
     const root = seedProject(makeTmp(), { env: { OTHER: 'x' } });
     process.env['STEPTIX_MCP_ROOTS'] = root;
-    process.env['SERVER_URL'] = 'http://127.0.0.1:4100';
+    process.env['STEPTIX_SERVER_URL'] = 'http://127.0.0.1:4100';
     process.env['STEPTIX_SERVER_API_KEY'] = 'host-key';
 
     const project = await resolveProject({ projectRoot: root });
@@ -507,14 +510,14 @@ describe('environment composition (§4)', () => {
   it('prefers the project files over process.env', async () => {
     const root = seedProject(makeTmp());
     process.env['STEPTIX_MCP_ROOTS'] = root;
-    process.env['SERVER_URL'] = 'http://127.0.0.1:9999';
+    process.env['STEPTIX_SERVER_URL'] = 'http://127.0.0.1:9999';
 
     await expect(resolveProject({ projectRoot: root })).resolves.toMatchObject({
       serverUrl: 'http://127.0.0.1:3100',
     });
   });
 
-  it('falls back to the machine SERVER_URL, then the default, when the project names none', async () => {
+  it('falls back to the machine STEPTIX_SERVER_URL, then the default, when the project names none', async () => {
     // stories/machine-server-url.md: the same two a bare `steptix serve`
     // takes its port from, so auto-start and every other client agree.
     const root = seedProject(makeTmp(), {
@@ -526,19 +529,19 @@ describe('environment composition (§4)', () => {
     const bare = await resolveProject({ projectRoot: root, envName: 'uat' });
     expect(bare.serverUrl).toBe('http://127.0.0.1:3100');
 
-    seedUserRoot({ env: { SERVER_URL: 'http://127.0.0.1:3200' } });
+    seedUserRoot({ env: { STEPTIX_SERVER_URL: 'http://127.0.0.1:3200' } });
     const machine = await resolveProject({ projectRoot: root, envName: 'uat' });
     expect(machine.serverUrl).toBe('http://127.0.0.1:3200');
     // The machine value is a fallback for the URL only; it never enters the
     // project's env map, which ships to the server as the request's `env`.
-    expect(machine.env['SERVER_URL']).toBeUndefined();
+    expect(machine.env['STEPTIX_SERVER_URL']).toBeUndefined();
   });
 
-  it('keeps process.env above the machine SERVER_URL', async () => {
+  it('keeps process.env above the machine STEPTIX_SERVER_URL', async () => {
     const root = seedProject(makeTmp(), { env: { STEPTIX_SERVER_API_KEY: 'k' } });
     process.env['STEPTIX_MCP_ROOTS'] = root;
-    seedUserRoot({ env: { SERVER_URL: 'http://127.0.0.1:3200' } });
-    process.env['SERVER_URL'] = 'http://127.0.0.1:4100';
+    seedUserRoot({ env: { STEPTIX_SERVER_URL: 'http://127.0.0.1:3200' } });
+    process.env['STEPTIX_SERVER_URL'] = 'http://127.0.0.1:4100';
 
     expect((await resolveProject({ projectRoot: root })).serverUrl).toBe('http://127.0.0.1:4100');
   });
@@ -546,7 +549,7 @@ describe('environment composition (§4)', () => {
   it('defers a missing STEPTIX_SERVER_API_KEY as null rather than refusing', async () => {
     // stories/machine-key.md: only server-start.ts can decide what a missing
     // key means — down + loopback generates one, a running server refuses.
-    const root = seedProject(makeTmp(), { env: { SERVER_URL: 'http://127.0.0.1:3100' } });
+    const root = seedProject(makeTmp(), { env: { STEPTIX_SERVER_URL: 'http://127.0.0.1:3100' } });
     process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const project = await resolveProject({ projectRoot: root });
@@ -554,7 +557,7 @@ describe('environment composition (§4)', () => {
   });
 
   it('falls back to the machine key file when project and process.env have none', async () => {
-    const root = seedProject(makeTmp(), { env: { SERVER_URL: 'http://127.0.0.1:3100' } });
+    const root = seedProject(makeTmp(), { env: { STEPTIX_SERVER_URL: 'http://127.0.0.1:3100' } });
     process.env['STEPTIX_MCP_ROOTS'] = root;
     const steptixDir = path.join(process.env['LOCALAPPDATA']!, 'steptix');
     mkdirSync(steptixDir, { recursive: true });
@@ -579,7 +582,7 @@ describe('environment composition (§4)', () => {
     });
 
     const withoutProjectKey = seedProject(makeTmp(), {
-      env: { SERVER_URL: 'http://127.0.0.1:3100' },
+      env: { STEPTIX_SERVER_URL: 'http://127.0.0.1:3100' },
     });
     process.env['STEPTIX_MCP_ROOTS'] = withoutProjectKey;
     process.env['STEPTIX_SERVER_API_KEY'] = 'host-key';
@@ -610,13 +613,13 @@ describe('environment composition (§4)', () => {
     expect(text).toBe(`Environment file not found: ${path.join(root, '.env.uat')}`);
   });
 
-  it('refuses a .env.<name> symlinked outside the allowed roots', async () => {
+  it('refuses a .env.<name> symlinked outside the allowed roots', async (ctx) => {
     const parent = makeTmp();
     const root = seedProject(path.join(parent, 'proj'));
     const secrets = path.join(parent, 'secrets.env');
     writeFileSync(secrets, 'STOLEN=1\n');
     process.env['STEPTIX_MCP_ROOTS'] = root;
-    if (!trySymlink(secrets, path.join(root, '.env.uat'), 'file')) return;
+    if (!trySymlink(secrets, path.join(root, '.env.uat'), 'file')) ctx.skip('cannot create a file symlink here');
 
     const text = await refusalText(() => resolveProject({ projectRoot: root, envName: 'uat' }));
     expect(text).toContain('outside every allowed root');
@@ -656,17 +659,17 @@ describe('user scope (stories/mcp-no-project.md)', () => {
     expect(project.toolsDir).toBeNull();
   });
 
-  it('defaults SERVER_URL to the port a bare serve listens on, below both env layers', async () => {
+  it('defaults STEPTIX_SERVER_URL to the port a bare serve listens on, below both env layers', async () => {
     noProjectCwd();
     expect((await resolveProject({})).serverUrl).toBe('http://127.0.0.1:3100');
 
     // The user root's own .env beats the default…
-    seedUserRoot({ env: { SERVER_URL: 'http://127.0.0.1:4444' } });
+    seedUserRoot({ env: { STEPTIX_SERVER_URL: 'http://127.0.0.1:4444' } });
     expect((await resolveProject({})).serverUrl).toBe('http://127.0.0.1:4444');
 
     // …and process.env sits between the two.
     rmSync(path.join(testUserRoot(), '.env'));
-    process.env['SERVER_URL'] = 'http://127.0.0.1:5555';
+    process.env['STEPTIX_SERVER_URL'] = 'http://127.0.0.1:5555';
     expect((await resolveProject({})).serverUrl).toBe('http://127.0.0.1:5555');
   });
 
@@ -724,7 +727,7 @@ describe('user scope (stories/mcp-no-project.md)', () => {
   it('an explicit project_root naming the user root is user scope, whatever it contains', async () => {
     const userRoot = seedUserRoot({
       config: { tests: { skillsDir: './skills' } },
-      env: { SERVER_URL: 'http://127.0.0.1:4444' },
+      env: { STEPTIX_SERVER_URL: 'http://127.0.0.1:4444' },
     });
     mkdirSync(path.join(userRoot, 'skills'), { recursive: true });
     process.env['STEPTIX_MCP_ROOTS'] = seedProject(makeTmp());
@@ -756,8 +759,8 @@ describe('user scope (stories/mcp-no-project.md)', () => {
 
   it('layers .env.<name> under the user root exactly like a project', async () => {
     noProjectCwd();
-    const userRoot = seedUserRoot({ env: { SERVER_URL: 'http://127.0.0.1:4444' } });
-    writeEnvFile(path.join(userRoot, '.env.uat'), { SERVER_URL: 'http://127.0.0.1:4555' });
+    const userRoot = seedUserRoot({ env: { STEPTIX_SERVER_URL: 'http://127.0.0.1:4444' } });
+    writeEnvFile(path.join(userRoot, '.env.uat'), { STEPTIX_SERVER_URL: 'http://127.0.0.1:4555' });
 
     const project = await resolveProject({ envName: 'uat' });
     expect(project.scope).toBe('user');
@@ -808,28 +811,32 @@ describe('user root joins the allow-list for ADDRESSING only, never project file
     expect(() => resolveTestsGlob(project)).toThrow(PreflightFailure);
   });
 
-  it('a project skillsDir/toolsDir pointing into the user root is dropped, not loaded', async () => {
-    // resolveProjectDir confines against the configured roots and returns null
-    // for anything outside them — so a config aiming skills at the user root
-    // gets no skills directory rather than one that executes user-root code.
-    const parent = makeTmp();
-    const root = seedProject(path.join(parent, 'proj'), {
-      config: { tests: { skillsDir: '../../steptix-evil-skills' } },
-    });
-    // Even if such a directory exists, it is outside the configured root.
-    mkdirSync(path.join(parent, 'steptix-evil-skills'), { recursive: true });
-    process.env['STEPTIX_MCP_ROOTS'] = root;
+  it('a project skillsDir or toolsDir pointing into the user root is refused, not loaded', async () => {
+    // resolveProjectDir confines against the CONFIGURED roots before it looks
+    // for the directory — so a config aiming skills or tools at the user root,
+    // which `allowedRoots()` does list, is refused rather than handed a
+    // directory that executes user-root code. The directory exists, so it is
+    // the confinement that refuses it, not a missing path.
+    const target = path.join(testUserRoot(), 'skills');
+    mkdirSync(target, { recursive: true });
 
-    const text = await refusalText(() => resolveProject({ projectRoot: root }));
-    expect(text).toContain('outside every allowed root');
+    for (const key of ['skillsDir', 'toolsDir']) {
+      const root = seedProject(makeTmp(), { config: { tests: { [key]: target } } });
+      process.env['STEPTIX_MCP_ROOTS'] = root;
+
+      const text = await refusalText(() => resolveProject({ projectRoot: root }));
+      expect(text, key).toContain('outside every allowed root');
+    }
   });
 
-  it('a base .env symlinked into the user root is refused (machine-key exfil channel)', async () => {
+  it('a base .env symlinked into the user root is refused (machine-key exfil channel)', async (ctx) => {
     const root = seedProject(makeTmp(), { env: null });
     mkdirSync(testUserRoot(), { recursive: true });
     writeFileSync(path.join(testUserRoot(), '.env'), 'STEPTIX_SERVER_API_KEY=machine-secret\n');
     process.env['STEPTIX_MCP_ROOTS'] = root;
-    if (!trySymlink(path.join(testUserRoot(), '.env'), path.join(root, '.env'), 'file')) return;
+    if (!trySymlink(path.join(testUserRoot(), '.env'), path.join(root, '.env'), 'file')) {
+      ctx.skip('cannot create a file symlink here');
+    }
 
     const text = await refusalText(() => resolveProject({ projectRoot: root }));
     expect(text).toContain('outside every allowed root');
@@ -845,7 +852,7 @@ describe('user root joins the allow-list for ADDRESSING only, never project file
       path.join(sub, 'steptix.config.json'),
       JSON.stringify({ tests: { skillsDir: './skills' } }),
     );
-    writeEnvFile(path.join(sub, '.env'), { SERVER_URL: 'http://127.0.0.1:3100' });
+    writeEnvFile(path.join(sub, '.env'), { STEPTIX_SERVER_URL: 'http://127.0.0.1:3100' });
     process.env['STEPTIX_MCP_ROOTS'] = seedProject(makeTmp());
 
     const text = await refusalText(() => resolveProject({ projectRoot: sub }));
@@ -855,7 +862,7 @@ describe('user root joins the allow-list for ADDRESSING only, never project file
   it('but the user root ITSELF as project_root still routes to user scope', async () => {
     // The addressing path the wide allow-list exists to serve — unaffected by
     // the loading-boundary tightening.
-    seedUserRoot({ env: { SERVER_URL: 'http://127.0.0.1:4444' } });
+    seedUserRoot({ env: { STEPTIX_SERVER_URL: 'http://127.0.0.1:4444' } });
     process.env['STEPTIX_MCP_ROOTS'] = seedProject(makeTmp());
 
     await expect(resolveProject({ projectRoot: testUserRoot() })).resolves.toMatchObject({

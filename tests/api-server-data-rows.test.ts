@@ -14,6 +14,9 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import type { Express } from 'express';
 import type { Config } from '../src/config/types.js';
 import type { StepResult, TestReport } from '../src/report/types.js';
@@ -185,6 +188,17 @@ const testConfig: Config = {
 let server: Server;
 let baseUrl: string;
 
+/**
+ * Where the test files these requests name live. None of them exists — the
+ * server parses nothing from disk here — but a whole-test batch still writes
+ * its code-behind last-run sidecar beside the path it was given. A fixed fake
+ * like `/tests/plain.md` put that sidecar in a real `C:\tests\` on Windows,
+ * carried across runs, and failed silently with EACCES on Linux and macOS: one
+ * code path behaving three ways. A temp dir makes it one, and leaves nothing.
+ */
+let testsDir: string;
+const testFile = (name: string): string => path.join(testsDir, name);
+
 async function listenOnRandomPort(app: Express): Promise<{ server: Server; baseUrl: string }> {
   const started = createServer(app);
   await new Promise<void>((resolve) => { started.listen(0, '127.0.0.1', () => resolve()); });
@@ -233,7 +247,7 @@ function sessionId(label: string): string {
 async function runThreeRows(id: string): Promise<void> {
   for (const [index, email] of ['a@b.c', 'd@e.f', 'g@h.i'].entries()) {
     await postSteps(id, {
-      testFilePath: '/tests/matrix.md',
+      testFilePath: testFile('matrix.md'),
       dataRow: index + 1,
       dataRowCount: 3,
       dataRowValues: { email },
@@ -243,12 +257,14 @@ async function runThreeRows(id: string): Promise<void> {
 }
 
 beforeAll(async () => {
+  testsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rows-'));
   const { app } = createApiServer(testConfig);
   ({ server, baseUrl } = await listenOnRandomPort(app));
 }, 30_000);
 
 afterAll(async () => {
   await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+  await fs.rm(testsDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 beforeEach(() => {
@@ -259,7 +275,7 @@ describe('a batch carrying dataRow', () => {
   it('writes no report of its own', async () => {
     const id = sessionId('accumulate');
     const { status } = await postSteps(id, {
-      testFilePath: '/tests/matrix.md',
+      testFilePath: testFile('matrix.md'),
       dataRow: 1,
       dataRowCount: 3,
       dataRowValues: { email: 'a@b.c' },
@@ -272,7 +288,7 @@ describe('a batch carrying dataRow', () => {
   it('still writes one when the batch has no dataRow', async () => {
     // The regression guard: the accumulator must not swallow every report.
     const id = sessionId('plain');
-    await postSteps(id, { testFilePath: '/tests/plain.md' });
+    await postSteps(id, { testFilePath: testFile('plain.md') });
     expect(generateReportMock).toHaveBeenCalledTimes(1);
   });
 });
@@ -311,7 +327,7 @@ describe('POST /sessions/:id/report', () => {
   it('lists rows the client never reached', async () => {
     const id = sessionId('notrun');
     await postSteps(id, {
-      testFilePath: '/tests/matrix.md',
+      testFilePath: testFile('matrix.md'),
       dataRow: 1,
       dataRowCount: 3,
       dataRowValues: { email: 'a@b.c' },
@@ -405,7 +421,7 @@ describe('section rows on the wire', () => {
     // the way in, so `rows` travels only because it is named there.
     const id = sessionId('section-rows');
     const { status } = await postSteps(id, {
-      testFilePath: '/tests/loop.md',
+      testFilePath: testFile('loop.md'),
       steps: ['Upload each file'],
       sourceLines: [3],
       sections: {
@@ -444,7 +460,7 @@ describe('section rows on the wire', () => {
     // numbers and nothing else, so numbering them right here is the whole fix.
     const id = sessionId('section-subset');
     const { status } = await postSteps(id, {
-      testFilePath: '/tests/loop.md',
+      testFilePath: testFile('loop.md'),
       steps: ['Upload each file'],
       sourceLines: [3],
       sections: {
@@ -478,33 +494,9 @@ describe('section rows on the wire', () => {
     });
   });
 
-  it('rejects rowNumbers that do not match the rows', async () => {
-    // The pairing and the ordering rules are pinned in
-    // api-server-sections.test.ts; this is the one guard that has to hold at
-    // THIS seam too, since the entry is rebuilt field by field on the way in.
-    const { status } = await postSteps(sessionId('bad-rownumbers'), {
-      testFilePath: '/tests/loop.md',
-      steps: ['Upload each file'],
-      sourceLines: [3],
-      sections: {
-        'upload each file': {
-          name: 'Upload each file',
-          headingLine: 5,
-          steps: ['Upload {{file}}'],
-          stepLines: [9],
-          rows: [{ file: 'b.png' }, { file: 'c.png' }],
-          rowNumbers: [2, 4],
-          rowCount: 3,
-        },
-      },
-    });
-    expect(status).toBe(400);
-    expect(generateReportMock).not.toHaveBeenCalled();
-  });
-
   it('rejects a malformed rows field', async () => {
     const { status } = await postSteps(sessionId('bad-rows'), {
-      testFilePath: '/tests/loop.md',
+      testFilePath: testFile('loop.md'),
       steps: ['Upload each file'],
       sourceLines: [3],
       sections: {

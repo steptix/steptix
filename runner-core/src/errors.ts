@@ -10,10 +10,9 @@
  * the literal name of any setting key involved so the user can grep.
  */
 
-// STX001 (no .env found) and STX002 (.env without SERVER_URL) are retired: a
-// test with neither falls back to the machine SERVER_URL, then the default
-// (stories/machine-server-url.md). Their numbers stay unused.
 export type ErrorCode =
+  | 'STX001'
+  | 'STX002'
   | 'STX003'
   | 'STX004'
   | 'STX005'
@@ -59,24 +58,19 @@ export interface ErrorPayload {
 // Per-code context types — each ErrorCode declares exactly what it needs.
 // ---------------------------------------------------------------------------
 
-/*
- * A `envPath` / `baseEnvPath` of null means the test has no project `.env`:
- * nothing was found walking up from it and `steptix.defaultEnvFile` names
- * none. That is a supported setup, not an error of its own.
- */
 export interface ErrorContextMap {
-  STX003: { envPath: string | null; machineEnvPath: string };
-  /** `envPath` is whichever file the bad SERVER_URL came from — the project's
-   *  `.env` or the machine one. */
+  STX001: { searchedDirs: string[]; fallbackSetting: string };
+  STX002: { envPath: string };
+  STX003: { envPath: string; machineEnvPath: string };
   STX004: { envPath: string; value: string };
   STX005: { envPath: string; lineNumber: number; line: string };
-  STX006: { envName: string; expectedPath: string };
-  /** The machine `.env` exists but could not be read. Distinct from STX003
+  STX006: { envName: string; expectedPath: string; baseEnvPath: string };
+  /** The machine key file exists but could not be read. Distinct from STX003
    *  ("nowhere"): the key may well be in there. `reason` is the read error's
    *  message, which names the errno (EACCES, EISDIR, EBUSY…). */
   STX007: { machineEnvPath: string; reason: string };
   STX010: { serverUrl: string; reason: string };
-  STX011: { envPath: string | null; serverUrl: string };
+  STX011: { envPath: string; serverUrl: string };
   STX012: { serverUrl: string };
   STX013: { serverUrl: string; status: number; bodyExcerpt?: string };
   STX014: { serverUrl: string; reason: string };
@@ -85,14 +79,22 @@ export interface ErrorContextMap {
   STX024: { detail: string };
   STX025: Record<string, never>;
   STX026: Record<string, never>;
-  /** A foreign service answered SERVER_URL. `service` is what it called
+  /** A foreign service answered STEPTIX_SERVER_URL. `service` is what it called
    *  itself, verbatim — naming it is what turns "the run failed" into "you
    *  pointed at Grafana". */
   STX027: { serverUrl: string; service: string };
   /** Auto-start failed. `reason` distinguishes the two ways it can (spawn
    *  refused up front vs never became healthy); `logPath` is where to look
-   *  and `logTail` the last few lines when cheaply available. */
-  STX028: { serverUrl: string; reason: string; logPath?: string; logTail?: string };
+   *  and `logTail` the last few lines when cheaply available. `runtimeDir` is
+   *  set when what failed to start was the installed runtime rather than the
+   *  command setting — the fix is then a different one. */
+  STX028: {
+    serverUrl: string;
+    reason: string;
+    logPath?: string;
+    logTail?: string;
+    runtimeDir?: string;
+  };
   STX030: Record<string, never>;
   STX031: Record<string, never>;
   /** A chain member the chain cannot reach: an `Else if` / `Otherwise` that
@@ -104,8 +106,8 @@ export interface ErrorContextMap {
   STX032: { detail: string };
   /** Auto-start would start a server somewhere other than `serverUrl`, so it
    *  did not start one. `servePort` is where the configured command listens
-   *  and `servePortSource` why (its own `-p`, the machine SERVER_URL, or the
-   *  default); `urlSource` is where `serverUrl` came from. */
+   *  and `servePortSource` why (its own `-p`, the machine STEPTIX_SERVER_URL,
+   *  or the default); `urlSource` is where `serverUrl` came from. */
   STX033: { serverUrl: string; urlSource: string; servePort: number; servePortSource: string };
 }
 
@@ -120,13 +122,25 @@ type Builder<C extends ErrorCode> = (ctx: ErrorContextMap[C]) => {
 };
 
 const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
+  STX001: (ctx) => ({
+    diagnosis: `No .env file found for this test. Searched: ${ctx.searchedDirs.join(', ')}, then fallback setting "steptix.defaultEnvFile" (=${ctx.fallbackSetting || 'unset'})`,
+    fix: 'Create the file "steptix.defaultEnvFile" names (or a .env next to this test), or clear the setting. A project needs no .env of its own: STEPTIX_SERVER_URL and STEPTIX_SERVER_API_KEY both fall back to the machine .env.',
+    actions: [
+      { label: 'Open Settings', command: 'workbench.action.openSettings', args: ['steptix.defaultEnvFile'] },
+    ],
+  }),
+  STX002: (ctx) => ({
+    diagnosis: `STEPTIX_SERVER_URL is missing from ${ctx.envPath}`,
+    fix: 'Add a line like STEPTIX_SERVER_URL=http://localhost:3100 (full URL including scheme and port).',
+    actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
+  }),
   STX003: (ctx) => ({
-    diagnosis: `STEPTIX_SERVER_API_KEY is nowhere: ${ctx.envPath === null ? 'this test has no project .env' : `not in ${ctx.envPath}`}, not in the VS Code process environment, and no machine key at ${ctx.machineEnvPath}`,
-    fix: 'Start the server once and it writes the machine key there — set "steptix.serverAutoStart.command" and "steptix.serverAutoStart.cwd" and Run does it for you, or run `steptix serve`. If a server is already running, it was started with a key this machine does not have: add STEPTIX_SERVER_API_KEY=<that key> to the machine key file or this project\'s .env.',
+    diagnosis: `STEPTIX_SERVER_API_KEY is nowhere: not in ${ctx.envPath}, not in the VS Code process environment, and no machine key at ${ctx.machineEnvPath}`,
+    fix: 'Start the server once and it writes the machine key there — Run does that for you when the Steptix runtime is installed or "steptix.serverAutoStart.command" is set, or run `steptix serve`. If a server is already running, it was started with a key this machine does not have: add STEPTIX_SERVER_API_KEY=<that key> to the machine key file or this project\'s .env.',
     actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
   STX004: (ctx) => ({
-    diagnosis: `SERVER_URL in ${ctx.envPath} is not a valid URL: "${ctx.value}"`,
+    diagnosis: `STEPTIX_SERVER_URL in ${ctx.envPath} is not a valid URL: "${ctx.value}"`,
     fix: 'Use a full URL like http://localhost:3100 — include scheme, host, and port.',
     actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
@@ -137,25 +151,25 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   }),
   STX006: (ctx) => ({
     diagnosis: `Active environment "${ctx.envName}" is selected, but no .env.${ctx.envName} was found at ${ctx.expectedPath}`,
-    fix: `Create ${ctx.expectedPath}, or clear the env selection in the status bar (globe → env).`,
+    fix: `Create .env.${ctx.envName} next to ${ctx.baseEnvPath}, or clear the env selection in the status bar (globe → env).`,
     actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
   STX007: (ctx) => ({
-    diagnosis: `Could not read the machine .env file ${ctx.machineEnvPath}: ${ctx.reason}`,
+    diagnosis: `Could not read the machine key file ${ctx.machineEnvPath}: ${ctx.reason}`,
     fix: 'Make sure it is a file your account can read and that no other program holds it locked, then run again.',
   }),
   STX010: (ctx) => ({
     diagnosis: `Cannot reach the Steptix server at ${ctx.serverUrl} (${ctx.reason})`,
     fix:
-      "Start it with 'npx steptix serve' in your test project (or 'steptix serve' if the package is installed globally), then confirm SERVER_URL names the host and port it is listening on. " +
+      "Start it with 'npx steptix serve' in your test project (or 'steptix serve' if the package is installed globally), then confirm STEPTIX_SERVER_URL names the host and port it is listening on. " +
       'If it runs on another machine, check the firewall. ' +
-      'To have Steptix start it for you, configure "steptix.serverAutoStart.command" and ".cwd" in your user settings.',
+      'To have Steptix start it for you, install the Steptix runtime, or set "steptix.serverAutoStart.command" and ".cwd" in your user settings.',
     actions: [{ label: 'Show Run Log', command: 'steptix.showRunLog' }],
   }),
   STX011: (ctx) => ({
     diagnosis: `Server at ${ctx.serverUrl} rejected the API key (HTTP 401)`,
     fix:
-      `The STEPTIX_SERVER_API_KEY Steptix sent (from ${ctx.envPath === null ? '' : `${ctx.envPath}, `}the process environment, ` +
+      `The STEPTIX_SERVER_API_KEY Steptix sent (from ${ctx.envPath}, the process environment, ` +
       'or the machine key file) must match the key the server was started with.',
     actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
@@ -174,10 +188,12 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
     fix: 'Check the server is still up and re-run; use "Steptix: Stop" to abort the orphaned session.',
     actions: [{ label: 'Show Run Log', command: 'steptix.showRunLog' }],
   }),
+  // No action: its "Reopen as Text" button named `steptix.reopenAsText`, a
+  // command the extension neither contributes nor registers — a button that
+  // could only fail. errors.test.js checks every action against package.json.
   STX020: (ctx) => ({
     diagnosis: `${ctx.filePath} has no "## Steps" heading, so there's nothing to run`,
     fix: 'Add a "## Steps" heading followed by a numbered list, or open as plain Markdown.',
-    actions: [{ label: 'Reopen as Text', command: 'steptix.reopenAsText' }],
   }),
   STX021: () => ({
     diagnosis: 'No step at or below the cursor to run',
@@ -201,15 +217,17 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   // would be worse than putting the pointer in `fix`, which IS rendered.
   STX027: (ctx) => ({
     diagnosis: `${ctx.serverUrl} responds, but it is not a Steptix server (it identifies as "${ctx.service}")`,
-    fix: 'Point SERVER_URL at the Steptix server, or stop the other process holding that port. Steptix will not start a server on top of one it does not recognise.',
+    fix: 'Point STEPTIX_SERVER_URL at the Steptix server, or stop the other process holding that port. Steptix will not start a server on top of one it does not recognise.',
   }),
   STX028: (ctx) => ({
     diagnosis:
       `Could not auto-start the Steptix server for ${ctx.serverUrl} — ${ctx.reason}` +
       (ctx.logTail ? `. Last log lines: ${ctx.logTail}` : ''),
-    fix: ctx.logPath
-      ? `Check the server log at ${ctx.logPath} (command "Steptix: Show Server Log"), then fix "steptix.serverAutoStart.command" / "steptix.serverAutoStart.cwd" in your USER settings — or start the server yourself.`
-      : 'Set "steptix.serverAutoStart.command" and "steptix.serverAutoStart.cwd" in your USER settings (they are machine-scoped and cannot be set per workspace) — or start the server yourself.',
+    fix: ctx.runtimeDir
+      ? `Check the server log at ${ctx.logPath ?? 'the server log'} (command "Steptix: Show Server Log"). Steptix started the runtime installed in ${ctx.runtimeDir}: make sure Node.js 22.21 or later is on PATH (or STEPTIX_NODE names it) and reinstall the runtime if its files are damaged, or set "steptix.serverAutoStart.command" and "steptix.serverAutoStart.cwd" in your USER settings to start something else — or start the server yourself.`
+      : ctx.logPath
+        ? `Check the server log at ${ctx.logPath} (command "Steptix: Show Server Log"), then fix "steptix.serverAutoStart.command" / "steptix.serverAutoStart.cwd" in your USER settings — or start the server yourself.`
+        : 'Set "steptix.serverAutoStart.command" and "steptix.serverAutoStart.cwd" in your USER settings (they are machine-scoped and cannot be set per workspace) — or start the server yourself.',
   }),
   STX030: () => ({
     diagnosis: 'Steptix needs an open folder so it can resolve .env',
@@ -238,7 +256,7 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
   STX033: (ctx) => ({
     diagnosis:
       `No Steptix server is running at ${ctx.serverUrl} (from ${ctx.urlSource}), and auto-start would start one on port ${ctx.servePort} (from ${ctx.servePortSource}) instead — so it did not start one`,
-    fix: `Start the server for ${ctx.serverUrl} yourself with \`steptix serve -p ${portOf(ctx.serverUrl)}\`, or point SERVER_URL at port ${ctx.servePort}.`,
+    fix: `Start the server for ${ctx.serverUrl} yourself with \`steptix serve -p ${portOf(ctx.serverUrl)}\`, add -p ${portOf(ctx.serverUrl)} after serve in "steptix.serverAutoStart.command", or point STEPTIX_SERVER_URL at port ${ctx.servePort}.`,
   }),
 };
 

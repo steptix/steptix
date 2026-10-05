@@ -3,7 +3,9 @@
  *
  * Both directions are exhaustive discriminated unions. Use the narrowing
  * helpers below at message-handler boundaries — never compare `type`
- * strings inline.
+ * strings inline. The webview cannot import them (Vite's CJS interop drops
+ * the names), so it keeps its own host-message guard beside its handler in
+ * steptix-vscode/src/webview/steptix-runner.jsx.
  */
 
 import type { ErrorPayload } from './errors.js';
@@ -689,20 +691,6 @@ export type CompileEvent =
   | CompileResultEvent
   | CompileRunEvent
   | OutputEvent;
-
-export function isCompileEvent(value: unknown): value is CompileEvent {
-  if (!value || typeof value !== 'object') return false;
-  const t = (value as { type?: unknown }).type;
-  return (
-    t === 'compile:phase' ||
-    t === 'compile:step' ||
-    t === 'compile:progress' ||
-    t === 'compile:done' ||
-    t === 'compile:result' ||
-    (t === 'compile:run' && isRunEvent((value as { event?: unknown }).event)) ||
-    t === 'output'
-  );
-}
 
 /** `POST /codebehind/compile` (stories/codebehind-compile.md §Server). */
 export interface CompileRequest {
@@ -1929,34 +1917,6 @@ export type WebviewToHostMsg =
 // Narrowing helpers
 // ---------------------------------------------------------------------------
 
-export function isHostMsg(value: unknown): value is HostToWebviewMsg {
-  if (!value || typeof value !== 'object') return false;
-  const t = (value as { type?: unknown }).type;
-  return (
-    t === 'activeFile' ||
-    t === 'runEvent' ||
-    t === 'runError' ||
-    t === 'prompt' ||
-    t === 'promptDone' ||
-    t === 'parametersResolved' ||
-    // The two data-row messages. `rowSummary` was missing here from the day
-    // it was added — nothing in the extension host routes host messages
-    // through this guard, so the omission was invisible; it is listed now so
-    // a future consumer that does guard cannot silently drop the repaint.
-    t === 'rowSummary' ||
-    t === 'rows' ||
-    t === 'running' ||
-    t === 'breakpointStop' ||
-    t === 'batchBanner' ||
-    t === 'skillRerunAvailable' ||
-    t === 'compileEvent' ||
-    t === 'compileProgress' ||
-    t === 'compileRunEvent' ||
-    t === 'recording' ||
-    t === 'recordAddStepResult'
-  );
-}
-
 export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
   if (!value || typeof value !== 'object') return false;
   const t = (value as { type?: unknown }).type;
@@ -1991,30 +1951,5 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     // The browser toolbar's panel parity (stories/steptix-record-toolbar.md).
     t === 'recordPause' ||
     t === 'recordAddStep'
-  );
-}
-
-export function isRunEvent(value: unknown): value is RunEvent {
-  if (!value || typeof value !== 'object') return false;
-  const t = (value as { type?: unknown }).type;
-  return (
-    t === 'step:start' ||
-    t === 'step:pass' ||
-    t === 'step:fail' ||
-    // A step an `If … then return` left behind (stories/step-flow-control.md).
-    t === 'step:skip' ||
-    t === 'output' ||
-    t === 'capture' ||
-    t === 'done' ||
-    t === 'frame:push' ||
-    t === 'frame:pop' ||
-    t === 'frame:scope' ||
-    t === 'step:awaiting' ||
-    t === 'tool:awaiting-debugger' ||
-    t === 'codebehind:awaiting-debugger' ||
-    // Only a compile-mode run emits these; an ordinary one never does.
-    t === 'compile:step' ||
-    t === 'compile:progress' ||
-    t === 'compile:result'
   );
 }

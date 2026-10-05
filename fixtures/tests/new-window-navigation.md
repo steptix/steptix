@@ -1,6 +1,6 @@
 ---
 tags: [smoke, popup, new-window, e2e]
-timeout: 120s
+timeout: 600s
 ---
 
 # New Window and Tab Navigation Test

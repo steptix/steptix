@@ -6,7 +6,7 @@ against the still-live session**, with the test's variables in scope — so they
 edit the skill `.md` and re-run to confirm a fix without replaying the whole test.
 
 Sibling of [skill-step-rerun-with-variables.md](skill-step-rerun-with-variables.md)
-(the paused-on-error "re-run from the failed step" feature, merged 05e40bd). This
+(the paused-on-error "re-run from the failed step" feature, merged 861fc1b). This
 spec reuses that feature's machinery (frame-qualified slice, per-step cache
 bypass, the `isSessionAlive` liveness pre-flight) and adds the **Stop** path it
 deliberately excluded. Also see [debugging-ux.md](debugging-ux.md) (run / pause /

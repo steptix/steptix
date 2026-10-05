@@ -6,7 +6,7 @@
 // for the wrong reason, and a pool that hands two items to one worker just
 // looks like a slow afternoon. Everything here is pure or filesystem-only —
 // no VS Code, no server, no browser.
-import { test } from "node:test";
+import { test, after } from "node:test";
 import { strict as assert } from "node:assert";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -18,14 +18,24 @@ const {
   copyWorkspace,
   rebaseConfigPaths,
   pointEnvAtServer,
+  liveAiProblem,
   scheduleOrder,
   runPool,
   sharedServerStatsWarning,
 } = require("../tests/integration/liveShards.cjs");
 
+/** A fresh temp dir, removed when the file is done. `maxRetries`: on Windows
+ *  antivirus or the indexer can still hold a file written moments ago, and
+ *  `force` does not cover EBUSY/EPERM. */
+const made = [];
 function tmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "live-shards-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "live-shards-"));
+  made.push(dir);
+  return dir;
 }
+after(() => {
+  for (const dir of made) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+});
 
 function write(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -91,16 +101,32 @@ test("runPool: a free worker takes the next item rather than waiting its turn", 
   // two workers: a pre-computed split could give one worker the long item AND
   // two short ones; pulling means the fast worker drains the short ones while
   // the other is still on the long one.
+  //
+  // "Long" is not a duration: the long item lasts until every short one is
+  // done. Timers cannot be trusted to order it — Windows rounds a 1 ms timer
+  // up to its ~15 ms tick, so four "short" ones can outlast a 60 ms one. A
+  // split that queued short items behind the long one would never finish
+  // them; the backstop releases it so that fails on the assertion, not by
+  // hanging.
   const workers = [{ index: 1 }, { index: 2 }];
-  const durations = { long: 60, a: 1, b: 1, c: 1, d: 1 };
   const byWorker = new Map();
+  let releaseLong;
+  const longEnds = new Promise((r) => (releaseLong = r));
+  const backstop = setTimeout(() => releaseLong(), 10_000);
+  let shortsDone = 0;
 
   await runPool(workers, ["long", "a", "b", "c", "d"], async (worker, item) => {
-    await new Promise((r) => setTimeout(r, durations[item]));
+    if (item === "long") {
+      await longEnds;
+    } else {
+      await new Promise((r) => setTimeout(r, 1));
+      if (++shortsDone === 4) releaseLong();
+    }
     const list = byWorker.get(worker.index) ?? [];
     list.push(item);
     byWorker.set(worker.index, list);
   });
+  clearTimeout(backstop);
 
   const longWorker = [...byWorker.entries()].find(([, items]) => items.includes("long"))[0];
   assert.deepEqual(
@@ -139,7 +165,7 @@ test("copyWorkspace: brings the fixtures, leaves the per-run leftovers", () => {
   const src = path.join(root, "templates");
   const dest = path.join(root, "shard", "templates");
 
-  write(path.join(src, ".env"), "SERVER_URL=http://localhost:3100\n");
+  write(path.join(src, ".env"), "STEPTIX_SERVER_URL=http://localhost:3100\n");
   write(path.join(src, "init", "steptix.config.json"), "{}");
   write(path.join(src, "init", "tests", "example.md"), "## Steps\n");
   write(path.join(src, "init", "skills", "flows", "enter_email.md"), "skill\n");
@@ -177,7 +203,7 @@ test("copyWorkspace: replaces a previous shard's copy rather than merging into i
   const root = tmpDir();
   const src = path.join(root, "templates");
   const dest = path.join(root, "shard", "templates");
-  write(path.join(src, ".env"), "SERVER_URL=x\n");
+  write(path.join(src, ".env"), "STEPTIX_SERVER_URL=x\n");
   write(path.join(src, "keep.md"), "keep");
 
   copyWorkspace(src, dest);
@@ -203,7 +229,7 @@ function workspaceWithConfig(config, { at = ["init"] } = {}) {
   const original = path.join(root, "templates");
   const copy = path.join(root, "shard", "templates");
   write(path.join(original, ...at, "steptix.config.json"), JSON.stringify(config, null, 2));
-  write(path.join(original, ".env"), "SERVER_URL=x\n");
+  write(path.join(original, ".env"), "STEPTIX_SERVER_URL=x\n");
   // The out-of-tree target has to actually exist for the assertions to be
   // about paths rather than about existence.
   fs.mkdirSync(path.join(root, "fixtures", "tools", "src"), { recursive: true });
@@ -321,27 +347,27 @@ test("rebaseConfigPaths: reaches every config in the workspace, not just the top
 
 // ─── pointEnvAtServer ───────────────────────────────────────────────────────
 
-test("pointEnvAtServer: rewrites SERVER_URL in place, leaving the rest alone", () => {
+test("pointEnvAtServer: rewrites STEPTIX_SERVER_URL in place, leaving the rest alone", () => {
   const dir = tmpDir();
   const env = path.join(dir, ".env");
   write(
     env,
-    "AI_API_KEY=secret\nSERVER_URL=http://localhost:3100\nGITHUB_USERNAME=someone\n",
+    "AI_API_KEY=secret\nSTEPTIX_SERVER_URL=http://localhost:3100\nGITHUB_USERNAME=someone\n",
   );
 
   pointEnvAtServer(env, "http://localhost:3207");
 
   const text = fs.readFileSync(env, "utf8");
-  assert.match(text, /^SERVER_URL=http:\/\/localhost:3207$/m);
+  assert.match(text, /^STEPTIX_SERVER_URL=http:\/\/localhost:3207$/m);
   assert.match(text, /^AI_API_KEY=secret$/m);
   assert.match(text, /^GITHUB_USERNAME=someone$/m);
   // Rewritten, not appended: a duplicate key does not reliably resolve the
   // same way in every .env parser, and "it depends" is not a property a test
   // harness should have.
-  assert.equal(text.match(/^SERVER_URL=/gm).length, 1);
+  assert.equal(text.match(/^STEPTIX_SERVER_URL=/gm).length, 1);
 });
 
-test("pointEnvAtServer: appends SERVER_URL when the file has none", () => {
+test("pointEnvAtServer: appends STEPTIX_SERVER_URL when the file has none", () => {
   const dir = tmpDir();
   const env = path.join(dir, ".env");
   write(env, "AI_API_KEY=secret\n");
@@ -350,30 +376,92 @@ test("pointEnvAtServer: appends SERVER_URL when the file has none", () => {
 
   const text = fs.readFileSync(env, "utf8");
   assert.match(text, /^AI_API_KEY=secret$/m);
-  assert.match(text, /^SERVER_URL=http:\/\/localhost:3207$/m);
+  assert.match(text, /^STEPTIX_SERVER_URL=http:\/\/localhost:3207$/m);
 });
 
-test("pointEnvAtServer: a commented-out SERVER_URL is not mistaken for the real one", () => {
+test("pointEnvAtServer: a commented-out STEPTIX_SERVER_URL is not mistaken for the real one", () => {
   const dir = tmpDir();
   const env = path.join(dir, ".env");
-  write(env, "# SERVER_URL=http://localhost:9999\nAI_API_KEY=secret\n");
+  write(env, "# STEPTIX_SERVER_URL=http://localhost:9999\nAI_API_KEY=secret\n");
 
   pointEnvAtServer(env, "http://localhost:3207");
 
   const text = fs.readFileSync(env, "utf8");
-  assert.match(text, /^# SERVER_URL=http:\/\/localhost:9999$/m, "the comment survives");
-  assert.match(text, /^SERVER_URL=http:\/\/localhost:3207$/m, "a real line is added");
+  assert.match(text, /^# STEPTIX_SERVER_URL=http:\/\/localhost:9999$/m, "the comment survives");
+  assert.match(text, /^STEPTIX_SERVER_URL=http:\/\/localhost:3207$/m, "a real line is added");
 });
 
-test("pointEnvAtServer: a missing .env is an error, not a silent no-op", () => {
-  // Silence here would send the shard's extension at whatever SERVER_URL the
-  // walk-up found next — in practice the other checkout's server, testing the
-  // wrong `src/` while reporting green.
+test("pointEnvAtServer: a missing .env is created holding only STEPTIX_SERVER_URL", () => {
+  // A fresh clone has no templates/.env (it is gitignored). Skipping the file
+  // would send the shard's extension at whatever STEPTIX_SERVER_URL the
+  // walk-up found next — in practice another checkout's server, testing the
+  // wrong `src/` while reporting green — so the shard gets a .env of its own.
   const dir = tmpDir();
-  assert.throws(
-    () => pointEnvAtServer(path.join(dir, ".env"), "http://localhost:3207"),
-    /no \.env/,
+  const env = path.join(dir, ".env");
+
+  pointEnvAtServer(env, "http://localhost:3207");
+
+  assert.equal(fs.readFileSync(env, "utf8"), "STEPTIX_SERVER_URL=http://localhost:3207\n");
+});
+
+// ─── liveAiProblem ─────────────────────────────────────────────────────────
+
+/** A repo root with a templates/ dir and an empty machine file, all under tmp. */
+function aiFixture({ templatesEnv, rootEnv, machineEnv, config } = {}) {
+  const repoRoot = tmpDir();
+  const templatesDir = path.join(repoRoot, "templates");
+  fs.mkdirSync(templatesDir, { recursive: true });
+  if (templatesEnv !== undefined) write(path.join(templatesDir, ".env"), templatesEnv);
+  if (rootEnv !== undefined) write(path.join(repoRoot, ".env"), rootEnv);
+  if (config !== undefined) write(path.join(repoRoot, "steptix.config.json"), JSON.stringify(config));
+  const machineEnvPath = path.join(repoRoot, "machine", ".env");
+  fs.mkdirSync(path.dirname(machineEnvPath), { recursive: true });
+  if (machineEnv !== undefined) write(machineEnvPath, machineEnv);
+  return { repoRoot, templatesDir, machineEnvPath, env: {} };
+}
+
+test("liveAiProblem: no key anywhere — names every place looked and the one line to add", () => {
+  const f = aiFixture();
+  const problem = liveAiProblem(f);
+  assert.match(problem, /no AI_API_KEY was found/);
+  assert.match(problem, /templates\/\.env/);
+  assert.match(problem, /the environment/);
+  assert.ok(problem.includes(f.machineEnvPath), "names the machine file");
+  assert.match(problem, /AI_API_KEY=<your OpenAI API key>/);
+});
+
+test("liveAiProblem: a key in any one source passes — templates, environment, repo root or machine", () => {
+  assert.equal(liveAiProblem(aiFixture({ templatesEnv: "AI_API_KEY=k\n" })), null);
+  assert.equal(liveAiProblem({ ...aiFixture(), env: { AI_API_KEY: "k" } }), null);
+  assert.equal(liveAiProblem(aiFixture({ rootEnv: "AI_API_KEY=k\n" })), null);
+  assert.equal(liveAiProblem(aiFixture({ machineEnv: "AI_API_KEY=k\n" })), null);
+});
+
+test("liveAiProblem: a blank or commented-out key is no key", () => {
+  const f = aiFixture({ templatesEnv: "AI_API_KEY=\n# AI_API_KEY=k\n" });
+  assert.match(liveAiProblem(f), /no AI_API_KEY was found/);
+});
+
+test("liveAiProblem: a gateway-routed model with no AI_GATEWAY_URL anywhere is refused", () => {
+  for (const model of ["aibroker/openai/x", "gateway/copilot/x"]) {
+    const f = aiFixture({ machineEnv: `AI_API_KEY=k\nAI_MODEL=${model}\n` });
+    const problem = liveAiProblem(f);
+    assert.match(problem, new RegExp(`AI_MODEL=${model} routes through a gateway`));
+    assert.match(problem, /AI_GATEWAY_URL/);
+  }
+});
+
+test("liveAiProblem: a gateway-routed model passes once a URL is set in an env file or the config", () => {
+  const key = "AI_API_KEY=k\nAI_MODEL=aibroker/openai/x\n";
+  assert.equal(liveAiProblem(aiFixture({ machineEnv: `${key}AI_GATEWAY_URL=https://g.test\n` })), null);
+  assert.equal(
+    liveAiProblem(aiFixture({ machineEnv: key, config: { ai: { gatewayUrl: "https://g.test" } } })),
+    null,
   );
+});
+
+test("liveAiProblem: a direct model needs no gateway URL", () => {
+  assert.equal(liveAiProblem(aiFixture({ machineEnv: "AI_API_KEY=k\nAI_MODEL=openai/gpt-6-luna\n" })), null);
 });
 
 // ─── sharedServerStatsWarning ──────────────────────────────────────────────

@@ -57,18 +57,29 @@ const LIMITS = `<!doctype html><html><head><style>.next::after { content: " \\21
 <button>Say "hi"</button>
 </body></html>`;
 
+// One Chromium for the file; each describe below opens its own page on it.
+// A launch per describe tripled the launch/close cost, and closing a Chromium
+// is the step that has run longest when the whole suite starts at once.
+let browser: Browser;
+
+beforeAll(async () => {
+  browser = await chromium.launch({ headless: true });
+}, 60_000);
+
+afterAll(async () => {
+  try { await browser?.close(); } catch { /* noop */ }
+}, 60_000);
+
 describe('what Playwright matches (issue 062)', () => {
-  let browser: Browser;
   let page: Page;
   const count = (selector: string) => page.locator(selector).count();
 
   beforeAll(async () => {
-    browser = await chromium.launch({ headless: true });
     page = await browser.newPage();
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
-    await browser?.close();
+    await page?.close();
   });
 
   describe('on the markup from the failing runs', () => {
@@ -159,17 +170,15 @@ describe('what Playwright matches (issue 062)', () => {
 });
 
 describe('the role form through the framework', () => {
-  let browser: Browser;
   let page: Page;
   const clicked = () => page.evaluate(() => document.body.dataset['clicked'] ?? '');
 
   beforeAll(async () => {
-    browser = await chromium.launch({ headless: true });
     page = await browser.newPage();
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
-    await browser?.close();
+    await page?.close();
   });
 
   it.each([
@@ -224,7 +233,6 @@ describe('the role form through the framework', () => {
 });
 
 describe('iframes and waits take the role form too', () => {
-  let browser: Browser;
   let page: Page;
   const FRAMES: Record<string, string> = {
     '/frames': '<iframe id="pay-frame" src="/pay"></iframe><iframe id="outer" src="/outer"></iframe>',
@@ -234,7 +242,6 @@ describe('iframes and waits take the role form too', () => {
   };
 
   beforeAll(async () => {
-    browser = await chromium.launch({ headless: true });
     page = await browser.newPage();
     // Routed rather than served: the frames load by URL, and nothing here
     // needs a server beyond the bodies below.
@@ -245,10 +252,10 @@ describe('iframes and waits take the role form too', () => {
         body: FRAMES[new URL(route.request().url()).pathname] ?? '',
       }),
     );
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
-    await browser?.close();
+    await page?.close();
   });
 
   const loadFrames = async () => {
@@ -308,17 +315,17 @@ describe('iframes and waits take the role form too', () => {
     ['no waitType, role form', { condition: 'role=button[name="Later"]' }],
   ])('waits until it holds: %s', async (_label, fields) => {
     await page.setContent(LATE);
-    const started = Date.now();
+    // A wait that ran out its budget fails, so success alone proves it ended
+    // on the page's change — a text wait for the literal selector would never
+    // match. The budget is generous because the suite's own load, not the
+    // page, is what took 5 s on a busy run; no clock is read for that reason.
     const result = await executeAction(page, {
       action: 'wait',
-      timeout: 5_000,
+      timeout: 15_000,
       description: 'Wait',
       ...fields,
     });
     expect(result.success, result.error).toBe(true);
-    // Well inside the budget: the wait ended when the page changed, it did
-    // not run out its timeout as a text wait for the literal selector would.
-    expect(Date.now() - started).toBeLessThan(4_000);
   });
 
   it('a count wait that never holds fails as a TimeoutError', async () => {

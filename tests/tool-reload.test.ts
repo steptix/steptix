@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Page, BrowserContext, Browser } from 'playwright';
@@ -30,7 +30,11 @@ import {
  */
 
 const repoRoot = path.resolve(__dirname, '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-tool-reload');
+/** This run's own base, from `mkdtemp`: a fixed name would hand a run the
+ *  `tN/` dirs an aborted earlier run left behind — a stray `second.ts` that
+ *  "discovers a file added after the initial scan" then counts — and two runs
+ *  in one checkout would delete each other's files. */
+let tmpBase: string;
 
 // Reload tests use pure string tools that never touch the browser, so these
 // dummies are enough to satisfy executeToolStep's signature.
@@ -77,8 +81,12 @@ async function run(
   return { status: outcome.status, marker: resolvedParameters['marker'], error: outcome.error };
 }
 
+beforeAll(async () => {
+  tmpBase = await fs.mkdtemp(path.join(repoRoot, 'tests', '.tmp-tool-reload-'));
+});
+
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true });
+  if (tmpBase) await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 describe('tool reload — edited files (issue 033 Part 1)', () => {
@@ -265,7 +273,7 @@ describe('refreshIndex — added / removed files (issue 033 Part 2)', () => {
     await cat.resolve('marker'); // load something so byFile is non-empty
     expect(cat.indexedCount).toBe(1);
 
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     await cat.refreshIndex();
     expect(cat.indexedCount).toBe(0);
     expect(cat.diagnostics?.toolsDirMissing).toBe(true);

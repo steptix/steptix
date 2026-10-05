@@ -49,11 +49,11 @@ nothing is ever chosen silently.
 
 ## 1. Background — what exists, and the gap
 
-- **Paused-on-error** (merged, 05e40bd): the Variables panel offers "re-run
+- **Paused-on-error** (merged, 861fc1b): the Variables panel offers "re-run
   from the failed step", seeding the captured scope (editable) — but the run
   unit is failed-step → end of skill, and the affordance lives on the test's
   panel, not the skill file.
-- **Stop** (merged, dd704e1): `performStop({setSkillDebug})` parks a single
+- **Stop** (merged, c48d006): `performStop({setSkillDebug})` parks a single
   registry-level context; "Run selected skill steps on stopped session" runs
   an editor-selection slice (`startAt`+`endAt`) against the stopped test's
   live session with live/accumulating variables. A selection of one line is

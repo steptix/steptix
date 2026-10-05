@@ -19,9 +19,8 @@
  * classification order, and §3 of the same document for which exports see
  * body lines:
  *
- *  - main flow only  — `extractSteps`, `resolveRunLines`,
- *    `nearestStepAtOrBelow|Above`. Body lines are `section-step`, so every one
- *    of these filters them out by construction.
+ *  - main flow only  — `extractSteps`. Body lines are `section-step`, so it
+ *    filters them out by construction.
  *  - caller's choice — `resolveRunSelection` and `classifySelectedSteps`,
  *    whose `scope` argument defaults to main-flow. `resolveRunSelection` is
  *    the only function allowed to *pick* the scope; see
@@ -177,35 +176,6 @@ export function classifyLines(text: string): ClassifiedLine[] {
   }
 
   return out;
-}
-
-/**
- * True iff the given 1-based line is a **main-flow** step line. A section
- * body line is a step to the eye but not a runnable unit on its own, so this
- * returns false for one.
- */
-export function isStepLine(text: string, lineNumber: number): boolean {
-  const classified = classifyLines(text);
-  const entry = classified[lineNumber - 1];
-  return entry?.kind === 'step';
-}
-
-/** Nearest **main-flow** step at or below `lineNumber` (1-based), or null. */
-export function nearestStepAtOrBelow(text: string, lineNumber: number): number | null {
-  const classified = classifyLines(text);
-  for (let i = lineNumber - 1; i < classified.length; i++) {
-    if (classified[i]?.kind === 'step') return classified[i]!.line;
-  }
-  return null;
-}
-
-/** Nearest **main-flow** step at or above `lineNumber` (1-based), or null. */
-export function nearestStepAtOrAbove(text: string, lineNumber: number): number | null {
-  const classified = classifyLines(text);
-  for (let i = lineNumber - 1; i >= 0; i--) {
-    if (classified[i]?.kind === 'step') return classified[i]!.line;
-  }
-  return null;
 }
 
 /**
@@ -535,41 +505,6 @@ export function classifySelectedSteps(
       : all.filter((s) => requestedLines.includes(s.line));
 
   return filtered.map((s) => classifyOne(s));
-}
-
-/**
- * Translate a user's line selection into the step lines that should actually
- * run. The contract:
- *
- *  - Empty `requestedLines` → every step in the document.
- *  - If any selected line is a step line, return only those (preserving
- *    document order).
- *  - If the selection contains no step lines (user clicked a heading,
- *    blank line, prose), fall back to "every step at or below the first
- *    selected line" — so clicking `## Steps` and pressing Run executes
- *    the whole section instead of failing with STX021.
- *  - If the fallback finds nothing (selection is past the last step),
- *    return `[]` — caller decides how to surface that.
- *
- * "Step" means **main-flow step** throughout: selecting a section body line
- * resolves to `[]`, and a selection entirely below the last main-flow step
- * resolves to `[]`. Callers must distinguish that empty result from the
- * empty-request case, which means "run everything" — the condition is
- * `requested.length > 0 && resolved.length === 0`, never `resolved.length
- * === 0` alone.
- *
- * Now expressed as `resolveRunSelection` narrowed to the main flow, so the
- * two cannot drift. The narrowing is byte-identical to the standalone version
- * this replaced, not merely close: sections are defined below the main flow
- * inside the `## Steps` span, so a body-only selection's fallback ("main-flow
- * steps at or below the lowest selected line") was already always empty.
- *
- * Kept main-flow-only on purpose — this is what `runLines([])` and the
- * breakpoint trimmer read, and a body step must never appear there.
- */
-export function resolveRunLines(text: string, requestedLines: number[]): number[] {
-  const selection = resolveRunSelection(text, requestedLines);
-  return selection.scope === 'main-flow' ? selection.lines : [];
 }
 
 /**

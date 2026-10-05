@@ -8,8 +8,7 @@ export const DEFAULT_CONFIG: Config = {
     redactSensitive: true,
   },
   ai: {
-    gatewayUrl: 'https://llm.corp.example',
-    model: 'openai/gpt-5.6-luna',
+    model: 'openai/gpt-6-luna',
     maxInputTokens: 1_000_000,
     streamResponses: false,
     sendScreenshots: false,

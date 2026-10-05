@@ -92,7 +92,7 @@ export function parseInspectorUrl(
   // This value arrives in the body of an UNAUTHENTICATED /health response,
   // and `service` is a self-declared string, not proof of anything. So the
   // scheme and host are constrained here rather than trusted: tool step-into
-  // already requires a loopback SERVER_URL, and a real Node inspector on a
+  // already requires a loopback STEPTIX_SERVER_URL, and a real Node inspector on a
   // local server always reports a local address, so nothing legitimate is
   // lost — while a responder that named `ws://attacker.example/…` would
   // otherwise have VS Code's debug adapter dial out and speak CDP to it.

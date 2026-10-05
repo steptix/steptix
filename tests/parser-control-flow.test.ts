@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseTestContent, parseTestFile, parseSkillFile } from '../src/parser/markdown.js';
 import { clearSkillCache } from '../src/skills/expander.js';
 import { parseControlLine } from '../src/parser/control-line.js';
@@ -531,13 +532,18 @@ describe('what parseTestFile hands the runner', () => {
  */
 describe('the control-flow examples in docs/ parse', () => {
   const DOCS = ['docs/test-writing-handbook.md', 'docs/ai-test-authoring-guide.md'];
+  /** From this file, not `process.cwd()`: a runner rooted anywhere but the
+   *  checkout (an IDE at a parent folder, `vitest --root`) would otherwise
+   *  fail all three tests below with ENOENT. */
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   /** A fenced markdown block that holds at least one numbered control line. */
   const CONTROL_LINE_RE = /(^|\n)\s*\d+\.\s*(?:\[no-hooks\]\s*)?(if|else|otherwise|while|repeat|for each)\b/i;
 
   async function controlFences(): Promise<{ doc: string; index: number; body: string }[]> {
     const out: { doc: string; index: number; body: string }[] = [];
     for (const rel of DOCS) {
-      const text = await fs.readFile(path.join(process.cwd(), rel), 'utf8');
+      // A checkout with core.autocrlf on (GitHub's Windows runners) has CRLF.
+      const text = (await fs.readFile(path.join(repoRoot, rel), 'utf8')).replace(/\r\n/g, '\n');
       let index = 0;
       for (const match of text.matchAll(/```markdown\n([\s\S]*?)```/g)) {
         index++;
