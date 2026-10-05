@@ -24,10 +24,11 @@ So commands here don't hardcode where the checkout lives: they write it as
 (git worktree list --porcelain)[0] -replace '^worktree ', ''
 ```
 
-The GitHub repo is `pkent/steptix` (renamed from `pkent/ai-ui-automation` on
-2026-09-30). GitHub redirects the old URL, so the links to it in resolved
-issues, stories and older CHANGELOG entries keep working and were left as
-written.
+The GitHub repo is `steptix/steptix`. Links to `pkent/steptix` and
+`pkent/ai-ui-automation` in resolved issues, stories and older CHANGELOG
+entries, and `pkent/steptix-archive#N` in commit messages, lead to the
+private archive of the repo before the move, which only maintainers can
+open. Leave them as written.
 
 ## Flick: one client
 

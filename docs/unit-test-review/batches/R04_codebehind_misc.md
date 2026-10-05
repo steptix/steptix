@@ -13,13 +13,13 @@
 - Flakiness: no high risks. Three medium mechanisms:
   - 5 ms sleeps used to make two `new Date()` stamps differ;
   - per-test cold Chromium launches;
-  - temp-dir removal without the `maxRetries` the EBUSY fix (5e61f46) gave the in-repo dirs.
-- The writer lock test fixed in 4598ebb now waits on a cue and has no remaining timing race. Its only siblings in this batch are the recording sleeps.
+  - temp-dir removal without the `maxRetries` the EBUSY fix (f83c11b) gave the in-repo dirs.
+- The writer lock test fixed in 272eca0 now waits on a cue and has no remaining timing race. Its only siblings in this batch are the recording sleeps.
 
 ## Flakiness risks
 
 Already well guarded (not flagged):
-- `codebehind-writer.test.ts:306` "waits out a lock on the file instead of failing the write". The lock is released on cue from `onLocked`, not on a timer (4598ebb). The 90 s and 30 s budgets only bound PowerShell's output, and the process is killed in `finally`. The writer retries 20 × 100 ms after an awaited `onLocked` (src/codebehind/writer.ts:206-214). No residual race.
+- `codebehind-writer.test.ts:306` "waits out a lock on the file instead of failing the write". The lock is released on cue from `onLocked`, not on a timer (272eca0). The 90 s and 30 s budgets only bound PowerShell's output, and the process is killed in `finally`. The writer retries 20 × 100 ms after an awaited `onLocked` (src/codebehind/writer.ts:206-214). No residual race.
 - `api-server-codebehind.test.ts:563/594` (409 lock tests) use an event gate (`holdCompile`: `entered` and `release`), not sleeps. They release in `finally`.
 - `api-server-codebehind-debugger.test.ts:350` (run-control mid-run) posts run-control on `step:awaiting`. The server sets `pendingRunControl` synchronously in the same tick as the emit (session-manager.ts:8183-8195), so the POST cannot arrive before the run is parked.
 - Every HTTP suite in the batch listens on port 0. Every in-repo `tests/.tmp-*` dir in the batch is used by exactly one test file (checked across `tests/`) and is removed with `maxRetries: 10, retryDelay: 100`.
@@ -35,7 +35,7 @@ Already well guarded (not flagged):
   - `:599` "a filed splice still matches a recording written before the field existed" sleeps the same way but asserts no timestamp, so that sleep is dead.
 - Risk: medium (unlikely on any single run, but it is a timing-based assertion on three tests).
 - Fix: fake only `Date` (`vi.useFakeTimers({ toFake: ['Date'] })` with `vi.setSystemTime(t1)` before the write and `t2` before the splice), or let `spliceRecording`/`writeRecording` take an injectable `now`. Delete the sleep at :599.
-- Evidence: reading. This is the same family as the writer's "timed lock raced the retry budget" fix (4598ebb).
+- Evidence: reading. This is the same family as the writer's "timed lock raced the retry budget" fix (272eca0).
 
 ### `codebehind-tabs.test.ts:246, :267, :274, :289, :296` — the five "ctx.browsers" tests
 - Mechanism: every test launches 1–2 extra cold Chromium processes inside the test body.
@@ -47,10 +47,10 @@ Already well guarded (not flagged):
 - Evidence: reasoning about launch cost under parallel workers. No failures in `git log` for this file.
 
 ### Temp-dir removal without retries — `codebehind-upload.test.ts:38`, `codebehind-section-rows.test.ts:43`, `codebehind-skill-params.test.ts:324` (+ `:331-333` in `beforeEach`), `api-server-codebehind.test.ts:467` (`rmSync`, `afterEach`), `api-server-codebehind-debugger.test.ts:228` and `:491` (inside the test's `finally`), `api-server-condition-codebehind.test.ts:207`, `test-runner-condition-codebehind.test.ts:176`
-- Mechanism: `fs.rm(dir, { recursive: true, force: true })` runs with no `maxRetries`. `force` does not ignore EBUSY or EPERM. Most of these dirs hold a freshly written `.steps.ts` plus the `.mjs` esbuild bundle that the loader just imported. This is exactly the file type that 5e61f46 ("Retry removing in-repo temp dirs that Windows briefly locks") saw the scanner open. That commit fixed only the in-repo `tests/.tmp-*` dirs, on the grounds that "%TEMP% is usually spared". The debugger's `:491` removal sits inside the test body, so a lock there fails the test itself rather than a hook.
+- Mechanism: `fs.rm(dir, { recursive: true, force: true })` runs with no `maxRetries`. `force` does not ignore EBUSY or EPERM. Most of these dirs hold a freshly written `.steps.ts` plus the `.mjs` esbuild bundle that the loader just imported. This is exactly the file type that f83c11b ("Retry removing in-repo temp dirs that Windows briefly locks") saw the scanner open. That commit fixed only the in-repo `tests/.tmp-*` dirs, on the grounds that "%TEMP% is usually spared". The debugger's `:491` removal sits inside the test body, so a lock there fails the test itself rather than a hook.
 - Risk: medium (Windows only, needs a scanner to touch the file, but it is the documented failure mode of this repo).
 - Fix: pass `{ recursive: true, force: true, maxRetries: 10, retryDelay: 100 }` everywhere, which makes the batch consistent.
-- Evidence: the 5e61f46 commit message (EBUSY seen in codebehind-alignment, codebehind-failure-outcomes and flow-control-runner during full runs).
+- Evidence: the f83c11b commit message (EBUSY seen in codebehind-alignment, codebehind-failure-outcomes and flow-control-runner during full runs).
 
 Not flagged, but worth knowing:
 - `codebehind-tabs.test.ts:122` navigates to `http://127.0.0.1:1/nothing-here`. This is real network outside the routed origin. It relies on the OS refusing port 1 quickly; Windows takes about 2 s of SYN retries against a 30 s budget. `route.abort()` on a routed path would make it hermetic.
@@ -87,7 +87,7 @@ Not flagged, but worth knowing:
 
 ### `api-server-codebehind.test.ts:669` — "keeps nothing of a run on the session — there is no last run to reuse"
 - Category: L2 / L7
-- Evidence: `expect((sessionManager as unknown as { lastRunDetails?: unknown }).lastRunDetails).toBeUndefined();`. `grep -rn "lastRunDetails" src/ runner-core/src steptix-vscode/src flick-vscode/src` returns nothing. `git log -S lastRunDetails -- src` shows the property was removed in 6c4abcb ("Keep the compile's recording beside the test, not on the server"). The test reads a property that no longer exists, so it passes unless someone re-adds a field with that exact name. The real guarantee (Record runs in the caller's session every time) is already covered by :638 "records in that session every time, and leaves it open" and :757.
+- Evidence: `expect((sessionManager as unknown as { lastRunDetails?: unknown }).lastRunDetails).toBeUndefined();`. `grep -rn "lastRunDetails" src/ runner-core/src steptix-vscode/src flick-vscode/src` returns nothing. `git log -S lastRunDetails -- src` shows the property was removed in 900f591 ("Keep the compile's recording beside the test, not on the server"). The test reads a property that no longer exists, so it passes unless someone re-adds a field with that exact name. The real guarantee (Record runs in the caller's session every time) is already covered by :638 "records in that session every time, and leaves it open" and :757.
 - Recommendation: delete.
 - Confidence: high
 

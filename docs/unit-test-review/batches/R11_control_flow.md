@@ -10,15 +10,15 @@
 
 ### `tests/flow-control-runner.test.ts:138` — whole file (every `runTest` case writes here)
 - Mechanism: a fixed temp base inside the repository, `const tmpBase = path.join(repoRoot, 'tests', '.tmp-flow-control-runner');`, with per-test subdirectories named by a counter that restarts on every run (`dir = path.join(tmpBase, \`t${counter++}\`)`, :222). Each run therefore reuses `t0…tN` from any earlier run whose teardown failed, and two `npm test` runs in one checkout write the same files at once (a `--watch` session beside a full run, or two agents sharing a checkout). The Windows search indexer and antivirus scan in-repo files and leave `%TEMP%` mostly alone.
-- Risk: medium. The teardown half is already guarded: `afterAll` uses `fs.rm(..., { maxRetries: 10, retryDelay: 100 })`. That guard was added by commit 5e61f46 ("Retry removing in-repo temp dirs that Windows briefly locks"), which names flow-control-runner as one of the suites seen failing with EBUSY. What remains is the shared, reused path.
+- Risk: medium. The teardown half is already guarded: `afterAll` uses `fs.rm(..., { maxRetries: 10, retryDelay: 100 })`. That guard was added by commit f83c11b ("Retry removing in-repo temp dirs that Windows briefly locks"), which names flow-control-runner as one of the suites seen failing with EBUSY. What remains is the shared, reused path.
 - Fix: `dir = await fs.mkdtemp(path.join(tmpBase, 'run-'))` in `beforeEach`. That keeps the in-repo location the other `.tmp-*` suites need, though this file compiles no code-behind and so could use `fs.mkdtemp(path.join(os.tmpdir(), 'flow-control-runner-'))` instead, which also takes it out of the indexer's path.
-- Evidence: commit 5e61f46 message ("Seen in codebehind-alignment, codebehind-failure-outcomes and flow-control-runner during full runs").
+- Evidence: commit f83c11b message ("Seen in codebehind-alignment, codebehind-failure-outcomes and flow-control-runner during full runs").
 
 ### `tests/parser-control-flow.test.ts:541` — "the control-flow examples in docs/ parse" (all three tests, :556, :564, :575)
-- Mechanism: `await fs.readFile(path.join(process.cwd(), rel), 'utf8')` resolves `docs/…` against the process working directory rather than the test file. Run from anywhere but the repo root (an IDE runner rooted at a parent folder, `vitest --root`, or a sibling test that `chdir`s in the same process), it fails with ENOENT. The CRLF half of this test was already hardened by 25a1829 ("Make two root tests hold on GitHub's Windows runner").
+- Mechanism: `await fs.readFile(path.join(process.cwd(), rel), 'utf8')` resolves `docs/…` against the process working directory rather than the test file. Run from anywhere but the repo root (an IDE runner rooted at a parent folder, `vitest --root`, or a sibling test that `chdir`s in the same process), it fails with ENOENT. The CRLF half of this test was already hardened by 9ff8492 ("Make two root tests hold on GitHub's Windows runner").
 - Risk: medium. `npm test` always runs from the root, so this needs an unusual but realistic invocation.
 - Fix: `path.join(path.dirname(fileURLToPath(import.meta.url)), '..', rel)`, the same way flow-control-runner.test.ts:137 and ui-runner-adapter-control-flow.test.ts:1016 locate repo files.
-- Evidence: git history (25a1829 fixed the CRLF variant of the same read); reading the code.
+- Evidence: git history (9ff8492 fixed the CRLF variant of the same read); reading the code.
 
 ### Checked and already guarded (not flagged)
 - `tests/condition-judge.test.ts:188-260`: the re-ask and the 30 s budget run under `vi.useFakeTimers()` + `vi.advanceTimersByTimeAsync`. `Date.now()` is faked too, and every await in `evaluateConditions` is a mocked promise, so the poll count is deterministic (10 polls). `afterEach` restores real timers.
@@ -26,7 +26,7 @@
 - `tests/flow-control-executor.test.ts:431`: real-timer `executeBranchedStep`, but the first poll answers `matched: 'B'`, so it never sleeps. `waitForPageStability` is a recording stub, and `withRetry` gets no `delayMs`.
 - `tests/test-runner-control-flow.test.ts`, `tests/ui-runner-adapter-control-flow.test.ts`, `tests/flow-control-runner.test.ts`, `tests/flow-control-ui-adapter.test.ts`: `evaluateConditions` / `executeStep` / `executeBranchedStep` are mocked and resolve immediately, so the judge's 30 s settle/re-ask never runs in real time. The CLI loop's `timeoutDeadline` uses the default `execution.timeout`.
 - `tests/flow-control-ui-adapter.test.ts:111-126`, `tests/ui-runner-adapter-control-flow.test.ts:109-134`: `process.chdir(root)` is restored in `afterEach` (vitest 4 `forks` pool, one process per file). `process.env` is restored by the test (flow-control-ui-adapter) or by the adapter's own `restoreProcessEnv`. The temp roots come from `mkdtempSync(os.tmpdir())`.
-- mkdtemp + `fs.rm` in `afterEach`: expander-control-flow, flow-control-frames, flow-control-hooks, parser-control-flow, test-runner-control-flow (`os.tmpdir()`, unique per run). They have no `maxRetries`, but they live in `%TEMP%`, which 5e61f46 notes is usually spared the indexer.
+- mkdtemp + `fs.rm` in `afterEach`: expander-control-flow, flow-control-frames, flow-control-hooks, parser-control-flow, test-runner-control-flow (`os.tmpdir()`, unique per run). They have no `maxRetries`, but they live in `%TEMP%`, which f83c11b notes is usually spared the indexer.
 - `tests/flow-control-hooks.test.ts:110` `loadConfig` reads the real `%LOCALAPPDATA%\steptix\.env` (`withMachineAiFloor`), read-only and irrelevant to the asserted refusal.
 
 ## Per-file verdicts

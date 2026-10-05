@@ -1035,7 +1035,7 @@ a settings toggle — with no zoom needed for those. The model reached for
 `zoom` twice on its own, both times to read small text (an address bar and a
 download bubble) while diagnosing why a dialog had not appeared.
 
-**A defect the first attempt found, fixed in 7494518:** after
+**A defect the first attempt found, fixed in 1e5f72c:** after
 `focus_window` succeeded on turn 1 the next turn showed the same step and the
 same screen with no record of the action, so the model repeated it until the
 stall detector ended the step. Each attempt now carries an "Actions already

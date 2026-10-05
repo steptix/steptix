@@ -18,13 +18,13 @@ No high risks. Ports are 0 everywhere, and the real-app files park `executeStep`
 - Mechanism: the shared single-flight start outlives its cancelled caller and is left to settle by a wall-clock sleep: `async function drain() { await new Promise((resolve) => setTimeout(resolve, 25)); }` (line 159-161), called at line 620 after `h.up = true`. If that start has not settled when the next test begins, `beforeEach`'s `resetRegistry()` clears the map. The stale start's `.finally(() => startsInFlight.delete(key))` (src/mcp/registry.ts:134-136) can then delete the next test's in-flight entry, and the start could also `recordStartFailure` into the next test's registry. Either way a later single-flight or backoff test would fail for a reason that has nothing to do with its own code.
 - Risk: medium. Today the start settles within one event-loop check phase, well inside 25 ms, but the guarantee comes from a timer.
 - Fix: join the shared promise instead of sleeping. After `h.up = true`, run `await ensureServerReadyWith(makeProject(), undefined, h.deps)`; with no signal, that joins the same single-flight promise. Alternatively, have the harness resolve a "settled" deferred from `probe` once `h.up` is seen.
-- Evidence: reasoning (registry.ts single-flight cleanup); the construct is unchanged since 8ca7594.
+- Evidence: reasoning (registry.ts single-flight cleanup); the construct is unchanged since bfe0e47.
 
 ### `tests/mcp-seam.test.ts:1808` — "aborts the run and leaves the session open"
 - Mechanism: `setTimeout(() => controller.abort(), 40);` races the server handler reaching `streamSteps`. The fake attaches its listener only once called (lines 107-114: `signal?.addEventListener('abort', …)`) and never checks `signal.aborted`. If the abort lands first, the fake sits out the full `holdMs: 5_000`. On a slow box the server-side abort path is then never exercised, though the test still passes: the client rejects locally, and the "after" call waits up to 5 s for the lock.
 - Risk: medium. The test is slow, and its result depends on which path the timer happened to hit.
 - Fix: in the fake, `if (signal?.aborted) return reject(signal.reason)` before waiting. Drive the abort from a `started` deferred the fake resolves, instead of a 40 ms timer.
-- Evidence: reasoning; unchanged since 8ca7594.
+- Evidence: reasoning; unchanged since bfe0e47.
 
 ### `tests/mcp-api-client.test.ts:313` — "rethrows on our own cancellation rather than calling it a dropped stream"
 - Mechanism: `setTimeout(() => controller.abort(), 30);` with `.rejects.toThrow()`, which accepts any error. If the response headers have not arrived within 30 ms, `fetch` itself rejects, and the `if (signal?.aborted) throw err` branch in `consumeRunStream` (src/mcp/api-client.ts:259) is never reached. A regression in that branch would then go unnoticed on that run.

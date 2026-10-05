@@ -2,7 +2,7 @@
 
 **Status: built + verified 2026-08-26** (branch
 `claude/codebehind-debugging-breakpoints-8a9128`, Steptix 0.5.98, rebased
-onto main at 95aa7e9). Root vitest 3044/3044, runner-core 472/472, extension
+onto main at 064bfde). Root vitest 3044/3044, runner-core 472/472, extension
 unit 399/399 + integration 259/259, `tsc --noEmit` clean on both roots. Live
 proof:
 [scripts/codebehind-debugger-e2e.mjs](../scripts/codebehind-debugger-e2e.mjs)

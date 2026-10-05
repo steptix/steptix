@@ -1,6 +1,6 @@
 # Unit test review — value and flakiness
 
-Reviewed 2026-10-05 against `main` at 5ff18be. Scope: the four unit suites —
+Reviewed 2026-10-05 against `main` at 2eb9b8c. Scope: the four unit suites —
 root `npm test` (vitest, `tests/`), `runner-core`, `flick-vscode` and
 `steptix-vscode`. Integration and live suites are out of scope.
 
@@ -24,7 +24,7 @@ root `npm test` (vitest, `tests/`), `runner-core`, `flick-vscode` and
   all**.
 - **Flakiness is the bigger problem.**
   - **CI:** 7 of the last 20 runs failed, each on at least one flaky root test.
-    One cause is fixed (4598ebb); two are still open.
+    One cause is fixed (272eca0); two are still open.
   - **This machine, under load:** every one of the 5 root runs failed —
     including both runs in normal order — across **11 different files**.
   - **Most were predicted:** reviewers had flagged 8 of those 11 files by
@@ -46,8 +46,8 @@ landed on 2026-10-01:
 
 | Test | Failures | Status |
 |---|---|---|
-| `codebehind-writer` "waits out a moment's lock on the file" (EPERM on rename) | 5 | Fixed in 4598ebb — the lock is now released on cue. Green in every run since. |
-| `parser-control-flow` "the control-flow examples in docs/ parse" | 1 | Not a flake: it failed every time on CI's CRLF checkout. Fixed in 25a1829. |
+| `codebehind-writer` "waits out a moment's lock on the file" (EPERM on rename) | 5 | Fixed in 272eca0 — the lock is now released on cue. Green in every run since. |
+| `parser-control-flow` "the control-flow examples in docs/ parse" | 1 | Not a flake: it failed every time on CI's CRLF checkout. Fixed in 9ff8492. |
 | `record-steps-toolbar.test.ts:446` "the pick outline and label are never in the crop…" | 2 | **Open.** `await sleep(300)` (:453), then `expect(pixelsNear(shot, blue)).toBeGreaterThan(50)` got 0: the outline had not painted yet. |
 | `stats-run-stats.test.ts:347` "the recorder adds well under 5 ms a step" | 1 | **Open.** A wall-clock performance assertion; it measured 8.7 ms. |
 
@@ -134,7 +134,7 @@ fixing them one by one. Every file and line is in [FINDINGS.md](FINDINGS.md).
      `use-ai-runner-cli`, `tool-reload`, `selector-targeting-transcript`,
      `failure-outcomes-runner` and `api-server-loops-compile`.
    - **Failure mode:** one killed run or one EBUSY in `afterAll` (commit
-     5e61f46 shows that happens) leaves stale `.steps.ts` and sidecar files.
+     f83c11b shows that happens) leaves stale `.steps.ts` and sidecar files.
      The next run reads them as input. Two runs in one checkout delete each
      other's files.
    - **Fix:** `fs.mkdtemp(path.join(repoRoot, 'tests', '.tmp-<name>-'))`. The
@@ -213,14 +213,14 @@ owner decision, and some of it may be API kept on purpose.
 |---|---|
 | `src/api/auth-resolver.ts` (whole module) | `tests/auth-resolver.test.ts` — the whole file, 19 tests |
 | `cleanHtmlString` / `extractInteractiveElements` (`src/browser/dom-cleaner.ts:1205`) | `tests/dom-cleaner.test.ts:9-102` (13) |
-| Functions re-implemented **inside the test file**; the production originals were deleted in c9ea589 | `tests/multi-turn.test.ts:283-377` (10) |
+| Functions re-implemented **inside the test file**; the production originals were deleted in a65b1cd | `tests/multi-turn.test.ts:283-377` (10) |
 | `scrollDurationMs`, `easeOutCubic` — the animator inlines its own copy, so these tests cannot catch a change to it | `tests/scroll-action.test.ts:218-261` (6) |
 | `summarizeSpec` | `tests/spec-loader.test.ts:5-59` (5) |
 | `ApiResponseStore.getForStep`, `getAll`, `clear` | `tests/api-response-store.test.ts` (5) |
 | `interpolateEnvDataDeep` | `tests/interpolate-env-data.test.ts:119-148` (3) |
 | `FakeDesktopAdapter` | `tests/desktop-adapter.test.ts:203, :222, :264` |
 | A tool-level `config.tableStructure` — the schema and the assembler do not accept it; the test compiles only because `tests/` is not type-checked | `tests/mcp-assemble.test.ts:273, :281` |
-| `SessionManager.lastRunDetails` (removed in 6c4abcb) | `tests/api-server-codebehind.test.ts:669` |
+| `SessionManager.lastRunDetails` (removed in 900f591) | `tests/api-server-codebehind.test.ts:669` |
 | `IdleMonitor.idleFor` outside `isExpired` | `tests/idle-monitor.test.ts:69` |
 | runner-core `isHostMsg` / `isRunEvent` / `isCompileEvent` | `runner-core/tests/protocol.test.js` — 15 of its 19 tests; `record-steps.test.js:132, :136` |
 | runner-core `resolveRunLines`, `isStepLine`, `nearestStepAtOrBelow` / `nearestStepAtOrAbove` | `runner-core/tests/step-lines.test.js`, `sections.test.js` |

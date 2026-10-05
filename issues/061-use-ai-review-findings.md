@@ -27,7 +27,7 @@ for issue 060, found it on 2026-09-29.
 
 ## The findings
 
-Ranked by user impact. Line references are as of commit 197c50c.
+Ranked by user impact. Line references are as of commit 9d847f9.
 
 1. *(Dropped with the step cache — see the summary.)*
 
@@ -109,7 +109,7 @@ Ranked by user impact. Line references are as of commit 197c50c.
     `{"as": "ok", "value": "OK"}`, stored the value as `{{OK}}`, not `{{ok}}`.
     `nameTheStepGives` returns the spelling of the FIRST case-insensitive
     whole-word match in the step (`use-ai-step-runner.ts:114-118` as of
-    b700473), and here that is the word the step quotes, "OK", which comes
+    02d968b), and here that is the word the step quotes, "OK", which comes
     before the name. Variable names are case-sensitive, so a later `{{ok}}` is
     left literal with only a warning and fails somewhere else. Found by the
     review of the issue-060 fix on 2026-09-29. The fix is to prefer a

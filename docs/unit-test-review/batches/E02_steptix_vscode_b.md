@@ -27,7 +27,7 @@ string/array functions with no timers, I/O, ports, env or global mutation):
   `fs.mkdtempSync(path.join(os.tmpdir(), 'tb-skills-'))` and removed in
   `finally`; symlink/junction creation failures `t.skip()` instead of
   failing (Windows without Developer Mode); `:216` already accepts either
-  readdir winner (commit 9dbb35d "order-agnostic junction test" fixed exactly
+  readdir winner (commit 993cc0c "order-agnostic junction test" fixed exactly
   that); `collectSkillNames` sorts its output, so `:135/:256` do not depend on
   readdir order; `:528` (cache re-read) changes the file SIZE, so the
   mtime+size cache key changes even on a coarse-mtime filesystem. `:186` reads

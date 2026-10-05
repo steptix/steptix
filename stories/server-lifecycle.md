@@ -97,7 +97,7 @@ sensitive). Response:
   "ok": true,
   "service": "steptix",
   "version": "<package.json version>",
-  "commit": "b700473",
+  "commit": "02d968b",
   "modified": false,
   "pid": 12345,
   "startedAt": "2026-07-23T10:00:00.000Z",

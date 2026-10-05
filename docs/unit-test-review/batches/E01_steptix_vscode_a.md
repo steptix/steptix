@@ -36,7 +36,7 @@ All 407 tests were checked for the addendum mechanisms. Four risks were found, a
 - Evidence: `record-secret-parity.test.js:63-71` says that deleting a clause from runner-core's source "left it 12/12 green" through the package specifier. It worked around the problem locally by importing `../../runner-core/src/repl.ts`.
 
 ### Checked and well-guarded (not flagged)
-- `live-shards.test.js:89` — the pull-queue order is gated by a promise, with a 10 s backstop, instead of timers. Commit `53e176d` ("Order runPool's pull-queue test by a gate, not by timers") fixed an earlier timer race. `:69` uses `setTimeout(r, 1)`, but its assertions (each item once, `peak === 2`) do not depend on timer order, and both workers start synchronously.
+- `live-shards.test.js:89` — the pull-queue order is gated by a promise, with a 10 s backstop, instead of timers. Commit `895ef57` ("Order runPool's pull-queue test by a gate, not by timers") fixed an earlier timer race. `:69` uses `setTimeout(r, 1)`, but its assertions (each item once, `peak === 2`) do not depend on timer order, and both workers start synchronously.
 - `server-manager.test.js` — every stub listens on port 0. `:158` times out against a server that never answers, so it is deterministic. `:306` uses an injected fake clock. `:333` aborts from inside the injected sleep. The `AutoStartGuard` tests inject the clock. `decideServerAction` tests never reach the default runtime discovery, so they never read the real `%LOCALAPPDATA%`. `:136`/`:143` close a stub and then probe its port. Reuse of that port within milliseconds is possible in theory but negligible, so it is not flagged. The temp dirs are never removed (a leak, not a flake).
 - `server-url.test.js` — passes `deps.env` instead of mutating `process.env`, and redirects both `LOCALAPPDATA` and `XDG_CONFIG_HOME` to a mkdtemp dir. That is correct on macOS too, because runner-core uses XDG there when it is set.
 - `lm-bridge-core.test.js` and `lm-bridge-env.test.js` — pure functions. Port 18790 appears only as a string, and nothing binds a socket.
@@ -75,8 +75,8 @@ All 407 tests were checked for the addendum mechanisms. Four risks were found, a
 
 ### `steptix-vscode/tests/server-manager.test.js:713` — "describeHealth: the headline names the build"
 - Category: L4
-- Evidence: `assert.equal(headline, `Steptix server on ${LOCAL} — v1.0.0-beta.1 (b700473, modified)`)` pins the whole headline sentence. No doc or spec quotes it: grep for `Steptix server on` finds only server-manager.ts:279 and this test. The behaviour the test names, that the headline carries the build, comes from `describeServerVersion`, which `:703` already pins in all four forms. Rewording the prefix ("Steptix server on" → "Server at") breaks this test and catches no bug.
-- Recommendation: rewrite to `assert.match(headline, /v1\.0\.0-beta\.1 \(b700473, modified\)/)`, with an optional `assert.ok(headline.includes(LOCAL))`
+- Evidence: `assert.equal(headline, `Steptix server on ${LOCAL} — v1.0.0-beta.1 (02d968b, modified)`)` pins the whole headline sentence. No doc or spec quotes it: grep for `Steptix server on` finds only server-manager.ts:279 and this test. The behaviour the test names, that the headline carries the build, comes from `describeServerVersion`, which `:703` already pins in all four forms. Rewording the prefix ("Steptix server on" → "Server at") breaks this test and catches no bug.
+- Recommendation: rewrite to `assert.match(headline, /v1\.0\.0-beta\.1 \(02d968b, modified\)/)`, with an optional `assert.ok(headline.includes(LOCAL))`
 - Confidence: medium
 
 ## Test defects

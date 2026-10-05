@@ -19,9 +19,9 @@ Checked and well-guarded (not flagged): `desktop-lock` puts every lock file in i
 
 ### `tests/desktop-vision-route.test.ts:280` — "a timeout proceeds, and aborts the request"
 - Mechanism: real 30 ms timer plus an elapsed-time assertion — `const started = Date.now(); … expect(Date.now() - started).toBeLessThan(2_000);`
-- Risk: medium (needs a >2 s stall of the worker, which commit 2ef64db measured happening while every worker starts: "a test that takes a second alone can take several")
+- Risk: medium (needs a >2 s stall of the worker, which commit 518069b measured happening while every worker starts: "a test that takes a second alone can take several")
 - Fix: use `vi.useFakeTimers()` + `advanceTimersByTimeAsync(30)` and assert the promise settled (as `:304` already does for the default), and drop the elapsed check.
-- Evidence: commit 2ef64db "Budget tests and hooks for the whole suite running at once".
+- Evidence: commit 518069b "Budget tests and hooks for the whole suite running at once".
 
 ### `tests/dialog-guard.test.ts:360` — "guards a CDP-attached context"
 - Mechanism: port TOCTOU — `const port = await freePort();` (listen on 0, read, CLOSE) then `chromium.launch({ args: [\`--remote-debugging-port=${port}\`] })`. Between the close and Chromium binding, any other parallel worker (many root suites start servers/browsers) can take the port; Chromium then fails to bind or `launchBrowser(BROWSER_CONFIG, { port, tab: 'new' })` attaches to the wrong process.
@@ -33,20 +33,20 @@ Checked and well-guarded (not flagged): `desktop-lock` puts every lock file in i
 - Mechanism: real Chromium + a timing race by design — `await waitUntil(() => dialogsHandled() > 0, 20_000);` then a fixed `await new Promise((r) => setTimeout(r, 3_000));`, then `expect(dialogsHandled()).toBeGreaterThan(0)`. On a loaded box the OOPIF may not raise a dialog within 20 s. Also `capture.stop()` (`:332`) is not in a `finally`, so a throw from `page.goto` leaves a process-global `addLogCallback` attached for the rest of the file.
 - Risk: medium
 - Fix: move `capture.stop()` and `context.close()` into `finally`; see also the defect entry — the race this exists for is hit only sometimes, so it is a probabilistic detector as well as a probabilistic failure.
-- Evidence: commit 2ef64db raised this file's `afterAll` budget from 20 s to 60 s because Chromium close took ~27 s under load.
+- Evidence: commit 518069b raised this file's `afterAll` budget from 20 s to 60 s because Chromium close took ~27 s under load.
 
 ### `tests/video-recording.test.ts:55`, `:101`, `:122` — the three recording cases
-- Mechanism: real Chromium with `recordVideo`; `finalizeMainPageVideo` closes the context (which flushes the .webm through Playwright's ffmpeg) then `fs.rename`s / `fs.rm`s it (manager.ts:1858-1873). On Windows a just-closed .webm can still be held (ffmpeg exit, Defender scan) → `rename` fails → finalize logs a WARN and returns `undefined` → `expect(saved).toBeDefined()` fails. Each test's own `await fsp.rm(videoDir, …)` is in the test body (not `afterEach`) and would itself throw EBUSY in the same situation. Context close under suite-wide load is the slow step 2ef64db measured (~27 s), against a 30 s test budget.
+- Mechanism: real Chromium with `recordVideo`; `finalizeMainPageVideo` closes the context (which flushes the .webm through Playwright's ffmpeg) then `fs.rename`s / `fs.rm`s it (manager.ts:1858-1873). On Windows a just-closed .webm can still be held (ffmpeg exit, Defender scan) → `rename` fails → finalize logs a WARN and returns `undefined` → `expect(saved).toBeDefined()` fails. Each test's own `await fsp.rm(videoDir, …)` is in the test body (not `afterEach`) and would itself throw EBUSY in the same situation. Context close under suite-wide load is the slow step 518069b measured (~27 s), against a 30 s test budget.
 - Risk: medium
 - Fix: move cleanup to `afterEach` with `fs.rm(..., { maxRetries: 5, retryDelay: 100 })`; consider retrying the rename in `finalizeMainPageVideo` on EBUSY/EPERM (product fix, since the same race hits real runs); give these tests an explicit 60 s budget.
-- Evidence: reasoning + commit 2ef64db.
+- Evidence: reasoning + commit 518069b.
 
 ### `tests/computer-step.test.ts:1296`, `:1385`, `:1413` (and, with more slack, `:1323`) — the D2 wait-budget block: "an endless wait is ended by the wait budget…", "fails the step once wait_window has spent the wait budget, naming it", "counts plain waits against the same budget"
 - Mechanism: the budget is charged in WALL-CLOCK time — `waits.spentMs += Date.now() - subStartTime;` (src/runner/computer-step.ts, after `executeComputerAction`) — and the loop's sleeps are real `setTimeout`s (no `sleep`/`now` seam on `ComputerStepOptions`). The assertions assume the timers fire close to on time, with ~100 ms of slack:
   - `:1413` waits 0.2 s, 0.21 s, 0.22 s against `waitBudgetMs: 300` and asserts `expect(sent).toHaveLength(3)`. If the first 200 ms timer lands ≥100 ms late, turn 2 already finds `remaining <= 0`, the step fails on turn 2, and `sent` is 2.
   - `:1385` wait_window 200 ms then 201 ms against 300 ms, asserting `toContain('Timed out')`. If turn 1 overspends by ≥100 ms, turn 2 is refused before it runs and the error is `waitBudgetMessage(budget, spent)` with no `last` — no "Timed out".
   - `:1296` `wait 0.05 s` against `waitBudgetMs: 200`, asserting `expect(sent.length).toBeGreaterThan(3)`; if the first two 50 ms timers each land ~50 ms late (s1 + s2 ≥ 200), turn 3 is refused and `sent.length` is 3.
-- Risk: medium (needs a worker stalled ~50–100 ms during a timer — the condition 2ef64db documents for suite start-up; Windows' default 15.6 ms timer granularity eats part of the slack too)
+- Risk: medium (needs a worker stalled ~50–100 ms during a timer — the condition 518069b documents for suite start-up; Windows' default 15.6 ms timer granularity eats part of the slack too)
 - Fix: give `ComputerStepOptions.computer` the same injectable `sleep`/`now` that `executeComputerAction` already takes (desktop-executor.test.ts drives those with a virtual clock) and run this block on it. Failing that, stop asserting exact turn counts: assert the error names the wait budget and that the stall rule did not fire, and keep each wait ≤ budget/10.
 - Evidence: reasoning from the accounting code; no history of fixes yet (file history is feature commits only).
 
@@ -60,7 +60,7 @@ Checked and well-guarded (not flagged): `desktop-lock` puts every lock file in i
 - Mechanism: `setTimeout(() => controller.abort(), 100); const started = Date.now(); … expect(Date.now() - started).toBeLessThan(1500);` — real timer against a wall-clock bound; the computer variant also includes a real `captureView` (jimp) in the measured span.
 - Risk: medium
 - Fix: `vi.useFakeTimers({ toFake: ['setTimeout'] })`, `advanceTimersByTimeAsync(100)`, and assert the promise rejected before advancing the remaining 2.9 s of `CONDITION_JUDGE_POLL_MS`; or abort from inside the scripted client after its first response and assert only that a single request was made.
-- Evidence: reasoning; same budget concern as 2ef64db.
+- Evidence: reasoning; same budget concern as 518069b.
 
 ### `tests/video-config.test.ts:41` — "defaults to 'off' when unspecified"
 - Mechanism: environment dependence, not timing — `const config = await loadConfig();` with no path reads `steptix.config.json` from `process.cwd()`, i.e. the repo root's tracked config. The test passes only while that file sets no `browser.video`.

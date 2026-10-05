@@ -26,16 +26,16 @@ commits in the last 180 days, but they are not the same 17:
 
 | | `flick/` (Tauri) | `flick-vscode/` |
 | --- | --- | --- |
-| Last feature/fix | `0aa6fe7`, 2026-04-20 | `2a92c04`, 2026-08-19 |
-| Everything since | dependency bumps only (`aefd57a`, `9aa82e6`, `cc4fd3e`) | CDP attach, output sectioning, machine key, harness fix |
-| CDP attach ("Adopt") | — | `2d2e07b`, `d4a6582` |
-| Sectioned outputs + delta filter | — | `2026d64` |
+| Last feature/fix | `9ee9a56`, 2026-04-20 | `f5b7bb8`, 2026-08-19 |
+| Everything since | dependency bumps only (`a429da9`, `921e01c`, `dedcfe7`) | CDP attach, output sectioning, machine key, harness fix |
+| CDP attach ("Adopt") | — | `0751c95`, `95a69f6` |
+| Sectioned outputs + delta filter | — | `ecf6f31` |
 | Tests | 0 files | 18 (unit + VS Code integration + live) |
 
 Since April the Tauri app has received nothing but `npm audit` remediation —
 carrying cost, not work.
 
-**It fell off the machine-key path.** `af1145b` made `AIUI_SERVER_API_KEY` a
+**It fell off the machine-key path.** `1aae4da` made `AIUI_SERVER_API_KEY` a
 machine-level secret the framework provisions for itself, and updated the MCP
 server, `aiui stop`, both TestBench extensions and flick-vscode. It did not
 touch `flick/`. The Tauri app still expects a hand-typed `x-api-key` in its
@@ -54,7 +54,7 @@ and nothing else.
 ## What is lost
 
 - **Speech-to-text mic button** — `flick/src/lib/components/InputBox.svelte`
-  (`0a90e23`), a Web Speech API (`webkitSpeechRecognition`) push-to-talk on the
+  (`e73efbb`), a Web Speech API (`webkitSpeechRecognition`) push-to-talk on the
   input box. This is the one feature with no flick-vscode equivalent. It is a
   webview feature rather than a Tauri one, so it is re-implementable in
   flick-vscode's webview if we want it back.

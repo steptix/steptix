@@ -158,7 +158,7 @@ attempt produces a second line with `"attempt": 2`.
 | `site` | Host of the page the action ran on, masked like a URL in the report; absent when the page has no host (`about:blank`, the computer surface) | `"secure.super.test"` |
 | `model` | Model that chose the action | `"openai/gpt-6-luna"` |
 | `prompt` | Rules fingerprint (§5.5); `null` on imported lines, absent on the lines listed there | `"p-3f9a1c"` |
-| `fw` | Framework version and commit, when known | `"1.0.0+b700473"` |
+| `fw` | Framework version and commit, when known | `"1.0.0+02d968b"` |
 | `card` | `false` when the report writes no card for the step, so there is no anchor to link to (§8.3); absent, never `true`, otherwise | `false` |
 | `suite` | `user`, `live`, `bench` or `compile` (§5.6) | `"user"` |
 | `source` | `ai` or `code` (§5.6) | `"ai"` |

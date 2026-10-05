@@ -44,7 +44,7 @@ reports.
 
 **It still takes maintenance.** 13 commits touched `testbench-monaco/` in the
 last 90 days (vs 45 for native), and they are follow-the-leader changes, not
-feature work — the most recent being `67f8ddb`, *"Harden testbench-monaco's
+feature work — the most recent being `d2eb293`, *"Harden testbench-monaco's
 runner too — it was the last silent pass"*. Every hardening pass, every
 runner-core contract change, has to be applied twice.
 

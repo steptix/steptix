@@ -21,19 +21,19 @@ Context checked for every file: vitest 4 runs with the default `forks` pool and 
 - Mechanism: polling with a wall-clock deadline: `async function waitFor(condition, timeoutMs = 5000) { const deadline = Date.now() + timeoutMs; ... setTimeout(resolve, 5) }`, used as `await waitFor(() => events.some((e) => e.channel === 'runner:paused'))`. Before it pauses, the adapter must parse the file, resolve the env bundle and walk to breakpoint 1. vitest.config.ts itself says a test that takes a second alone "can take several" while every worker starts, and testTimeout was raised to 30 s for that reason. This helper keeps its own 5 s budget.
 - Risk: medium (a loaded CI box at suite start-up)
 - Fix: resolve a promise from the emit callback instead of polling, e.g. `const paused = new Promise<void>((r) => { emit = (ch, d) => { events.push(...); if (ch === 'runner:paused') r(); } })`. Or at least raise the default to ~20 s so the test timeout, not this helper, is the limit.
-- Evidence: reasoning from vitest.config.ts:14-20. No flake commit in this file's history (69dc5d4, 3f933c9, d72393f).
+- Evidence: reasoning from vitest.config.ts:14-20. No flake commit in this file's history (a0e4708, 5f04e02, 35e1999).
 
 ### `tests/use-ai-step.test.ts:33` — file-level temp dir (affects every test in the file that calls `write`)
-- Mechanism: a fixed path inside the repo plus a per-process counter: `const tmpBase = path.join(repoRoot, 'tests', '.tmp-use-ai-step'); ... dir = path.join(tmpBase, `t${counter++}`)`, and `afterAll` does `fs.rm(tmpBase, { recursive: true, ... })`. Two runs of this file from one checkout at the same time (watch mode plus `npm test`, or two agents in one worktree) use the same `t0…tN` directories, and whichever finishes first deletes the other's tree mid-run. A run that dies before `afterAll` leaves `t*` directories that the next run reuses without emptying. EBUSY on Windows is already handled (`maxRetries: 10, retryDelay: 100`, commit 5e61f46).
+- Mechanism: a fixed path inside the repo plus a per-process counter: `const tmpBase = path.join(repoRoot, 'tests', '.tmp-use-ai-step'); ... dir = path.join(tmpBase, `t${counter++}`)`, and `afterAll` does `fs.rm(tmpBase, { recursive: true, ... })`. Two runs of this file from one checkout at the same time (watch mode plus `npm test`, or two agents in one worktree) use the same `t0…tN` directories, and whichever finishes first deletes the other's tree mid-run. A run that dies before `afterAll` leaves `t*` directories that the next run reuses without emptying. EBUSY on Windows is already handled (`maxRetries: 10, retryDelay: 100`, commit f83c11b).
 - Risk: medium (needs concurrent runs in one checkout)
 - Fix: `beforeAll(async () => { tmpBase = await fs.mkdtemp(path.join(repoRoot, 'tests', '.tmp-use-ai-step-')); })`. This keeps the in-repo location the code-behind bundle needs and makes each run unique.
-- Evidence: 5e61f46 "Retry removing in-repo temp dirs that Windows briefly locks" names 28 suites with this `tests/.tmp-*` pattern. It hardened the delete but not the fixed path.
+- Evidence: f83c11b "Retry removing in-repo temp dirs that Windows briefly locks" names 28 suites with this `tests/.tmp-*` pattern. It hardened the delete but not the fixed path.
 
 ### `tests/use-ai-runner-cli.test.ts:128` — file-level temp dir (all 9 tests)
 - Mechanism: same as above: `const tmpBase = path.join(repoRoot, 'tests', '.tmp-use-ai-runner-cli'); ... dir = path.join(tmpBase, `t${counter++}`)`, and `afterAll` removes the whole base.
 - Risk: medium
 - Fix: `fs.mkdtemp(path.join(repoRoot, 'tests', '.tmp-use-ai-runner-cli-'))` in a `beforeAll`.
-- Evidence: same as above (5e61f46 touched this file).
+- Evidence: same as above (f83c11b touched this file).
 
 ### `tests/resolve-env-bundle.test.ts:92` — "resolves $VAR leaves in the data file against the composed map (no global mutation)" (also `:40`)
 - Mechanism: the test assumes the ambient environment never defines these names. `expect(process.env['ADMIN_PWD']).toBeUndefined()` at :103, and `expect(process.env['BASE_URL_PURE']).toBeUndefined()` at :49, run without deleting the key first. The afterEach only removes keys the test added. `ADMIN_PWD` is the name the repo's own fixtures reference (`fixtures/data/uat.json`, `staging.json` use `$ADMIN_PWD`), so a developer who has exported their project `.env` into the shell fails this test with no code change.
@@ -102,7 +102,7 @@ Already guarded and not flagged: data-sources-integration (sets HOME/USERPROFILE
 
 ### `tests/config-loader.test.ts:381` — "no machine values leaves the built-in default model untouched" (also `:388`, `:415`, `:456`)
 - Category: L4 (partial; the behaviour is real, the literal is not)
-- Evidence: `expect(config.ai.model).toBe('openai/gpt-5.6-luna')` and `toBe('https://llm.corp.example')` pin the current built-in defaults. `git log -- tests/config-loader.test.ts` shows `14944e2 Default model: openai/gpt-5.4-mini -> openai/gpt-5.6-luna` had to edit this file, so a harmless default change broke it.
+- Evidence: `expect(config.ai.model).toBe('openai/gpt-5.6-luna')` and `toBe('https://llm.corp.example')` pin the current built-in defaults. `git log -- tests/config-loader.test.ts` shows `04a3b65 Default model: openai/gpt-5.4-mini -> openai/gpt-5.6-luna` had to edit this file, so a harmless default change broke it.
 - Recommendation: rewrite to compare against `DEFAULT_CONFIG.ai.model` / `DEFAULT_CONFIG.ai.gatewayUrl` (exported, `src/config/defaults.ts:4`). Keep the tests.
 - Confidence: high
 

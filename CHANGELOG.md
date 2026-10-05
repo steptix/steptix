@@ -225,8 +225,8 @@ longer says which code is answering. `npm run build` now stamps
 working tree had uncommitted changes (tracked or untracked), and that is
 reported beside the version:
 
-- `steptix --version` and `steptix status`: `1.0.0-beta.1 (b700473)`, or
-  `1.0.0-beta.1 (b700473, modified)`.
+- `steptix --version` and `steptix status`: `1.0.0-beta.1 (02d968b)`, or
+  `1.0.0-beta.1 (02d968b, modified)`.
 - `GET /health` and the MCP `server_status` tool: new `commit` and `modified`
   fields; `version` is unchanged.
 - The Steptix status bar keeps the short version; its tooltip, the "server

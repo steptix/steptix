@@ -47,7 +47,7 @@
 - Evidence: the `ls /c/tests/.steptix-codebehind-cache` output, plus the code path.
 
 ### `tests/api-server-loops-compile.test.ts:329` — whole file
-- Mechanism: a fixed in-repo scratch dir, `const tmpDir = path.join(repoRoot, 'tests', '.tmp-loops-compile');`, which `beforeAll` rm's and re-creates. Two concurrent runs of the same checkout would delete each other's fixtures mid-compile, for example `npm test` alongside a watcher or a second terminal. Windows EBUSY on removal is already handled (`maxRetries: 10, retryDelay: 100`, added in 5e61f46 "Retry removing in-repo temp dirs that Windows briefly locks").
+- Mechanism: a fixed in-repo scratch dir, `const tmpDir = path.join(repoRoot, 'tests', '.tmp-loops-compile');`, which `beforeAll` rm's and re-creates. Two concurrent runs of the same checkout would delete each other's fixtures mid-compile, for example `npm test` alongside a watcher or a second terminal. Windows EBUSY on removal is already handled (`maxRetries: 10, retryDelay: 100`, added in f83c11b "Retry removing in-repo temp dirs that Windows briefly locks").
 - Risk: medium
 - Fix: keep the dir in-repo, which package self-resolution requires, but make it unique: `await fs.mkdtemp(path.join(repoRoot, 'tests', '.tmp-loops-compile-'))`.
 - Evidence: the git history above, and the in-file note that the location is deliberate.
