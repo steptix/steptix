@@ -5,14 +5,23 @@
  */
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   DEFAULT_SERVER_URL,
   describeServerUrlOrigin,
   resolveServerUrl,
 } from '../src/extension/server-url.ts';
+
+/**
+ * The framework's own defaults (src/config/defaults.ts, as built into the repo
+ * root's dist/ — pretest builds it), which is where `steptix serve` takes its
+ * host and port from. The case that uses it skips, saying so, when the root
+ * has not been built.
+ */
+const DEFAULTS_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../dist/config/defaults.js');
 
 /** A user root of its own, with `machineEnv` as its .env (none when null). */
 function machine(machineEnv, env = {}) {
@@ -23,7 +32,10 @@ function machine(machineEnv, env = {}) {
     mkdirSync(path.dirname(envPath), { recursive: true });
     writeFileSync(envPath, machineEnv);
   }
-  return { deps, envPath, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  // maxRetries: on Windows antivirus or the indexer can still hold the .env
+  // just written, and `force` does not cover EBUSY/EPERM.
+  const cleanup = () => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  return { deps, envPath, cleanup };
 }
 
 const PROJECT_ENV = path.resolve(path.sep, 'proj', '.env');
@@ -76,7 +88,20 @@ test('nothing anywhere is the default serve listens on, and the log says where i
       m.cleanup();
     }
   }
-  assert.equal(DEFAULT_SERVER_URL, 'http://127.0.0.1:3100');
+});
+
+test('the default is where the server\'s own defaults say serve listens', async (t) => {
+  // DEFAULT_SERVER_URL is a copy of `server.host`/`server.port` that nothing
+  // links — the extension bundles separately from the framework — so this is
+  // the one place the two meet. Pinning the constant to its own literal would
+  // stay green if serve moved to 3200 and every unconfigured run missed it.
+  if (!existsSync(DEFAULTS_PATH)) {
+    t.skip(`the repo root is not built (${DEFAULTS_PATH} is missing)`);
+    return;
+  }
+  const { DEFAULT_CONFIG } = await import(pathToFileURL(DEFAULTS_PATH).href);
+  const { host, port } = DEFAULT_CONFIG.server;
+  assert.equal(DEFAULT_SERVER_URL, `http://${host}:${port}`);
 });
 
 test('an unreadable machine .env throws rather than falling through to the default', () => {

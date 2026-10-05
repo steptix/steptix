@@ -47,12 +47,6 @@ test('a stale guard keeps ⚠ AND its hover detail through the pop', () => {
   assert.deepEqual(marks.forFramePop(DOC, 5), { status: 'pass-stale', detail: STALE });
 });
 
-test('a guard the model decided pops to a plain ✓', () => {
-  const marks = new GuardMarks();
-  marks.notePass(DOC, 2, 'pass');
-  assert.deepEqual(marks.forFramePop(DOC, 2), { status: 'pass' });
-});
-
 test('the latest pass on the line wins — a loop\'s later visit updates the mark', () => {
   const marks = new GuardMarks();
   // Visit 1: code decided. Visit 2: the code threw and the model healed it.

@@ -690,30 +690,7 @@ describe('the project switch in steptix.config.json (§6.4)', () => {
     expect(validate({ stats: { enable: false } })).toBe(false);
   });
 
-  it('rides through the loader, so the run can hand it to statsSettings', async () => {
-    const { loadConfig } = await import('../src/config/loader.js');
-    // The loader's machine-AI floor reads the user root: keep it in tmp.
-    const preserved = { LOCALAPPDATA: process.env['LOCALAPPDATA'], XDG_CONFIG_HOME: process.env['XDG_CONFIG_HOME'] };
-    process.env['LOCALAPPDATA'] = tmp;
-    process.env['XDG_CONFIG_HOME'] = tmp;
-    try {
-      const off = path.join(tmp, 'off.json');
-      fs.writeFileSync(off, JSON.stringify({ stats: { enabled: false } }));
-      const plain = path.join(tmp, 'plain.json');
-      fs.writeFileSync(plain, JSON.stringify({}));
-
-      const offConfig = await loadConfig(off);
-      expect(offConfig.stats).toEqual({ enabled: false });
-      expect(statsSettings({ env: {}, projectEnabled: offConfig.stats?.enabled, deps: deps() }).enabled).toBe(false);
-
-      const plainConfig = await loadConfig(plain);
-      expect(plainConfig.stats).toBeUndefined();
-      expect(statsSettings({ env: {}, projectEnabled: plainConfig.stats?.enabled, deps: deps() }).enabled).toBe(true);
-    } finally {
-      for (const [key, value] of Object.entries(preserved)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
-  });
+  // That the loader carries the switch through is tests/stats-config.test.ts;
+  // what statsSettings does with it is 'a project with stats.enabled false
+  // records nothing', above.
 });

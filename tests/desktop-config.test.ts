@@ -45,20 +45,16 @@ afterAll(() => {
 describe('DEFAULT_CONFIG.desktop — §5.10', () => {
   it('carries the four documented defaults', () => {
     expect(DEFAULT_CONFIG.desktop).toEqual({
+      // OFF: a shared project must opt in (§5.1 item 1).
       enabled: false,
       maxImageWidth: 1600,
       settleMs: 300,
       reportScreenshots: true,
     });
   });
-
-  it('is OFF by default — a shared project must opt in (§5.1 item 1)', () => {
-    expect(DEFAULT_CONFIG.desktop.enabled).toBe(false);
-  });
-
-  it('ships no launchArgs — the launcher\'s own flags are the whole list', () => {
-    expect(DEFAULT_CONFIG.browser.launchArgs).toBeUndefined();
-  });
+  // That the defaults ship no `browser.launchArgs` — the launcher's own flags
+  // are the whole list — is checked through the real loader on a freshly
+  // `init`-ed project, below.
 });
 
 describe('loadConfig — the new keys', () => {

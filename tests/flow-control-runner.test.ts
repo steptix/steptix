@@ -11,7 +11,7 @@
  * The test documents are parsed by the real parser and expanded by the real
  * expander, so the frame table the loop reads is the one a run would get.
  */
-import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -135,7 +135,11 @@ import { renderReport } from '../src/report/generator.js';
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-flow-control-runner');
+/** This run's own directory, made in `beforeAll`. A fixed name was shared by
+ *  every run in the checkout: two at once (a `--watch` beside a full run)
+ *  wrote and deleted each other's documents, and a run whose teardown lost to
+ *  a Windows lock left `t0…tN` behind for the next one to write over. */
+let tmpBase: string;
 
 /** The two flow-control lines the fixtures below use, written once because
  *  every reason string now quotes the returning step's AUTHORED line back —
@@ -207,6 +211,10 @@ function statuses(report: TestReport): Array<[number, string]> {
 let dir: string;
 let counter = 0;
 
+beforeAll(async () => {
+  tmpBase = await fs.mkdtemp(path.join(repoRoot, 'tests', '.tmp-flow-control-runner-'));
+});
+
 beforeEach(async () => {
   executeStepMock.mockReset();
   executeBranchedStepMock.mockReset();
@@ -224,7 +232,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  if (tmpBase) await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 // ─── A return in the main flow ──────────────────────────────────────────────

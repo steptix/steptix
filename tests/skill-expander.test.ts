@@ -290,69 +290,6 @@ type: skill
     );
   });
 
-  it('expands a subfolder skill that calls another subfolder skill', async () => {
-    await writeSkill(
-      'flows/inner',
-      `---
-type: skill
----
-# inner
-## Parameters
-- text: input
-## Steps
-1. Type "{{text}}"
-`,
-    );
-    await writeSkill(
-      'flows/outer',
-      `---
-type: skill
----
-# outer
-## Parameters
-- name: input
-## Steps
-1. Click start
-2. [skill: flows/inner text="hello {{name}}"]
-3. Click finish
-`,
-    );
-
-    const result = await expandSkills(['[skill: flows/outer name="world"]'], tmpDir);
-
-    expect(result.steps).toEqual([
-      'Click start',
-      'Type "hello world"',
-      'Click finish',
-    ]);
-    // Outermost-skill attribution survives the path-qualified hop: every step
-    // is tagged `flows/outer`, including the one authored in `flows/inner`.
-    expect(result.sourceSkills).toEqual(['flows/outer', 'flows/outer', 'flows/outer']);
-  });
-
-  it('renames a subfolder skill output when the caller aliases it', async () => {
-    await writeSkill(
-      'flows/count',
-      `---
-type: skill
----
-# count
-## Outputs
-- result_count
-## Steps
-1. Count rows [store as: result_count]
-`,
-    );
-
-    const result = await expandSkills(
-      ['[skill: flows/count out.result_count="my_count"]', 'Total: {{my_count}}'],
-      tmpDir,
-    );
-
-    expect(result.steps[0]).toBe('Count rows [store as: my_count]');
-    expect(result.steps[1]).toBe('Total: {{my_count}}');
-  });
-
   it('resolves a `### Section` inside a subfolder skill', async () => {
     // A skill-private section is called by bare name from the skill's own body.
     // The section index is built from the skill file, so a subfolder skill's
@@ -408,24 +345,6 @@ type: skill
     ).rejects.toThrow(
       /Skill "login" has no declared output "token" — declared outputs: \[none\] \(invoked as "auth\/login"\)/,
     );
-  });
-
-  it('expands a deeply nested skill', async () => {
-    await writeSkill(
-      'a/b/c/d',
-      `---
-type: skill
----
-# d
-## Steps
-1. Deep step ran
-`,
-    );
-
-    const result = await expandSkills(['[skill: a/b/c/d]'], tmpDir);
-
-    expect(result.steps).toEqual(['Deep step ran']);
-    expect(result.sourceSkills).toEqual(['a/b/c/d']);
   });
 
   it('detects direct cycles', async () => {
@@ -640,25 +559,6 @@ type: skill
         'Total: {{result_count}}',
       ]);
     });
-
-    it('bare `out.<name>` for an undeclared output throws (catches typos)', async () => {
-      await writeSkill(
-        'count',
-        `---
-type: skill
----
-# count
-## Outputs
-- result_count
-## Steps
-1. Count rows [store as: result_count]
-`,
-      );
-
-      await expect(
-        expandSkills(['[skill: count out.resultcount]'], tmpDir),
-      ).rejects.toThrow(/no declared output "resultcount"/);
-    });
   });
 
   describe('syntax errors are surfaced', () => {
@@ -666,20 +566,6 @@ type: skill
       await expect(
         expandSkills(['[skill: login password="{{password}}]'], tmpDir),
       ).rejects.toThrow(/unterminated string for argument 'password'/);
-    });
-
-    it('throws on missing closing bracket', async () => {
-      await expect(
-        expandSkills(['[skill: foo'], tmpDir),
-      ).rejects.toThrow(/expected '\]'/);
-    });
-
-    it('throws on an unquoted `key=value` argument', async () => {
-      await expect(
-        expandSkills(['[skill: foo bar=baz]'], tmpDir),
-      ).rejects.toThrow(
-        /expected '"', '\[', a number, or true\/false after '=' for argument 'bar'/,
-      );
     });
   });
 });

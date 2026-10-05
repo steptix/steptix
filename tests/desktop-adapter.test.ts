@@ -200,31 +200,10 @@ describe('nut.js has exactly one importer, and imports lazily (§5.1 item 2, §5
 });
 
 describe('FakeDesktopAdapter', () => {
-  it('records every call with its arguments, in order', async () => {
-    const adapter = new FakeDesktopAdapter({ width: 8, height: 4 });
-    await adapter.move({ x: 1, y: 2 });
-    await adapter.click({ x: 3, y: 4 }, { button: 'right', count: 2 });
-    await adapter.type('hi');
-    await adapter.key('ctrl+s');
-    await adapter.scroll({ x: 5, y: 6 }, 'down', 3);
-    await adapter.drag({ x: 0, y: 0 }, { x: 9, y: 9 });
-
-    expect(adapter.calls.map((c) => c.name)).toEqual([
-      'move', 'click', 'type', 'key', 'scroll', 'drag',
-    ]);
-    expect(adapter.callsOf('click')[0]!.args).toEqual({
-      point: { x: 3, y: 4 },
-      button: 'right',
-      count: 2,
-    });
-  });
-
-  it('grabs a buffer of exactly width × height × 4 bytes', async () => {
-    const grab = await new FakeDesktopAdapter({ width: 8, height: 4 }).grab();
-    expect(grab.rgba).toHaveLength(8 * 4 * 4);
-    expect({ width: grab.width, height: grab.height }).toEqual({ width: 8, height: 4 });
-  });
-
+  // Its call recorder and its grab buffer are not tested here: every suite
+  // that asserts `callsOf(...)` fails if the recorder does, and
+  // `viewFromGrab` refuses a buffer of the wrong length. What stays is what
+  // the policy tests rely on the fake to model.
   it('makes two grabs byte-identical, or different, on demand', async () => {
     // Both are needed: the stall detector's whole question is whether two
     // captures are the same pixels.
@@ -259,11 +238,6 @@ describe('FakeDesktopAdapter', () => {
     expect(typeof found!.handle).toBe('number');
     expect(await adapter.findWindow('Print')).toBeNull();
     expect(adapter.callsOf('findWindow').map((c) => c.args['found'])).toEqual([found!.handle, null]);
-  });
-
-  it('can be made to fail a grab, for §5.1 item 4', async () => {
-    const adapter = new FakeDesktopAdapter({ grabError: new Error('Failed to capture screen') });
-    await expect(adapter.grab()).rejects.toThrow('Failed to capture screen');
   });
 });
 

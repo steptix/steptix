@@ -108,14 +108,18 @@ describe('renderToolStep — HTML rendering of [tool: ...] step details', () => 
     expect(html).toContain('{&quot;nested&quot;:true,&quot;count&quot;:7}');
   });
 
-  it('renders boolean and number arg values as-is', () => {
+  it('renders scalar arg values as written, not JSON-encoded', () => {
     const html = renderToolStep({
       name: 'mixed',
-      args: { flag: true, count: 42 },
+      args: { mode: 'strict', flag: true, count: 42 },
       outputs: {},
       logs: [],
     });
-    expect(html).toContain('true');
-    expect(html).toContain('42');
+    // The string is the case that can tell: JSON.stringify would quote it
+    // (`&quot;strict&quot;`), where for a number or a boolean it gives the
+    // same text String() does.
+    expect(html).toContain('<span class="tool-kv-value">strict</span>');
+    expect(html).toContain('<span class="tool-kv-value">true</span>');
+    expect(html).toContain('<span class="tool-kv-value">42</span>');
   });
 });

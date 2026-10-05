@@ -1,70 +1,48 @@
 /**
- * The fixture app's Documents page and `/api/documents` — part 1 of
- * stories/file-upload-steps.md.
+ * The fixture app's Documents page and `/api/documents` — the contract other
+ * tests stand on. No product code runs here.
  *
- * This is the "an upload is automatable at all" proof that the framework's
- * upload-step support (part 2) will be measured against. Bare Playwright, no
- * AI: `setInputFiles` on the plain field, on the HIDDEN input behind the styled
- * button, through the `filechooser` event, and on the multi-file field — plus
- * the server's own contract (multipart parsing, sha256 fidelity, rejection,
- * clear). Boots `fixtures/test-app/server.ts` the way open-page.test.ts does.
+ * This began as part 1 of stories/file-upload-steps.md: bare Playwright
+ * proving each of the page's uploaders was automatable at all. Part 2 — the
+ * upload action — now drives those same uploaders through the product, in
+ * upload-action.test.ts, so the bare-Playwright card tests went.
+ *
+ * What stays is what something else relies on, so that a fixture break fails
+ * HERE, by name, instead of as a confusing product or live-suite failure:
+ *   - the server's contract (multipart parsing, sha256 fidelity, rejection
+ *     messages, DELETE → 204), which upload-action.test.ts and the live
+ *     templates reset and assert through;
+ *   - the page lines the templates in templates/init/tests/ assert —
+ *     securebank-upload.md, securebank-upload-rows.md and
+ *     table-documents-empty.md: the success and rejection status lines, the
+ *     proof-of-identity card's own Upload button, and "Clear all" leaving the
+ *     "No documents uploaded yet." row.
+ * Boots `fixtures/test-app/server.ts` through tests/fixture-server.ts.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { spawn, type ChildProcess } from 'node:child_process';
-import net from 'node:net';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { startFixtureServer, type FixtureServer } from './fixture-server.js';
 
 const repoRoot = path.resolve(__dirname, '..');
-const serverPath = path.join(repoRoot, 'fixtures', 'test-app', 'server.ts');
 const attachmentsDir = path.join(repoRoot, 'fixtures', 'tests', 'attachments');
 const LOGO = path.join(attachmentsDir, 'logo.png');
-const STATEMENT = path.join(attachmentsDir, 'statement.pdf');
 const RECEIPT_1 = path.join(attachmentsDir, 'receipt-1.png');
 const RECEIPT_2 = path.join(attachmentsDir, 'receipt-2.png');
+const STATEMENT = path.join(attachmentsDir, 'statement.pdf');
 const MALWARE = path.join(attachmentsDir, 'malware.exe');
 
-let serverProc: ChildProcess;
+let server: FixtureServer | undefined;
 let browser: Browser;
 let context: BrowserContext;
 let page: Page;
-let port: number;
 let baseUrl: string;
 let tmpDir: string;
 /** Just over the 1 MB per-file limit; generated, never committed. */
 let BIG_PDF: string;
-
-async function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.unref();
-    srv.on('error', reject);
-    srv.listen(0, () => {
-      const addr = srv.address();
-      if (addr && typeof addr === 'object') {
-        const p = addr.port;
-        srv.close(() => resolve(p));
-      } else {
-        srv.close(() => reject(new Error('port allocation failed')));
-      }
-    });
-  });
-}
-
-async function waitForHttp(url: string, timeoutMs = 15_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url);
-      if (res.status < 500) return;
-    } catch { /* not ready */ }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error(`Timed out waiting for ${url}`);
-}
 
 async function sha256Of(file: string): Promise<string> {
   return crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex');
@@ -113,17 +91,8 @@ async function rowNames(): Promise<string[]> {
 }
 
 beforeAll(async () => {
-  port = await getFreePort();
-  baseUrl = `http://127.0.0.1:${port}`;
-  serverProc = spawn(process.execPath, ['--import', 'tsx', serverPath], {
-    cwd: repoRoot,
-    env: { ...process.env, PORT: String(port) },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  serverProc.stderr?.on('data', (b: Buffer) => {
-    process.stderr.write(`[test-app] ${b.toString()}`);
-  });
-  await waitForHttp(`${baseUrl}/api/documents`);
+  server = await startFixtureServer();
+  baseUrl = server.baseUrl;
 
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-upload-'));
   BIG_PDF = path.join(tmpDir, 'big.pdf');
@@ -139,12 +108,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   try { await browser?.close(); } catch { /* noop */ }
-  if (serverProc && !serverProc.killed) {
-    serverProc.kill('SIGTERM');
-    await new Promise((r) => setTimeout(r, 50));
-    if (!serverProc.killed) serverProc.kill('SIGKILL');
-  }
-  if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true });
+  await server?.stop();
+  if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }, 60_000);
 
 beforeEach(async () => {
@@ -253,12 +218,15 @@ describe('/api/documents', () => {
   });
 });
 
-// ─── The page, driven with bare Playwright ───────────────────────────────────
+// ─── The page lines the templates assert ─────────────────────────────────────
 
 describe('Documents page', () => {
   beforeEach(async () => {
     await page.goto(`${baseUrl}/documents`, { waitUntil: 'domcontentloaded' });
-    await page.locator('#documents-empty').waitFor();
+    // Not `#documents-empty`: that row is static markup, there before the
+    // page's own first GET returns — and when that GET does return it
+    // re-renders the table, wiping a row a test's upload added meanwhile.
+    await page.locator('#documents-body[data-loaded="true"]').waitFor({ state: 'attached' });
   });
 
   it('is served at /documents and linked from every sidebar', async () => {
@@ -270,69 +238,36 @@ describe('Documents page', () => {
     }
   });
 
-  it('card 1 — the plain visible field: setInputFiles, Upload, row appears', async () => {
+  it('a successful upload says what it uploaded: name and size for one file, the count for several', async () => {
+    // securebank-upload.md asserts both lines; securebank-upload-rows.md
+    // asserts the single-file one with "starts with", because of the size.
+    const size = (await fs.stat(LOGO)).size;
     await page.locator('#statement-file').setInputFiles(LOGO);
     await page.locator('#statement-upload').click();
+    expect(await statusAfterAction()).toEqual({ state: 'success', text: `Uploaded logo.png (${formatSize(size)})` });
 
-    const status = await statusAfterAction();
-    const size = (await fs.stat(LOGO)).size;
-    expect(status).toEqual({ state: 'success', text: `Uploaded logo.png (${formatSize(size)})` });
-
-    const row = page.locator('tr.doc-row[data-name="logo.png"]');
-    await row.waitFor();
-    expect(await row.locator('td.doc-size').textContent()).toBe(formatSize(size));
-    expect(await row.locator('td.doc-type').textContent()).toBe('image/png');
-    expect(await row.getAttribute('data-sha256')).toBe(await sha256Of(LOGO));
-    expect(await page.locator('#documents-count').textContent()).toBe('1 document');
-    // The field is cleared after a successful upload, so a second submit
-    // would be "Choose a file first", not a silent re-upload.
-    expect(await page.locator('#statement-file').inputValue()).toBe('');
+    await page.locator('#receipts-files').setInputFiles([RECEIPT_1, RECEIPT_2]);
+    await page.locator('#receipts-upload').click();
+    // The status is already `success` from the first upload, so wait on the
+    // line itself rather than on the state leaving `idle`.
+    const status = page.locator('#upload-status', { hasText: 'Uploaded 2 files' });
+    await status.waitFor({ timeout: 10_000 });
+    expect(await status.getAttribute('data-state')).toBe('success');
   }, 20_000);
 
-  it('card 2 — the hidden input behind the styled button accepts setInputFiles directly', async () => {
-    const input = page.locator('#identity-file');
-    expect(await input.isVisible()).toBe(false);
-    expect(await page.locator('#identity-upload').isDisabled()).toBe(true);
-
-    await input.setInputFiles(STATEMENT);
-
+  it('the proof-of-identity card uploads the file its hidden input holds, and lists it', async () => {
+    // securebank-upload.md steps 6-7: the styled uploader keeps the chosen
+    // file in page state and enables its own Upload button; nothing else here
+    // clicks `#identity-upload`.
     const size = (await fs.stat(STATEMENT)).size;
-    expect(await page.locator('#identity-selected').textContent()).toBe(`statement.pdf (${formatSize(size)})`);
-    expect(await page.locator('#identity-upload').isDisabled()).toBe(false);
+    expect(await page.locator('#identity-upload').isDisabled()).toBe(true);
+    await page.locator('#identity-file').setInputFiles(STATEMENT);
     await page.locator('#identity-upload').click();
 
     expect(await statusAfterAction()).toEqual({ state: 'success', text: `Uploaded statement.pdf (${formatSize(size)})` });
     const row = page.locator('tr.doc-row[data-name="statement.pdf"]');
     await row.waitFor();
     expect(await row.locator('td.doc-type').textContent()).toBe('application/pdf');
-    // Reset after success: the styled uploader is ready for the next file.
-    expect(await page.locator('#identity-selected').textContent()).toBe('');
-    expect(await page.locator('#identity-upload').isDisabled()).toBe(true);
-  }, 20_000);
-
-  it('card 2 — clicking Choose file opens a file chooser that can be answered', async () => {
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser', { timeout: 10_000 }),
-      page.locator('#identity-choose').click(),
-    ]);
-    expect(chooser.isMultiple()).toBe(false);
-    await chooser.setFiles(LOGO);
-
-    expect(await page.locator('#identity-selected').textContent()).toContain('logo.png');
-    await page.locator('#identity-upload').click();
-    expect((await statusAfterAction()).state).toBe('success');
-    expect(await rowNames()).toEqual(['logo.png']);
-  }, 20_000);
-
-  it('card 3 — the multiple field sends both files in one request', async () => {
-    await page.locator('#receipts-files').setInputFiles([RECEIPT_1, RECEIPT_2]);
-    await page.locator('#receipts-upload').click();
-
-    expect(await statusAfterAction()).toEqual({ state: 'success', text: 'Uploaded 2 files' });
-    await page.locator('tr.doc-row[data-name="receipt-2.png"]').waitFor();
-    expect(await rowNames()).toEqual(['receipt-1.png', 'receipt-2.png']);
-    expect(await page.locator('#documents-count').textContent()).toBe('2 documents');
-    expect(await listDocuments()).toHaveLength(2);
   }, 20_000);
 
   it('a disallowed file is refused by the server and the page says so, adding no row', async () => {
@@ -344,23 +279,6 @@ describe('Documents page', () => {
     expect(await page.locator('#documents-empty').isVisible()).toBe(true);
   }, 20_000);
 
-  it('an oversized file is refused with the size message', async () => {
-    await page.locator('#statement-file').setInputFiles(BIG_PDF);
-    await page.locator('#statement-upload').click();
-
-    expect(await statusAfterAction()).toEqual({ state: 'error', text: 'big.pdf is larger than the 1 MB limit' });
-    expect(await rowNames()).toEqual([]);
-  }, 20_000);
-
-  it('submitting with nothing chosen is "Choose a file first"', async () => {
-    await page.locator('#statement-upload').click();
-    expect(await statusAfterAction()).toEqual({ state: 'error', text: 'Choose a file first' });
-
-    await page.reload({ waitUntil: 'domcontentloaded' });
-    await page.locator('#receipts-upload').click();
-    expect(await statusAfterAction()).toEqual({ state: 'error', text: 'Choose a file first' });
-  }, 20_000);
-
   it('Clear all empties the table and shows the empty row', async () => {
     await page.locator('#statement-file').setInputFiles(LOGO);
     await page.locator('#statement-upload').click();
@@ -369,14 +287,9 @@ describe('Documents page', () => {
     await page.locator('#documents-clear').click();
     await page.locator('#documents-empty').waitFor();
     expect(await rowNames()).toEqual([]);
+    // table-documents-empty.md reads this lone full-width row as "no data".
+    expect(await page.locator('#documents-empty').textContent()).toBe('No documents uploaded yet.');
     expect(await page.locator('#documents-count').textContent()).toBe('0 documents');
     expect(await listDocuments()).toEqual([]);
-  }, 20_000);
-
-  it('the list is the server\'s: a reload shows what was uploaded before it', async () => {
-    await postDocuments([await fileFrom(RECEIPT_1, 'image/png')]);
-    await page.reload({ waitUntil: 'domcontentloaded' });
-    await page.locator('tr.doc-row[data-name="receipt-1.png"]').waitFor();
-    expect(await rowNames()).toEqual(['receipt-1.png']);
   }, 20_000);
 });

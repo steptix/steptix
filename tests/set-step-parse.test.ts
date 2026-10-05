@@ -162,21 +162,6 @@ describe('bake-over refusals that only expansion can see', () => {
     ).rejects.toThrow(/Cannot assign to \{\{tag\}\}.*enclosing it/s);
   });
 
-  it('refuses a row value that makes the assignment unparseable', async () => {
-    // A `"` in the row value breaks the `[^"]*` grammar once baked in, so
-    // that ROW's assignment was skipped while the variable still held the
-    // PREVIOUS row's value — the row then ran on stale data.
-    await expect(
-      parse(
-        [
-          '# T', '', '## Steps', '1. Greet', '',
-          '### Greet', '', '| who |', '| --- |', '| Alice |', '| He said "hi" |', '',
-          '1. Set {{msg}} to "Hello {{who}}"', '',
-        ].join('\n'),
-      ),
-    ).rejects.toThrow(/makes the step unparseable/);
-  });
-
   it('still expands a looped section whose Set target is not a column', async () => {
     // The guard must not refuse the legitimate shape.
     const parsed = (await parse(
@@ -209,22 +194,6 @@ describe('bake-overs at the other substitution sites', () => {
     return file;
   };
 
-  it('leaves a HOOK Set uninterpolated so a quote-bearing ${...} still assigns', async () => {
-    // Hooks are baked at parse time — they are never shown to the model as
-    // authored text. But a Set step IS read back by `parseSetStep` at run
-    // time, so baking a data value containing a `"` turned the hook into an
-    // unparseable line that ran as AI prose and never assigned.
-    const file = testFile(
-      ['# T', '', '## Hooks', '- before: Set {{g}} to "${data.greeting}"', '',
-       '## Steps', '1. Click Save', ''].join('\n'),
-    );
-    const parsed = await parseTestFile(file, {
-      envData: { env: {}, data: { greeting: 'He said "hi"' } },
-    });
-    // The token survives parse; `resolveSetTemplate` resolves it per run.
-    expect(parsed.hooks.before[0]).toBe('Set {{g}} to "${data.greeting}"');
-  });
-
   it('still bakes a NON-Set hook, which has nothing to preserve', async () => {
     const file = testFile(
       ['# T', '', '## Hooks', '- before: Navigate to ${data.url}', '',
@@ -234,24 +203,6 @@ describe('bake-overs at the other substitution sites', () => {
       envData: { env: {}, data: { url: 'https://x.test' } },
     });
     expect(parsed.hooks.before[0]).toBe('Navigate to https://x.test');
-  });
-
-  it('refuses a skill argument named after a declared OUTPUT', async () => {
-    // Outputs are excluded from internal renaming, so the argument was baked
-    // straight over the assignment's target and it silently never happened.
-    skill(
-      'outp',
-      // `msg` is an OUTPUT only — not a parameter — so the skill-parameter
-      // refusal does not fire. `validateCall` merely warns about an unknown
-      // argument, and the value still reaches `interpolate` and bakes the
-      // assignment's target away.
-      ['---', 'type: skill', '---', '', '# outp', '',
-       '## Outputs', '- msg', '', '## Steps', '1. Set {{msg}} to "assigned"', ''].join('\n'),
-    );
-    const file = testFile('# T\n\n## Steps\n1. [skill: outp msg="baked"]\n');
-    await expect(
-      parseTestFile(file, { skillsDir: path.join(dir, 'skills') }),
-    ).rejects.toThrow(/unparseable once its arguments/);
   });
 
   it('refuses an array-literal argument that breaks the assigned value', async () => {
@@ -314,9 +265,12 @@ describe('every substitution site preserves a Set step', () => {
     site: string;
     /** Builds a file whose Set step this site substitutes into. */
     build: () => { file: string; opts: Parameters<typeof parseTestFile>[1] };
+    /** This site's own refusal — so a row cannot pass on another site's. */
+    refusal: RegExp;
   }> = [
     {
       site: 'markdown.ts — skill body ${…}',
+      refusal: /A value substituted into skill "body" makes "Set \{\{g\}\} to …" unparseable/,
       build: () => {
         write(
           'skills/body.md',
@@ -331,6 +285,7 @@ describe('every substitution site preserves a Set step', () => {
     },
     {
       site: 'markdown.ts — skill SECTION body ${…}',
+      refusal: /A value substituted into skill "sect" makes "Set \{\{g\}\} to …" unparseable/,
       build: () => {
         write(
           'skills/sect.md',
@@ -346,12 +301,15 @@ describe('every substitution site preserves a Set step', () => {
     },
     {
       site: 'expander.ts — skill arguments (output-name collision)',
+      refusal: /The call to skill "args" makes "Set \{\{g\}\} to …" unparseable once its arguments are substituted/,
       build: () => {
         // NOT a hostile quoted value: the invocation parser refuses
         // `who="He said "hi""` before the expander sees it, so that half of
         // this site is unreachable. The reachable half is an argument named
         // after a declared OUTPUT — outputs are not renamed, so the value
-        // bakes straight over the assignment's target.
+        // bakes straight over the assignment's target and the assignment
+        // silently never happens. `validateCall` only warns about an argument
+        // that is not a parameter, so nothing else stops it.
         write(
           'skills/args.md',
           ['---', 'type: skill', '---', '', '# args', '', '## Parameters', '- who: n', '',
@@ -366,6 +324,10 @@ describe('every substitution site preserves a Set step', () => {
     },
     {
       site: 'expander.ts — looped section row bindings',
+      // A `"` in the row value breaks the `[^"]*` grammar once baked in, so
+      // that ROW's assignment was skipped while the variable still held the
+      // PREVIOUS row's value — the row then ran on stale data.
+      refusal: /A row value used by "Set \{\{g\}\} to …" in the body of section "Greet" makes the step unparseable/,
       build: () => ({
         file: write(
           't-rows.md',
@@ -378,20 +340,20 @@ describe('every substitution site preserves a Set step', () => {
     },
   ];
 
-  it.each(SITES)('refuses a hostile value at $site', async ({ build }) => {
+  it.each(SITES)('refuses a hostile value at $site', async ({ build, refusal }) => {
     const { file, opts } = build();
     // Every guarded site throws rather than producing a line that is no
-    // longer a Set step. The message differs per site; that it refuses at
-    // all is the invariant.
-    await expect(parseTestFile(file, opts)).rejects.toThrow(
-      /unparseable|may not contain a double quote|Cannot assign/,
-    );
+    // longer a Set step — each with its own message, naming the site, which
+    // is what an author has to act on.
+    await expect(parseTestFile(file, opts)).rejects.toThrow(refusal);
   });
 
   it('the HOOK site preserves rather than refuses, and that is deliberate', async () => {
     // A hook Set is not broken by baking — it is simply better resolved per
     // run, because `runHookScope` passes `envData` into `runSetStep`. So this
-    // site keeps the token instead of refusing the substitution.
+    // site keeps the token instead of refusing the substitution. (Baked, a
+    // value containing a `"` turned the hook into an unparseable line that
+    // ran as AI prose and never assigned.)
     const file = write(
       't-hook.md',
       ['# T', '', '## Hooks', '- before: Set {{g}} to "${env.GREETING}"', '',

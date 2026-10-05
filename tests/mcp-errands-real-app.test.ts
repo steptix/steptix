@@ -12,13 +12,19 @@
  * A test that inspects the runner in isolation cannot tell you whether
  * `list_sessions` gained a row.
  *
- * Verification items (1), (2), (3), (4), (6) and (7) of stories/errands.md live
- * here. Item (5)'s tab accounting is here too as far as a receipt can show it;
+ * Verification items (1), (2), (3), (4) and (7) of stories/errands.md live
+ * here — (7) only for the page-type filter over the real listing. Item (6)'s
+ * `session_id` refusal fires in the tool layer before any HTTP; (7)'s two
+ * name refusals fire there too, after resolving the browser and listing its
+ * tabs, and are decided over that listing alone. Beyond the listing, which is
+ * pinned here, the real server adds nothing to either: they are in
+ * `tests/mcp-errands-seam.test.ts`. Item (5)'s tab accounting is here too as
+ * far as a receipt can show it;
  * its mocked-Playwright-seam assertions — which page was closed, which was
  * raised — are in `api-server-errands.test.ts`, where the fake browser is
  * reachable.
  */
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -467,8 +473,21 @@ let server: Server;
 let client: Client;
 let tmpDir: string;
 let previousRoots: string | undefined;
+/** The user root this file resolves against, and the values it displaced. */
+let userRootTmp: string;
+const savedUserRoot: Record<string, string | undefined> = {};
 
 beforeAll(async () => {
+  // Every `resolveProject` reads the machine key from the user root's `.env`
+  // and confines paths against that root, so point it into an empty tmp dir —
+  // this machine's real %LOCALAPPDATA%\steptix must not decide an outcome here.
+  // LOCALAPPDATA is what win32 reads, XDG_CONFIG_HOME what everything else does.
+  userRootTmp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-errand-user-root-')));
+  for (const key of ['LOCALAPPDATA', 'XDG_CONFIG_HOME'] as const) {
+    savedUserRoot[key] = process.env[key];
+    process.env[key] = userRootTmp;
+  }
+
   const { app } = createApiServer(cfg);
   server = createServer(app);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
@@ -512,10 +531,24 @@ beforeAll(async () => {
 afterAll(async () => {
   if (previousRoots === undefined) delete process.env['STEPTIX_MCP_ROOTS'];
   else process.env['STEPTIX_MCP_ROOTS'] = previousRoots;
+  for (const [key, value] of Object.entries(savedUserRoot)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   await client?.close();
   await new Promise<void>((r) => server?.close(() => r()));
   resetRegistry();
-  await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  for (const dir of [tmpDir, userRootTmp]) {
+    if (dir) await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).catch(() => {});
+  }
+});
+
+// The report mock is module-level and the session tests below DO generate
+// reports (a `run_steps` batch writes one), so every "nothing generated a
+// report" assertion has to start from a clean count — or it holds only while
+// those tests happen to run last.
+beforeEach(() => {
+  vi.mocked(generateReportMock).mockClear();
 });
 
 async function listSessionIds(): Promise<string[]> {
@@ -633,57 +666,6 @@ describe('run_errand over the real HTTP seam', () => {
     expect((second.structuredContent as { status: string }).status).toBe('passed');
   }, 30_000);
 
-  it('refuses session_id before it touches anything (item 6)', async () => {
-    executedSteps.length = 0;
-    const before = await listSessionIds();
-
-    const res = await client.callTool({
-      name: 'run_errand',
-      arguments: {
-        tab: 'targetId:tab-cart',
-        steps: ['click the checkout button'],
-        session_id: 'mcp:steps-1',
-        project_root: tmpDir,
-      },
-    });
-
-    expect(res.isError).toBe(true);
-    expect(content(res)).toContain('run_steps');
-    expect(executedSteps).toEqual([]);
-    expect(await listSessionIds()).toEqual(before);
-  });
-
-  it('refuses a name matching nothing, listing what is open (item 7)', async () => {
-    executedSteps.length = 0;
-
-    const res = await client.callTool({
-      name: 'run_errand',
-      arguments: { tab: 'the invoices tab', steps: ['click something'], project_root: tmpDir },
-    });
-
-    expect(res.isError).toBe(true);
-    // The real listing, straight off the real route.
-    expect(content(res)).toContain('Cart — Shop');
-    expect(content(res)).toContain('Inbox');
-    expect(executedSteps).toEqual([]);
-  });
-
-  it('refuses a name matching two, naming both (item 7)', async () => {
-    executedSteps.length = 0;
-
-    const res = await client.callTool({
-      name: 'run_errand',
-      arguments: { tab: 'shop.example', steps: ['click something'], project_root: tmpDir },
-    });
-
-    expect(res.isError).toBe(true);
-    expect(content(res)).toContain('tab-cart');
-    expect(content(res)).toContain('tab-archive');
-    // Not the one that did not match.
-    expect(content(res)).not.toContain('tab-mail');
-    expect(executedSteps).toEqual([]);
-  });
-
   it('refuses a second errand on a tab one is driving, then lets the retry in (item 3)', async () => {
     // Verification item (3), end to end: two real `run_errand` calls through
     // the real MCP client, the real HTTP client and the real route. Nothing
@@ -692,6 +674,7 @@ describe('run_errand over the real HTTP seam', () => {
     // have been closed" — advice that would send it re-listing a tab that is
     // open and busy.
     executedSteps.length = 0;
+    const before = await listSessionIds();
     let release!: () => void;
     let markStarted!: () => void;
     const gate = new Promise<void>((r) => (release = r));
@@ -738,7 +721,7 @@ describe('run_errand over the real HTTP seam', () => {
     expect((retry.structuredContent as { errandId: string }).errandId).not.toBe(holder);
 
     // And not one of the three left a session behind.
-    expect(await listSessionIds()).toEqual([]);
+    expect(await listSessionIds()).toEqual(before);
   }, 30_000);
 
   it('refuses a retry naming a tab the holder OPENED, with the zero-match refusal (item 3)', async () => {
@@ -749,51 +732,58 @@ describe('run_errand over the real HTTP seam', () => {
     const receiptTab = makePage('tab-receipt', 'https://shop.example/receipt', 'Receipt — Shop');
     const original = vi.mocked(executeStepMock).getMockImplementation()!;
     try {
-      vi.mocked(executeStepMock).mockImplementation(async (i, t, instruction, options) => {
-        const tracker = (options as unknown as { pageTracker?: { addPage: (p: unknown) => void; markExpected: (p: unknown) => void } }).pageTracker;
-        // Appearing DURING the run is the point: a tab already in TABS at attach
-        // time is on the tracker's ignore list and never adopted at all.
-        // `openPage`'s own two calls, in its order.
-        TABS.push(receiptTab);
-        tracker?.addPage(receiptTab);
-        tracker?.markExpected(receiptTab);
-        return original(i, t, instruction, options);
-      });
+      try {
+        vi.mocked(executeStepMock).mockImplementation(async (i, t, instruction, options) => {
+          const tracker = (options as unknown as { pageTracker?: { addPage: (p: unknown) => void; markExpected: (p: unknown) => void } }).pageTracker;
+          // Appearing DURING the run is the point: a tab already in TABS at attach
+          // time is on the tracker's ignore list and never adopted at all.
+          // `openPage`'s own two calls, in its order.
+          TABS.push(receiptTab);
+          tracker?.addPage(receiptTab);
+          tracker?.markExpected(receiptTab);
+          return original(i, t, instruction, options);
+        });
 
-      const opened = await client.callTool({
+        const opened = await client.callTool({
+          name: 'run_errand',
+          arguments: { tab: 'targetId:tab-cart', steps: ['open the receipt'], project_root: tmpDir },
+        });
+        expect(opened.isError, content(opened)).toBeFalsy();
+        expect((opened.structuredContent as { openedTabs: unknown }).openedTabs).toEqual([
+          { targetId: 'tab-receipt', url: 'https://shop.example/receipt', title: 'Receipt — Shop' },
+        ]);
+        // Taken with its coat — and therefore out of the listing the next match
+        // runs against, which is what makes the refusal below the right one.
+        expect(receiptTab.closed).toBe(true);
+      } finally {
+        vi.mocked(executeStepMock).mockImplementation(original);
+      }
+
+      const retry = await client.callTool({
         name: 'run_errand',
-        arguments: { tab: 'targetId:tab-cart', steps: ['open the receipt'], project_root: tmpDir },
+        arguments: { tab: 'targetId:tab-receipt', steps: ['click something'], project_root: tmpDir },
       });
-      expect(opened.isError, content(opened)).toBeFalsy();
-      expect((opened.structuredContent as { openedTabs: unknown }).openedTabs).toEqual([
-        { targetId: 'tab-receipt', url: 'https://shop.example/receipt', title: 'Receipt — Shop' },
-      ]);
-      // Taken with its coat — and therefore out of the listing the next match
-      // runs against, which is what makes the refusal below the right one.
-      expect(receiptTab.closed).toBe(true);
-    } finally {
-      vi.mocked(executeStepMock).mockImplementation(original);
-    }
 
-    const retry = await client.callTool({
-      name: 'run_errand',
-      arguments: { tab: 'targetId:tab-receipt', steps: ['click something'], project_root: tmpDir },
-    });
-
-    expect(retry.isError).toBe(true);
-    expect(textOf(retry)).toBe(
-      errorText(
-        errandTabNotFound(
-          'targetId:tab-receipt',
-          describeBrowser({ engine: 'edge', profile: 'default', scope: 'project' }),
-          TABS.filter((p) => !p.closed).map((p) => ({
-            targetId: p.targetId,
-            title: p.titleText,
-            url: p.urlText,
-          })),
+      expect(retry.isError).toBe(true);
+      expect(textOf(retry)).toBe(
+        errorText(
+          errandTabNotFound(
+            'targetId:tab-receipt',
+            describeBrowser({ engine: 'edge', profile: 'default', scope: 'project' }),
+            TABS.filter((p) => !p.closed).map((p) => ({
+              targetId: p.targetId,
+              title: p.titleText,
+              url: p.urlText,
+            })),
+          ),
         ),
-      ),
-    );
+      );
+    } finally {
+      // TABS is every test's browser. If the errand failed to close the tab it
+      // opened, a still-open receipt would sit in every later listing.
+      const at = TABS.indexOf(receiptTab);
+      if (at !== -1) TABS.splice(at, 1);
+    }
   }, 30_000);
 
   it('never makes an iframe, a browser_ui target or a dialog a candidate (item 7)', async () => {
@@ -914,12 +904,14 @@ describe('run_errand over the real HTTP seam', () => {
     // tool — so this is the case that has to keep working, on BOTH sides.
     const id = 'mcp:errand-idle';
     executedSteps.length = 0;
-    const bound = await sessionSteps(id, ['read the inbox'], true);
-    expect(bound.isError, content(bound)).toBeFalsy();
-    expect((bound.structuredContent as { status: string }).status).toBe('passed');
-    expect(await listSessionIds()).toEqual([id]);
+    const before = await listSessionIds();
 
     try {
+      const bound = await sessionSteps(id, ['read the inbox'], true);
+      expect(bound.isError, content(bound)).toBeFalsy();
+      expect((bound.structuredContent as { status: string }).status).toBe('passed');
+      expect(await listSessionIds()).toEqual([...before, id].sort());
+
       const errand = await client.callTool({
         name: 'run_errand',
         arguments: {
@@ -939,7 +931,7 @@ describe('run_errand over the real HTTP seam', () => {
       expect(executedSteps).toContain('read the inbox again');
 
       // And the errand added nothing to the sessions map on its way through.
-      expect(await listSessionIds()).toEqual([id]);
+      expect(await listSessionIds()).toEqual([...before, id].sort());
     } finally {
       await closeSession(id);
     }
@@ -962,7 +954,7 @@ describe('run_errand over the real HTTP seam', () => {
     });
 
     let refused: Awaited<ReturnType<typeof client.callTool>>;
-    let batch: ReturnType<typeof sessionSteps>;
+    let batch: ReturnType<typeof sessionSteps> | undefined;
     try {
       const bound = await sessionSteps(id, ['read the inbox'], true);
       expect(bound.isError, content(bound)).toBeFalsy();
@@ -977,6 +969,11 @@ describe('run_errand over the real HTTP seam', () => {
     } finally {
       release();
       vi.mocked(executeStepMock).mockImplementation(original);
+      // Let the released batch finish, then close — here rather than after the
+      // assertions, so a failure above cannot leave the session open for
+      // whichever test runs next.
+      await batch?.catch(() => undefined);
+      await closeSession(id);
     }
     expect((await batch!).isError).toBeFalsy();
 
@@ -987,45 +984,5 @@ describe('run_errand over the real HTTP seam', () => {
     // Nothing ran in the tab, which is what "refused before any browser work"
     // means from the caller's side.
     expect(executedSteps).not.toContain('archive it');
-
-    await closeSession(id);
-  }, 30_000);
-
-  it('never blocks a run_steps batch on a tab an errand is driving (item 3)', async () => {
-    // Sessions take no lock and are refused by none: the errand-only guard is a
-    // bounded amendment to mcp-cdp-browser §Locked, whose subject — parallel
-    // sessions — is untouched.
-    const id = 'mcp:errand-parallel';
-    executedSteps.length = 0;
-    let release!: () => void;
-    let markStarted!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const started = new Promise<void>((r) => (markStarted = r));
-    const original = vi.mocked(executeStepMock).getMockImplementation()!;
-    vi.mocked(executeStepMock).mockImplementation(async (i, t, instruction, options) => {
-      if (String(instruction).includes('drive slowly')) {
-        markStarted();
-        await gate;
-      }
-      return original(i, t, instruction, options);
-    });
-
-    const errand = client.callTool({
-      name: 'run_errand',
-      arguments: { tab: 'targetId:tab-mail', steps: ['drive slowly'], project_root: tmpDir },
-    });
-    try {
-      await started;
-      const batch = await sessionSteps(id, ['read the inbox'], true);
-      expect(batch.isError, content(batch)).toBeFalsy();
-      expect((batch.structuredContent as { status: string }).status).toBe('passed');
-    } finally {
-      release();
-      vi.mocked(executeStepMock).mockImplementation(original);
-    }
-    expect((await errand).isError).toBeFalsy();
-
-    await closeSession(id);
-    expect(await listSessionIds()).toEqual([]);
   }, 30_000);
 });

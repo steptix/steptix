@@ -1,8 +1,7 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import {
   createFile,
   spliceEntry,
@@ -12,6 +11,7 @@ import {
   writeCodeBehindEntry,
 } from '../src/codebehind/writer.js';
 import { scan } from '../src/codebehind/tokenizer.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * The writer's job is to change one entry and nothing else, and to never
@@ -23,8 +23,13 @@ import { scan } from '../src/codebehind/tokenizer.js';
  * back byte-for-byte).
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-writer');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
+
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('codebehind-writer');
+});
 
 let counter = 0;
 let dir: string;
@@ -35,7 +40,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await removeScratchBase(tmpBase);
 });
 
 /** A file with every brace hazard sprinkled around the entry to be replaced. */

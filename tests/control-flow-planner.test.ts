@@ -307,12 +307,6 @@ describe('For each', () => {
     const plan = planAfterGuard(FOREACH_LOOP, 0, { kind: 'list', items: [] }, state);
     expect(plan).toEqual({ skip: [[1, 1]], next: 2, loopEnded: { guard: 0, count: 0 } });
   });
-
-  it('the count is known from the start, unlike a While`s', () => {
-    const state = createControlState();
-    const plan = planAfterGuard(FOREACH_LOOP, 0, { kind: 'list', items: ['a'] }, state);
-    expect(plan.pass?.count).toBe(1);
-  });
 });
 
 /**
@@ -857,11 +851,8 @@ describe('exits from inside a structure', () => {
     expect(plan).toEqual({ skip: [[3, 3]], next: 0, loopEnded: { guard: 2, count: 0 } });
   });
 
-  it('at the top level the exit is still the next step', () => {
-    expect(
-      planAfterGuard(CHAIN_NO_ELSE, 1, { kind: 'chain', selected: null }, createControlState()),
-    ).toEqual({ skip: [[1, 6]], next: 7, selected: null });
-  });
+  // The control case, at the top level the exit is still the next step, is
+  // '"none" with no Otherwise skips the whole chain and carries on after it'.
 });
 
 /**

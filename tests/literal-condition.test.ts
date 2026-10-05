@@ -148,9 +148,6 @@ describe('the ordering forms', () => {
       numeric: true,
       holds: true,
     });
-    // …and would have sorted the other way as text, which is why `numeric`
-    // exists rather than the comparison just calling `Number()`.
-    expect(decide('"10" is at least "9"')).toBe(true);
   });
 
   it('refuses an ordering it cannot do numerically, rather than answering false', () => {
@@ -201,7 +198,7 @@ describe('equality compares characters, never numbers', () => {
   });
 
   it('reports `numeric` for the orderings and nothing else', () => {
-    expect(parseLiteralCondition('"10" is at least 2')).toMatchObject({ numeric: true });
+    expect(parseLiteralCondition('4 is less than 5')).toMatchObject({ numeric: true });
     expect(parseLiteralCondition('1001 contains 100')).toMatchObject({
       numeric: false,
       holds: true,
@@ -211,6 +208,8 @@ describe('equality compares characters, never numbers', () => {
   });
 
   it('leaves the orderings numeric, so 10 still sorts above 9', () => {
+    // As text it would sort the other way, which is why `numeric` exists
+    // rather than the comparison just calling `Number()`.
     expect(decide('"10" is at least "9"')).toBe(true);
     expect(decide('"0012" is more than 11')).toBe(true);
     expect(decide('"1.0" is at most 1')).toBe(true);

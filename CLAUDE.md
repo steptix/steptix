@@ -201,6 +201,32 @@ Playwright browser, so ignore the root suite's real-browser tests there (they
 fail with `browserType.launch: Executable doesn't exist`) and judge Linux on
 everything else.
 
+## Unit tests are not timed and share nothing
+
+A unit test must give the same answer on a loaded CI runner, in any order,
+and on any developer's machine.
+
+- **Never wait with a sleep or assert on elapsed time.** Wait on the condition
+  itself — an event, a promise gate, or a poll with a generous ceiling. When
+  the code under test is timed, inject `now`/`sleep` or use
+  `vi.useFakeTimers({ toFake: [...] })`.
+- **Let the server pick its port.** Have the child bind port 0 and report the
+  port it got; `tests/fixture-server.ts` does this for the SecureBank app.
+  Never close a port-0 listener and hand its number on.
+- **Give each run its own scratch directory** with `fs.mkdtemp`. Put it under
+  `tests/` when package self-resolution needs an in-repo path. Remove it
+  recursively with `maxRetries`.
+- **Leave nothing behind.** Restore every global you change (`process.env`,
+  `process.stdout.isTTY`, page globals) in `finally` or `afterEach`. Clear
+  module-level mocks in `beforeEach`. Give a test that changes a shared page
+  its own page. The weekly `Unit tests (shuffled)` workflow runs the root
+  suite in a random order to catch what slips through.
+- **Don't read the developer's machine.**
+  - Point `LOCALAPPDATA` / `XDG_CONFIG_HOME` at a temp dir before anything
+    resolves the user root.
+  - Pass `loadConfig` an explicit project root.
+  - Don't depend on the locale or on a fixed calendar year.
+
 ## Seed gitignored files into a new worktree
 
 After creating a worktree (via `git worktree add` or the `EnterWorktree`

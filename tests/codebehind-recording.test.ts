@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { StepResult } from '../src/report/types.js';
 import {
   readRecording,
@@ -14,6 +13,7 @@ import {
   writeRecording,
   writeReplayFailure,
 } from '../src/codebehind/recording.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * The recording on disk (stories/codebehind-recording-on-disk.md): a compile's
@@ -21,8 +21,13 @@ import {
  * author — and by nobody on the server afterwards.
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-recording');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
+
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('codebehind-recording');
+});
 let counter = 0;
 let dir: string;
 
@@ -32,8 +37,27 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await removeScratchBase(tmpBase);
 });
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+/**
+ * A splice proves it stamped its step by a `recordedAt` that differs from the
+ * write before it, and both come from `new Date()`. Two real stamps taken a
+ * few milliseconds apart can still share a millisecond (a timer may fire early
+ * off libuv's cached loop time, and the wall clock can step back), so the
+ * tests that compare them pin the clock instead. Only `Date` is faked: fs and
+ * every timer stay real.
+ */
+const WRITTEN_AT = '2026-08-23T10:00:00.000Z';
+const SPLICED_AT = '2026-08-23T10:00:01.000Z';
+function clockAt(iso: string): void {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(iso));
+}
 
 function step(index: number, over: Partial<StepResult> = {}): StepResult {
   return {
@@ -321,10 +345,12 @@ describe('splicing a single step into an existing recording', () => {
 
   it('overwrites the matched step, stamps it, and leaves the siblings alone', async () => {
     const test = path.join(dir, 'checkout.md');
+    clockAt(WRITTEN_AT);
     await seed(test);
     const before = (await readRecording(test))!;
+    expect(before.steps.map((s) => s.recordedAt)).toEqual([WRITTEN_AT, WRITTEN_AT, WRITTEN_AT]);
 
-    await new Promise((r) => setTimeout(r, 5));
+    clockAt(SPLICED_AT);
     await spliceRecording(test, {
       steps: [
         step(1, {
@@ -351,10 +377,10 @@ describe('splicing a single step into an existing recording', () => {
     // The spliced step kept slot 2 — its filenames, and its place in the test.
     expect(after.steps[1]!.index).toBe(2);
     expect(after.steps[1]!.domBefore).toBe('<div>cart empty</div>');
-    expect(after.steps[1]!.recordedAt).not.toBe(before.steps[1]!.recordedAt);
+    expect(after.steps[1]!.recordedAt).toBe(SPLICED_AT);
     // …and the siblings are byte-for-byte the recording they were.
-    expect(after.steps[0]!.recordedAt).toBe(before.steps[0]!.recordedAt);
-    expect(after.steps[2]!.recordedAt).toBe(before.steps[2]!.recordedAt);
+    expect(after.steps[0]!.recordedAt).toBe(WRITTEN_AT);
+    expect(after.steps[2]!.recordedAt).toBe(WRITTEN_AT);
     expect(after.steps[0]!.domBefore).toBe(before.steps[0]!.domBefore);
   });
 
@@ -471,6 +497,7 @@ describe('splicing when a test repeats a step', () => {
     // cannot tell them apart, so a splice keyed on that overwrites the FIRST
     // occurrence's files when the author compiles the second.
     const test = path.join(dir, 'repeat.md');
+    clockAt(WRITTEN_AT);
     await writeRecording(test, {
       steps: [
         step(1, { instruction: 'Press Enter', pageUrl: 'https://app.test/one' }),
@@ -488,8 +515,9 @@ describe('splicing when a test repeats a step', () => {
       },
     });
     const before = (await readRecording(test))!;
+    expect(before.steps[2]!.recordedAt).toBe(WRITTEN_AT);
 
-    await new Promise((r) => setTimeout(r, 5));
+    clockAt(SPLICED_AT);
     await spliceRecording(test, {
       steps: [step(1, { instruction: 'Press Enter', pageUrl: 'https://app.test/spliced' })],
       status: 'passed',
@@ -503,10 +531,10 @@ describe('splicing when a test repeats a step', () => {
     expect(after.steps).toHaveLength(3);
     // The SECOND occurrence took the splice…
     expect(after.steps[2]!.pageUrl).toBe('https://app.test/spliced');
-    expect(after.steps[2]!.recordedAt).not.toBe(before.steps[2]!.recordedAt);
+    expect(after.steps[2]!.recordedAt).toBe(SPLICED_AT);
     // …and the first is exactly the recording it was.
     expect(after.steps[0]!.pageUrl).toBe('https://app.test/one');
-    expect(after.steps[0]!.recordedAt).toBe(before.steps[0]!.recordedAt);
+    expect(after.steps[0]!.recordedAt).toBe(WRITTEN_AT);
   });
 });
 
@@ -538,12 +566,14 @@ describe('the splice identity carries the binding\'s target file', () => {
 
   it('a filed splice claims its own file\'s slot, never the identically-worded other frame\'s', async () => {
     const test = path.join(dir, 'checkout.md');
+    clockAt(WRITTEN_AT);
     await seedBothFrames(test, true);
     const before = (await readRecording(test))!;
     expect(before.steps[0]!.file).toBe(TEST_FILE);
     expect(before.steps[1]!.file).toBe(SKILL_FILE);
+    expect(before.steps[1]!.recordedAt).toBe(WRITTEN_AT);
 
-    await new Promise((r) => setTimeout(r, 5));
+    clockAt(SPLICED_AT);
     await spliceRecording(test, {
       steps: [step(1, { instruction: 'Press the go button', pageUrl: 'https://app.test/spliced' })],
       status: 'passed',
@@ -557,10 +587,10 @@ describe('the splice identity carries the binding\'s target file', () => {
     expect(after.steps).toHaveLength(2);
     // The SKILL slot took the splice — slot 2, not the first in file order…
     expect(after.steps[1]!.pageUrl).toBe('https://app.test/spliced');
-    expect(after.steps[1]!.recordedAt).not.toBe(before.steps[1]!.recordedAt);
+    expect(after.steps[1]!.recordedAt).toBe(SPLICED_AT);
     // …and the test-frame step's evidence is byte-for-byte what it was.
     expect(after.steps[0]!.pageUrl).toBe('https://app.test/from-test-frame');
-    expect(after.steps[0]!.recordedAt).toBe(before.steps[0]!.recordedAt);
+    expect(after.steps[0]!.recordedAt).toBe(WRITTEN_AT);
   });
 
   it('a filed splice never claims a slot recorded for a DIFFERENT file — it opens a new one', async () => {
@@ -596,7 +626,6 @@ describe('the splice identity carries the binding\'s target file', () => {
     const before = (await readRecording(test))!;
     expect(before.steps[0]!.file).toBeUndefined();
 
-    await new Promise((r) => setTimeout(r, 5));
     await spliceRecording(test, {
       steps: [step(1, { instruction: 'Press the go button', pageUrl: 'https://app.test/spliced' })],
       status: 'passed',

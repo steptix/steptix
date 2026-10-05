@@ -115,9 +115,11 @@ export function renderReport(report: TestReport): string {
   });
 
   const duration = formatDuration(report.durationMs);
-  const tokensUsed = report.tokensUsed.toLocaleString();
-  const inputTokens = report.inputTokens.toLocaleString();
-  const outputTokens = report.outputTokens.toLocaleString();
+  // Counts in the date's fixed locale too, so a report reads the same on
+  // every machine rather than `9.325` on one and `9,325` on the next.
+  const tokensUsed = report.tokensUsed.toLocaleString('en-AU');
+  const inputTokens = report.inputTokens.toLocaleString('en-AU');
+  const outputTokens = report.outputTokens.toLocaleString('en-AU');
   const stepsHtml = renderSteps(report.steps);
   const diagnosisHtml = report.diagnosis ? renderDiagnosis(report.diagnosis) : '';
   const modelSummary = summarizeModels(report);
@@ -490,7 +492,7 @@ function renderRowsTable(rows: TestReport['rows']): string {
   ${cells}
   <td><span class="badge ${statusClass}">${label}</span></td>
   <td class="row-duration">${(row.durationMs / 1000).toFixed(1)}s</td>
-  <td class="row-tokens">${row.tokensUsed.toLocaleString()}${video}</td>
+  <td class="row-tokens">${row.tokensUsed.toLocaleString('en-AU')}${video}</td>
 </tr>`;
     })
     .join('\n');

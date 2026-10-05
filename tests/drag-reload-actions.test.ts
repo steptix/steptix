@@ -9,8 +9,10 @@
  * nothing else noticed the list losing one; `executeAction` now refuses it —
  * tests/unknown-action-type.test.ts), a code-generation rule asserted as
  * if it were conditional while it was emitted on every compile, and the claim
- * that the actions are not on the compile's refusal list. Each is pinned here
- * with its control.
+ * that the actions are not on the compile's refusal list. The last two are
+ * pinned here with their controls; the first, for every type at once, in
+ * tests/unknown-action-type.test.ts (each valid type has a route, and none is
+ * refused as unknown).
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
@@ -22,35 +24,13 @@ import { parseAIResponse } from '../src/ai/action-parser.js';
 import { buildSystemPrompt, buildStepCodePrompt, contentBlocksToText } from '../src/ai/prompts.js';
 import { conditionEntryComplaint } from '../src/codebehind/generate.js';
 import { parseComputerActions } from '../src/desktop/action-parser.js';
-import { logger } from '../src/utils/logger.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+// That both are known types (VALID_ACTION_TYPES, each with a route) and that
+// their spellings fold to them ("refresh", "dragTo", "reloadPage"…) is pinned
+// in unknown-action-type.test.ts.
 describe('drag and reload — the parser', () => {
-  it('are known action types, so the parser does not warn about them (with the control)', () => {
-    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
-    try {
-      parseAIResponse(JSON.stringify({ action: 'reload', description: 'Reload' }));
-      parseAIResponse(JSON.stringify({ action: 'drag', selector: '#a', target: '#b', description: 'Drag' }));
-      const unknown = (): string[] =>
-        warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('Unknown action type'));
-      expect(unknown()).toEqual([]);
-      parseAIResponse(JSON.stringify({ action: 'teleport', description: 'x' }));
-      expect(unknown()).toHaveLength(1);
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it('normalises the spellings a model reaches for — each would otherwise cost a failed attempt', () => {
-    for (const [raw, canonical] of [
-      ['refresh', 'reload'], ['reloadPage', 'reload'], ['browserRefresh', 'reload'],
-      ['dragTo', 'drag'], ['dragAndDrop', 'drag'], ['drag_and_drop', 'drag'], ['dragDrop', 'drag'],
-    ] as const) {
-      expect(parseAIResponse(JSON.stringify({ action: raw, description: 'x' })).actions[0]!.action, raw).toBe(canonical);
-    }
-  });
-
   it('keeps a drag\'s target — and reads it from the other names a model uses, for a drag only', () => {
     const one = (obj: Record<string, unknown>) => parseAIResponse(JSON.stringify({ description: 'x', ...obj })).actions[0]!;
     expect(one({ action: 'drag', selector: '#card', target: '#paid' })).toMatchObject({ selector: '#card', target: '#paid' });

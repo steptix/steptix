@@ -426,7 +426,7 @@ describe('errors', () => {
     ).rejects.toThrow(/no skills directory is configured/i);
   });
 
-  it('names both files when a section cycles across a skill boundary', async () => {
+  it('same-named sections in a test and a skill do not collide (cycle key is per file)', async () => {
     // Two files may define same-named sections without colliding: the cycle
     // key is namespaced by file path.
     await writeSkill(

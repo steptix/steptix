@@ -9,6 +9,36 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — unit tests that failed for no reason, and four things they found
+
+A review of all four unit suites (9,338 tests) cut them to 8,945 and made
+them hold under load and in any order (extension 0.5.169).
+- **Gone:** duplicates and tests of code nothing calls.
+- **Fixed:** the 17 tests the review found could never fail now check what
+  they claim, or are gone. Sleeps and elapsed-time checks became injected
+  clocks and event gates, and ports are picked by the server.
+- **No sharing:** each run gets its own scratch directory, and no state
+  carries from one test to the next or comes from the developer's machine.
+
+A weekly CI job now runs the root suite in a shuffled order. CLAUDE.md
+states the rules.
+
+Fixed along the way:
+
+- **STX020's catalogue entry no longer offers a "Reopen as Text" button.** It
+  named `steptix.reopenAsText`, a command the extension never registered.
+  Nothing raises STX020 today, so the button was never shown.
+- **A run's "Latest runs" line is written whole.** The test file is written
+  beside itself and renamed over, so an editor or another reader never sees
+  it half-written. A symlinked test file is still updated at its target, a
+  read-only one is still refused, and the file keeps its permissions.
+- **Flick's saves of one file land in the order they were made.** Flick
+  already wrote a temp file and renamed it. Now each save gets its own temp
+  name, a save waits for the one before it to the same file, and on Windows
+  the rename is retried while another process briefly holds the file.
+- **An HTML report's token counts read the same on every machine.** They now
+  use the `en-AU` format the report's date already used.
+
 ### Added — `steptix` on PATH from the runtime installer
 
 The Windows runtime installer has a new option, "Add steptix to PATH", ticked

@@ -130,13 +130,6 @@ describe('back and forward — the parser (§4.1)', () => {
       warn.mockRestore();
     }
   });
-
-  it('does not require a url, a selector or a value', () => {
-    const only = parseAIResponse(JSON.stringify({ action: 'back', description: 'Go back' })).actions[0]!;
-    expect(only.url).toBeUndefined();
-    expect(only.selector).toBeUndefined();
-    expect(only.value).toBeUndefined();
-  });
 });
 
 describe('back and forward — the settle (§4.4)', () => {

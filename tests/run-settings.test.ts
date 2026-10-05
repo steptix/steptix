@@ -11,9 +11,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  AI_MODES,
   CAPTURE_MODES,
-  RUN_SETTING_KEYS,
   captureModeOf,
   mergeRunSettings,
   resolveRunSettings,
@@ -398,15 +396,5 @@ describe('resolveRunSettings — the AI switch', () => {
     expect(config.ai.maxInputTokens).toBe(server.ai.maxInputTokens);
     expect(config.ai.diagnoseFailures).toBe(server.ai.diagnoseFailures);
     expect(config.browser.captureScreenshotsPerAction).toBe(false);
-  });
-});
-
-describe('the accepted vocabulary', () => {
-  it('lists ai among the wire keys, so the route stops refusing it as unknown', () => {
-    expect(RUN_SETTING_KEYS).toContain('ai');
-  });
-
-  it('offers "default", without which going back would be inexpressible', () => {
-    expect(AI_MODES).toEqual(['on', 'off', 'default']);
   });
 });

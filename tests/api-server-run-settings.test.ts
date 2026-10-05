@@ -1209,12 +1209,9 @@ describe('GET /config', () => {
     expect(status).toBe(400);
   });
 
-  it('requires the api key', async () => {
-    // Unlike /health, which is deliberately open: this body carries project
-    // paths and the resolved model.
-    const res = await fetch(`${baseUrl}/config`);
-    expect(res.status).toBe(401);
-  });
+  // Behind the api key, unlike /health — this body carries project paths and
+  // the resolved model. tests/api-server.test.ts proves that for every route
+  // by walking the app's router.
 });
 
 describe('the project bundle as a source', () => {

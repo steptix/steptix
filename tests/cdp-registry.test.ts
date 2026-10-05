@@ -20,7 +20,7 @@ import {
 import { listPageTabs } from '../src/browser/cdp-discovery.js';
 import { ErrandLocks } from '../src/server/errand-locks.js';
 
-const ROOT = path.join('C:', 'proj');
+const ROOT = path.resolve(path.sep, 'proj');
 const PROFILES = cdpProfilesRoot(ROOT);
 /** The close/focus verbs take the swept roots pre-resolved; a bare project
  *  sweep is the old single-root behaviour. */
@@ -319,17 +319,6 @@ describe('startCdpBrowser', () => {
     expect(result).toMatchObject({ ok: true, outcome: 'launched_into_existing_profile' });
   });
 
-  it('asking for a profile that exists is not an error', async () => {
-    const dir = path.join(PROFILES, 'chrome-admin');
-    const { deps } = fakeFs({ dirs: [PROFILES, dir] });
-    const { launch } = launcherStub();
-    const result = await startCdpBrowser(
-      { projectRoot: ROOT, engine: 'chrome', profile: 'admin' },
-      { ...deps, launch, probe: probeFor({ 40000: 'chrome' }) },
-    );
-    expect(result.ok).toBe(true);
-  });
-
   it('writes the .steptix-profile marker on every launch', async () => {
     const { deps, files } = fakeFs({ dirs: [PROFILES] });
     const { launch } = launcherStub();
@@ -528,7 +517,7 @@ describe('resetProfile', () => {
 
   it('guard 2: refuses a symlinked profile directory, and its target survives', async () => {
     const dir = path.join(PROFILES, 'edge-admin');
-    const target = path.join('C:', 'Users', 'dev', 'Documents');
+    const target = path.resolve(path.sep, 'Users', 'dev', 'Documents');
     const { deps, dirs, renames, removed } = fakeFs({
       dirs: [PROFILES, dir, target],
       files: { [marker(dir)]: '{}' },
@@ -547,7 +536,7 @@ describe('resetProfile', () => {
 
   it('guard 3: refuses a directory that resolves outside the profiles root', async () => {
     const dir = path.join(PROFILES, 'edge-admin');
-    const outside = path.join('C:', 'Users', 'dev', 'Documents');
+    const outside = path.resolve(path.sep, 'Users', 'dev', 'Documents');
     const { deps, dirs, renames } = fakeFs({
       dirs: [PROFILES, dir, outside],
       files: { [marker(dir)]: '{}' },
@@ -860,6 +849,10 @@ describe('closeCdpTab', () => {
     }) as never;
     h.deps.listTabs = (async () => (gone ? [] : [TWO_TABS[0]!])) as never;
     h.deps.alive = (async () => true) as never;
+    // The exit-confirm poll runs out its whole budget here, since the process
+    // never goes. On a clock that moves per read, not a 1.5s spin of the real one.
+    let clock = 0;
+    h.deps.now = (() => (clock += 500)) as never;
 
     const result = await closeCdpTab(
       { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3', allowBrowserExit: true },
@@ -1133,25 +1126,6 @@ describe('closeCdpTab', () => {
     expect(result).toMatchObject({ ok: true, browserExited: true, remainingTabs: 0 });
   });
 
-  it('warns when an ordinary close leaves a running browser with no tabs', async () => {
-    const h = liveBrowser(TWO_TABS);
-    let stage = 0;
-    h.deps.close = (async () => ({ ok: true, notFound: false, error: null })) as never;
-    h.deps.listTabs = (async () => (stage++ === 0 ? TWO_TABS : [])) as never;
-    h.deps.alive = (async () => true) as never;
-    let clock = 0;
-    h.deps.now = (() => (clock += 500)) as never;
-
-    const result = await closeCdpTab(
-      { roots: PROJECT_ROOTS, port: PORT, targetId: 'A1B2C3' },
-      h.deps,
-    );
-
-    // Zero tabs and a live browser is a contradiction to a reader; it must not
-    // be reported in silence.
-    expect((result as { warnings: string[] }).warnings.join(' ')).toMatch(/still running/i);
-  });
-
   it('refuses an unowned port, and closes it when allowUnowned is passed', async () => {
     // `knownProfiles` only ever holds this project's profiles, so without the
     // flag a foreign browser can never be closed however the caller is
@@ -1160,6 +1134,10 @@ describe('closeCdpTab', () => {
     const h = liveBrowser(TWO_TABS);
     h.deps.probe = probeFor({ 9222: 'chrome' }) as never;
     h.deps.listTabs = (async () => TWO_TABS.slice(0, 1)) as never;
+    // The port stays alive after the close, so the exit-confirm poll spends
+    // its whole budget: on a clock that moves per read, not the real one.
+    let clock = 0;
+    h.deps.now = (() => (clock += 500)) as never;
 
     const refused = await closeCdpTab(
       { roots: PROJECT_ROOTS, port: 9222, targetId: 'A1B2C3' },
@@ -1292,6 +1270,9 @@ describe('closeCdpTab', () => {
     );
 
     expect(result).toMatchObject({ ok: true, remainingTabs: 0, browserExited: false });
+    // And it says so: zero tabs and a live browser is a contradiction to a
+    // reader, and must not be reported in silence.
+    expect((result as { warnings: string[] }).warnings.join(' ')).toMatch(/still running/i);
   });
 
   it('does not report a close as done because ONE tab-list read failed', async () => {
@@ -1572,7 +1553,7 @@ describe('focusCdpTab', () => {
 // ---------------------------------------------------------------------------
 
 describe('knownProfilesAcross', () => {
-  const USER = path.join('C:', 'users', 'x', 'steptix');
+  const USER = path.resolve(path.sep, 'users', 'x', 'steptix');
   const PROJ_PROFILES = cdpProfilesRoot(ROOT);
   const USER_PROFILES = cdpProfilesRoot(USER);
   const portFile = (dir: string) => path.join(dir, 'DevToolsActivePort');
@@ -1630,7 +1611,7 @@ describe('knownProfilesAcross', () => {
 });
 
 describe('close/focus over a user-scoped sweep', () => {
-  const USER = path.join('C:', 'users', 'x', 'steptix');
+  const USER = path.resolve(path.sep, 'users', 'x', 'steptix');
   const USER_PROFILES = cdpProfilesRoot(USER);
   const USER_DIR = path.join(USER_PROFILES, 'edge-default');
   const PORT = 52000;

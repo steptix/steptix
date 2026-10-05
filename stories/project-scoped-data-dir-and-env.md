@@ -237,8 +237,8 @@ parsed maps; `resolveEnvBundle` composes `{ ...processEnvBaseline, ...baseDotenv
 is the right long-term shape and the root-cause fix behind 011 — and the biggest
 single piece of work here, because **every consumer that reads a project-scoped
 value straight off `process.env` must instead read the per-project map** (see
-the audit table — `auth-resolver`, `spec-loader`, `parameters`, `resolveSecrets`
-are all in this set **[R]**).
+the audit table — `auth-resolver` (since removed, see below), `spec-loader`,
+`parameters`, `resolveSecrets` are all in this set **[R]**).
 
 **The `withEnvDefaults` split.** `loadConfig` runs `withEnvDefaults`
 ([config/loader.ts:70-101](../src/config/loader.ts#L70-L101)), folding env vars
@@ -403,7 +403,8 @@ pure-load-everywhere, to fix the user's scenario + the contamination without a
   data.** `ai`/`browser`/`execution` config stay server-global (the browser is
   launched once per session; relaunching per project is out of scope).
 
-**Deferred (documented gap):** the deep API consumers — `api/auth-resolver.ts`,
+**Deferred (documented gap):** the deep API consumers — `api/auth-resolver.ts`
+(later deleted: it was never called, so it never read anything),
 `api/spec-loader.ts`, `parser/parameters.ts` `$VAR` — still read `process.env`.
 On the CLI that's correct (the global is populated). On the **shared server**
 they see only the server baseline, not a project's `.env.<name>`, so API-testing
@@ -436,7 +437,7 @@ Every project-scoped `process.env` read, classified for the pure-load refactor.
 | Site | Read | Classification |
 |---|---|---|
 | [data-loader.ts:106](../src/env/data-loader.ts#L106) | `$VAR` secret leaves in data files (`resolveSecrets`) | **Move to project env map** — top contamination risk |
-| **[R]** [api/auth-resolver.ts:124,147](../src/api/auth-resolver.ts#L124) | `$API_KEY`/`$TOKEN`/`$SECRET` for the **API-under-test** auth headers | **Move** — also breaks (loses bearer token) under pure-load if not migrated |
+| **[R]** `api/auth-resolver.ts:124,147` | `$API_KEY`/`$TOKEN`/`$SECRET` for the **API-under-test** auth headers | **Move** — also breaks (loses bearer token) under pure-load if not migrated. *Later deleted: nothing ever called the module, so it never read these.* |
 | **[R]** [api/spec-loader.ts:202](../src/api/spec-loader.ts#L202) | `$ENV_VAR` in OpenAPI spec URLs | **Move** |
 | **[R]** [parser/parameters.ts:55](../src/parser/parameters.ts#L55) | `## Parameters` `$VAR` resolution | **Move** (CLI/data-driven path); server resolves params client-side, but the runner can still hit this |
 | [resolve-bundle.ts:46](../src/env/resolve-bundle.ts#L46) | snapshot of the (mutated) global into bundle `env` | **Move** — compose from baseline + `.env` + `.env.<env>` |

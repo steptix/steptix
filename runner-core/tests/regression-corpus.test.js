@@ -1,34 +1,40 @@
 /**
- * Goal 4: a test file that defines no sections must classify **exactly** as
- * it did before sections existed.
+ * Goal 4: a test file that uses none of the new grammar — no sections, no
+ * ignored region — must classify **exactly** as it did before sections
+ * existed.
  *
  * The guard is a reference implementation of the pre-change classifier,
  * checked in below, run against every real Markdown test file in the repo.
  *
  * ## What this proves, and what it does not
  *
- * Be honest about the shape of this suite: **for the commit that introduced
- * it, the per-file rows cannot fail.** The filter predicate
- * (`extractSections(text).length === 0`) is logically equivalent to the
- * property being asserted. `section-heading` is the only new classification;
- * `extractSections` emits an entry for every one of them; and `section-step`
- * is unreachable without a preceding `section-heading`. So "defines no
- * sections" implies every new branch of `classifyLines` falls through to the
- * legacy one, and the corpus partitions itself into "provably identical" and
- * "excluded". An adversarial review confirmed this empirically over 400k
- * generated documents: zero sectionless documents differ, zero sectioned ones
- * agree.
+ * Be honest about the shape of this suite: **the per-file rows cannot fail
+ * for the classifier as it stands.** The new grammar has three kinds the
+ * legacy classifier never emits: `section-heading`; `section-step`, which is
+ * unreachable without a preceding `section-heading`; and `inert-step`, a
+ * numbered item under a depth->=4 heading inside `## Steps` (contract §5 rule
+ * 4a, added after this suite was written) that the legacy classifier called a
+ * `step`. The corpus filter excludes exactly the documents that can produce
+ * one — any that defines a section (`extractSections` emits an entry for
+ * every `section-heading`) or carries an inert item — so the filter predicate
+ * is logically equivalent to the property being asserted, and the corpus
+ * partitions itself into "provably identical" and "excluded". An adversarial
+ * review confirmed the section half empirically over 400k generated
+ * documents: zero sectionless documents differ, zero sectioned ones agree.
  *
- * That equivalence is a *proof* of the Goal-4 property for this commit, not
- * evidence for it — so do not read 55 green rows as validation that the
- * classification change is correct. The frozen tables in
- * `fixtures/sections/classification.json` are what does that job.
+ * That equivalence is a *proof* of the Goal-4 property, not evidence for it —
+ * so do not read the green rows as validation that the classification change
+ * is correct. The frozen tables in `fixtures/sections/classification.json`
+ * are what does that job.
  *
  * What this suite is genuinely for is **future** edits. The equivalence holds
- * only while the new classifier's extra branches are exactly the section
- * ones; any later change to span handling, frontmatter, heading depth or step
+ * only while the new classifier's extra branches are exactly those three
+ * kinds; any later change to span handling, frontmatter, heading depth or step
  * recognition breaks it and surfaces here as a concrete file and line, on
- * real documents rather than on synthetic ones.
+ * real documents rather than on synthetic ones. A change that adds a fourth
+ * kind on purpose has to widen the filter below, the way `inert-step` did —
+ * otherwise the first corpus document that uses it fails every row for an
+ * intended behaviour.
  *
  * The corpus is filtered by **property**, never by path —
  * `fixtures/tests/sections-demo.md` already lives in a directory this walks,
@@ -39,7 +45,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import {
@@ -47,7 +53,7 @@ import {
   extractSections,
   extractSteps,
   isTestFile,
-  resolveRunLines,
+  resolveRunSelection,
 } from '../dist/step-lines.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -62,30 +68,53 @@ const CORPUS_ROOTS = [
  * `fixtures/tools/node_modules` is a real installed tree — walking it costs
  * minutes and sweeps in third-party READMEs that happen to carry a `## Steps`
  * heading. Skip it and the other generated directories.
+ *
+ * Dot-directories are skipped too: `.steptix/` (CDP browser profiles —
+ * thousands of files in a checkout that has run a browser), the
+ * `.steptix-codebehind-cache` and `.steptix-tool-cache` dirs. None holds a
+ * test document, and a live run or an open browser creates and deletes files
+ * in them while this walks.
  */
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git']);
 
 function walk(dir, out = []) {
   let entries;
   try {
-    entries = readdirSync(dir);
+    // Dirents, so there is no per-entry stat for a deleted file to throw on.
+    entries = readdirSync(dir, { withFileTypes: true });
   } catch {
     return out;
   }
   for (const entry of entries) {
-    if (SKIP_DIRS.has(entry)) continue;
-    const full = path.join(dir, entry);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (entry.endsWith('.md')) out.push(full);
+    if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+      walk(path.join(dir, entry.name), out);
+    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      out.push(path.join(dir, entry.name));
+    }
   }
   return out;
 }
 
-const corpus = CORPUS_ROOTS.flatMap((root) => walk(path.join(REPO, root)))
-  .map((file) => ({ file: path.relative(REPO, file), text: readFileSync(file, 'utf-8') }))
-  .filter((entry) => isTestFile(entry.text));
+/** The file's text, or null when it went away between the walk and the read. */
+function readIfPresent(file) {
+  try {
+    return readFileSync(file, 'utf-8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+}
 
-const sectionless = corpus.filter((entry) => extractSections(entry.text).length === 0);
+const corpus = CORPUS_ROOTS.flatMap((root) => walk(path.join(REPO, root)))
+  .map((file) => ({ file: path.relative(REPO, file), text: readIfPresent(file) }))
+  .filter((entry) => entry.text !== null && isTestFile(entry.text));
+
+/** Uses grammar the legacy classifier predates: a section, or an ignored region. */
+const usesNewGrammar = (text) =>
+  extractSections(text).length > 0 || classifyLines(text).some((l) => l.kind === 'inert-step');
+
+const untouched = corpus.filter((entry) => !usesNewGrammar(entry.text));
 const sectioned = corpus.filter((entry) => extractSections(entry.text).length > 0);
 
 // ---------------------------------------------------------------------------
@@ -171,9 +200,9 @@ function legacyFindStepsSection(lines, from) {
 
 // ---------------------------------------------------------------------------
 
-test('the corpus is real: enough sectionless files, and at least one sectioned', () => {
+test('the corpus is real: enough untouched files, and at least one sectioned', () => {
   // A silently-empty corpus would make every assertion below vacuous.
-  assert.ok(sectionless.length >= 20, `only ${sectionless.length} sectionless files found`);
+  assert.ok(untouched.length >= 20, `only ${untouched.length} files the new grammar leaves untouched`);
   // And the filter must actually be excluding something, or it is untested.
   assert.ok(
     sectioned.length >= 1,
@@ -181,23 +210,18 @@ test('the corpus is real: enough sectionless files, and at least one sectioned',
   );
 });
 
-for (const { file, text } of sectionless) {
+for (const { file, text } of untouched) {
   test(`unchanged classification: ${file}`, () => {
     assert.deepEqual(classifyLines(text), legacyClassifyLines(text));
   });
 
   test(`unchanged steps: ${file}`, () => {
     assert.deepEqual(extractSteps(text), legacyExtractSteps(text));
-    assert.deepEqual(
-      resolveRunLines(text, []),
-      legacyExtractSteps(text).map((s) => s.line),
-    );
-  });
-
-  test(`no section kinds appear: ${file}`, () => {
-    const kinds = new Set(classifyLines(text).map((l) => l.kind));
-    assert.equal(kinds.has('section-heading'), false);
-    assert.equal(kinds.has('section-step'), false);
+    // Run All: what an empty selection resolves to.
+    assert.deepEqual(resolveRunSelection(text, []), {
+      scope: 'main-flow',
+      lines: legacyExtractSteps(text).map((s) => s.line),
+    });
   });
 }
 
@@ -208,4 +232,10 @@ test('the reference classifier really can disagree', () => {
   assert.notDeepEqual(classifyLines(sectionedText), legacyClassifyLines(sectionedText));
   assert.deepEqual(legacyExtractSteps(sectionedText).length, 2);
   assert.deepEqual(extractSteps(sectionedText).length, 1);
+  // A sectionless document can disagree too — through an ignored region —
+  // which is why the corpus filter has a second half.
+  const inertText = ['## Steps', '1. One', '', '#### Notes', '2. Inert'].join('\n');
+  assert.equal(extractSections(inertText).length, 0);
+  assert.notDeepEqual(classifyLines(inertText), legacyClassifyLines(inertText));
+  assert.equal(usesNewGrammar(inertText), true);
 });

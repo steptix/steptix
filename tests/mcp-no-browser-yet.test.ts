@@ -12,11 +12,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { NO_BROWSER_LAUNCHED_MESSAGE } from '../src/browser/manager.js';
-import {
-  NO_BROWSER_LAUNCHED_WIRE_MESSAGE,
-  pageContentNoBrowserYet,
-  pageContentSessionGone,
-} from '../src/mcp/errors.js';
+import { NO_BROWSER_LAUNCHED_WIRE_MESSAGE, pageContentNoBrowserYet } from '../src/mcp/errors.js';
 
 describe('the wire copy of the no-browser sentence', () => {
   it('is the sentence the tracker actually throws', () => {
@@ -46,7 +42,7 @@ describe('pageContentNoBrowserYet', () => {
     expect(err.message).toContain('[use browser]');
   });
 
-  it('is a different answer from the session-gone one', () => {
-    expect(err.message).not.toBe(pageContentSessionGone('s-1').content[0]!.text);
-  });
+  // That `get_page_content` actually ROUTES a 409 carrying the sentence to this
+  // message — and a navigation-lost 409 away from it — is driven through the
+  // tool in mcp-seam.test.ts ("answers the no-browser-yet 409 …").
 });

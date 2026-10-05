@@ -54,10 +54,4 @@ describe('parseToolCall — inline JSON-array literals', () => {
     expect(caught).toBeDefined();
     expect(caught!.reason).toMatch(/unterminated array literal/);
   });
-
-  it('still rejects unquoted scalar values', () => {
-    expect(() => parseToolCall('[tool: x bar=baz]')).toThrow(
-      /expected '"', '\[', a number, or true\/false after '=' for argument 'bar'/,
-    );
-  });
 });

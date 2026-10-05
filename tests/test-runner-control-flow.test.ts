@@ -860,7 +860,8 @@ describe('For each binds the list', () => {
   it('does not warn about the item a For each header is there to bind', async () => {
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
     try {
-      const inst = await instance(FOR_EACH, { accounts: '["Everyday"]' }, 'for-each-quiet.md');
+      // `accounts` is left unbound on purpose — it is the control below.
+      const inst = await instance(FOR_EACH, {}, 'for-each-quiet.md');
       await runTest(
         // No `expansion`, so no controls: every line runs as an ordinary step.
         { ...inst, test: { ...inst.test, expansion: undefined } },
@@ -869,9 +870,12 @@ describe('For each binds the list', () => {
       );
       const warnings = warn.mock.calls.map((c) => String(c[0]));
       expect(warnings).not.toContain('Unresolved placeholder: {{account}}');
-      // The control: the LIST is a genuine reference, and if it were missing
-      // it would still be warned about. Only the item is exempt.
-      expect(warnings).not.toContain('Unresolved placeholder: {{accounts}}');
+      // The control: the LIST is a genuine reference, so the same header IS
+      // warned about for it. Only the header names `{{accounts}}`, so this
+      // proves the line went through `interpolate` with the spy watching — a
+      // loop that stopped interpolating it would pass the assertion above too.
+      // Only the item is exempt.
+      expect(warnings).toContain('Unresolved placeholder: {{accounts}}');
     } finally {
       warn.mockRestore();
     }
@@ -1601,25 +1605,8 @@ describe('a return meets a loop, a chain and a guard', () => {
     expect(report.status).toBe('passed');
   });
 
-  it('a bare Return in the main flow still ends the whole run', async () => {
-    const report = await runTest(
-      await instance(
-        [
-          '# Plain return',
-          '',
-          '## Steps',
-          '1. Open the statements page',
-          '2. Return',
-          '3. Verify the last page is shown',
-          '',
-        ].join('\n'),
-      ),
-      makeConfig(),
-    );
-    expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual(['Open the statements page']);
-    expect(rows(report.steps).at(-1)).toEqual(['Verify the last page is shown', 'skipped']);
-    expect(report.status).toBe('passed');
-  });
+  // A bare Return with no guard after it is flow-control-runner.test.ts's
+  // "costs no model call at all and still ends the flow".
 });
 
 describe('a return written as a one-line loop body', () => {

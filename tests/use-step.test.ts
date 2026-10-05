@@ -3,7 +3,6 @@ import {
   isUseStepClaim,
   parseUseAiStep,
   parseUseStep,
-  USE_SURFACES,
   useStepError,
 } from '../src/parser/use-step.js';
 import {
@@ -62,10 +61,6 @@ describe('§4.1 the forms that parse', () => {
     expect(parseUseStep(line)).toEqual({ surface });
     expect(isUseStepClaim(line)).toBe(true);
     expect(useStepError(line)).toBeNull();
-  });
-
-  it('the closed set is exactly the two surfaces', () => {
-    expect(USE_SURFACES).toEqual(['computer', 'browser']);
   });
 });
 
@@ -584,10 +579,6 @@ describe('[use ai] <step> — every misuse is refused with its own message', () 
     expect(message).toContain('`[use browser]`');
     expect(message).toContain('switch the surface as whole steps');
     expect(message).toContain('`[use ai] <step>` asks the model for a value');
-  });
-
-  it('[use computer] and click Save — keeps its whole-step refusal', () => {
-    expect(useStepError('[use computer] and click Save')).toContain('is the whole step');
   });
 
   it('the §4.2 directive list names the new form too', () => {

@@ -19,7 +19,10 @@
  * Deliberately NOT mirrored: `controlLineError`. Diagnostics for a claimed-
  * but-incomplete line are the CLI parser's job; the client's job is to know
  * what resolves, and an unparseable control line resolves to nothing, which
- * is what `parseControlLine` returning null already says.
+ * is what `parseControlLine` returning null already says. The claim test the
+ * original exports beside it (`claimedControlForm` / `isControlLineClaim`) is
+ * left out for the same reason: no client asks whether a line claimed a form,
+ * only whether it parsed.
  */
 
 export type ControlLine =
@@ -152,36 +155,6 @@ const CAP_RE = /,\s*up\s+to\s+(\d+)\s+times\s*$/i;
 /** The complete `For each` shape. */
 const FOREACH_RE =
   /^for\s+each\s+\{\{([A-Za-z_]\w*)\}\}\s+in\s+\{\{([A-Za-z_]\w*)\}\}\s*,\s*(\S.*)$/i;
-
-/** Which of the six forms this line claimed, or null. */
-export function claimedControlForm(instruction: string): ControlKind | null {
-  const s = normalise(instruction);
-
-  // Rung 0: flow control wins the overlap — see `isFlowControlLine`.
-  if (isFlowControlLine(s)) return null;
-
-  if (ELSE_IF_HEAD_RE.test(s)) return 'elseif';
-  if (ELSE_HEAD_RE.test(s)) return 'else';
-
-  const ifHead = IF_HEAD_RE.exec(s);
-  if (ifHead) return THEN_SPLIT_RE.test(s.slice(ifHead[0].length)) ? 'if' : null;
-
-  if (WHILE_HEAD_RE.test(s)) return 'while';
-
-  const repeatHead = REPEAT_HEAD_RE.exec(s);
-  if (repeatHead) {
-    const rest = s.slice(repeatHead[0].length).replace(CAP_RE, '');
-    return UNTIL_SPLIT_RE.test(rest) ? 'repeat' : null;
-  }
-
-  if (FOREACH_CLAIM_RE.test(s)) return 'foreach';
-  return null;
-}
-
-/** True when the line opens one of the six forms, complete or not. */
-export function isControlLineClaim(instruction: string): boolean {
-  return claimedControlForm(instruction) !== null;
-}
 
 /** The parsed control line, or null when the line is not one (including a
  *  line that claimed a form and failed to complete it). */

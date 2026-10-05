@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach, afterAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { Page, BrowserContext, Browser } from 'playwright';
 import type { AiClient } from '../src/ai/client.js';
 import type { ChatMessage } from '../src/ai/types.js';
@@ -19,6 +18,7 @@ import {
 import type { CodeBehindContext, StepCodeEntry } from '../src/codebehind/types.js';
 import { executeStep } from '../src/runner/step-executor.js';
 import { logger } from '../src/utils/logger.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * The `condition` entry (stories/codebehind-loops-and-conditions.md,
@@ -31,8 +31,13 @@ import { logger } from '../src/utils/logger.js';
  * tests/guard-condition-codebehind.test.ts.
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-conditions');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
+
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('codebehind-conditions');
+});
 
 const noPage = {} as unknown as Page;
 const noContext = {} as unknown as BrowserContext;
@@ -52,7 +57,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await removeScratchBase(tmpBase);
 });
 
 async function write(rel: string, contents: string): Promise<string> {
@@ -318,24 +323,9 @@ describe('a condition entry bound to an ordinary step', () => {
       .filter((m) => m.includes('a condition entry is bound to a step that is not a condition line — the step runs under AI'));
     expect(said).toHaveLength(1);
   });
-
-  it('leaves a run entry on an ordinary step exactly as before', async () => {
-    const out = await runCodeBehindEntry({
-      binding: {
-        file: path.join(dir, 'x.steps.ts'),
-        source: 'Open the statements page',
-        occurrence: 0,
-        scope: { renames: {}, inputs: {} },
-        entry: { source: 'Open the statements page', run: () => {} },
-      },
-      page: noPage,
-      context: noContext,
-      browser: noBrowser,
-      resolvedParameters: {},
-      label: 't',
-    });
-    expect(out.status).toBe('passed');
-  });
+  // Its counterpart — a RUN entry on an ordinary step still runs as code, with
+  // no model call — is codebehind-integration.test.ts "runs a fully covered
+  // test with zero AI calls", through executeStep as here.
 });
 
 // ─── getVar through a renamed root ───────────────────────────────────────────

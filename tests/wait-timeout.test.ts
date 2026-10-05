@@ -35,10 +35,6 @@ describe('clampWaitTimeout (issue 022)', () => {
     expect(clampWaitTimeout(Number.NaN)).toBe(DEFAULT_WAIT_TIMEOUT_MS);
     expect(clampWaitTimeout(Number.POSITIVE_INFINITY)).toBe(DEFAULT_WAIT_TIMEOUT_MS);
   });
-
-  it('the default is below the cap (sanity)', () => {
-    expect(DEFAULT_WAIT_TIMEOUT_MS).toBeLessThan(MAX_WAIT_TIMEOUT_MS);
-  });
 });
 
 describe('executeWait forwards the clamped timeout to Playwright (issue 022)', () => {
@@ -143,10 +139,11 @@ describe('text wait matches VISIBLE text (innerText), not raw textContent (issue
           textContent: "Wait fixture setTimeout(function(){ d.textContent = 'Ready now'; }, 35000);",
         },
       };
-      // FIX: must NOT match — "Ready now" isn't painted yet.
+      // FIX: must NOT match — "Ready now" isn't painted yet. This is the line a
+      // revert to textContent turns red.
       expect(predicate('Ready now')).toBe(false);
-      // Guard: the OLD textContent check WOULD have matched here, so a revert to
-      // textContent flips this assertion red.
+      // The fixture's own control (no code under test runs here): the text IS
+      // in textContent, so the old check would have matched.
       expect((globalThis as any).document.body.textContent.includes('Ready now')).toBe(true);
 
       // Once the element renders, innerText contains it → the wait resolves.

@@ -103,6 +103,13 @@ export type ComputerStepOptions = StepExecutorOptions & {
     /** §5.5 — the step's wait budget. The runners leave it out and get
      *  {@link COMPUTER_WAIT_BUDGET_MS}; a test passes a small one. */
     waitBudgetMs?: number | undefined;
+    /** The clock the wait budget is charged against, and the sleep its waits
+     *  use. The runners leave both out and get `Date.now` and a real sleep that
+     *  gives up on Stop; a test passes a virtual clock, so a budget of a few
+     *  hundred milliseconds is spent the same on a loaded runner as on an idle
+     *  one. */
+    now?: (() => number) | undefined;
+    sleep?: ((ms: number) => Promise<void>) | undefined;
   };
 };
 
@@ -1454,6 +1461,8 @@ async function computerTurns(
 ): Promise<StepResult> {
   const { config, aiClient, contextContent, testName, baseUrl, conversationHistory } = opts;
   const computer = opts.computer;
+  const now = computer.now ?? Date.now;
+  const sleep = computer.sleep ?? (opts.signal ? interruptibleSleep(opts.signal) : undefined);
   const maxTurns = config.execution.maxTurns;
   // The step as the page model reads it (`executeStepAttempt`): the `otherwise
   // …` tail OFF, because applying it is the framework's job and a model that
@@ -1730,13 +1739,13 @@ async function computerTurns(
     for (const action of run) {
       reached++;
       throwIfAborted();
-      const subStartTime = Date.now();
+      const subStartTime = now();
       const aiReasoningVal = config.reports.includeAiReasoning ? parsed.reasoning : undefined;
       const baseSub = (): SubActionResult => ({
         index: ++globalSubActionIndex,
         action: reportAction(action),
         ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
-        durationMs: Date.now() - subStartTime,
+        durationMs: now() - subStartTime,
         timestamp: new Date().toISOString(),
       });
 
@@ -1938,10 +1947,12 @@ async function computerTurns(
         view,
         settleMs: computer.settleMs,
         maxImageWidth: computer.maxImageWidth,
-        ...(opts.signal && { signal: opts.signal, sleep: interruptibleSleep(opts.signal) }),
+        ...(opts.signal && { signal: opts.signal }),
+        ...(sleep && { sleep }),
+        ...(computer.now && { now: computer.now }),
       });
       if (action.action === 'wait' || action.action === 'wait_window') {
-        waits.spentMs += Date.now() - subStartTime;
+        waits.spentMs += now() - subStartTime;
       }
       // A Stop during the action — a wait_window cut short only says that it
       // stopped — ends the step here, before anything more is captured.
@@ -1978,7 +1989,7 @@ async function computerTurns(
       // image does not carry. The record of it goes to the model on every
       // remaining turn of this step.
       if (outcome.performed) {
-        performed.push(performedLine(currentTurn, toRun, outcome, Date.now() - subStartTime));
+        performed.push(performedLine(currentTurn, toRun, outcome, now() - subStartTime));
       }
 
       if (action.action === 'zoom') {

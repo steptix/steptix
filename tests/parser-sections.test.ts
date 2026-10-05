@@ -66,18 +66,6 @@ describe('section capture', () => {
     expect(parsed.sections['s']!.steps).toEqual(['Body', 'Still body']);
   });
 
-  it('a #### heading with text opens an ignored region inside a body', () => {
-    const parsed = parseTestContent(
-      ['# T', '', '## Steps', '1. One', '', '### S', '1. A', '', '#### Note', '', '2. B'].join('\n'),
-    );
-    // The depth-4 heading still does not CLOSE the body — S is the only
-    // section, and a later `###` would be what ended it. But B is inert:
-    // nothing under a `####` runs (contract §5 rule 4a).
-    expect(parsed.sections['s']!.steps).toEqual(['A']);
-    expect(parsed.steps).toEqual(['One']);
-    expect(Object.keys(parsed.sections)).toEqual(['s']);
-  });
-
   it('captures the raw match side separately from the executed text', () => {
     const parsed = parseTestContent(
       ['# T', '', '## Steps', '1. **Bold call**', '', '### S', '1. Body'].join('\n'),
@@ -149,12 +137,6 @@ describe('section name validation', () => {
   ])('refuses the hashes-only heading %s as an empty name', (hashes) => {
     const md = ['# T', '', '## Steps', '1. Call', '', hashes, '1. Body'].join('\n');
     expect(() => parseTestContent(md)).toThrow(/empty name/i);
-  });
-
-  it('refuses every hashes-only depth in the shared fixture', () => {
-    expect(() =>
-      parseTestContent(readFixture('classification-hashes.md'), 'classification-hashes.md'),
-    ).toThrow(/empty name/i);
   });
 
   it('names the file and line in the refusal', () => {

@@ -1,340 +1,120 @@
 /**
- * Tests for openPage support:
- * - "openPage" action-type parsing (canonical + aliases)
- * - End-to-end: a real Playwright context spawns a new page via the same
- *   path the openPage handler uses, and pageTracker auto-registers it.
+ * The label an `openPage` step's `as` gives its tab: `PageTracker.relabelPage`,
+ * and switching and closing by that label.
+ *
+ * The openPage handler itself (step-executor) is driven through `executeStep`
+ * in multi-turn.test.ts, from the model's reply on: it opens the tab, raises
+ * it in a headed run, and names it by `as` so a later switch finds it by that
+ * label alone. What is left to pin here is the tracker's bookkeeping, which
+ * keys on page identity, URL and title — so stand-in pages do, with no
+ * browser and no server. Switching by URL, title and auto-label, and closing,
+ * are popup.test.ts's; the `openPage` aliases are unknown-action-type.test.ts's.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { spawn, type ChildProcess } from 'node:child_process';
-import net from 'node:net';
-import path from 'node:path';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
-import { parseAIResponse } from '../src/ai/action-parser.js';
+import { describe, it, expect, vi } from 'vitest';
+import type { Page } from 'playwright';
 import { PageTracker } from '../src/browser/manager.js';
 
-// ─── Parser tests ──────────────────────────────────────────────────────────
-
-describe('parseAIResponse — openPage action', () => {
-  it('parses openPage action with url field', () => {
-    const raw = JSON.stringify({
-      actions: [
-        {
-          action: 'openPage',
-          url: 'https://docs.example.com',
-          description: 'Open documentation in a new tab',
-        },
-      ],
-      reasoning: 'Step asked to open docs in a new tab.',
-    });
-    const result = parseAIResponse(raw);
-    expect(result.actions).toHaveLength(1);
-    expect(result.actions[0]?.action).toBe('openPage');
-    expect(result.actions[0]?.url).toBe('https://docs.example.com');
-  });
-
-  it.each([
-    'open_page',
-    'openTab',
-    'open_tab',
-    'openWindow',
-    'open_window',
-    'newTab',
-    'new_tab',
-    'newWindow',
-    'new_window',
-  ])('normalises alias "%s" to canonical openPage', (alias) => {
-    const raw = JSON.stringify({
-      actions: [{ action: alias, url: 'https://example.com', description: 'open' }],
-      reasoning: 'alias should normalise',
-    });
-    const result = parseAIResponse(raw);
-    expect(result.actions[0]?.action).toBe('openPage');
-  });
-
-  it('parses openPage with an `as` label for deterministic switchPage targeting', () => {
-    const raw = JSON.stringify({
-      actions: [
-        {
-          action: 'openPage',
-          url: 'https://docs.example.com',
-          as: 'docs',
-          description: 'Open docs and label as "docs"',
-        },
-      ],
-      reasoning: 'Step asked us to remember this tab as docs.',
-    });
-    const result = parseAIResponse(raw);
-    expect(result.actions[0]?.as).toBe('docs');
-    expect(result.actions[0]?.url).toBe('https://docs.example.com');
-  });
-});
-
-// ─── End-to-end: spawn a new page, verify pageTracker registers it ─────────
-
-const repoRoot = path.resolve(__dirname, '..');
-const serverPath = path.join(repoRoot, 'fixtures', 'test-app', 'server.ts');
-
-let serverProc: ChildProcess;
-let browser: Browser;
-let context: BrowserContext;
-let mainPage: Page;
-let port: number;
-let baseUrl: string;
-
-async function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.unref();
-    srv.on('error', reject);
-    srv.listen(0, () => {
-      const addr = srv.address();
-      if (addr && typeof addr === 'object') {
-        const p = addr.port;
-        srv.close(() => resolve(p));
-      } else {
-        srv.close(() => reject(new Error('port allocation failed')));
-      }
-    });
-  });
+/** A stand-in page: a URL, a title, and close handling the tracker hooks. */
+function standIn(url: string, title = ''): Page {
+  const onClose: Array<() => void> = [];
+  let closed = false;
+  return {
+    url: vi.fn(() => url),
+    title: vi.fn(async () => title),
+    on: vi.fn((event: string, handler: () => void) => {
+      if (event === 'close') onClose.push(handler);
+    }),
+    isClosed: vi.fn(() => closed),
+    close: vi.fn(async () => {
+      closed = true;
+      for (const h of onClose) h();
+    }),
+  } as unknown as Page;
 }
 
-async function waitForHttp(url: string, timeoutMs = 15_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url);
-      if (res.status < 500) return;
-    } catch { /* not ready */ }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error(`Timed out waiting for ${url}`);
-}
+describe('PageTracker — the label `as` gives a tab', () => {
+  const main = (): Page => standIn('https://bank.test/', 'SecureBank');
 
-beforeAll(async () => {
-  port = await getFreePort();
-  baseUrl = `http://127.0.0.1:${port}`;
-  serverProc = spawn(process.execPath, ['--import', 'tsx', serverPath], {
-    cwd: repoRoot,
-    env: { ...process.env, PORT: String(port) },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  serverProc.stderr?.on('data', (b: Buffer) => {
-    process.stderr.write(`[test-app] ${b.toString()}`);
-  });
-  await waitForHttp(`${baseUrl}/api/csrf-token`);
-  browser = await chromium.launch({ headless: true });
-  context = await browser.newContext();
-  mainPage = await context.newPage();
-  await mainPage.goto(`${baseUrl}/`);
-}, 60_000);
+  it('replaces the auto-generated page:N: the tab answers to its new label and no longer to the old one', async () => {
+    const tracker = new PageTracker(main());
+    const docs = standIn('https://bank.test/help', 'Help');
+    expect(tracker.addPage(docs)).toBe('page:2');
 
-afterAll(async () => {
-  try { await browser?.close(); } catch { /* noop */ }
-  if (serverProc && !serverProc.killed) {
-    serverProc.kill('SIGTERM');
-    await new Promise((r) => setTimeout(r, 50));
-    if (!serverProc.killed) serverProc.kill('SIGKILL');
-  }
-}, 60_000);
+    tracker.relabelPage(docs, 'docs');
 
-describe('openPage execution path — real browser', () => {
-  it('spawns a new page via context.newPage() and pageTracker can switch to it', async () => {
-    const tracker = new PageTracker(mainPage);
-
-    // Mirror exactly what step-executor's openPage handler does:
-    // 1. context.newPage()  2. goto(url)  3. tracker.addPage  4. switchToAsync
-    const targetUrl = `${baseUrl}/dashboard.html`;
-    const newPage = await context.newPage();
-    await newPage.goto(targetUrl, { waitUntil: 'domcontentloaded' });
-    tracker.addPage(newPage);
-    const switched = await tracker.switchToAsync(targetUrl);
-
-    expect(switched).not.toBeNull();
-    expect(switched?.url()).toContain('/dashboard.html');
-    expect(tracker.getActive().url()).toContain('/dashboard.html');
-
-    // Switching back to "main" works.
-    const back = await tracker.switchToAsync('main');
-    expect(back).not.toBeNull();
-    expect(back?.url()).toBe(mainPage.url());
-
-    await newPage.close();
+    expect(await tracker.switchToAsync('docs')).toBe(docs);
+    expect(await tracker.switchToAsync('page:2')).toBeNull();
   });
 
-  it('opening multiple pages: each registers and is switchable independently', async () => {
-    const tracker = new PageTracker(mainPage);
-
-    // Use data: URLs so we don't depend on test-app pages that redirect when
-    // not logged in (delegates.html etc. bounce to /login if no session).
-    const aUrl = 'data:text/html,<title>Alpha</title><h1>alpha</h1>';
-    const bUrl = 'data:text/html,<title>Beta</title><h1>beta</h1>';
-
-    const a = await context.newPage();
-    await a.goto(aUrl, { waitUntil: 'domcontentloaded' });
-    tracker.addPage(a);
-
-    const b = await context.newPage();
-    await b.goto(bUrl, { waitUntil: 'domcontentloaded' });
-    tracker.addPage(b);
-
-    // Switch by title substring (the tracker falls back to title match when
-    // label and URL don't match).
-    const sa = await tracker.switchToAsync('Alpha');
-    expect(sa?.url()).toContain('alpha');
-    const sb = await tracker.switchToAsync('Beta');
-    expect(sb?.url()).toContain('beta');
-
-    await a.close();
-    await b.close();
-  });
-
-  it('relabels a tracked page when the author supplies `as`', async () => {
-    const tracker = new PageTracker(mainPage);
-
-    const newPage = await context.newPage();
-    await newPage.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' });
-    tracker.addPage(newPage);
-
-    // Custom label replaces the auto-generated `page:N` form.
-    tracker.relabelPage(newPage, 'docs');
-
-    const switched = await tracker.switchToAsync('docs');
-    expect(switched).not.toBeNull();
-    expect(switched).toBe(newPage);
-    // Old auto-label no longer matches.
-    const noMatch = await tracker.switchToAsync('page:2');
-    expect(noMatch).toBeNull();
-
-    await newPage.close();
-  });
-
-  it('relabelPage rejects reserved name "main"', async () => {
-    const tracker = new PageTracker(mainPage);
-    const p = await context.newPage();
-    await p.goto(`${baseUrl}/`);
+  it('rejects the reserved name "main"', () => {
+    const tracker = new PageTracker(main());
+    const p = standIn('https://bank.test/a');
     tracker.addPage(p);
     expect(() => tracker.relabelPage(p, 'main')).toThrow(/reserved/);
-    await p.close();
   });
 
-  it('relabelPage rejects the auto-label format `page:N`', async () => {
-    const tracker = new PageTracker(mainPage);
-    const p = await context.newPage();
-    await p.goto(`${baseUrl}/`);
+  it('rejects the auto-label format page:N', () => {
+    const tracker = new PageTracker(main());
+    const p = standIn('https://bank.test/a');
     tracker.addPage(p);
     expect(() => tracker.relabelPage(p, 'page:7')).toThrow(/auto-generated/);
-    await p.close();
   });
 
-  it('relabelPage rejects illegal characters', async () => {
-    const tracker = new PageTracker(mainPage);
-    const p = await context.newPage();
-    await p.goto(`${baseUrl}/`);
+  it('rejects illegal characters and a leading digit', () => {
+    const tracker = new PageTracker(main());
+    const p = standIn('https://bank.test/a');
     tracker.addPage(p);
     expect(() => tracker.relabelPage(p, 'has spaces')).toThrow(/letters, digits/);
     expect(() => tracker.relabelPage(p, '1leading_digit')).toThrow(/start with a letter/);
-    await p.close();
   });
 
-  it('relabelPage rejects collision with another page', async () => {
-    const tracker = new PageTracker(mainPage);
-    const a = await context.newPage();
-    await a.goto(`${baseUrl}/`);
+  it('rejects a label another page already has', () => {
+    const tracker = new PageTracker(main());
+    const a = standIn('https://bank.test/a');
+    const b = standIn('https://bank.test/b');
     tracker.addPage(a);
-    tracker.relabelPage(a, 'first');
-
-    const b = await context.newPage();
-    await b.goto(`${baseUrl}/`);
     tracker.addPage(b);
+    tracker.relabelPage(a, 'first');
     expect(() => tracker.relabelPage(b, 'first')).toThrow(/already taken/);
-
-    await a.close();
-    await b.close();
   });
 
-  it('relabelPage on the same page with the same label is a no-op (allowed)', async () => {
-    const tracker = new PageTracker(mainPage);
-    const p = await context.newPage();
-    await p.goto(`${baseUrl}/`);
+  it('allows the same label again on the same page — the collision check leaves the page itself out', () => {
+    const tracker = new PageTracker(main());
+    const p = standIn('https://bank.test/a');
     tracker.addPage(p);
     tracker.relabelPage(p, 'inbox');
-    // Re-applying same label to same page is fine — collision check excludes
-    // the page being relabeled.
     expect(() => tracker.relabelPage(p, 'inbox')).not.toThrow();
-    await p.close();
   });
 
-  it('three named tabs: each switchable by exact label even with similar URLs/titles', async () => {
-    const tracker = new PageTracker(mainPage);
-    const dupTitleHtml = (label: string) =>
-      `data:text/html,<title>Document</title><h1>${label}</h1>`;
-
-    // All three tabs have the same title — without naming, switching would be
-    // ambiguous. With `as`, every switch is exact.
-    const a = await context.newPage();
-    await a.goto(dupTitleHtml('alpha'));
-    tracker.addPage(a);
-    tracker.relabelPage(a, 'alpha');
-
-    const b = await context.newPage();
-    await b.goto(dupTitleHtml('beta'));
-    tracker.addPage(b);
-    tracker.relabelPage(b, 'beta');
-
-    const c = await context.newPage();
-    await c.goto(dupTitleHtml('gamma'));
-    tracker.addPage(c);
-    tracker.relabelPage(c, 'gamma');
-
-    expect((await tracker.switchToAsync('alpha'))?.url()).toContain('alpha');
-    expect((await tracker.switchToAsync('beta'))?.url()).toContain('beta');
-    expect((await tracker.switchToAsync('gamma'))?.url()).toContain('gamma');
-    expect((await tracker.switchToAsync('main'))?.url()).toBe(mainPage.url());
-
-    await a.close();
-    await b.close();
-    await c.close();
+  it('three tabs with one title: each is reached by its exact label', async () => {
+    const tracker = new PageTracker(main());
+    // Same title everywhere, so by title a switch would be ambiguous; and no
+    // URL contains its label, so only the label itself can find each tab.
+    const tabs = ['alpha', 'beta', 'gamma'].map((label, i) => {
+      const p = standIn(`https://bank.test/doc/${i + 1}`, 'Document');
+      tracker.addPage(p);
+      tracker.relabelPage(p, label);
+      return [label, p] as const;
+    });
+    for (const [label, p] of tabs) expect(await tracker.switchToAsync(label), label).toBe(p);
+    expect((await tracker.switchToAsync('main'))?.url()).toBe('https://bank.test/');
   });
 
-  it('closing a named tab by its custom label works end-to-end', async () => {
-    const tracker = new PageTracker(mainPage);
-
-    // Open a named tab the same way the openPage handler does.
-    const named = await context.newPage();
-    await named.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' });
+  it('closes a tab by its label: gone by every name, and the active tab falls back to main', async () => {
+    const first = main();
+    const tracker = new PageTracker(first);
+    const named = standIn('https://bank.test/help', 'Help');
     tracker.addPage(named);
     tracker.relabelPage(named, 'docs');
-
-    // Sanity: switching by custom label resolves to the named page.
     expect(await tracker.switchToAsync('docs')).toBe(named);
 
-    // Close by the custom label — same path the AI emits when an author
-    // says "Close the docs tab" in a step.
     const result = await tracker.closePage('docs');
-    expect(result.closed).toBe(true);
-    // Active page falls back to main after a non-main close.
-    expect(result.activePage).toBe(mainPage);
-
-    // The tab is no longer reachable by any identifier (label, URL, title).
-    expect(await tracker.switchToAsync('docs')).toBeNull();
-    // Closing again is a no-op error (page already gone).
-    const second = await tracker.closePage('docs');
-    expect(second.closed).toBe(false);
-
+    expect(result).toMatchObject({ closed: true, activePage: first });
     expect(named.isClosed()).toBe(true);
-  });
-
-  it('opens an arbitrary URL (not from the test-app), proving openPage is not origin-restricted', async () => {
-    const tracker = new PageTracker(mainPage);
-    // Use a data: URL — guaranteed to be reachable, not on the test-app origin.
-    const targetUrl = 'data:text/html,<title>External</title><h1>External</h1>';
-    const newPage = await context.newPage();
-    await newPage.goto(targetUrl, { waitUntil: 'domcontentloaded' });
-    tracker.addPage(newPage);
-
-    const switched = await tracker.switchToAsync(newPage.url());
-    expect(switched).not.toBeNull();
-    expect(await switched!.title()).toBe('External');
-    await newPage.close();
+    // Not by its label, its URL or its title.
+    expect(await tracker.switchToAsync('docs')).toBeNull();
+    expect(await tracker.switchToAsync('/help')).toBeNull();
+    expect(await tracker.switchToAsync('Help')).toBeNull();
+    expect((await tracker.closePage('docs')).closed).toBe(false);
   });
 });

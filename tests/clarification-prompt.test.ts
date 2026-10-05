@@ -71,6 +71,7 @@ async function runWrapper(options: RunOptions): Promise<{
   outcome: Awaited<ReturnType<typeof promptUserWithReplEscape>>;
   writes: string[];
   adHocResults: StepResult[];
+  reader: InteractiveReader;
 }> {
   const writes: string[] = [];
   const adHocResults: StepResult[] = [];
@@ -86,7 +87,7 @@ async function runWrapper(options: RunOptions): Promise<{
     reader,
     write: (s) => writes.push(s),
   });
-  return { outcome, writes, adHocResults };
+  return { outcome, writes, adHocResults, reader };
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -197,9 +198,11 @@ describe('promptUserWithReplEscape — /repl escape hatch', () => {
 
   it('reader passed into the wrapper is forwarded to runInteractiveRepl so a single readline is shared', async () => {
     runInteractiveReplMock.mockResolvedValueOnce({ kind: 'exit' });
-    await runWrapper({ lines: ['/repl'] });
+    const { reader } = await runWrapper({ lines: ['/repl'] });
     const args = runInteractiveReplMock.mock.calls[0]![0] as Record<string, unknown>;
-    expect(args.reader).toBeDefined();
+    // The same object, not merely a reader: a wrapper that opened its own
+    // readline on stdin would still hand the REPL a defined one.
+    expect(args.reader).toBe(reader);
   });
 
   it('adHocResults accumulator is forwarded to runInteractiveRepl so REPL captures land in the caller array', async () => {

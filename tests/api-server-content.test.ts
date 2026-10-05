@@ -660,9 +660,6 @@ describe('routes that read a page, before any browser exists', () => {
     expect(body.error).toBe('no browser has been launched in this session');
   });
 
-  it('a session that does not exist is still 404, not 409', async () => {
-    const { status } = await api('GET', '/sessions/s-never-existed/content');
-
-    expect(status).toBe(404);
-  });
+  // A session that does not exist stays 404, not 409: "returns 404 for an
+  // unknown session" above.
 });

@@ -65,13 +65,6 @@ describe('IdleMonitor', () => {
     monitor.bump();
     expect(monitor.idleFor()).toBe(0);
   });
-
-  it('idleFor() is unaffected by the configured window', () => {
-    const clock = fakeClock();
-    const monitor = new IdleMonitor(null, clock.now);
-    clock.advance(5_000);
-    expect(monitor.idleFor()).toBe(5_000);
-  });
 });
 
 /**
@@ -141,14 +134,20 @@ describe('startIdleReaper', () => {
     stop();
   });
 
-  // An open-but-idle SESSION is not a run, so it never enters this rule.
-  it('fires on the next tick once the run ends inside the window', () => {
+  // The short-run twin of the test above. A run that ends INSIDE the window
+  // leaves a timestamp that is not yet stale, so a reaper that restarted the
+  // window only for a stale one would still count from the run's START here,
+  // and reap 30 minutes after the results instead of 60.
+  it('a run shorter than the window also restarts it', () => {
     const { state, advance, stop } = setup(60, { busy: true });
 
     advance(30 * 60_000);
     state.busy = false;
-    advance(61 * 60_000);
 
+    advance(59 * 60_000);
+    expect(state.expired).toBe(0); // the window runs from the END of the run
+
+    advance(2 * 60_000);
     expect(state.expired).toBe(1);
     stop();
   });

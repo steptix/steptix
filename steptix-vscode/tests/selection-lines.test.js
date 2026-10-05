@@ -32,7 +32,9 @@ test('a selection ending past column 0 keeps its end line', () => {
 
 test('a selection ending at column 0 of a line two below still drops only that line', () => {
   // Three triple-clicked lines (Shift+Down ×3) — the guard takes one line
-  // off the end, never the whole tail.
+  // off the end, never the whole tail. The same shape is a drag over table
+  // rows from the left margin: before the guard it ran the row the user
+  // stopped short of, which in a matrix is a whole extra browser and sign-in.
   assert.deepEqual(selectionLinesFrom([sel(2, 0, 5, 0)]), [3, 4, 5]);
 });
 
@@ -68,13 +70,6 @@ test('no selections at all is no lines', () => {
   assert.deepEqual(selectionLinesFrom([]), []);
 });
 
-test('the whole-line rule applies to a two-row drag over a table', () => {
-  // Dragging rows 2 and 3 of a table from the left margin ends at (row 4, 0).
-  // Before the guard this ran row 4 as well — the row the user stopped short
-  // of, which in a matrix is a whole extra browser and a whole extra sign-in.
-  assert.deepEqual(selectionLinesFrom([sel(5, 0, 7, 0)]), [6, 7]);
-});
-
 // ── The exception: narrowing a selection must not widen a run ──────────────
 //
 // `resolveRunSelection`'s last fallback is "every main-flow step at or below
@@ -90,6 +85,9 @@ test('a drag from prose that stops at the start of a step keeps that step', () =
   // resolver reads that as "step 6". Without the exception the selection is
   // `[5]`, which names no step, and the fallback runs step 6 and every step
   // after it.
+  // The contrast: with no runnable set (every existing caller) the plain
+  // rule holds and line 6 goes.
+  assert.deepEqual(selectionLinesFrom([sel(4, 0, 5, 0)]), [5]);
   const steps = [6, 7, 8];
   assert.deepEqual(selectionLinesFrom([sel(4, 0, 5, 0)], steps), [5, 6]);
 });
@@ -115,8 +113,4 @@ test('the dropped line has to be runnable itself — a blank is still dropped', 
   // guard drops 9 as always. Nothing kept it, and nothing should: the
   // resolver's fallback is the RIGHT answer for that gesture.
   assert.deepEqual(selectionLinesFrom([sel(2, 0, 8, 0)], [10, 11]), [3, 4, 5, 6, 7, 8]);
-});
-
-test('with no runnable set, the plain rule holds — every existing caller', () => {
-  assert.deepEqual(selectionLinesFrom([sel(4, 0, 5, 0)]), [5]);
 });

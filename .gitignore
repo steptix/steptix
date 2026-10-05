@@ -24,6 +24,9 @@ memory/
 # the project zip but stays out of git to avoid churn).
 .steptix/
 *.tsbuildinfo
+# Unit-test scratch dirs. In-repo because code-behind bundles resolve the
+# package from there; each run removes its own, but a killed run leaves one.
+tests/.tmp-*/
 .env
 .env.*
 !.env.example

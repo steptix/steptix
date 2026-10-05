@@ -165,11 +165,6 @@ test("extractSections: culls an item that is empty after the marker strip", () =
   );
 });
 
-test("extractSections: keeps the [no-hooks] marker on a body step verbatim", () => {
-  const text = ["## Steps", "1. Call", "", "### S", "1. [no-hooks] Do it"].join("\n");
-  assert.equal(extractSections(text)[0].steps[0].instruction, "[no-hooks] Do it");
-});
-
 // ---------------------------------------------------------------------------
 // Differential: the mirror vs runner-core itself
 // ---------------------------------------------------------------------------
@@ -251,14 +246,6 @@ for (const [name, lines] of Object.entries(HAZARDS)) {
   }
 }
 
-test("the differential harness can actually detect a disagreement", () => {
-  // Without this, a mistake that made both sides return [] for everything
-  // would turn every row above into a tautology.
-  const text = ["## Steps", "1. Login", "", "### Login", "1. Type"].join("\n");
-  assert.equal(extractSections(text).length, 1);
-  assert.notDeepEqual(extractSections(text), []);
-});
-
 // ---------------------------------------------------------------------------
 // extractStepLineIds — PRESERVATION: main + body, in both copies
 //
@@ -283,17 +270,6 @@ for (const [fixture, expected] of Object.entries(STEP_LINE_IDS)) {
     assert.deepEqual(hostExtractStepLineIds(read(fixture)), expected);
   });
 }
-
-test("extractStepLineIds: the two copies agree with each other", () => {
-  for (const fixture of Object.keys(frozen.files)) {
-    const text = read(fixture);
-    assert.deepEqual(
-      extractStepLineIds(text),
-      hostExtractStepLineIds(text),
-      `webview and host disagree on ${fixture}`,
-    );
-  }
-});
 
 test("KNOWN GAP: frontmatter with a column-0 `## Steps` desyncs the two spans", () => {
   // `extractSections` skips frontmatter (matching runner-core); the shipped

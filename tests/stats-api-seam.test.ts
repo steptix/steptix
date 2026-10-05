@@ -283,12 +283,18 @@ function hangUntilStopped(signal: AbortSignal | undefined): Promise<never> {
 /** Wait until the session's run has finished on the server — the client that
  *  closed the stream is not there to be told (`GET …/last-run`, issue 021). */
 async function waitForFinalizedRun(id: string): Promise<{ reportPath?: string }> {
-  for (let i = 0; i < 200; i++) {
+  // A ceiling, not a budget: this normally returns within a few polls. But the
+  // abort has to reach the hung call, the step fail, and the HTML report be
+  // written before the run finalizes, and on a loaded runner that can take
+  // seconds. Well inside the 30 s test timeout, so a run that never finalizes
+  // still fails by name rather than as a timeout.
+  const deadline = Date.now() + 20_000;
+  for (;;) {
     const last = await api('GET', `/sessions/${id}/last-run`);
     if (last.status === 200 && last.body?.finalized === true) return last.body;
+    if (Date.now() > deadline) throw new Error(`the run of ${id} never finalized`);
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(`the run of ${id} never finalized`);
 }
 
 async function lines(): Promise<StatsLine[]> {
@@ -384,7 +390,8 @@ describe('a Sessions API batch records its actions, steps and run', () => {
     expect(path.dirname(runLine!.report!)).toBe(path.join(root, 'reports'));
     expect(html).toContain(`id="${stepAnchor({ step: 1 })}"`);
     expect(html).toContain(`id="${stepAnchor({ step: 2 })}"`);
-    // …and its token counts are the run line's.
+    // …and its token counts are the run line's, in the report's fixed locale
+    // (en-AU, as its date is) whatever the machine's own.
     expect(html).toContain('9,325');
 
     await api('DELETE', `/sessions/${id}`);

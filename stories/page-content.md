@@ -317,11 +317,11 @@ to `isError` with nothing readable in it.
 
 [tests/page-content-capture.test.ts](../tests/page-content-capture.test.ts) —
 a new file rather than an addition to
-[tests/dom-cleaner.test.ts](../tests/dom-cleaner.test.ts), which is
-deliberately browser-free (it tests `cleanHtmlString`, the regex path that
-exists precisely for "no real browser available"). Half of W1's behaviour *is*
-a browser behaviour, so it launches Chromium and would change that file's
-character:
+[tests/dom-cleaner.test.ts](../tests/dom-cleaner.test.ts), which was then
+deliberately browser-free (it tested `cleanHtmlString`, the regex path that
+existed precisely for "no real browser available" — since removed as dead code,
+with those tests). Half of W1's behaviour *is* a browser behaviour, so it
+launches Chromium and would have changed that file's character:
 
 - `captureVisibleText` returns visible text and omits both `display: none` and
   `hidden` subtrees — the case that fails if `textContent` is ever substituted

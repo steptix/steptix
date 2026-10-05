@@ -90,29 +90,21 @@ dataSources:
     expect(result.config.timeout).toBe('30s');
   });
 
-  it('parses ## Config section cdp port shorthand', () => {
-    const md = `# Test\n\n## Config\n- baseUrl: http://localhost:3000\n- cdp: 9222\n\n## Steps\n- Visit home\n`;
-    const result = parseTestContent(md);
-    expect(result.config.cdp).toBe('9222');
-    expect(result.config.cdpTab).toBeUndefined();
-  });
-
-  it('parses ## Config section cdpTab variants', () => {
-    const md = `# Test\n\n## Config\n- cdp: 9222\n- cdpTab: url~example.com\n\n## Steps\n- Visit home\n`;
-    const result = parseTestContent(md);
-    expect(result.config.cdp).toBe('9222');
-    expect(result.config.cdpTab).toBe('url~example.com');
-  });
-
-  it('parses ## Config section viewport onto TestConfig', () => {
-    // The Config scan is generic, so this is one assertion rather than a suite:
-    // what it pins is that `viewport` reaches `TestConfig` as the RAW string
-    // (stories/per-test-viewport.md §3) — the parser resolves nothing, and a
-    // future "helpful" normalisation here would put a second validator in the
-    // pipeline.
-    const md = `# Test\n\n## Config\n- viewport: mobile\n\n## Steps\n- Visit home\n`;
-    const result = parseTestContent(md);
-    expect(result.config.viewport).toBe('mobile');
+  // The Config scan is generic, so this is one table rather than a suite per
+  // key: what it pins is that each key reaches `TestConfig` as the RAW string.
+  // `viewport` (stories/per-test-viewport.md §3) and `unmask`
+  // (stories/placeholder-preserving-actions.md, decision 2) are each read by
+  // one parser in the executor's caller, so the CLI and the server agree on
+  // what a value means; a future "helpful" normalisation here would put a
+  // second validator in the pipeline.
+  it.each([
+    ['cdp', '9222'],
+    ['cdpTab', 'url~example.com'],
+    ['viewport', 'mobile'],
+    ['unmask', 'keyword, data.keys.public'],
+  ] as const)('carries ## Config %s onto TestConfig as the raw string', (key, value) => {
+    const md = `# Test\n\n## Config\n- ${key}: ${value}\n\n## Steps\n- Visit home\n`;
+    expect(parseTestContent(md).config[key]).toBe(value);
   });
 
   it('parses ## Parameters section', () => {
@@ -416,19 +408,5 @@ describe('parseTestFile — env/data references in steps', () => {
     );
     expect(fromCli).toBe(fromServer);
     expect(fromCli).toBe('Sign in to https://uat.app.test as admin@app.test with hunter2');
-  });
-});
-
-describe('## Config: unmask', () => {
-  it('is read off the config block as its raw comma-separated string', () => {
-    // Held raw, like `viewport`: one parser, in the executor's caller, so the
-    // CLI and the server agree on what a name is
-    // (stories/placeholder-preserving-actions.md, decision 2).
-    const md = '# T\n\n## Config\n- unmask: keyword, data.keys.public\n\n## Steps\n1. Go\n';
-    expect(parseTestContent(md).config.unmask).toBe('keyword, data.keys.public');
-  });
-
-  it('is absent when the test does not declare one', () => {
-    expect(parseTestContent('# T\n\n## Steps\n1. Go\n').config.unmask).toBeUndefined();
   });
 });

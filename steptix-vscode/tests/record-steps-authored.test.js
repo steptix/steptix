@@ -2117,17 +2117,10 @@ test('the panel\'s Add step box keeps its text until the host says the server to
   );
 });
 
-test('the panel copies of the heading text and the draft marks match the core (recording-panel.js)', async () => {
+test('the panel copy of the draft marks matches the core (recording-panel.js)', async () => {
+  // The heading text's copy, paused states included, is pinned in one table
+  // in record-steps.test.js.
   const inline = await import('../src/webview/lib/recording-panel.js');
-  const a = (dropped, action) => ({ dropped, ...(action !== undefined && { action }) });
-  for (const state of [
-    { phase: 'recording', paused: true, actions: [a(false), a(false, false)] },
-    { phase: 'recording', paused: false, actions: [a(false)] },
-    { phase: 'recording', paused: true, actions: [] },
-    { phase: 'finishing', paused: true, actions: [a(false)] },
-  ]) {
-    assert.equal(inline.recordingStatusTextInline(state), core.recordingStatusText(state), JSON.stringify(state));
-  }
   for (const draft of [
     { steps: ['a', 'b', 'c'], locked: 2, authored: [0] },
     { steps: ['a', 'b', 'c'], authored: [0], edited: [2] },

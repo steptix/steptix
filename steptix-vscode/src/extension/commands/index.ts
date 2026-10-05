@@ -1168,7 +1168,7 @@ export function registerCommands(
           return;
         }
         // Continue runs from startLine to end-of-document. Passing
-        // `[startLine]` alone would collapse through resolveRunLines
+        // `[startLine]` alone would collapse through resolveRunSelection
         // to a one-step run — useful for Step Over but not Continue.
         const resumeLines = extractSteps(editor.document.getText())
           .map((s) => s.line)

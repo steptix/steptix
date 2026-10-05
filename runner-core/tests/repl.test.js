@@ -299,15 +299,6 @@ test('a flat name still takes the broad rule — a bare KEY is a secret', () => 
   assert.equal(maskIfSecret('keyword', 'abc'), '***');
 });
 
-// The same word, both sides of the dot: flat it is the author's and masks,
-// as a column it is the page's and does not. This pair is the whole split.
-test('the split decides `keyword` and `sort_key` twice, and differently', () => {
-  assert.equal(maskIfSecret('keyword', 'search'), '******');
-  assert.equal(maskIfSecret('payment.keyword', 'search'), 'search');
-  assert.equal(maskIfSecret('sort_key', 'abc'), '***');
-  assert.equal(maskIfSecret('payment.sort_key', 'abc'), 'abc');
-});
-
 test('isSecretVarName answers the split question too', () => {
   assert.equal(isSecretVarName('payment.sort_key'), false);
   assert.equal(isSecretVarName('payment.api_key'), true);

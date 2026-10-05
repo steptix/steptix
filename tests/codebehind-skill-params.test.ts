@@ -321,7 +321,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((r, e) => server.close((err) => (err ? e(err) : r())));
-  await fs.rm(tmpDir, { recursive: true, force: true });
+  await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 beforeEach(async () => {
@@ -329,8 +329,8 @@ beforeEach(async () => {
   aiPrompts.length = 0;
   forcedEntryBody = null;
   await fs.rm(skillStepsPath, { force: true });
-  await fs.rm(path.join(skillsDir, '.steptix-codebehind-cache'), { recursive: true, force: true });
-  await fs.rm(path.join(tmpDir, '.steptix-codebehind-cache'), { recursive: true, force: true });
+  await fs.rm(path.join(skillsDir, '.steptix-codebehind-cache'), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await fs.rm(path.join(tmpDir, '.steptix-codebehind-cache'), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 async function compileRun(
@@ -392,23 +392,30 @@ async function readSse(res: Response): Promise<{ type: string; [k: string]: any 
   return frames;
 }
 
+/**
+ * The parameter block's line for `username`. Asserted whole: `Alice` alone is
+ * in every generation prompt anyway, because the recorded transcript typed it
+ * and the prompt embeds the raw actions — so only the line itself shows the
+ * NAME was mapped to the value.
+ */
+const usernameResolvedTo = (value: string): string =>
+  `- {{username}} resolved to ${JSON.stringify(value)} on this run`;
+
 describe('a skill invoked with a parameter, compiled', () => {
-  it('the run itself typed the resolved value (the expander inlined it into the text)', async () => {
+  it('the run typed the resolved value, and generation sees the AUTHORED text and the username → Alice mapping', async () => {
     await compileRun();
+    // The run itself typed the resolved value: the expander inlined it into
+    // the text.
     expect(stepCalls.some((s) => s.includes('Alice'))).toBe(true);
     expect(stepCalls.some((s) => s.includes('{{username}}'))).toBe(false);
-  });
 
-  it('generation sees the AUTHORED text and the username → Alice mapping', async () => {
-    await compileRun();
     const generation = aiPrompts.find((p) => p.includes('user box') && !/Review a generated/.test(p));
     expect(generation).toBeDefined();
     // The source the entry must bind to is the authored skill text…
     expect(generation!).toContain(AUTHORED);
     // …and the prompt maps the authored name to the caller's value, which is
     // what lets the model write step.getVar('username') instead of 'Alice'.
-    expect(generation!).toContain('username');
-    expect(generation!).toContain('Alice');
+    expect(generation!).toContain(usernameResolvedTo('Alice'));
   });
 
   it("proposes the entry in the SKILL's own .steps.ts, reading the value via getVar", async () => {
@@ -441,14 +448,11 @@ describe('a skill invoked with a parameter, compiled', () => {
 });
 
 describe('a skill invoked with a ${data.*} argument, compiled', () => {
-  it('the run itself typed the resolved value', async () => {
+  it('the run typed the resolved value, and generation maps username to the VALUE, not the placeholder text', async () => {
     await compileDataRefRun();
     expect(stepCalls.some((s) => s.includes('Alice'))).toBe(true);
     expect(stepCalls.some((s) => s.includes('${data.username}'))).toBe(false);
-  });
 
-  it('generation maps username to the VALUE, not the placeholder text', async () => {
-    await compileDataRefRun();
     const generation = aiPrompts.find((p) => p.includes('user box') && !/Review a generated/.test(p));
     expect(generation).toBeDefined();
     expect(generation!).toContain(AUTHORED);
@@ -456,7 +460,7 @@ describe('a skill invoked with a ${data.*} argument, compiled', () => {
     // username = "${data.username}" while the transcript typed Alice — the
     // model then has no way to connect the literal to the name.
     expect(generation!).not.toContain('${data.username}"');
-    expect(generation!).toContain('Alice');
+    expect(generation!).toContain(usernameResolvedTo('Alice'));
   });
 
   it('discards a generated entry that inlines the resolved data value', async () => {
@@ -484,7 +488,7 @@ describe('a composite argument — {{param}} and ${data.*} in one value', () => 
     await compileComposite();
     const generation = aiPrompts.find((p) => p.includes('user box') && !/Review a generated/.test(p));
     expect(generation).toBeDefined();
-    expect(generation!).toContain('Hello Bob from Paris');
+    expect(generation!).toContain(usernameResolvedTo('Hello Bob from Paris'));
     expect(generation!).not.toContain('${data.city}');
     expect(generation!).not.toContain('{{name}}"');
   });
@@ -517,7 +521,7 @@ describe('chained skills — ${data.*} handed through an outer skill', () => {
     const generation = aiPrompts.find((p) => p.includes('user box') && !/Review a generated/.test(p));
     expect(generation).toBeDefined();
     expect(generation!).toContain(AUTHORED);
-    expect(generation!).toContain('Alice');
+    expect(generation!).toContain(usernameResolvedTo('Alice'));
     expect(generation!).not.toContain('${data.username}"');
     expect(generation!).not.toContain('{{who}}"');
   });

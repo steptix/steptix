@@ -278,21 +278,32 @@ describe('checkVisionRoute — everything else proceeds', () => {
   });
 
   it('a timeout proceeds, and aborts the request', async () => {
-    let aborted = false;
-    // Never answers on its own; honours the abort the way a real fetch does.
-    const fetch = ((_url: string, init?: RequestInit) =>
-      new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => {
-          aborted = true;
-          reject(new DOMException('aborted', 'AbortError'));
-        });
-      })) as unknown as typeof globalThis.fetch;
-    const started = Date.now();
-    const result = await checkVisionRoute(BRIDGE_AI, { fetch, timeoutMs: 30 });
-    expect(result.ok).toBe(true);
-    expect((result as { note?: string }).note).toContain('timed out');
-    expect(aborted).toBe(true);
-    expect(Date.now() - started).toBeLessThan(2_000);
+    vi.useFakeTimers();
+    try {
+      let aborted = false;
+      // Never answers on its own; honours the abort the way a real fetch does.
+      const fetch = ((_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            aborted = true;
+            reject(new DOMException('aborted', 'AbortError'));
+          });
+        })) as unknown as typeof globalThis.fetch;
+      let settled = false;
+      const pending = checkVisionRoute(BRIDGE_AI, { fetch, timeoutMs: 30 }).then((r) => {
+        settled = true;
+        return r;
+      });
+      // The check's own 30 ms, and nothing longer: it has proceeded by then.
+      await vi.advanceTimersByTimeAsync(30);
+      expect(settled).toBe(true);
+      const result = await pending;
+      expect(result.ok).toBe(true);
+      expect((result as { note?: string }).note).toContain('timed out');
+      expect(aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a timeout proceeds even when the fetch ignores its signal', async () => {

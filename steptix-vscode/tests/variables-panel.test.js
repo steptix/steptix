@@ -130,17 +130,22 @@ test("collectVariables: multiple out.X=\"Y\" aliases on a single skill call", ()
 
 // ── Output-source tagging (spec test plan item 11) ────────────────────
 
-test("classifyCaptureSource: 'toolOutput' passes through", () => {
-  assert.equal(classifyCaptureSource("toolOutput"), "toolOutput");
-});
-
-test("classifyCaptureSource: 'capture' passes through", () => {
-  assert.equal(classifyCaptureSource("capture"), "capture");
-});
-
-test("classifyCaptureSource: 'generated' passes through — a [use ai] value", () => {
-  assert.equal(classifyCaptureSource("generated"), "generated");
-  assert.equal(classifyCaptureSource("assignment"), "assignment");
+test("classifyCaptureSource: the known sources pass through, anything else is a capture", () => {
+  for (const [source, expected] of [
+    ["toolOutput", "toolOutput"],
+    ["capture", "capture"],
+    ["generated", "generated"], // a [use ai] value
+    ["assignment", "assignment"], // a `Set {{name}} to "…"` step
+    // Absent is the back-compat rule the wire type mandates, and what makes
+    // adding a new value safe for a client that predates it.
+    [undefined, "capture"],
+    // A future/garbage value must not leak through as a non-capture label.
+    ["parameter", "capture"],
+    ["bogus", "capture"],
+    [null, "capture"],
+  ]) {
+    assert.equal(classifyCaptureSource(source), expected, String(source));
+  }
 });
 
 test("collectVariables: seeds a row for a [use ai] step's explicit name, source 'generated'", () => {
@@ -159,48 +164,6 @@ test("collectVariables: seeds a row for a [use ai] step's explicit name, source 
     { name: "colour", source: "generated", line: 3, value: undefined },
     { name: "motto", source: "generated", line: 4, value: undefined },
   ]);
-});
-
-test("classifyCaptureSource: absent source defaults to 'capture' (back-compat)", () => {
-  assert.equal(classifyCaptureSource(undefined), "capture");
-});
-
-test("classifyCaptureSource: unrecognised source defaults to 'capture'", () => {
-  // A future/garbage value must not leak through as a non-capture label.
-  assert.equal(classifyCaptureSource("parameter"), "capture");
-  assert.equal(classifyCaptureSource("bogus"), "capture");
-  assert.equal(classifyCaptureSource(null), "capture");
-});
-
-test("collectVariables: capture-sourced [output:] row is annotated captureSource='capture'", () => {
-  const text = ["## Steps", "1. [output: pageTitle] grab the title"].join("\n");
-  const got = collectVariables(
-    text,
-    {},
-    { pageTitle: "Welcome" },
-    { pageTitle: "capture" },
-  );
-  const row = got.find((v) => v.name === "pageTitle");
-  assert.equal(row.value, "Welcome");
-  assert.equal(row.captureSource, "capture");
-});
-
-test("collectVariables: toolOutput-sourced row is annotated captureSource='toolOutput'", () => {
-  // Skill aliases its captured value into the caller's scope; the
-  // streaming capture event carried source: 'toolOutput'.
-  const text = [
-    "## Steps",
-    '1. [skill: search query="x" out.first_result_url="target_url"]',
-  ].join("\n");
-  const got = collectVariables(
-    text,
-    {},
-    { target_url: "https://example.com" },
-    { target_url: "toolOutput" },
-  );
-  const row = got.find((v) => v.name === "target_url");
-  assert.equal(row.source, "output");
-  assert.equal(row.captureSource, "toolOutput");
 });
 
 test("collectVariables: a row with no matching runtimeSources entry has no captureSource", () => {
@@ -241,7 +204,9 @@ test("collectVariables: distinguishes parameter, page capture, and tool output i
   assert.equal(byName.user.captureSource, undefined);
   // Page capture.
   assert.equal(byName.pageTitle.captureSource, "capture");
-  // Tool output — the visually distinct one.
+  // Tool output — a skill aliasing its capture into the caller's scope; the
+  // streaming capture event carried source: 'toolOutput'. The visually
+  // distinct one.
   assert.equal(byName.resultUrl.captureSource, "toolOutput");
 });
 
@@ -391,27 +356,6 @@ test("maskIfSecretInline: the ROOT is still the author's word", () => {
 // it. The corpus that holds this mirror to runner-core's lives in
 // `record-secret-parity.test.js`; these are the panel's own edges.
 
-test("maskIfSecretInline: a dotted name nobody bound takes the flat author rule", () => {
-  assert.equal(maskIfSecretInline("user.apikey", "uk_live_1234", { bindings: [] }), "*".repeat(8));
-  assert.equal(maskIfSecretInline("payment.keyword", "search", { bindings: [] }), "******");
-});
-
-test("maskIfSecretInline: a dotted name a pass bound keeps the two-segment rule", () => {
-  const bindings = ["payment.keyword", "payment.password"];
-  assert.equal(maskIfSecretInline("payment.keyword", "AU", { bindings }), "AU");
-  assert.equal(maskIfSecretInline("payment.password", "hunter2", { bindings }), "*".repeat(7));
-  // The other name in the same map is still decided on its own terms.
-  assert.equal(maskIfSecretInline("user.apikey", "uk_live_1234", { bindings }), "*".repeat(8));
-});
-
-test("maskIfSecretInline: no opts at all is exactly what it was", () => {
-  // An older server sends neither field, and the panel's default `{}` has to
-  // be indistinguishable from the two-argument call it replaced.
-  assert.equal(maskIfSecretInline("user.apikey", "uk_live_1234"), "uk_live_1234");
-  assert.equal(maskIfSecretInline("user.apikey", "uk_live_1234", {}), "uk_live_1234");
-  assert.equal(maskIfSecretInline("payment.keyword", "search", {}), "search");
-});
-
 test("maskIfSecretInline: an unmasked name is shown, empty-value guard included", () => {
   assert.equal(maskIfSecretInline("keyword", "search", { unmask: ["keyword"] }), "search");
   // The hatch is read BEFORE the falsy guard, so an unmasked empty value is
@@ -555,19 +499,9 @@ test("maskRecordSecretsInline: a leading BOM does not smuggle a record past the 
 // server's `redactAuthoredMap`. The capture banner (`✎ name ← value`) is the
 // one surface here whose names are author-chosen end to end, and the
 // two-segment rule answered no about `user.apikey` — so the banner printed
-// `uk_live_1234` beside a report that said `***`.
-test("maskIfSecretAuthoredInline: the whole dotted key takes the flat author rule", () => {
-  for (const name of ["user.apikey", "user.apitoken", "row.mypassword", "login.passkey", "api.key"]) {
-    assert.equal(maskIfSecretAuthoredInline(name, "uk_live_1234"), "*".repeat(8), name);
-  }
-  // The difference from the scope rule, stated: these four are exactly what
-  // made the banner and the report disagree. (`api.key` is not among them —
-  // the whole-name clause catches it under either rule.)
-  for (const name of ["user.apikey", "user.apitoken", "row.mypassword", "login.passkey"]) {
-    assert.equal(maskIfSecretInline(name, "uk_live_1234"), "uk_live_1234", `${name} as a scope entry`);
-  }
-});
-
+// `uk_live_1234` beside a report that said `***`. The whole-key corpus that
+// holds it to runner-core and the server is AUTHORED_CORPUS in
+// `record-secret-parity.test.js`; these are the panel's own edges.
 test("maskIfSecretAuthoredInline: a flat name answers exactly as maskIfSecretInline does", () => {
   for (const [name, value] of [
     ["password", "hunter2"],

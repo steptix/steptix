@@ -8,11 +8,13 @@
 // creation-time filter is what prevents it.
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { once } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { findBwProcess, parseLookup, pickBwChild, type ProcessRow } from '../src/credentials/bw-process.js';
+import { startWrappedWaiter } from './cmd-wrapped-waiter.js';
 
 const SPAWNED = { pid: 500, created: 1_000_000n };
 
@@ -67,6 +69,31 @@ describe('parseLookup — output is trusted only when all of it parses', () => {
   });
 });
 
+describe('findBwProcess — the PID it is given', () => {
+  it('refuses a PID that cannot exist, without asking the process table', async () => {
+    // Returned before PowerShell is spawned, so this holds on every platform.
+    await expect(findBwProcess(0)).resolves.toBeNull();
+    await expect(findBwProcess(-5)).resolves.toBeNull();
+    await expect(findBwProcess(1.5)).resolves.toBeNull();
+  });
+});
+
+/**
+ * The budget the real lookups below get. Their claim is what the lookup
+ * ANSWERS, not how fast — test 17 owns the timeout — so this is a ceiling a
+ * loaded runner cannot reach, where the production 10s could be.
+ */
+const LOOKUP_CEILING_MS = 30_000;
+
+function running(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe.runIf(process.platform === 'win32')('findBwProcess — against the real process table', () => {
   it('17. answers "not found" when the lookup outlives its timeout', async () => {
     // 1ms: PowerShell cannot even start in that time, so only the timeout can
@@ -74,33 +101,31 @@ describe.runIf(process.platform === 'win32')('findBwProcess — against the real
     await expect(findBwProcess(process.pid, 1)).resolves.toBeNull();
   });
 
-  it('answers "not found" for a PID that is not running', async () => {
-    await expect(findBwProcess(0)).resolves.toBeNull();
-    await expect(findBwProcess(-5)).resolves.toBeNull();
+  it('answers "not found" for a process that has already exited', { timeout: 60_000 }, async () => {
+    const gone = spawn(process.execPath, ['--version'], { windowsHide: true, stdio: 'ignore' });
+    const pid = gone.pid!;
+    await once(gone, 'exit');
+    const pick = await findBwProcess(pid, LOOKUP_CEILING_MS);
+    // Windows may hand a freed PID to a new process at once. Only then may the
+    // lookup describe something — a live stranger, never the process that left.
+    expect(pick === null || running(pid), `PID ${pid} answered ${String(pick)} after it exited`).toBe(true);
   });
 
-  it('finds the one real child of a process this test spawned itself', { timeout: 30_000 }, async () => {
+  it('finds the one real child of a process this test spawned itself', { timeout: 90_000 }, async () => {
     // A cmd.exe wrapper around a node that waits — the npm `bw.cmd` shape.
     // Both are this test's own processes, and both are stopped by exact PID.
-    //
-    // The waiting script is a FILE, never `-e <code>`: cmd.exe reads `>` in
-    // an arrow function as output redirection, runs something else entirely,
-    // and leaves a stray file named after the rest of the code in the cwd.
     const dir = mkdtempSync(path.join(os.tmpdir(), 'bw-process-'));
-    const waiter = path.join(dir, 'wait.cjs');
-    writeFileSync(waiter, 'setTimeout(function () {}, 20000);\n');
-    const wrapper = spawn(process.env['COMSPEC'] ?? 'cmd.exe', ['/d', '/s', '/c', process.execPath, waiter], {
-      windowsHide: true,
-      stdio: 'ignore',
-    });
     try {
-      await new Promise((r) => setTimeout(r, 1500)); // let node start under it
-      const pick = await findBwProcess(wrapper.pid!);
-      expect(typeof pick).toBe('number');
-      expect(pick).not.toBe(wrapper.pid);
-      if (typeof pick === 'number') process.kill(pick);
+      const waiter = await startWrappedWaiter(dir);
+      try {
+        // Exactly the node that announced itself: not the wrapper, not the
+        // conhost.exe beside it, not "some child".
+        await expect(findBwProcess(waiter.wrapper.pid!, LOOKUP_CEILING_MS)).resolves.toBe(waiter.nodePid);
+      } finally {
+        waiter.stop();
+      }
     } finally {
-      wrapper.kill();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });

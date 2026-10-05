@@ -39,10 +39,17 @@ async function startStub(handler: Handler): Promise<string> {
   return `http://127.0.0.1:${port}`;
 }
 
-/** A port with nothing on it — bound then released, so connects are refused. */
+/**
+ * A port where nothing answers. Not one bound then released: another worker in
+ * this suite can be handed a freed port before the probe reaches it, and then
+ * "down" reads as up or foreign. So the stub stays bound and destroys every
+ * connection on arrival. The client sees what a refused connect gives it — a
+ * transport failure with no response — which is exactly what the probe folds
+ * into `down`.
+ */
 async function deadUrl(): Promise<string> {
   const url = await startStub(() => {});
-  await stopStub();
+  server!.on('connection', (socket) => socket.destroy());
   return url;
 }
 
@@ -185,7 +192,7 @@ describe('steptix status', () => {
 
     await stopStub();
     out = [];
-    expect(await statusCommand({ url, json: true })).toBe(1);
+    expect(await statusCommand({ url: await deadUrl(), json: true })).toBe(1);
     expect(JSON.parse(out.join('\n'))).toMatchObject({ running: false });
   });
 });
@@ -263,11 +270,12 @@ describe('steptix stop', () => {
         shutdownBody = JSON.parse(body);
         stopping = true;
         json(res, 200, JSON.stringify({ ok: true, stopping: true }));
-        // Simulate the real grace-delay exit: stop answering shortly after.
-        const mine = server;
-        setTimeout(() => void stopStub(mine), 20);
         return;
       }
+      // Gone, as the real server is after its grace delay: every request
+      // dropped unanswered. Dropped rather than the listener closed — a freed
+      // port can be handed to another worker's server before the confirm probe
+      // gets there (see deadUrl).
       if (stopping) {
         res.destroy();
         return;
@@ -348,18 +356,15 @@ describe('steptix stop', () => {
         return;
       }
       healthCalls++;
-      // Still tearing down for the first probes, then gone. `close()` alone
-      // doesn't end an undici-pooled keep-alive socket, so a departed server
-      // has to drop the connection for the probe to see it go dark.
+      // Still tearing down for the first probes, then gone: every request
+      // dropped unanswered. Not `close()` — that alone doesn't end an
+      // undici-pooled keep-alive socket, and a freed port can be handed to
+      // another worker's server before the next probe (see deadUrl).
       if (gone) {
         res.destroy();
         return;
       }
-      if (healthCalls >= 2) {
-        gone = true;
-        const mine = server;
-        void stopStub(mine);
-      }
+      if (healthCalls >= 2) gone = true;
       json(res, 200, healthBody());
     });
 

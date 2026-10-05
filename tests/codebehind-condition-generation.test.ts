@@ -39,8 +39,6 @@ describe('conditionEntryComplaint', () => {
       'the spec\'s While',
       `    const next = page.getByRole('button', { name: 'Next' });\n    return (await next.count()) > 0 && (await next.isEnabled());`,
     ],
-    ['a checkbox read', `    return await page.getByLabel('Cash').isChecked();`],
-    ['a count', `    return (await page.getByRole('button', { name: 'Load more' }).count()) === 0;`],
     [
       'a value read through getVar',
       `    const row = page.locator('tr', { hasText: step.getVar('order.id') ?? '' });\n    if ((await row.count()) === 0) return false;\n    return ((await row.first().textContent()) ?? '').includes('Paid');`,
@@ -48,16 +46,13 @@ describe('conditionEntryComplaint', () => {
     // Strings and comments are blanked before the calls are looked for.
     ['a button NAMED Click', `    // never .click( in a condition\n    return (await page.getByRole('button', { name: 'Click .fill( here' }).count()) > 0;`],
     ['an isChecked, which is not check(', `    return page.locator('#t').isChecked();`],
-    ['an arrow-form condition', `    return true;`],
+    ['a constant condition', `    return true;`],
   ])('accepts %s', (_what, body) => {
     expect(conditionEntryComplaint(entry(body))).toBeUndefined();
   });
 
-  it('accepts the property form `condition: async () =>`', () => {
-    expect(
-      conditionEntryComplaint(`{ source: 'If x, then y', condition: async ({ page }) => (await page.locator('#x').count()) > 0 }`),
-    ).toBeUndefined();
-  });
+  // A checkbox read, a count, the property (arrow) form and a tab switch are
+  // in the corpus below, with the same bodies.
 
   it.each([
     ['click', `    await page.getByRole('button', { name: 'Next' }).click();\n    return true;`, '.click('],
@@ -83,11 +78,6 @@ describe('conditionEntryComplaint', () => {
     const complaint = conditionEntryComplaint(entry(body));
     expect(complaint).toBeDefined();
     expect(complaint).toContain(`\`${call}`);
-  });
-
-  it('refuses a tab switch', () => {
-    const complaint = conditionEntryComplaint(entry(`    await tabs.switchTo('page:2');\n    return true;`, '{ page, tabs }'));
-    expect(complaint).toMatch(/calls `tabs\.switchTo\(`/);
   });
 
   it('refuses a `run` — on its own or beside a condition', () => {
@@ -350,7 +340,9 @@ describe('the review prompt, over a file with a condition entry', () => {
     expect(prompt).toContain('**A `condition` entry answers a condition line**');
     expect(prompt).toContain('returning `true` or `false`');
     expect(prompt).toContain('Keep it read-only');
-    expect(prompt).toContain('Never\n   turn one into a `run` entry');
+    // Across whitespace: the paragraph is hard-wrapped, and re-flowing it
+    // changes no rule.
+    expect(prompt).toMatch(/Never\s+turn one into a `run` entry/);
     expect(prompt).toContain('never add a `condition` entry');
     // …and excepts it from the post-condition rule.
     expect(prompt).toContain('A `condition` entry takes no post-condition');
@@ -808,7 +800,7 @@ describe('reviewCandidate over a file with a condition entry', () => {
         (m) => events.push(m),
       );
     } finally {
-      await fs.rm(dir, { recursive: true, force: true });
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
     return { events, replaced };
   }

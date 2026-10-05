@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { AiClient } from '../src/ai/client.js';
 import type { AIAction, ChatMessage } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
@@ -25,6 +24,7 @@ import {
 } from '../src/codebehind/compile.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import type { RecordedAction } from '../src/codebehind/recording.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * The exact reference rule (stories/placeholder-preserving-actions.md,
@@ -48,11 +48,16 @@ import type { RecordedAction } from '../src/codebehind/recording.js';
  * built by hand.
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-placeholder-rule');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
 
 let counter = 0;
 let dir: string;
+
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('codebehind-placeholder-rule');
+});
 
 beforeEach(async () => {
   clearSkillCache();
@@ -61,7 +66,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await removeScratchBase(tmpBase);
 });
 
 // ───────────────────────────────────────────────────────────────────────────

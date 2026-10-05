@@ -113,6 +113,22 @@ vi.mock('../src/runner/step-executor.js', () => ({
   executeBranchedStep: vi.fn(async () => []),
 }));
 
+// REAL tool execution, with the options each call was handed recorded. The
+// abort-while-parked test needs to know whether the server ever asked for the
+// `debugger;` pause — and no event on a stream the client has already
+// dropped can say.
+const executeToolStepCalls = vi.fn();
+vi.mock('../src/tools/executor.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/tools/executor.js')>();
+  return {
+    ...actual,
+    executeToolStep: (...args: Parameters<typeof actual.executeToolStep>) => {
+      executeToolStepCalls(...args);
+      return actual.executeToolStep(...args);
+    },
+  };
+});
+
 vi.mock('../src/context/loader.js', () => ({
   loadContextFiles: vi.fn(async () => ({ files: [], combined: '' })),
 }));
@@ -162,6 +178,7 @@ vi.mock('../src/utils/logger.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
+import { executeStep } from '../src/runner/step-executor.js';
 
 const API_KEY = 'sk-tools-test';
 const cfg: Config = {
@@ -309,8 +326,8 @@ describe('api-server tool dispatch', () => {
   it('without toolsDir, [tool: ...] steps fall through to executeStep (legacy)', async () => {
     // Without `toolsDir` in the body, the catalogue isn't loaded; the
     // tool line goes through the AI mock (which we've stubbed to always
-    // pass). The aiExplanation must therefore NOT contain the tool's
-    // "produced outputs" string — it's whatever the AI returned.
+    // pass) as the raw `[tool: ...]` text, and the tool itself never runs.
+    vi.mocked(executeStep).mockClear();
     const sessionId = 'no-tools-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
     const events: any[] = [];
@@ -322,8 +339,14 @@ describe('api-server tool dispatch', () => {
       events.push(ev);
       if (ev.type === 'done') break;
     }
+    // The fall-through itself: the line reached the AI loop verbatim, and the
+    // run passed on the mock's say-so. Without these, a 4xx (no events at all)
+    // or a step that failed outright would pass the capture check below.
+    expect(vi.mocked(executeStep)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(executeStep).mock.calls[0]![2]).toBe('[tool: echo value="should-fall-through"]');
+    expect(events.find((e) => e.type === 'done')?.status).toBe('passed');
     const captures = events.filter((e) => e.type === 'capture');
-    expect(captures).toHaveLength(0); // no setVar fired
+    expect(captures).toHaveLength(0); // no setVar fired — the tool never ran
   });
 
   it('reloads the catalogue when toolsDir is corrected on a later batch (same session)', async () => {
@@ -516,7 +539,13 @@ describe('api-server tool dispatch', () => {
     //     (the user just cancelled).
     // Driving the abort here means cancelling the SSE fetch which
     // closes the underlying request. The server's res.on('close')
-    // aborts the AbortController. The run reports 'aborted' on done.
+    // aborts the AbortController.
+    //
+    // Both are read off the SERVER, after its run is over: the client's
+    // stream ends at the abort, so nothing that happens next can reach it.
+    // (The tool body itself does run once the wait resolves — only its pause
+    // is withheld — so "no capture on the stream" was never the claim.)
+    executeToolStepCalls.mockClear();
     const sessionId = 'abort-park-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
     const ac = new AbortController();
@@ -552,12 +581,37 @@ describe('api-server tool dispatch', () => {
 
     // We saw the awaiting event before aborting.
     expect(events.some((e) => e.type === 'tool:awaiting-debugger')).toBe(true);
-    // And NO capture event fired — the tool body never ran. (If it
-    // had, `debugger;` would still be a no-op because no inspector
-    // is attached; but the contract is "don't reach `debugger;` when
-    // we know the ack didn't come from a real attach.")
-    expect(events.filter((e) => e.type === 'capture')).toHaveLength(0);
     expect(aborted).toBe(true);
+
+    // The run is over when the server's own counter says so. A wait that the
+    // abort never resolved leaves the run parked, and this fails at its ceiling.
+    await vi.waitFor(
+      async () => {
+        const health = await (await fetch(`${baseUrl}/health`)).json();
+        expect(health.runsInFlight).toBe(0);
+      },
+      { timeout: 10_000, interval: 20 },
+    );
+
+    // Never with the pause armed. (With no inspector attached `debugger;` is
+    // a no-op, which is exactly why only the option can show it; the contract
+    // is "don't reach `debugger;` when the ack didn't come from a real attach".)
+    for (const [, options] of executeToolStepCalls.mock.calls) {
+      expect(options.pauseBeforeRun).not.toBe(true);
+    }
+
+    // Unwound: the session takes another batch, and runs the tool in it without
+    // parking again — a lingering `pendingDebuggerAck` or `pauseAtNextTool`
+    // would hold this request open instead.
+    const again = await fetch(`${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({ steps: ['[tool: echo value="after-abort"]'], sourceLines: [1], toolsDir }),
+    });
+    expect(again.status).toBe(200);
+    const body = await again.json();
+    expect(body.status).toBe('passed');
+    expect(body.outputs).toMatchObject({ echoed: 'after-abort' });
   });
 
   it('run-control with pauseAtNextTool sets the flag for the next tool', async () => {
@@ -579,7 +633,8 @@ describe('api-server tool dispatch', () => {
         events.push(ev);
         if (ev.type === 'step:awaiting') {
           stepCount++;
-          // On the second pause (the one before the tool step), set the
+          // On the first pause — step mode pauses AFTER each step, so this is
+          // the one between 'Open the page' and the tool step — set the
           // pauseAtNextTool flag along with the resume mode.
           if (stepCount === 1) {
             await fetch(

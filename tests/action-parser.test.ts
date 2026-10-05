@@ -24,8 +24,7 @@ describe('extractJson', () => {
 
   it('extracts JSON from surrounding prose', () => {
     const raw = 'Sure, here is the JSON: {"actions":[],"reasoning":"ok"} — hope that helps.';
-    const result = extractJson(raw);
-    expect(result).toContain('"actions"');
+    expect(extractJson(raw)).toBe('{"actions":[],"reasoning":"ok"}');
   });
 
   it('throws when no JSON found', () => {
@@ -93,41 +92,41 @@ describe('parseAIResponse', () => {
     expect(result.needs_reeval).toBe(true);
   });
 
-  it('parses a type action with value', () => {
-    const raw = JSON.stringify({
-      actions: [
-        { action: 'type', description: 'Type email', selector: '#email', value: 'user@example.com' },
-      ],
-      reasoning: 'Filling form.',
-    });
-    const result = parseAIResponse(raw);
-    expect(result.actions[0]?.action).toBe('type');
-    expect(result.actions[0]?.value).toBe('user@example.com');
-  });
-
-  it('parses a navigate action with url', () => {
-    const raw = JSON.stringify({
-      actions: [
-        { action: 'navigate', description: 'Go to dashboard', url: '/dashboard' },
-      ],
-      reasoning: 'Navigating.',
-    });
-    const result = parseAIResponse(raw);
-    expect(result.actions[0]?.action).toBe('navigate');
-    expect(result.actions[0]?.url).toBe('/dashboard');
-  });
-
-  it('parses multiple actions', () => {
-    const raw = JSON.stringify({
-      actions: [
-        { action: 'click', description: 'Click email field', selector: '#email' },
-        { action: 'type', description: 'Type email', selector: '#email', value: 'test@test.com' },
-        { action: 'click', description: 'Submit', selector: '#submit' },
-      ],
-      reasoning: 'Fill and submit form.',
-    });
-    const result = parseAIResponse(raw);
-    expect(result.actions).toHaveLength(3);
+  // Every field parseAction copies as it comes, one row each: a field the copy
+  // does not name never reaches the executor, which then fails for want of
+  // what the model DID send (a drag's target was lost that way). Fields with
+  // rules of their own — direction, to, waitType, filePath(s), a drag's
+  // target, the browser label, a table read's — have their own tests.
+  it.each([
+    ['click', 'selector', '#sign-in-btn'],
+    ['type', 'value', 'user@example.com'],
+    ['navigate', 'url', '/dashboard'],
+    ['wait', 'condition', '#ready'],
+    ['keyboard', 'key', 'Enter'],
+    ['prompt', 'question', 'Which account should be used?'],
+    ['scroll', 'amount', 300],
+    ['wait', 'timeout', 90_000],
+    ['api_call', 'method', 'POST'],
+    ['api_call', 'body', { name: 'Ada' }],
+    ['api_call', 'path', '/api/accounts'],
+    ['api_call', 'apiMode', 'standalone'],
+    ['api_call', 'apiHeaders', { 'X-Token': 'abc' }],
+    ['extract_csrf', 'source', 'meta[name=csrf-token]'],
+    ['read', 'as', 'balance'],
+    ['read', 'attribute', 'href'],
+    ['read', 'multiple', true],
+    ['read', 'pattern', '(\\d{4})'],
+    ['click', 'frame', '#payment'],
+    ['switchPage', 'page', 'page:2'],
+    ['openBrowser', 'engine', 'firefox'],
+    ['openBrowser', 'channel', 'msedge'],
+    ['openBrowser', 'headed', false],
+  ] as const)('keeps a %s action\'s %s', (action, field, value) => {
+    const label = action === 'openBrowser' ? { as: 'second' } : {};
+    const raw = JSON.stringify({ actions: [{ action, description: 'd', ...label, [field]: value }], reasoning: 'r' });
+    const parsed = parseAIResponse(raw).actions[0]!;
+    expect(parsed.action).toBe(action);
+    expect((parsed as unknown as Record<string, unknown>)[field]).toEqual(value);
   });
 
   it('accepts a bare actions array', () => {
@@ -164,18 +163,6 @@ describe('parseAIResponse', () => {
   it('throws when actions field is missing', () => {
     const raw = JSON.stringify({ reasoning: 'hmm', data: 42 });
     expect(() => parseAIResponse(raw)).toThrow('"actions" array');
-  });
-
-  it('parses scroll action with direction and amount', () => {
-    const raw = JSON.stringify({
-      actions: [
-        { action: 'scroll', description: 'Scroll down', direction: 'down', amount: 300 },
-      ],
-      reasoning: 'Need to scroll.',
-    });
-    const result = parseAIResponse(raw);
-    expect(result.actions[0]?.direction).toBe('down');
-    expect(result.actions[0]?.amount).toBe(300);
   });
 
   it('passes an absolute scroll target through for both valid values', () => {
@@ -218,7 +205,7 @@ describe('parseAIResponse', () => {
     expect(action.amount).toBe(500);
   });
 
-  it('parses assert action with expected field', () => {
+  it('parses an assert with description, condition and expected', () => {
     const raw = JSON.stringify({
       actions: [
         {
@@ -230,9 +217,44 @@ describe('parseAIResponse', () => {
       ],
       reasoning: 'Verifying.',
     });
-    const result = parseAIResponse(raw);
-    expect(result.actions[0]?.action).toBe('assert');
-    expect(result.actions[0]?.expected).toBe('$1,234.56');
+    expect(parseAIResponse(raw).actions[0]).toEqual({
+      action: 'assert',
+      description: 'Check balance',
+      condition: 'visible balance text',
+      expected: '$1,234.56',
+    });
+  });
+
+  it('keeps an assert\'s poll config', () => {
+    const raw = JSON.stringify({
+      actions: [
+        {
+          action: 'assert',
+          description: 'Toast eventually shows Saved',
+          condition: 'toast text',
+          expected: 'Saved',
+          poll: { timeoutMs: 3000, intervalMs: 200 },
+        },
+      ],
+      reasoning: 'polling assert',
+    });
+    expect(parseAIResponse(raw).actions[0]!.poll).toEqual({ timeoutMs: 3000, intervalMs: 200 });
+  });
+
+  it('keeps an assert\'s against mode', () => {
+    const raw = JSON.stringify({
+      actions: [
+        {
+          action: 'assert',
+          description: 'API status is 200',
+          condition: 'last api response status',
+          expected: '200',
+          against: 'api',
+        },
+      ],
+      reasoning: 'api assert',
+    });
+    expect(parseAIResponse(raw).actions[0]!.against).toBe('api');
   });
 
   // "Verify the Reference cell in row 2 … is empty" — the correct expectation
@@ -282,62 +304,11 @@ describe('parseAIResponse', () => {
     }
   });
 
-  it('parses keyboard action with key', () => {
-    const raw = JSON.stringify({
-      actions: [
-        { action: 'keyboard', description: 'Press Enter', key: 'Enter' },
-      ],
-      reasoning: 'Submit via keyboard.',
-    });
-    const result = parseAIResponse(raw);
-    expect(result.actions[0]?.key).toBe('Enter');
-  });
-
-  it('normalises "press" alias to keyboard', () => {
-    const raw = JSON.stringify({
-      actions: [
-        { action: 'press', description: 'Press Escape', key: 'Escape' },
-      ],
-      reasoning: 'Dismiss dialog.',
-    });
-    const result = parseAIResponse(raw);
-    expect(result.actions[0]?.action).toBe('keyboard');
-    expect(result.actions[0]?.key).toBe('Escape');
-  });
 });
 
-
-// ─── Exploration action types (find/expand) ─────────────────────────────────
-
-describe('parseAIResponse — find action', () => {
-  it('parses a find action with value', () => {
-    const raw = JSON.stringify({
-      actions: [{ action: 'find', value: 'ORD-789', description: 'Search for order ORD-789' }],
-      reasoning: 'Need to locate the order row.',
-      needs_reeval: true,
-    });
-    const result = parseAIResponse(raw);
-    expect(result.actions).toHaveLength(1);
-    expect(result.actions[0]?.action).toBe('find');
-    expect(result.actions[0]?.value).toBe('ORD-789');
-    expect(result.needs_reeval).toBe(true);
-  });
-});
-
-describe('parseAIResponse — expand action', () => {
-  it('parses an expand action with selector', () => {
-    const raw = JSON.stringify({
-      actions: [{ action: 'expand', selector: 'table[data-testid="orders"]', description: 'Expand the orders table' }],
-      reasoning: 'Need to see all rows.',
-      needs_reeval: true,
-    });
-    const result = parseAIResponse(raw);
-    expect(result.actions).toHaveLength(1);
-    expect(result.actions[0]?.action).toBe('expand');
-    expect(result.actions[0]?.selector).toBe('table[data-testid="orders"]');
-    expect(result.needs_reeval).toBe(true);
-  });
-});
+// Aliases ("press", "attach", "refresh", "open_tab"…) are pinned in
+// unknown-action-type.test.ts: the spellings a model reaches for by hand, and
+// that every entry of ACTION_TYPE_ALIASES folds to its own target.
 
 describe('parseAIResponse — wait timeout hint (issue 022)', () => {
   it('preserves a numeric timeout on a wait action', () => {
@@ -457,15 +428,6 @@ describe('parseAIResponse — upload action (stories/upload-action.md §2)', () 
     );
     expect(result.actions[0]!.filePaths).toEqual(['b.png']);
     expect(result.actions[0]!.filePath).toBeUndefined();
-  });
-
-  it('normalises the aliases a model reaches for', () => {
-    for (const alias of ['attach', 'attach_file', 'file_upload', 'setInputFiles']) {
-      const result = parseAIResponse(
-        `{"actions":[{"action":"${alias}","selector":"#f","filePath":"a.png","description":"d"}]}`,
-      );
-      expect(result.actions[0]!.action, alias).toBe('upload');
-    }
   });
 
   it('leaves a {{param}} placeholder intact for the executor to interpolate', () => {

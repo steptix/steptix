@@ -20,10 +20,6 @@ import {
   extractSections,
   extractSteps,
   inertRegionHeading,
-  isStepLine,
-  nearestStepAtOrAbove,
-  nearestStepAtOrBelow,
-  resolveRunLines,
 } from '../dist/step-lines.js';
 
 const FIXTURES = path.resolve(
@@ -59,53 +55,18 @@ test('extractSteps: main flow only, per the frozen table', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The consumer split (contract §5): main-flow only vs main + body
+// The consumer split (contract §5): main-flow only vs main + body. What a
+// line selection resolves to, body lines included, is run-selection.test.js's.
 // ---------------------------------------------------------------------------
 
-test('resolveRunLines: Run All resolves to main-flow lines only', () => {
+test('classifySelectedSteps: Run All classifies main-flow steps only', () => {
   // Without this, "run everything" would execute each body inline AND again
   // at its call site — the double execution the feature exists to prevent.
-  assert.deepEqual(resolveRunLines(read('classification.md'), []), [13, 17, 18]);
-});
-
-test('resolveRunLines: selecting a body line falls through to the steps below it', () => {
-  // Line 24 is inside `### Login`. It is not a runnable step, so the
-  // no-step-selected fallback applies: everything at or below it. Nothing in
-  // the main flow sits below line 24, so the honest answer is [].
-  assert.deepEqual(resolveRunLines(read('classification.md'), [24]), []);
-});
-
-test('resolveRunLines: an empty result is not the same as an empty request', () => {
-  const text = read('classification.md');
-  assert.deepEqual(resolveRunLines(text, [24]), []);
-  assert.notDeepEqual(resolveRunLines(text, []), []);
-});
-
-test('classifySelectedSteps: a requested body line selects nothing', () => {
-  assert.deepEqual(classifySelectedSteps(read('classification.md'), [24]), []);
-});
-
-test('classifySelectedSteps: Run All classifies main-flow steps only', () => {
   const classified = classifySelectedSteps(read('classification.md'), []);
   assert.deepEqual(
     classified.map((s) => s.line),
     [13, 17, 18],
   );
-});
-
-test('isStepLine: false for a section body line, true for a main-flow one', () => {
-  const text = read('classification.md');
-  assert.equal(isStepLine(text, 17), true);
-  assert.equal(isStepLine(text, 24), false);
-});
-
-test('nearestStepAtOrBelow/Above: skip over section bodies', () => {
-  const text = read('classification.md');
-  // From inside the Login body there is no main-flow step below.
-  assert.equal(nearestStepAtOrBelow(text, 24), null);
-  // Above it, the last main-flow step is 18 — not the body line 24 itself.
-  assert.equal(nearestStepAtOrAbove(text, 24), 18);
-  assert.equal(nearestStepAtOrAbove(text, 33), 18);
 });
 
 // ---------------------------------------------------------------------------
@@ -298,10 +259,6 @@ test('no consumer treats an inert item as runnable or as a section member', () =
   const login = extractSections(IGNORED)[0];
   assert.equal(login.name, 'Login');
   assert.deepEqual(login.steps.map((s) => s.instruction), ['Body one']);
-  assert.equal(isStepLine(IGNORED, 5), false, 'line 5 is `2. Inert one`');
-  // The nearest-step helpers walk past it rather than landing on it.
-  assert.equal(nearestStepAtOrBelow(IGNORED, 5), null);
-  assert.equal(nearestStepAtOrAbove(IGNORED, 5), 2);
 });
 
 test('inertRegionHeading names the heading that stopped the item', () => {

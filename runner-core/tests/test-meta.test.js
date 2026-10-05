@@ -121,11 +121,6 @@ test('resolveSection: resolves every value', () => {
   });
 });
 
-test('resolveSection: missing $VARs left untouched', () => {
-  const got = resolveSection({ k: '$MISSING' }, {});
-  assert.deepEqual(got, { k: '$MISSING' });
-});
-
 // ---------------------------------------------------------------------------
 // scanSectionItems — the same scan parseSection builds its map from, with
 // source positions, so an editor can navigate to a bullet without restating

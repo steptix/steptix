@@ -2,104 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import {
   captureDomSnapshot,
-  cleanHtmlString,
   expandDomSubtree,
 } from '../src/browser/dom-cleaner.js';
-
-describe('cleanHtmlString', () => {
-  it('extracts button elements', () => {
-    const html = `<div><button type="submit">Sign In</button></div>`;
-    const result = cleanHtmlString(html);
-    expect(result).toContain('<button');
-    expect(result).toContain('Sign In');
-  });
-
-  it('extracts input elements', () => {
-    const html = `<form><input type="email" name="email" placeholder="you@example.com"></form>`;
-    const result = cleanHtmlString(html);
-    expect(result).toContain('<input');
-    expect(result).toContain('type="email"');
-  });
-
-  it('extracts anchor elements', () => {
-    const html = `<nav><a href="/dashboard">Dashboard</a></nav>`;
-    const result = cleanHtmlString(html);
-    expect(result).toContain('<a');
-    expect(result).toContain('Dashboard');
-  });
-
-  it('extracts select elements', () => {
-    const html = `<select name="month"><option value="1">January</option></select>`;
-    const result = cleanHtmlString(html);
-    expect(result).toContain('<select');
-  });
-
-  it('extracts textarea elements', () => {
-    const html = `<textarea name="notes" placeholder="Enter notes"></textarea>`;
-    const result = cleanHtmlString(html);
-    expect(result).toContain('<textarea');
-  });
-
-  it('skips inputs with type="hidden"', () => {
-    const html = `<input type="hidden" name="csrf" value="abc123"><input type="text" name="user">`;
-    const result = cleanHtmlString(html);
-    expect(result).not.toContain('name="csrf"');
-    expect(result).toContain('name="user"');
-  });
-
-  it('skips elements with display:none', () => {
-    const html = `<button style="display:none">Hidden</button><button>Visible</button>`;
-    const result = cleanHtmlString(html);
-    expect(result).not.toContain('Hidden');
-    expect(result).toContain('Visible');
-  });
-
-  it('skips elements with visibility:hidden', () => {
-    const html = `<button style="visibility:hidden">Invisible</button><button>OK</button>`;
-    const result = cleanHtmlString(html);
-    expect(result).not.toContain('Invisible');
-    expect(result).toContain('OK');
-  });
-
-  it('returns empty string for html with no interactive elements', () => {
-    const html = `<div><p>Just a paragraph</p><span>Some text</span></div>`;
-    const result = cleanHtmlString(html);
-    expect(result).toBe('');
-  });
-
-  it('extracts form elements', () => {
-    const html = `<form id="login-form" action="/login" method="post"><input type="text"></form>`;
-    const result = cleanHtmlString(html);
-    expect(result).toContain('<form');
-  });
-
-  it('extracts label elements', () => {
-    const html = `<label for="email">Email address</label><input type="email" id="email">`;
-    const result = cleanHtmlString(html);
-    expect(result).toContain('<label');
-    expect(result).toContain('Email address');
-  });
-
-  it('handles multiple elements on separate lines', () => {
-    const html = `
-      <form>
-        <input type="email" name="email">
-        <input type="password" name="password">
-        <button type="submit">Sign In</button>
-      </form>
-    `;
-    const result = cleanHtmlString(html);
-    const lines = result.split('\n').filter(Boolean);
-    expect(lines.length).toBeGreaterThanOrEqual(3);
-  });
-
-  it('normalises whitespace in extracted elements', () => {
-    const html = `<button   type="submit"   class="btn">   Sign   In   </button>`;
-    const result = cleanHtmlString(html);
-    // Each extracted element should be a single cleaned line
-    expect(result).not.toMatch(/\s{2,}/);
-  });
-});
 
 /**
  * The `expand` walk against a real Chromium, for the one property a string
@@ -163,31 +67,6 @@ describe('expandDomSubtree — live value, real browser', () => {
     expect(expanded).toContain('value="unpaid"');
   }, 30_000);
 
-  it('masks a secret field`s value the way the snapshot does, `pwd` included', async () => {
-    // Both halves of review 4's findings 1 and 2, checked on the OTHER copy of
-    // the rule: `name="pwd"` is a password field, and a field the run filled
-    // says so with `***` rather than by dropping the attribute.
-    await page.setContent(
-      `<body><div id="wrap">` +
-        `<input type="password" id="pwd" name="pwd">` +
-        `<input type="text" id="cred" name="credential">` +
-        `<button id="show" onclick="document.getElementById('pwd').type='text'">Show</button>` +
-        `</div></body>`,
-    );
-    await page.fill('#pwd', 'AAA-pwd-secret');
-    await page.fill('#cred', 'BBB-cred-secret');
-    await page.click('#show');
-
-    const expanded = await expandDomSubtree(page, '#wrap');
-    const snapshot = await captureDomSnapshot(page);
-
-    for (const text of [expanded, snapshot]) {
-      expect(text).not.toContain('AAA-pwd-secret');
-      expect(text).not.toContain('BBB-cred-secret');
-      expect(text).toContain('value="***"');
-    }
-  }, 30_000);
-
   it('leaves an untouched textarea`s text to the line that already prints it', async () => {
     // The snapshot speaks up only once the live text has diverged from
     // `defaultValue`, because a textarea's default value IS its child text and
@@ -243,45 +122,6 @@ describe('expandDomSubtree — live value, real browser', () => {
     );
     expect(await expandDomSubtree(page, '#wrap2')).not.toContain('value=');
     expect(await captureDomSnapshot(page)).not.toContain('value=');
-  }, 30_000);
-
-  it('judges a placeholder by the PASSWORD rule only, on this copy too', async () => {
-    // The `expand` half of review 5's finding 1 and finding 2: a placeholder
-    // is prose, so the name rule's bare `key` never reads it, while the
-    // password rule does — and `pass` inside `passenger` is not a password.
-    await page.setContent(
-      `<body><div id="wrap">` +
-        `<input type="password" id="ph" placeholder="Password">` +
-        `<input type="search" id="s" name="q" placeholder="Search by keyword">` +
-        `<input type="text" id="pg" name="passenger1_name">` +
-        `<input type="text" id="pc" name="pin_code">` +
-        `<input type="text" id="sh" name="shipping_address">` +
-        `<button id="show" onclick="document.getElementById('ph').type='text'">Show</button>` +
-        `</div></body>`,
-    );
-    await page.fill('#ph', 'PH-secret-A');
-    await page.fill('#s', 'unpaid');
-    await page.fill('#pg', 'Ada Lovelace');
-    // `pin` is a whole-token match on this copy too (review 7, finding 1):
-    // `pin_code` masks, `shipping_address` does not.
-    await page.fill('#pc', 'PIN-secret-B');
-    await page.fill('#sh', '1 Loop Lane');
-    await page.click('#show');
-
-    const expanded = await expandDomSubtree(page, '#wrap');
-    const snapshot = await captureDomSnapshot(page);
-
-    for (const text of [expanded, snapshot]) {
-      expect(text).not.toContain('PH-secret-A');
-      expect(text).not.toContain('PIN-secret-B');
-      expect(text).toContain('value="***"');
-      // Row-specific: the `#pc` line itself must carry the mask, so this
-      // cannot stay green on `#ph`'s mask alone if `#pc` dropped out.
-      expect(text).toMatch(/id="pc"[^\n]*value="\*\*\*"/);
-      expect(text).toContain('value="unpaid"');
-      expect(text).toContain('value="Ada Lovelace"');
-      expect(text).toContain('value="1 Loop Lane"');
-    }
   }, 30_000);
 
   it('will not hand a masked value back through a data-* attribute', async () => {
@@ -348,6 +188,26 @@ describe('expandDomSubtree — live value, real browser', () => {
     // The rest of the `data-*` family is still dropped, which is what makes
     // the line above a decision rather than an accident.
     expect(snapshot).not.toContain('data-row-key');
+  }, 30_000);
+
+  it('drops an <input type="hidden"> from the snapshot, value and all', async () => {
+    // A hidden input is page state — a CSRF token, a view-state blob — not a
+    // target, so the snapshot keeps a bare placeholder that says why and none
+    // of its attributes. Asked of the snapshot the model reads, not of a
+    // string helper that only looked like it.
+    await page.setContent(
+      '<body><form id="f">'
+      + '<input type="hidden" name="csrf" value="tok-NOT-IN-SNAPSHOT">'
+      + '<input type="text" name="user">'
+      + '</form></body>',
+    );
+
+    const snapshot = await captureDomSnapshot(page);
+    expect(snapshot).not.toContain('csrf');
+    expect(snapshot).not.toContain('tok-NOT-IN-SNAPSHOT');
+    expect(snapshot).toContain('<!-- hidden: input[type=hidden] -->');
+    // The visible field beside it is untouched.
+    expect(snapshot).toContain('name="user"');
   }, 30_000);
 
   it('emits data-steptix-row exactly ONCE in the expand walk', async () => {

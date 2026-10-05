@@ -201,12 +201,16 @@ afterEach(async () => {
 });
 
 async function startServer(
-  handler: (url: string, res: import('node:http').ServerResponse) => void,
+  handler: (
+    url: string,
+    res: import('node:http').ServerResponse,
+    req: import('node:http').IncomingMessage,
+  ) => void,
 ): Promise<string> {
   server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
-    req.on('end', () => handler(req.url ?? '', res));
+    req.on('end', () => handler(req.url ?? '', res, req));
   });
   await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
   const address = server.address();
@@ -322,11 +326,24 @@ describe('createApiClient.streamSteps', () => {
 
     const client = createApiClient({ baseUrl, apiKey: 'k' });
     const controller = new AbortController();
-    setTimeout(() => controller.abort(), 30);
 
-    await expect(
-      client.streamSteps('s1', { steps: ['x'] }, controller.signal),
-    ).rejects.toThrow();
+    // Abort from inside the stream, once the first frame has arrived — so the
+    // cancellation lands in the body read this test is about. A timer could
+    // fire before the headers came back, and then `fetch` itself rejects and
+    // the branch that tells a cancel from a drop is never reached.
+    const outcome = await client
+      .streamSteps('s1', { steps: ['x'] }, controller.signal, (event) => {
+        if (event.type === 'step:start') controller.abort();
+      })
+      .then(
+        (result) => ({ result }),
+        (error: unknown) => ({ error }),
+      );
+
+    // Rejected — not resolved as a `streamDropped: true` result, which is what
+    // the same read error means when nobody asked for it.
+    expect(outcome).not.toHaveProperty('result');
+    expect((outcome as { error: Error }).error.name).toBe('AbortError');
   });
 
   it('sends the api key and asks for a stream', async () => {
@@ -371,14 +388,24 @@ describe('createApiClient other routes', () => {
     await expect(client.listSessions()).resolves.toEqual([{ sessionId: 'mcp:a' }]);
   });
 
-  it('returns last-run info as given', async () => {
-    const baseUrl = await startServer((_url, res) => {
+  it('reads last-run info from the session\'s own path, encoded, with the api key', async () => {
+    // The body is passed through untouched, so the one thing this method
+    // decides is where it asks — and session ids are file paths, which only
+    // reach the right route encoded.
+    let seenUrl = '';
+    let seenKey: string | undefined;
+    const baseUrl = await startServer((url, res, req) => {
+      seenUrl = url;
+      seenKey = req.headers['x-api-key'] as string | undefined;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ finalized: false }));
     });
 
     const client = createApiClient({ baseUrl, apiKey: 'k' });
-    await expect(client.getLastRun('s1')).resolves.toEqual({ finalized: false });
+    await expect(client.getLastRun('mcp:c:/a b/t.md')).resolves.toEqual({ finalized: false });
+
+    expect(seenUrl).toBe(`/sessions/${encodeURIComponent('mcp:c:/a b/t.md')}/last-run`);
+    expect(seenKey).toBe('k');
   });
 
   it('builds the page-content query, encoding the selector and session id', async () => {

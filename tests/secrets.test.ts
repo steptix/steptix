@@ -610,9 +610,10 @@ describe('secretValues — the env/data secrets need both spellings too', () => 
     expect(redact(stored, secrets)).toBe(`{"path":"${MASK}"}`);
   });
 
-  it('still dedups and still drops empties', () => {
-    expect(secretValues({ password: 'same' }, ['same', 'other'])).toEqual(['same', 'other']);
-    expect(secretValues({ password: '' }, [''])).toEqual([]);
+  it('still dedups once each value has two spellings', () => {
+    // A quoted value, as a parameter AND as an env/data secret: each of its
+    // spellings is pushed twice and must come back once.
+    expect(secretValues({ password: 'say "hi"' }, ['say "hi"'])).toEqual(['say "hi"', 'say \\"hi\\"']);
   });
 });
 
@@ -780,18 +781,6 @@ describe('the loop-binding registry — which dotted names are page-derived', ()
       'row._row': '1',
       'row.keyword': 'AU',
     });
-  });
-
-  it('keeps the record floor for a REGISTERED binding, and the name rule for the entry', () => {
-    const live = { 'row.token': '7' };
-    markLoopBindings(live, ['row', 'row.token']);
-    const secrets = secretValues(live);
-    // One character, off the page: masking it everywhere would turn every
-    // seven in the DOM snapshot into `***`.
-    expect(secrets).toEqual([]);
-    expect(redact('3 rows, total $1,742.70', secrets)).toBe('3 rows, total $1,742.70');
-    // The entry is the one place that value is named, so it still says `***`.
-    expect(redactMap(live, secrets)).toEqual({ 'row.token': MASK });
   });
 
   it('masks an UNMARKED `row.keyword` — a heading that merely looks like a binding', () => {

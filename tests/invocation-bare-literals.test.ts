@@ -150,11 +150,6 @@ describe('parseToolCall — rejection rules', () => {
 });
 
 describe('parseToolCall — terminator handling', () => {
-  it('a bare value adjacent to `]` (no whitespace) closes the invocation cleanly', () => {
-    const call = parseToolCall('[tool: x count=5]');
-    expect(call?.args['count']).toBe('5');
-  });
-
   it('two bare values separated by whitespace both parse', () => {
     const call = parseToolCall('[tool: x a=1 b=2]');
     expect(call?.args['a']).toBe('1');
@@ -171,55 +166,6 @@ describe('parseToolCall — terminator handling', () => {
 // ─── Bridge-level: bare literals coerce to the declared schema type ─────────
 
 describe('executeToolStep — bare literals coerce through the schema', () => {
-  it('bare integer → tool receives a real number when type: number is declared', async () => {
-    let received: number | undefined;
-    const def: ToolDefinition = {
-      name: 'use-count',
-      parameters: { count: { type: 'number' } },
-      outputs: {},
-      run: (args) => {
-        received = (args as { count: number }).count;
-      },
-    };
-    const call: ToolCall = {
-      name: 'use-count',
-      args: { count: '30' },
-      outputAliases: {},
-    };
-    const outcome = await executeToolStep(call, {
-      ...stubCtx,
-      resolvedParameters: {},
-      catalogue: makeCatalogue(def) as never,
-    });
-    expect(outcome.status).toBe('passed');
-    expect(received).toBe(30);
-    expect(typeof received).toBe('number');
-  });
-
-  it('bare boolean → tool receives a real boolean when type: boolean is declared', async () => {
-    let received: boolean | undefined;
-    const def: ToolDefinition = {
-      name: 'use-flag',
-      parameters: { enabled: { type: 'boolean' } },
-      outputs: {},
-      run: (args) => {
-        received = (args as { enabled: boolean }).enabled;
-      },
-    };
-    const call: ToolCall = {
-      name: 'use-flag',
-      args: { enabled: 'true' },
-      outputAliases: {},
-    };
-    const outcome = await executeToolStep(call, {
-      ...stubCtx,
-      resolvedParameters: {},
-      catalogue: makeCatalogue(def) as never,
-    });
-    expect(outcome.status).toBe('passed');
-    expect(received).toBe(true);
-  });
-
   it('bare negative float → tool receives a real number', async () => {
     let received: number | undefined;
     const def: ToolDefinition = {

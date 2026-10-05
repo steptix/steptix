@@ -26,7 +26,6 @@ import {
   rowFailurePrefix,
   rowGlyph,
   rowGroups,
-  rowKey,
   rowsCollapseKey,
   rowsFor,
   rowStatusClass,
@@ -431,11 +430,6 @@ test("rowSummary folds into a per-file {line → rows} map, sorted", () => {
   assert.equal(setRowFailuresFor(map, undefined, []), map);
 });
 
-test("rowKey is what keeps the two lists' selections apart", () => {
-  assert.equal(rowKey("run", 3), "run#3");
-  assert.equal(rowKey("section:Upload each statement", 2), "section:Upload each statement#2");
-});
-
 // ── The panel renders what the host said, and nothing else ────────────────
 
 test("the row's values text and detail pass through untouched — the host masks and words them", () => {
@@ -449,12 +443,8 @@ test("the row's values text and detail pass through untouched — the host masks
     ],
   }];
   const [group] = rowGroups(tables);
-  assert.equal(group.rows[0].values, "email=demo@securebank.com, password=***");
-  assert.equal(group.rows[1].detail, "failed at step 6");
-  assert.equal(formatRowDuration(group.rows[1].durationMs), "7.4s");
-  assert.equal(formatRowDuration(group.rows[2].durationMs), "", "a row the loop never reached has no duration");
-  // Row numbers are table positions, always (decision 1) — a subset run's
-  // rows keep their numbers, so the panel never renumbers what it was sent.
-  assert.deepEqual(group.rows.map((r) => r.row), [1, 3, 5]);
-  assert.deepEqual(buildTableRowsPayload(group, [3]), { rows: [3] });
+  // Every field as shipped — including the row numbers, which are table
+  // positions always (decision 1): a subset run's rows keep their numbers,
+  // so the panel never renumbers what it was sent.
+  assert.deepEqual(group.rows, tables[0].rows);
 });

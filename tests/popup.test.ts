@@ -56,22 +56,6 @@ describe('parseAIResponse — switchPage action', () => {
     expect(result.actions[0]?.page).toBe('page:2');
   });
 
-  it('parses page field alongside other fields', () => {
-    const raw = JSON.stringify({
-      actions: [
-        {
-          action: 'switchPage',
-          page: 'main',
-          description: 'Switch back to main page',
-        },
-      ],
-      reasoning: 'Done with popup.',
-    });
-    const result = parseAIResponse(raw);
-    expect(result.actions[0]?.page).toBe('main');
-    expect(result.actions[0]?.description).toBe('Switch back to main page');
-  });
-
   it('ignores non-string page values', () => {
     const raw = JSON.stringify({
       actions: [{ action: 'switchPage', page: 42, description: 'Switch' }],
@@ -114,8 +98,13 @@ describe('parseAIResponse — closePage action', () => {
 
 // ─── Parser: closePage aliases ──────────────────────────────────────────────
 
+// The parser looks aliases up FOLDED (lower-case, `_`/`-`/spaces removed —
+// `foldActionName`), so `close_tab` is `closeTab` and `close_page` is the
+// canonical type itself; folding is pinned in unknown-action-type.test.ts. So
+// this table and the switchPage one below carry one row per distinct folded
+// alias, and that is every alias there is.
 describe('parseAIResponse — closePage aliases', () => {
-  const aliases = ['closeTab', 'close_tab', 'close_page', 'closeWindow', 'close_window'];
+  const aliases = ['closeTab', 'closeWindow'];
 
   for (const alias of aliases) {
     it(`normalises "${alias}" to "closePage"`, () => {
@@ -132,7 +121,7 @@ describe('parseAIResponse — closePage aliases', () => {
 // ─── Parser: switchPage aliases ─────────────────────────────────────────────
 
 describe('parseAIResponse — switchPage aliases', () => {
-  const aliases = ['switch_page', 'switchTab', 'switch_tab', 'switchWindow', 'switch_window'];
+  const aliases = ['switchTab', 'switchWindow'];
 
   for (const alias of aliases) {
     it(`normalises "${alias}" to "switchPage"`, () => {

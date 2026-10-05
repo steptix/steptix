@@ -10,7 +10,7 @@
  * Harness copied from `step-executor-placeholders.test.ts`: a fake page, a
  * scripted client, and the real executor.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Page } from 'playwright';
 import type { AiClient } from '../src/ai/client.js';
 import type { AIAction, ChatMessage } from '../src/ai/types.js';
@@ -328,9 +328,10 @@ describe('the computer-surface judge sends a short request of its own', () => {
       error: body,
       code: body.code,
     });
+    let calls = 0;
     const client = {
-      requests: [] as ChatMessage[][],
       complete: async () => {
+        calls++;
         throw rejection;
       },
     } as unknown as AiClient;
@@ -339,8 +340,10 @@ describe('the computer-surface judge sends a short request of its own', () => {
       ['the Print dialog is open'],
       computerOpts(client, new FakeDesktopAdapter({ width: 200, height: 150 })),
     );
-    await expect(judged).rejects.toThrow(message);
-    await expect(judged).rejects.toMatchObject({ retryable: false });
+    // The bridge's own words, not the SDK's `400 …` rendering of them.
+    await expect(judged).rejects.toMatchObject({ message, retryable: false });
+    // One request: re-asking would send the same image to the same model.
+    expect(calls).toBe(1);
   });
 });
 
@@ -415,38 +418,88 @@ describe('the computer judge\'s recorded capture obeys desktop.reportScreenshots
 // ---------------------------------------------------------------------------
 
 describe('Stop reaches the condition judge between polls', () => {
+  // `setTimeout` is fake in this block and nothing advances it, so the judge's
+  // 3 s pause cannot run out: if the judge settles at all, Stop is what ended
+  // the pause. Measured before the fix, the full poll interval ran out first —
+  // here, that is a judge still pending when `turnsUntil` gives up.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A client that answers `waiting` and presses Stop on the next turn of the
+   *  event loop. Everything between the judge reading that answer and starting
+   *  its pause is synchronous, so the Stop lands IN the pause — the case the
+   *  fix is for — not before it. `timersStartedBeforeStop` is the proof: one
+   *  timer, the pause's, was started between the answer and the Stop. (Not
+   *  the absolute count: Jimp's constructor leaves a 1 ms timer of its own.) */
+  function waitingThenStop(controller: AbortController, reasoning: string) {
+    const requests: ChatMessage[][] = [];
+    const client = {
+      requests,
+      timersStartedBeforeStop: -1,
+      complete: async (messages: ChatMessage[]) => {
+        requests.push(messages);
+        const atAnswer = vi.getTimerCount();
+        setImmediate(() => {
+          client.timersStartedBeforeStop = vi.getTimerCount() - atAnswer;
+          controller.abort();
+        });
+        return { text: JSON.stringify({ matched: 'waiting', actions: [], reasoning }), model: 'stub' };
+      },
+    };
+    return client as unknown as AiClient & { requests: ChatMessage[][]; timersStartedBeforeStop: number };
+  }
+
+  /** What the judge came to — `undefined` while it is still pending. */
+  function outcomeOf(judged: Promise<unknown>): () => unknown {
+    let outcome: unknown;
+    judged.then(
+      () => { outcome = 'decided'; },
+      (err: unknown) => { outcome = err; },
+    );
+    return () => outcome;
+  }
+
+  /** Event-loop turns until `done()` holds. Not a timer, because timers are
+   *  fake here; the real-time ceiling only bounds a failure. */
+  async function turnsUntil(done: () => boolean, ceilingMs = 10_000): Promise<void> {
+    const giveUpAt = performance.now() + ceilingMs;
+    while (!done() && performance.now() < giveUpAt) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+
   it('a Stop during the 3 s wait after a `waiting` answer ends the judge promptly', async () => {
     const adapter = new FakeDesktopAdapter({ width: 200, height: 150 });
     const controller = new AbortController();
-    const client = scriptedClient([
-      JSON.stringify({ matched: 'waiting', actions: [], reasoning: 'the dialog is still opening' }),
-    ]);
-    setTimeout(() => controller.abort(), 100);
-    const started = Date.now();
+    const client = waitingThenStop(controller, 'the dialog is still opening');
 
-    const judged = evaluateConditions(
+    const outcome = outcomeOf(evaluateConditions(
       ['the Print dialog is open'],
       computerOpts(client, adapter, { signal: controller.signal }),
-    );
+    ));
+    await turnsUntil(() => outcome() !== undefined);
 
-    await expect(judged).rejects.toMatchObject({ name: 'AbortError' });
-    // Measured before the fix: the full 3 s poll interval ran out first.
-    expect(Date.now() - started).toBeLessThan(1500);
+    expect(client.timersStartedBeforeStop).toBe(1);
+    expect(outcome(), 'the judge sat out its pause after Stop').toMatchObject({ name: 'AbortError' });
     expect(client.requests).toHaveLength(1);
   });
 
   it('the page surface gives way too, without waiting for the page to settle', async () => {
     const controller = new AbortController();
-    const client = scriptedClient([
-      JSON.stringify({ matched: 'waiting', actions: [], reasoning: 'still loading' }),
-    ]);
-    setTimeout(() => controller.abort(), 100);
-    const started = Date.now();
+    const client = waitingThenStop(controller, 'still loading');
 
-    const judged = evaluateConditions(['the banner is visible'], pageOpts(client, { signal: controller.signal }));
+    const outcome = outcomeOf(
+      evaluateConditions(['the banner is visible'], pageOpts(client, { signal: controller.signal })),
+    );
+    await turnsUntil(() => outcome() !== undefined);
 
-    await expect(judged).rejects.toMatchObject({ name: 'AbortError' });
-    expect(Date.now() - started).toBeLessThan(1500);
+    expect(client.timersStartedBeforeStop).toBe(1);
+    expect(outcome(), 'the judge sat out its pause after Stop').toMatchObject({ name: 'AbortError' });
+    expect(client.requests).toHaveLength(1);
   });
 });
 

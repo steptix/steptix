@@ -1725,7 +1725,11 @@ async function handleRequest(
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 server.listen(PORT, () => {
-  console.log(`Fixture test server running at http://localhost:${PORT}`);
+  // The port actually bound, not the one asked for: with PORT=0 the OS picks
+  // it, and tests/fixture-server.ts reads it from this line.
+  const address = server.address();
+  const bound = typeof address === 'object' && address ? address.port : PORT;
+  console.log(`Fixture test server running at http://localhost:${bound}`);
   console.log(`  Static:  index.html, dashboard.html, delegates.html, transactions.html, iframes.html, new-window.html, mfa-login.html, mfa.html`);
   console.log(`  Iframes: /iframe/banner, /iframe/sidebar/:cat, /iframe/content/:cat/:item`);
   console.log(`  API:     /api/delegates, /api/notifications, /api/csrf-token`);

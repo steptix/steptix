@@ -18,7 +18,6 @@ import {
   calledSectionNames,
   chainMembersKeptLogLine,
   buildRowsMessage,
-  dataRowLinesOf,
   failedRowsFrom,
   oldServerBodyStepsWarning,
   rowAtLine,
@@ -540,7 +539,7 @@ test('body split: a whole chain of three unwinds in one pass', () => {
 });
 
 // ---------------------------------------------------------------------------
-// rowAtLine / dataRowLinesOf
+// rowAtLine
 // ---------------------------------------------------------------------------
 
 test('rowAtLine: names the table and the position, not the line', () => {
@@ -556,11 +555,6 @@ test('rowAtLine: a header, a delimiter and a step are not rows', () => {
   for (const line of [4, 5, 10, 15, 16, 19]) {
     assert.equal(rowAtLine(BOTH, line), null, `line ${line}`);
   }
-});
-
-test('dataRowLinesOf: every table’s rows, ascending — the gutter menu key', () => {
-  assert.deepEqual(dataRowLinesOf(BOTH), [6, 7, 8, 17, 18]);
-  assert.deepEqual(dataRowLinesOf(PLAIN), []);
 });
 
 // ---------------------------------------------------------------------------

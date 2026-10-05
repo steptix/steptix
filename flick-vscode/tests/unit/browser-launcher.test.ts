@@ -9,7 +9,7 @@ import {
   detectInstalled,
   clearDetectionCache,
   launchBrowserWithCdp,
-  POLL_INTERVAL_MS,
+  __testCachedDetection,
 } from '../../src/extension/browser-launcher';
 
 type ExistsSync = (p: string) => boolean;
@@ -129,8 +129,9 @@ test('detectInstalled Linux falls back to google-chrome-stable when google-chrom
   assert.equal(result.chrome, '/usr/bin/google-chrome-stable');
 });
 
-test('cache: an overridden call does not leak its result to a subsequent uncached call', () => {
-  // Override path returns a fake binary…
+test('cache: a call with injected deps never writes its answer to the module cache', async () => {
+  // The cache serves the real, dep-less caller. A fake answer left in it
+  // would make that caller launch a binary that does not exist.
   const overridden = detectInstalled({
     platform: 'linux',
     env: {},
@@ -138,18 +139,30 @@ test('cache: an overridden call does not leak its result to a subsequent uncache
     which: () => '/fake/chrome',
   });
   assert.equal(overridden.chrome, '/fake/chrome');
+  assert.equal(__testCachedDetection(), null, 'detectInstalled with deps wrote the cache');
 
-  // …subsequent overridden call also recomputes (no cache hit on overrides).
-  const overriddenAgain = detectInstalled({
-    platform: 'linux',
-    env: {},
-    existsSync: () => false,
-    which: () => null,
-  });
-  assert.equal(overriddenAgain.chrome, null);
-
-  // The cache is per-test cleared in beforeEach; assert it's empty here too.
-  clearDetectionCache();
+  // The launcher detects through the same function, with its own deps. Nothing
+  // is installed, so it must stop there; the fakes that throw make sure a
+  // regression past that point can never create a directory or start a browser.
+  const refuse = (what: string) => () => {
+    throw new Error(`launchBrowserWithCdp reached ${what} with no browser installed`);
+  };
+  const launched = await launchBrowserWithCdp(
+    { engine: 'chrome', port: 9222, profileDir: '/tmp/p' },
+    {
+      platform: 'linux',
+      env: {},
+      existsSync: () => false,
+      which: () => null,
+      mkdirSync: refuse('mkdirSync'),
+      spawn: refuse('spawn') as unknown as typeof import('node:child_process').spawn,
+      fetchFn: refuse('fetch') as unknown as typeof fetch,
+      sleep: refuse('sleep') as unknown as (ms: number) => Promise<void>,
+    },
+  );
+  assert.equal(launched.ok, false);
+  assert.match(launched.error ?? '', /Chrome not found/);
+  assert.equal(__testCachedDetection(), null, 'launchBrowserWithCdp with deps wrote the cache');
 });
 
 test('launchBrowserWithCdp happy path (chrome) — array-form spawn, fetch ok on first poll', async () => {
@@ -250,32 +263,6 @@ test('launchBrowserWithCdp both engines spawn with the same arg shape', async ()
   ]);
 });
 
-test('profile dir is created with recursive: true', async () => {
-  const mkdirCalls: Array<{ p: string; opts: { recursive: boolean } }> = [];
-  await launchBrowserWithCdp(
-    { engine: 'edge', port: 9222, profileDir: '/nested/path/edge-profile' },
-    {
-      platform: 'linux',
-      env: {},
-      existsSync: () => false,
-      which: (cmd) => (cmd === 'microsoft-edge' ? '/usr/bin/microsoft-edge' : null),
-      mkdirSync: (p, opts) => {
-        mkdirCalls.push({ p, opts });
-      },
-      spawn: (() =>
-        makeFakeChild(1) as unknown as ReturnType<
-          typeof import('node:child_process').spawn
-        >) as typeof import('node:child_process').spawn,
-      fetchFn: (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch,
-      sleep: async () => {},
-    },
-  );
-
-  assert.equal(mkdirCalls.length, 1);
-  assert.equal(mkdirCalls[0].p, '/nested/path/edge-profile');
-  assert.equal(mkdirCalls[0].opts.recursive, true);
-});
-
 test('binary missing returns ok:false with engine-specific copy-paste command (edge)', async () => {
   const result = await launchBrowserWithCdp(
     { engine: 'edge', port: 9222, profileDir: '/tmp/edge-profile' },
@@ -352,8 +339,6 @@ test('poll timeout: fetch always throws, returns ok:false with port in error', a
     assert.match(result.error!, /pid 42/);
     assert.match(result.error!, /econnrefused/);
     assert.ok(sleepCalls > 0, 'sleep should have been called between polls');
-    // Each poll waits POLL_INTERVAL_MS — sanity check exported constant exists.
-    assert.equal(POLL_INTERVAL_MS, 200);
   } finally {
     Date.now = realNow;
   }

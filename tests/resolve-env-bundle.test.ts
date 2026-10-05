@@ -38,6 +38,9 @@ describe('resolveEnvBundle', () => {
   });
 
   it('composes .env.<name> into the bundle map WITHOUT mutating process.env (default/server path)', async () => {
+    // The purity check below reads `undefined` as "never written", so the
+    // shell running the suite must not have supplied it either.
+    delete process.env['BASE_URL_PURE'];
     writeFileSync(path.join(tmpRoot, '.env.uat'), 'BASE_URL_PURE=https://uat.example.com\n');
     writeFileSync(path.join(tmpRoot, 'data', 'uat.json'), JSON.stringify({ region: 'au' }));
 
@@ -90,6 +93,10 @@ describe('resolveEnvBundle', () => {
   });
 
   it('resolves $VAR leaves in the data file against the composed map (no global mutation)', async () => {
+    // ADMIN_PWD is the name the repo's own fixtures use, so a shell that
+    // exported the project `.env` has it. Clear it before the purity check
+    // reads it; afterEach puts it back.
+    delete process.env['ADMIN_PWD'];
     writeFileSync(path.join(tmpRoot, '.env.uat'), 'ADMIN_PWD=letmein\n');
     writeFileSync(
       path.join(tmpRoot, 'data', 'uat.json'),

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -25,7 +25,8 @@ import type { CodeBehindContext } from '../src/codebehind/types.js';
  * literal with the leak guard blind, and replay would read `undefined`.
  */
 
-const tmpBase = path.join(os.tmpdir(), `cb-section-rows-${process.pid}`);
+/** This run's own directory: nothing here resolves a package, so the OS temp folder will do. */
+let tmpBase: string | undefined;
 let counter = 0;
 let dir: string;
 
@@ -33,14 +34,18 @@ const noPage = {} as Page;
 const noContext = {} as BrowserContext;
 const noBrowser = {} as Browser;
 
+beforeAll(async () => {
+  tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), 'cb-section-rows-'));
+});
+
 beforeEach(async () => {
   clearSkillCache();
-  dir = path.join(tmpBase, `t${counter++}`);
+  dir = path.join(tmpBase!, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true });
+  if (tmpBase) await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 async function write(rel: string, contents: string): Promise<string> {

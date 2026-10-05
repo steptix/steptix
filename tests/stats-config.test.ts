@@ -22,7 +22,7 @@ function projectWith(config: Record<string, unknown>): string {
 }
 
 afterAll(() => {
-  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 describe('loadConfig — the stats section', () => {
@@ -31,6 +31,9 @@ describe('loadConfig — the stats section', () => {
     expect((await loadConfig(undefined, projectWith({ stats: { enabled: true } }))).stats).toEqual({ enabled: true });
     expect((await loadConfig(undefined, projectWith({ stats: {} }))).stats).toEqual({});
     expect((await loadConfig(undefined, projectWith({}))).stats).toBeUndefined();
+    // And through an explicit path, the form `--config <file>` takes.
+    const explicit = path.join(projectWith({ stats: { enabled: false } }), 'steptix.config.json');
+    expect((await loadConfig(explicit)).stats).toEqual({ enabled: false });
   });
 
   it.each([

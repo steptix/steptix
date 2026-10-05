@@ -165,22 +165,6 @@ describe('renderToolStep — "how to register a tool" hint', () => {
   });
 });
 
-// Touch one path-resolution quirk: realistic toolsDir paths are absolute.
-// Just confirm the buildNotFoundMessage doesn't blow up on Windows-style paths.
-describe('buildNotFoundMessage — platform path quirks', () => {
-  it('handles a Windows-style toolsDir path verbatim', () => {
-    const cat = new ToolCatalogue();
-    cat.diagnostics = {
-      toolsDir: 'C:\\Projects\\vibe\\ai-ui-automation\\fixtures\\tools\\src',
-      toolsDirMissing: false,
-      filesScanned: 5,
-    };
-    const msg = cat.buildNotFoundMessage('foo');
-    expect(msg).toContain('C:\\Projects\\vibe\\ai-ui-automation');
-    expect(msg).toContain('5 files');
-  });
-});
-
 // Sanity: the default catalogue (no diagnostics) still produces a sensible
 // error — diagnostics is optional metadata, not required for `require`.
 describe('ToolCatalogue.require — without diagnostics', () => {

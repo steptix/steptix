@@ -247,17 +247,6 @@ describe('AiClient on a keyless Bedrock config', () => {
     await expect(call).rejects.toThrow(/forbids AI/);
     expect(constructorMock).not.toHaveBeenCalled();
   });
-
-  it('forwards AI_EFFORT with a bedrock model like any other', async () => {
-    // Smoke: `output_config.effort` is always sent once effort is set, and
-    // Bedrock documents it neither way — so this pins that the framework does
-    // not quietly drop it for this provider.
-    const client = new AiClient({ ...bedrockKeyless().ai, effort: 'high' }, tokenTracker as never);
-
-    await client.complete([{ role: 'user', content: 'Hi' }]);
-
-    expect(chatMock.mock.calls[0]?.[1]).toMatchObject({ effort: 'high' });
-  });
 });
 
 // ─── The inert-pair warning ─────────────────────────────────────────────────

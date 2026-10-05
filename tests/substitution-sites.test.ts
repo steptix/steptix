@@ -50,7 +50,7 @@ import path from 'node:path';
  * found).
  */
 const SUBSTITUTION_CALL =
-  /\b(interpolate|interpolateQuiet|interpolateEnvData|interpolateEnvDataDeep|substituteText|substituteAsLiterals|substituteAction|resolveStepText)\s*\(/g;
+  /\b(interpolate|interpolateQuiet|interpolateEnvData|substituteText|substituteAsLiterals|substituteAction|resolveStepText)\s*\(/g;
 
 /**
  * Why each call site is safe. The classification is the load-bearing part —
@@ -78,7 +78,7 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   'src/codebehind/execute.ts': { why: 'not-step-text', calls: 2 },
   'src/codebehind/generate.ts': { why: 'not-step-text', calls: 2 },
   'src/mcp/assemble.ts': { why: 'not-step-text', calls: 1 },
-  'src/parser/interpolate-env-data.ts': { why: 'definition', calls: 4 },
+  'src/parser/interpolate-env-data.ts': { why: 'definition', calls: 1 },
   // The literal-condition pre-check (src/parser/literal-condition.ts): a
   // CONDITION is substituted so the runtime can decide it without a model
   // call. Not step text by construction — a control line's condition is split

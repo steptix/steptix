@@ -9,7 +9,7 @@
  *  - `domCaptureFailure` as pure string work — it exists to recognise the
  *    in-band failure strings the runner's capture paths return.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import {
   captureDomSnapshot,
@@ -685,15 +685,24 @@ describe('captureDomSnapshot — clipping and browser-side failures', () => {
   // capture-dom.js has its OWN try/catch, emitting `<error>Failed to capture
   // DOM: …` — a different prefix from the Node-side marker. Matching only the
   // Node one returned that string to the agent as 200 OK page content.
+  //
+  // Its own page: `setContent` does not replace the Window, so a throwing
+  // `getComputedStyle` left on the shared page breaks every capture that runs
+  // after this test.
   it('recognises a failure raised inside the browser script', async () => {
-    await page.setContent('<body><p>hi</p></body>');
-    await page.evaluate(`window.getComputedStyle = function () { throw new Error('boom'); }`);
+    const poisoned = await browser.newPage();
+    try {
+      await poisoned.setContent('<body><p>hi</p></body>');
+      await poisoned.evaluate(`window.getComputedStyle = function () { throw new Error('boom'); }`);
 
-    const snapshot = await captureDomSnapshot(page);
+      const snapshot = await captureDomSnapshot(poisoned);
 
-    expect(snapshot).toContain('<error>');
-    expect(domCaptureFailure(snapshot, 'snapshot')).not.toBeNull();
-    expect(domCaptureFailure(snapshot, 'snapshot')?.kind).toBe('evaluate-failed');
+      expect(snapshot).toContain('<error>');
+      expect(domCaptureFailure(snapshot, 'snapshot')).not.toBeNull();
+      expect(domCaptureFailure(snapshot, 'snapshot')?.kind).toBe('evaluate-failed');
+    } finally {
+      await poisoned.close();
+    }
   });
 });
 
@@ -839,6 +848,22 @@ describe('domCaptureFailure', () => {
 // ---------------------------------------------------------------------------
 
 describe('readPageIdentity', () => {
+  // The retry's half-second wait runs on a fake `setTimeout`: what these tests
+  // pin is which page the retry reports, not that the delay is real time.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** `readPageIdentity`, with any retry delay it schedules run out at once. */
+  async function identityOf(page: Page) {
+    const pending = readPageIdentity(page);
+    await vi.runAllTimersAsync();
+    return pending;
+  }
+
   /** A page whose `title()` fails for the first `failures` calls. */
   function flakyPage(opts: { failures: number; urls?: string[]; title?: string }) {
     let calls = 0;
@@ -859,7 +884,7 @@ describe('readPageIdentity', () => {
   it('reads in one go when nothing is moving', async () => {
     const { page, calls } = flakyPage({ failures: 0 });
 
-    const identity = await readPageIdentity(page);
+    const identity = await identityOf(page);
 
     expect(identity).toEqual({ url: 'https://shop.example/cart', title: 'Cart', stale: false });
     // No retry, so no 500ms spent on the overwhelmingly common path.
@@ -876,7 +901,7 @@ describe('readPageIdentity', () => {
       title: 'Sign in',
     });
 
-    const identity = await readPageIdentity(page);
+    const identity = await identityOf(page);
 
     expect(identity).toEqual({
       url: 'https://accounts.example/login',
@@ -888,7 +913,7 @@ describe('readPageIdentity', () => {
   it('gives up after the second failure and says the url may be stale', async () => {
     const { page } = flakyPage({ failures: 99 });
 
-    const identity = await readPageIdentity(page);
+    const identity = await identityOf(page);
 
     // `stale` is really a claim about the URL, not the title: `page.url()` was
     // read BEFORE the title threw, so it is the address from before the move.
@@ -897,12 +922,22 @@ describe('readPageIdentity', () => {
     expect(identity.title).toBe('');
   });
 
-  it('keeps a url it salvaged rather than answering with nothing', async () => {
-    // A stale url beats an empty one — `stale` is what says which it is.
-    const { page } = flakyPage({ failures: 99, urls: ['https://shop.example/cart'] });
+  it('keeps the url the first attempt salvaged when the retry cannot read one', async () => {
+    // A stale url beats an empty one — `stale` is what says which it is. The
+    // first attempt reads the url and then fails on the title; the retry fails
+    // on the url itself, so the only address left is the first one.
+    let urlReads = 0;
+    const page = {
+      url: () => {
+        if (urlReads++ > 0) throw new Error('Target page, context or browser has been closed');
+        return 'https://shop.example/cart';
+      },
+      title: async () => { throw new Error('Execution context was destroyed'); },
+    } as unknown as Page;
 
-    const identity = await readPageIdentity(page);
+    const identity = await identityOf(page);
 
-    expect(identity.url).not.toBe('');
+    expect(urlReads).toBe(2);
+    expect(identity).toEqual({ url: 'https://shop.example/cart', title: '', stale: true });
   });
 });

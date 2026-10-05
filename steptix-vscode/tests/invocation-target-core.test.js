@@ -26,6 +26,7 @@ import { strict as assert } from 'node:assert';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
 import {
   TOOL_FILE_EXTS,
   canonicalSkillName,
@@ -83,8 +84,22 @@ test('toolFileFor returns null on an interior empty segment', () => {
   assert.equal(toolFileFor(''), null);
 });
 
-test('TOOL_FILE_EXTS matches the registry probe order', () => {
-  assert.deepEqual([...TOOL_FILE_EXTS], ['.ts', '.mts', '.js', '.mjs']);
+test('TOOL_FILE_EXTS is the set of extensions the registry indexes', () => {
+  // The registry's set is a private `const` in src/tools/registry.ts, so it is
+  // read out of the source text (the placeholder-grammar-parity approach)
+  // rather than hard-coded here: a hard-coded copy would be a third list that
+  // agrees with this one and says nothing about the registry. The registry
+  // only asks `.has(ext)`, so the comparison is order-insensitive; the order
+  // is F12's own (definition-provider.ts probes them first to last).
+  const registryFile = new URL('../../src/tools/registry.ts', import.meta.url);
+  const hit = /const TOOL_FILE_EXTS = new Set\(\[([^\]]*)\]\);/.exec(fs.readFileSync(registryFile, 'utf8'));
+  assert.ok(
+    hit,
+    'could not read `const TOOL_FILE_EXTS = new Set([…]);` out of src/tools/registry.ts — ' +
+      'if that line was reformatted, update this reader; if the set moved, so must the mirror',
+  );
+  const registryExts = [...hit[1].matchAll(/'([^']*)'/g)].map((m) => m[1]);
+  assert.deepEqual([...TOOL_FILE_EXTS].sort(), registryExts.sort());
 });
 
 // ── canonicalSkillName: parity with parseSkillCall ───────────────────────────
@@ -132,6 +147,16 @@ function makeSkillsDir(files) {
   return root;
 }
 
+/**
+ * Remove a tree `makeSkillsDir` built. On Windows, Defender or the indexer can
+ * hold a just-written file for a moment, and `force` only forgives ENOENT —
+ * without retries an EBUSY/EPERM here would fail a test whose assertions all
+ * passed.
+ */
+function removeSkillsDir(root) {
+  fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
 test('collectSkillNames emits subfolder skills with forward slashes, sorted', () => {
   const root = makeSkillsDir([
     'capture_url.md',
@@ -147,7 +172,7 @@ test('collectSkillNames emits subfolder skills with forward slashes, sorted', ()
       'capture_url',
     ]);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeSkillsDir(root);
   }
 });
 
@@ -162,7 +187,7 @@ test('collectSkillNames skips dot-dirs, node_modules and non-markdown files', ()
   try {
     assert.deepEqual(collectSkillNames(root), ['login']);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeSkillsDir(root);
   }
 });
 
@@ -179,7 +204,7 @@ test('collectSkillNames drops names the invocation grammar cannot lex', () => {
   try {
     assert.deepEqual(collectSkillNames(root), ['ok_dir/z']);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeSkillsDir(root);
   }
 });
 
@@ -187,12 +212,38 @@ test('collectSkillNames returns [] for a missing skills dir', () => {
   assert.deepEqual(collectSkillNames(path.join(os.tmpdir(), 'tb-skills-does-not-exist')), []);
 });
 
+/**
+ * Run `fn` with every `fs.readdirSync` — including the one the walk under
+ * test makes through its own `import * as fs` — recorded in `reads`. Past
+ * `limit` reads the directory answers empty, so a walk that has lost its loop
+ * guard ends in milliseconds with a count that says so, instead of running for
+ * minutes: it is synchronous, and node:test cannot time out synchronous code.
+ */
+function countingReaddirs(limit, fn) {
+  const cjs = fs.default;
+  const real = cjs.readdirSync;
+  const reads = [];
+  cjs.readdirSync = function (dir, ...rest) {
+    reads.push(String(dir));
+    return reads.length > limit ? [] : real.call(this, dir, ...rest);
+  };
+  syncBuiltinESMExports();
+  try {
+    return { result: fn(), reads };
+  } finally {
+    cjs.readdirSync = real;
+    syncBuiltinESMExports();
+  }
+}
+
 test('collectSkillNames survives self-referential directory links (visited-set, not depth)', (t) => {
   // Two links back into the root: a depth cap alone makes this walk
   // O(links^depth) — measured in MINUTES at depth 16 — and it runs
   // synchronously per completion keystroke. The realpath visited-set means
   // every REAL directory is read once, so the loops contribute nothing and
-  // the walk stays proportional to the actual tree.
+  // the walk stays proportional to the actual tree. That is asserted as a
+  // count of reads rather than a wall-clock budget, which a busy machine can
+  // miss for reasons that have nothing to do with the walk.
   const root = makeSkillsDir(['real/login.md', 'real/deep/nested.md']);
   try {
     try {
@@ -202,14 +253,18 @@ test('collectSkillNames survives self-referential directory links (visited-set, 
       t.skip(`cannot create junctions here: ${err.code ?? err.message}`);
       return;
     }
-    const started = Date.now();
-    const names = collectSkillNames(root);
-    assert.ok(Date.now() - started < 2_000, 'a looping walk must terminate fast');
+    const { result: names, reads } = countingReaddirs(50, () => collectSkillNames(root));
+    // root, real, real/deep — and nothing through either loop.
+    assert.equal(
+      reads.length,
+      3,
+      `each real directory read once, but read ${reads.length}: ${JSON.stringify(reads.slice(0, 5))}…`,
+    );
     // The root's real path is visited first, so the loop junctions resolve to
     // an already-visited directory and are skipped outright.
     assert.deepEqual(names, ['real/deep/nested', 'real/login']);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeSkillsDir(root);
   }
 });
 
@@ -235,7 +290,7 @@ test('collectSkillNames offers a junctioned subfolder once, under the first pref
       `either spelling resolves at runtime, got ${JSON.stringify(names)}`,
     );
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeSkillsDir(root);
   }
 });
 
@@ -255,7 +310,7 @@ test('collectSkillNames follows a symlinked skill file', (t) => {
     }
     assert.deepEqual(collectSkillNames(root), ['linked', 'real/login']);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeSkillsDir(root);
   }
 });
 
@@ -507,7 +562,7 @@ test('skillIoFor reads parameters (with literal values) and outputs', () => {
     // Leading-slash sugar canonicalises to the same file.
     assert.deepEqual(skillIoFor(root, '/auth/login'), io);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeSkillsDir(root);
   }
 });
 
@@ -521,7 +576,7 @@ test('skillIoFor is null for a missing file or malformed name, empty for a bare 
     assert.deepEqual(io.params, []);
     assert.deepEqual(io.outputs, []);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeSkillsDir(root);
   }
 });
 
@@ -541,6 +596,6 @@ test('skillIoFor re-reads when the file changes on disk', () => {
       ['username', 'password'],
     );
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeSkillsDir(root);
   }
 });

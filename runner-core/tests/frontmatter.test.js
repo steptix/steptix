@@ -17,7 +17,7 @@ test('parseFrontmatter: disabled true', () => {
   assert.deepEqual(parseFrontmatter(text), { disabled: true });
 });
 
-test('parseFrontmatter: disabled false / missing returns no disabled key', () => {
+test('parseFrontmatter: disabled: false is kept as false; absent stays absent', () => {
   assert.deepEqual(parseFrontmatter('---\ndisabled: false\n---\n'), { disabled: false });
   assert.deepEqual(parseFrontmatter('---\nfoo: bar\n---\n'), {});
 });
@@ -27,12 +27,7 @@ test('parseFrontmatter: env field', () => {
   assert.deepEqual(parseFrontmatter(text), { env: 'prod' });
 });
 
-test('parseFrontmatter: tags as flow list', () => {
-  const text = '---\ntags: [smoke, slow, "needs-network"]\n---\n';
-  assert.deepEqual(parseFrontmatter(text), { tags: ['smoke', 'slow', 'needs-network'] });
-});
-
-test('parseFrontmatter: tags normalize to lowercase for reliable matching', () => {
+test('parseFrontmatter: tags as a flow list, quotes stripped, lowercased for reliable matching', () => {
   const text = '---\ntags: [Smoke, SLOW, "Needs-Network"]\n---\n';
   assert.deepEqual(parseFrontmatter(text), { tags: ['smoke', 'slow', 'needs-network'] });
 });
@@ -56,10 +51,6 @@ test('parseFrontmatter: dataSources block ends at the next top-level key (dedent
 test('parseFrontmatter: dataSources unquotes quoted paths', () => {
   const text = '---\ndataSources:\n  c: "../a b/cat.json"\n---\n';
   assert.deepEqual(parseFrontmatter(text), { dataSources: { c: '../a b/cat.json' } });
-});
-
-test('parseFrontmatter: no dataSources key when absent', () => {
-  assert.deepEqual(parseFrontmatter('---\ntags: [x]\n---\n'), { tags: ['x'] });
 });
 
 test('parseFrontmatter: dataSources child names with hyphens are ignored (CLI name-rule parity)', () => {

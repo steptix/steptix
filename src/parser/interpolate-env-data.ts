@@ -256,24 +256,6 @@ function buildPattern(ctx: EnvDataContext): RegExp {
   return new RegExp(`\\$\\{\\s*(${alt})\\.([A-Za-z0-9_.\\-]+)\\s*\\}`, 'g');
 }
 
-/** Walk an object/array tree and interpolate every string leaf in place (returns a new tree). */
-export function interpolateEnvDataDeep<T>(value: T, ctx: EnvDataContext): T {
-  if (typeof value === 'string') {
-    return interpolateEnvData(value, ctx) as unknown as T;
-  }
-  if (Array.isArray(value)) {
-    return value.map((v) => interpolateEnvDataDeep(v, ctx)) as unknown as T;
-  }
-  if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = interpolateEnvDataDeep(v, ctx);
-    }
-    return out as unknown as T;
-  }
-  return value;
-}
-
 /** A data leaf as step text sees it: strings as they are, scalars via
  *  `String`, a subtree JSON-encoded. Shared with `resolveEnvDataRef` so
  *  `step.getVar('data.fixtures')` reads what `${data.fixtures}` would. */

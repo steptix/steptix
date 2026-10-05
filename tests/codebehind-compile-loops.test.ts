@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { AiClient } from '../src/ai/client.js';
 import type { ChatMessage } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
@@ -17,6 +16,7 @@ import {
   type CompileRunRequest,
   type CompileRunner,
 } from '../src/codebehind/compile.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * The boxed compile — `steptix compile` — over a file that loops and decides
@@ -30,11 +30,16 @@ import {
  * generated from, what a replay proves and blames, and what the summary counts.
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-compile-loops');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
 
 let counter = 0;
 let dir: string;
+
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('codebehind-compile-loops');
+});
 
 beforeEach(async () => {
   clearSkillCache();
@@ -43,7 +48,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await removeScratchBase(tmpBase);
 });
 
 const CONFIG: Config = { ...DEFAULT_CONFIG };

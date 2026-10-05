@@ -12,10 +12,10 @@
  * `resolvedSelector` can be built from an `aria-label` or an `href` carrying a
  * secret. The last test here is that leak, asserted against the bytes on disk.
  */
-import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { Page } from 'playwright';
 import type { Config } from '../src/config/types.js';
 import type { AiClient } from '../src/ai/client.js';
@@ -314,21 +314,20 @@ describe('actionsOf — the transcript generation reads', () => {
 
 // ─── The recording: redaction happens after the merge, never before ──────────
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-selector-targeting');
-let counter = 0;
-let dir: string;
-
-beforeEach(async () => {
-  dir = path.join(tmpBase, `t${counter++}`);
-  await fs.mkdir(dir, { recursive: true });
-});
-
-afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-});
-
 describe('the recording on disk', () => {
+  // A directory of its own per test, removed after it: a fixed path would be
+  // shared with any other vitest process in this checkout, whose clean-up
+  // could delete it mid-test.
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'stx-targeting-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+
   it('writes the measurement alongside the action', async () => {
     const test = path.join(dir, 'checkout.md');
     await writeRecording(test, {

@@ -75,7 +75,6 @@ const SHAPES: { name: string; after: string[]; agree: boolean }[] = [
   { name: 'indented prose immediately', after: ['   cont'], agree: true },
   { name: 'unindented prose immediately (lazy continuation)', after: ['cont'], agree: true },
   { name: 'indented bullet immediately', after: ['   - detail'], agree: true },
-  { name: 'unindented bullet immediately', after: ['- detail'], agree: true },
   { name: 'blank then indented prose', after: ['', '   cont'], agree: true },
   { name: 'blank then unindented prose', after: ['', 'cont'], agree: true },
   { name: 'blank then indented bullet', after: ['', '   - detail'], agree: true },
@@ -108,6 +107,17 @@ const SHAPES: { name: string; after: string[]; agree: boolean }[] = [
   { name: 'link reference immediately (folds)', after: ['[r]: http://x'], agree: true },
 ];
 
+/**
+ * Shapes the CLI refuses outright, so it gives no answer for the index to
+ * agree or disagree with (see `cliCalls`). Pinned as refused rather than
+ * listed in SHAPES, where a refusal would pass with nothing compared: the
+ * markdown parser and the line scanner count a different number of steps,
+ * and the alignment guard turns that into a loud error.
+ */
+const REFUSED: { name: string; after: string[] }[] = [
+  { name: 'unindented bullet immediately', after: ['- detail'] },
+];
+
 describe('buildSectionIndex vs the CLI parser', () => {
   for (const shape of SHAPES) {
     it(`${shape.agree ? 'agrees' : 'is conservative'}: ${shape.name}`, () => {
@@ -115,14 +125,22 @@ describe('buildSectionIndex vs the CLI parser', () => {
       const cli = cliCalls(text);
       const index = indexCalls(text);
 
-      if (cli === null) {
-        // Refused by the CLI — see `cliCalls`. Nothing to compare.
-        return;
-      }
+      // Every row's answer was measured against marked, so the CLI must give
+      // one. `cliCalls` excuses a refused document for the fuzz, where one is
+      // expected; here it would let a row pass with nothing compared.
+      expect(cli, 'the CLI refused this row: re-measure it').not.toBeNull();
 
       // The invariant, in both branches: never claim a call the CLI won't make.
       if (index) expect(cli).toBe(true);
       expect(index === cli).toBe(shape.agree);
+    });
+  }
+
+  for (const shape of REFUSED) {
+    it(`is refused by the CLI: ${shape.name}`, () => {
+      expect(() => parseTestContent(doc(shape.after), 'parity.md')).toThrow(
+        /Step\/line mismatch/,
+      );
     });
   }
 

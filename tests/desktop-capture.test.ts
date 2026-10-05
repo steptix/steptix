@@ -23,10 +23,10 @@ import {
   captureView,
   mapToScreen,
   viewFromGrab,
-  viewSourceRect,
   zoomView,
   type ImageView,
 } from '../src/desktop/capture.js';
+import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { FakeDesktopAdapter, makeFakeGrab } from '../src/desktop/fake-adapter.js';
 import type { ScreenGrab } from '../src/desktop/adapter.js';
 
@@ -158,8 +158,11 @@ describe('captureView — §5.2', () => {
     ).rejects.toThrow(/10×10 RGBA needs 400/);
   });
 
-  it('defaults the cap to 1600 (§5.10)', () => {
-    expect(DEFAULT_MAX_IMAGE_WIDTH).toBe(1600);
+  it('falls back to the same cap the config defaults to (§5.10)', () => {
+    // Two constants for one number: the executor and the turn loop fall back
+    // to this one when no config reached them, the loader to the config's.
+    // The 1600 itself is pinned in desktop-config.test.ts.
+    expect(DEFAULT_MAX_IMAGE_WIDTH).toBe(DEFAULT_CONFIG.desktop.maxImageWidth);
   });
 });
 
@@ -243,10 +246,4 @@ describe('zoomView — §5.3', () => {
     ).rejects.toThrow(/outside the 160×80 image/);
   });
 
-  it('viewSourceRect is the whole grab for a full view', async () => {
-    const full = await viewFromGrab(makeFakeGrab({ width: 40, height: 20 }), {
-      maxImageWidth: 40,
-    });
-    expect(viewSourceRect(full)).toEqual({ x: 0, y: 0, width: 40, height: 20 });
-  });
 });

@@ -23,30 +23,13 @@ export interface CompileTail {
 }
 
 /**
- * "5 of 8 entries generated · review next", or the indeterminate form.
+ * 0..1 for a determinate bar, or null when the counts are unknown.
  *
- * The counts are the server's numbers, never derived from its prose — see
- * `compile:progress`. With no counts (an older server) the strip says only
- * that it is working, which is the honest answer and still better than the
- * silence this story replaces.
+ * The strip's headline and detail line are drawn only by the webview
+ * (`src/webview/lib/compile-strip-inline.js`); the fraction is the one strip
+ * value the extension side needs too, for the toast's increment, so it is the
+ * one the webview mirrors.
  */
-export function stripHeadline(tail: CompileTail): string {
-  if (tail.phase === 'review') return 'Compiling code-behind — reviewing the generated file';
-  if (tail.done === null || tail.total === null) return 'Compiling code-behind…';
-  const suffix = tail.reviewPending ? ' · review next' : '';
-  return `Compiling code-behind — ${tail.done} of ${tail.total} entries generated${suffix}`;
-}
-
-/** The strip's dimmed second line, or null when there is nothing to name. */
-export function stripDetail(tail: CompileTail): string | null {
-  if (tail.phase === 'review') return 'Reviewing the whole file before it is proposed';
-  if (tail.step === undefined) return null;
-  return tail.line === undefined
-    ? `Generating step ${tail.step}`
-    : `Generating step ${tail.step} — line ${tail.line}`;
-}
-
-/** 0..1 for a determinate bar, or null when the counts are unknown. */
 export function stripFraction(tail: CompileTail): number | null {
   if (tail.done === null || tail.total === null || tail.total <= 0) return null;
   return Math.max(0, Math.min(1, tail.done / tail.total));

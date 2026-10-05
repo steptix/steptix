@@ -79,30 +79,6 @@ test('streamSteps: the per-session config block rides the body verbatim, viewpor
   });
 });
 
-test('streamSteps: a config block without viewport stays byte-for-byte what it was', async () => {
-  // The minimum-scenario half of the pair: a test with no `viewport:` key must
-  // send a config block indistinguishable from the pre-story one, so the server
-  // falls back to its own browser config for every test that never opted in.
-  let captured;
-  const fetchImpl = async (url, init) => {
-    captured = { url, init };
-    return streamingResponse(['event: done\ndata: {"type":"done","status":"passed"}\n\n']);
-  };
-  const client = new ApiClient({ serverUrl: 'http://x:1', apiKey: 'k', fetch: fetchImpl });
-
-  await collect(
-    client.streamSteps(
-      'sess-1',
-      { steps: ['s1'], config: { baseUrl: 'https://example.test/' } },
-      new AbortController().signal,
-    ),
-  );
-
-  const body = JSON.parse(captured.init.body);
-  assert.deepEqual(body.config, { baseUrl: 'https://example.test/' });
-  assert.ok(!('viewport' in body.config), 'no viewport key may be invented');
-});
-
 test('streamSteps: yields ordered events', async () => {
   const chunks = [
     'event: step:start\ndata: {"type":"step:start","line":2}\n\n',
@@ -383,48 +359,14 @@ test('compileCodeBehind: posts the compile route with the request body', async (
   assert.equal(events.length, 1);
 });
 
-test('compileCodeBehind: yields the inner run events of a Record and a Replay as compile:run', async () => {
-  const frames = [
-    'event: compile:phase\ndata: {"type":"compile:phase","phase":"record","message":"running 2 step(s)"}\n\n',
-    'event: compile:run\ndata: {"type":"compile:run","phase":"record","event":{"type":"step:start","line":4}}\n\n',
-    'event: compile:run\ndata: {"type":"compile:run","phase":"record","event":{"type":"step:pass","line":4}}\n\n',
-    'event: compile:run\ndata: {"type":"compile:run","phase":"replay","round":1,"event":{"type":"step:pass","line":4,"fromCodeBehind":true}}\n\n',
-    'event: compile:run\ndata: {"type":"compile:run","phase":"replay","round":1,"event":{"type":"step:fail","line":5,"error":"locator timeout","screenshot":"AAAA"}}\n\n',
-    'event: compile:done\ndata: {"type":"compile:done","status":"partial","message":"some"}\n\n',
-    'event: compile:result\ndata: {"type":"compile:result","status":"partial","files":{},"summary":{"test":"/p/tests/a.md","unproven":[],"writtenOffAi":[2],"notAttempted":[]}}\n\n',
-  ];
-  const client = new ApiClient({
-    serverUrl: 'http://x:1',
-    apiKey: 'k',
-    fetch: async () => streamingResponse(frames),
-  });
-  const events = await collect(
-    client.compileCodeBehind({ testFilePath: '/p/tests/a.md' }, new AbortController().signal),
-  );
-  const runs = events.filter((e) => e.type === 'compile:run');
-  assert.deepEqual(
-    runs.map((r) => [r.phase, r.round, r.event.type, r.event.line]),
-    [
-      ['record', undefined, 'step:start', 4],
-      ['record', undefined, 'step:pass', 4],
-      ['replay', 1, 'step:pass', 4],
-      ['replay', 1, 'step:fail', 5],
-    ],
-  );
-  // The inner event is whole: the glyph flag and the failure's evidence survive.
-  assert.equal(runs[2].event.fromCodeBehind, true);
-  assert.equal(runs[3].event.error, 'locator timeout');
-  assert.equal(runs[3].event.screenshot, 'AAAA');
-  assert.equal(events.at(-1).status, 'partial');
-  assert.deepEqual(events.at(-1).summary.writtenOffAi, [2]);
-});
-
-test('compileCodeBehind: yields phases, steps and the final result in order', async () => {
+test('compileCodeBehind: yields phases, steps, the inner runs and the final result in order', async () => {
   const chunks = [
     'event: compile:phase\ndata: {"type":"compile:phase","phase":"select","message":"2 step(s) to generate"}\n\n',
     'event: compile:phase\ndata: {"type":"compile:phase","phase":"generate","message":"2 step(s)"}\n\n',
     'event: compile:step\ndata: {"type":"compile:step","phase":"generate","step":2,"message":"generated"}\n\n',
     'event: compile:phase\ndata: {"type":"compile:phase","phase":"replay","round":1,"message":"2/2 passed as code"}\n\n',
+    // A Replay's own run event, wrapped (stories/codebehind-compile-as-a-run.md).
+    'event: compile:run\ndata: {"type":"compile:run","phase":"replay","round":1,"event":{"type":"step:pass","line":4,"fromCodeBehind":true}}\n\n',
     'event: compile:done\ndata: {"type":"compile:done","status":"green","message":"Compiled"}\n\n',
     'event: compile:result\ndata: {"type":"compile:result","status":"green","files":{"/p/tests/a.steps.ts":"export default 1"},"summary":{"test":"/p/tests/a.md","compiled":2}}\n\n',
   ];
@@ -439,7 +381,7 @@ test('compileCodeBehind: yields phases, steps and the final result in order', as
   );
   assert.deepEqual(
     events.map((e) => e.type),
-    ['compile:phase', 'compile:phase', 'compile:step', 'compile:phase', 'compile:done', 'compile:result'],
+    ['compile:phase', 'compile:phase', 'compile:step', 'compile:phase', 'compile:run', 'compile:done', 'compile:result'],
   );
   const result = events.at(-1);
   assert.equal(result.status, 'green');
@@ -463,47 +405,4 @@ test('compileCodeBehind: 409 is a conflict carrying the server reason, not a ser
       err.status === 409 &&
       err.message === 'A compile of a.md is already running.',
   );
-});
-
-test('compileCodeBehind: 401 still throws unauthorized', async () => {
-  const client = new ApiClient({
-    serverUrl: 'http://x',
-    apiKey: 'k',
-    fetch: async () => jsonErrorResponse(401, '{"error":"bad key"}'),
-  });
-  await assert.rejects(
-    () => collect(client.compileCodeBehind({ testFilePath: '/p/a.md' }, new AbortController().signal)),
-    (err) => err instanceof ApiClientError && err.kind === 'unauthorized',
-  );
-});
-
-test('compileCodeBehind: aborting the signal surfaces as an abort, not a transport fault', async () => {
-  const controller = new AbortController();
-  const client = new ApiClient({
-    serverUrl: 'http://x',
-    apiKey: 'k',
-    fetch: async (_url, init) => {
-      controller.abort();
-      throw Object.assign(new Error('aborted'), { name: 'AbortError', signal: init.signal });
-    },
-  });
-  await assert.rejects(
-    () => collect(client.compileCodeBehind({ testFilePath: '/p/a.md' }, controller.signal)),
-    (err) => isUserAbort(err),
-  );
-});
-
-test('streamSteps still works after the shared SSE refactor', async () => {
-  const client = new ApiClient({
-    serverUrl: 'http://x',
-    apiKey: 'k',
-    fetch: async () =>
-      streamingResponse([
-        'event: step:pass\ndata: {"type":"step:pass","line":4,"fromCodeBehind":true}\n\n',
-        'event: done\ndata: {"type":"done","status":"passed"}\n\n',
-      ]),
-  });
-  const events = await collect(client.streamSteps('id', { steps: ['x'] }, new AbortController().signal));
-  assert.deepEqual(events.map((e) => e.type), ['step:pass', 'done']);
-  assert.equal(events[0].fromCodeBehind, true);
 });

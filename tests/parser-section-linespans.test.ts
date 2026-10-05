@@ -91,8 +91,11 @@ describe('cull rules agree between the two passes', () => {
   it('keeps #### noise inside a body out of both passes', () => {
     const md = ['# T', '', '## Steps', '1. Call', '', '### S', '1. A', '', '#### Note', '', '2. B'].join('\n');
     // Both passes must drop the SAME items or the zip below them throws
-    // its step/line mismatch: B is inert in each (contract §5 rule 4a).
-    expect(parseTestContent(md).sections['s']!.steps).toEqual(['A']);
+    // its step/line mismatch: B is inert in each (contract §5 rule 4a). The
+    // `####` neither closes S nor opens a section of its own.
+    const parsed = parseTestContent(md);
+    expect(parsed.sections['s']!.steps).toEqual(['A']);
+    expect(Object.keys(parsed.sections)).toEqual(['s']);
     expect(scanStepSpans(md, 't.md').entries.map((e) => e.raw)).toEqual(['Call', 'A']);
   });
 });

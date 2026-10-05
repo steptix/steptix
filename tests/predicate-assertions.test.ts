@@ -61,20 +61,8 @@ describe('action-parser — predicate mode', () => {
     expect(() => parseAIResponse(raw)).toThrow(/mutually exclusive/);
   });
 
-  it('still rejects DOM mode without expected (regression: existing strict path)', () => {
-    const raw = JSON.stringify({
-      actions: [
-        {
-          action: 'assert',
-          condition: 'visible title',
-          description: 'title check',
-        },
-      ],
-      reasoning: 'forgot expected',
-    });
-    expect(() => parseAIResponse(raw)).toThrow(/missing required "expected" field/);
-  });
-
+  // DOM mode without `expected` is still refused: action-parser.test.ts pins
+  // the refusal; this pins what it says.
   it("error message for missing expected nudges toward predicate mode", () => {
     let caught: Error | undefined;
     try {

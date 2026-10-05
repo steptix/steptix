@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +20,7 @@ import {
   type LiveCompileProgressEvent,
   type LiveCompileStepEvent,
 } from '../src/codebehind/live-compile.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * Compiling as the run goes (stories/compile-as-you-go.md), at the unit the
@@ -33,11 +34,17 @@ import {
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-live-compile');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
 let counter = 0;
 let dir: string;
 let testFile: string;
 let stepsFile: string;
+
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('live-compile');
+});
 
 beforeEach(async () => {
   dir = path.join(tmpBase, `t${counter++}`);
@@ -47,7 +54,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await removeScratchBase(tmpBase);
 });
 
 function binding(source: string, over: Partial<CodeBehindBinding> = {}): CodeBehindBinding {
@@ -219,6 +226,8 @@ function compilerFor(
     notes?: string[];
     /** Indices the framework dispatches — a control line's guard. */
     dispatched?: number[];
+    /** Called before an event is recorded in `events`: a stream that throws. */
+    beforeEmit?: (event: LiveCompileEvent) => void;
   } = {},
 ): LiveCompiler {
   const events = options.events ?? [];
@@ -237,7 +246,10 @@ function compilerFor(
       line: 10 + i,
     })),
     ...(options.signal && { signal: options.signal }),
-    emit: (event) => events.push(event),
+    emit: (event) => {
+      options.beforeEmit?.(event);
+      events.push(event);
+    },
     note: (message) => notes.push(message),
   });
 }
@@ -367,25 +379,42 @@ describe('the trailing generation queue', () => {
   });
 
   it('a link that throws does not poison the rest of the queue', async () => {
-    // `.then` on a rejected promise is skipped, so one unexpected throw would
-    // otherwise lose every later step silently.
+    // `.then` on a rejected promise is skipped, so one throw that escapes a
+    // link would otherwise lose every later step silently. A MODEL error never
+    // escapes — generation turns it into an `error` result, the test above —
+    // so the throw here comes from outside the model call: the run's stream,
+    // failing on step 2's `generating…` frame (a client gone mid-send).
     const notes: string[] = [];
-    const { client } = fakeClient({
-      generate: (prompt) => {
-        if (/source:\s*"Add to cart"/.test(prompt)) throw new Error('boom');
-        const source = /\n\s*source:\s*("(?:[^"\\]|\\.)*")/.exec(prompt);
-        const text = source?.[1] ? (JSON.parse(source[1]) as string) : 'step';
-        return JSON.stringify({ entry: `{ source: ${JSON.stringify(text)}, async run() {} }` });
+    const events: LiveCompileEvent[] = [];
+    const { client, prompts } = fakeClient();
+    const compiler = compilerFor(['Sign in', 'Add to cart', 'Check out'], {
+      client,
+      events,
+      notes,
+      beforeEmit: (event) => {
+        if (event.type === 'compile:step' && event.step === 2 && event.message === 'generating…') {
+          throw new Error('the stream closed');
+        }
       },
     });
-    const compiler = compilerFor(['Sign in', 'Add to cart', 'Check out'], { client, notes });
     compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
     compiler.offer({ index: 1, binding: binding('Add to cart'), result: result(2, 'Add to cart'), resolvedParameters: {} });
     compiler.offer({ index: 2, binding: binding('Check out'), result: result(3, 'Check out'), resolvedParameters: {} });
     const outcome = await compiler.finish({ tokensUsed: 0 });
 
+    // Step 3 still generated, after the link before it rejected.
     expect(outcome.summary.compiled).toBe(2);
     expect(outcome.files[stepsFile]).toContain("source: 'Check out'");
+    expect(outcome.files[stepsFile]).not.toContain("source: 'Add to cart'");
+    // Step 2 never reached the model, so its note can only be the link's catch.
+    expect(prompts.some((p) => /source:\s*"Add to cart"/.test(p) && !/Review a generated/.test(p))).toBe(false);
+    expect(notes.join('\n')).toContain('Code-behind generation failed for step 2: the stream closed');
+    expect(outcome.summary.error).toMatch(/1 step\(s\) could not be generated/);
+    // …and it counted the entry settled, so the bar still reached the end.
+    const generation = events.filter(
+      (e): e is LiveCompileProgressEvent => e.type === 'compile:progress' && e.phase === 'generate',
+    );
+    expect(generation.at(-1)).toMatchObject({ done: 3, total: 3 });
   });
 
   it('a decline becomes an `ai: true` entry carrying the reason', async () => {
@@ -593,9 +622,48 @@ describe('the trailing generation queue', () => {
     compiler.offer({ index: 2, binding: binding('Check out'), result: result(3, 'Check out'), resolvedParameters: {} });
     await compiler.dispose();
 
-    // The in-flight call finishes — it is already paid for — and nothing else
-    // starts. Certainly not all three.
-    expect(calls).toBeLessThan(3);
+    // `offer` only queues, and the dispose landed before the first link ran:
+    // nothing was in flight, so nothing was asked at all.
+    expect(calls).toBe(0);
+    await expect(fs.access(stepsFile)).rejects.toThrow();
+  });
+
+  it('dispose lets the call in flight finish, and starts nothing after it', async () => {
+    // The run threw while step 1's model call was out. That call is already
+    // paid for, so it finishes and dispose waits for it; the two queued behind
+    // it never start.
+    let calls = 0;
+    let disposing: Promise<void> | undefined;
+    let markAsked!: () => void;
+    const asked = new Promise<void>((resolve) => (markAsked = resolve));
+    const events: LiveCompileEvent[] = [];
+    const { client } = fakeClient({
+      generate: (prompt) => {
+        calls += 1;
+        disposing ??= compiler.dispose();
+        markAsked();
+        const source = /\n\s*source:\s*("(?:[^"\\]|\\.)*")/.exec(prompt);
+        const text = source?.[1] ? (JSON.parse(source[1]) as string) : 'step';
+        return JSON.stringify({ entry: `{ source: ${JSON.stringify(text)}, async run() {} }` });
+      },
+    });
+    const compiler = compilerFor(['Sign in', 'Add to cart', 'Check out'], { client, events });
+    compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
+    compiler.offer({ index: 1, binding: binding('Add to cart'), result: result(2, 'Add to cart'), resolvedParameters: {} });
+    compiler.offer({ index: 2, binding: binding('Check out'), result: result(3, 'Check out'), resolvedParameters: {} });
+    await asked;
+    await disposing;
+
+    expect(calls).toBe(1);
+    const said = events
+      .filter((e): e is LiveCompileStepEvent => e.type === 'compile:step')
+      .map((e) => [e.step, e.message]);
+    expect(said).toEqual([
+      [1, 'generating…'],
+      [1, 'generated'],
+      [2, 'skipped — the run was stopped'],
+      [3, 'skipped — the run was stopped'],
+    ]);
     await expect(fs.access(stepsFile)).rejects.toThrow();
   });
 
@@ -772,7 +840,7 @@ describe('the tail reports its progress', () => {
   const progress = (events: LiveCompileEvent[]): LiveCompileProgressEvent[] =>
     events.filter((e): e is LiveCompileProgressEvent => e.type === 'compile:progress');
 
-  it('forecasts at run end: the final total, and that a review pass follows', () => {
+  it('forecasts at run end: the final total, and that a review pass follows', async () => {
     const events: LiveCompileEvent[] = [];
     const notes: string[] = [];
     const compiler = compilerFor(['Sign in', 'Add to cart'], { events, notes });
@@ -786,6 +854,9 @@ describe('the tail reports its progress', () => {
     expect(forecast).toHaveLength(1);
     expect(forecast[0]).toMatchObject({ done: 0, total: 2, phase: 'generate', reviewPending: true });
     expect(notes).toEqual(['Run finished — 2 entries still to generate, then a review pass']);
+    // The queue is not this test's: stop it rather than leave it generating
+    // into the next test's time.
+    await compiler.dispose();
   });
 
   it('says nothing at run end when there is no tail to wait for', () => {
@@ -806,7 +877,7 @@ describe('the tail reports its progress', () => {
     expect(notes).toEqual([]);
   });
 
-  it('a single-step compile forecasts no review pass — that path runs none', () => {
+  it('a single-step compile forecasts no review pass — that path runs none', async () => {
     const events: LiveCompileEvent[] = [];
     const notes: string[] = [];
     const compiler = compilerFor(['Sign in'], { mode: 'steps', events, notes });
@@ -816,6 +887,7 @@ describe('the tail reports its progress', () => {
     expect(progress(events)[0]).toMatchObject({ done: 0, total: 1 });
     expect(progress(events)[0]!.reviewPending).toBeUndefined();
     expect(notes).toEqual(['Run finished — 1 entry still to generate']);
+    await compiler.dispose();
   });
 
   it('counts up to the summary: attempted = generated + kept AI + errored', async () => {
@@ -2085,7 +2157,8 @@ describe('offerGuard', () => {
 
   it('generates nothing at offer time, then one condition from the first held and first not-held visit', async () => {
     const { client, prompts } = conditionClient();
-    const compiler = compilerFor([WHILE, 'Click Next'], { client });
+    const events: LiveCompileEvent[] = [];
+    const compiler = compilerFor([WHILE, 'Click Next'], { client, events });
     const visits: Array<[number, boolean]> = [[1, true], [2, true], [3, true], [4, false]];
     for (const [n, holds] of visits) {
       compiler.offerGuard({
@@ -2094,11 +2167,20 @@ describe('offerGuard', () => {
         resolvedParameters: {},
       });
     }
-    // Nothing asked yet: a condition waits for every visit of the block.
+    // Nothing queued yet: a condition waits for every visit of the block. The
+    // frames are the evidence, not the prompts. A queued link's first act,
+    // before it awaits anything, is its progress and `generating…` frames, so
+    // one tick is enough for them to show; the prompt comes only after file
+    // reads, which one tick need not cover.
     await new Promise((r) => setTimeout(r, 0));
+    expect(events).toEqual([]);
     expect(prompts).toEqual([]);
 
     compiler.runStepsEnded();
+    // Queued now, all at once: the forecast counts the one condition.
+    expect(events).toEqual([
+      expect.objectContaining({ type: 'compile:progress', runEnded: true, done: 0, total: 1 }),
+    ]);
     const outcome = await compiler.finish({ tokensUsed: 0 });
     const generation = generationsIn(prompts);
     expect(generation).toHaveLength(1);

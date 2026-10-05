@@ -182,10 +182,12 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
     fix: 'Check the server is still up and re-run; use "Steptix: Stop" to abort the orphaned session.',
     actions: [{ label: 'Show Run Log', command: 'steptix.showRunLog' }],
   }),
+  // No action: its "Reopen as Text" button named `steptix.reopenAsText`, a
+  // command the extension neither contributes nor registers — a button that
+  // could only fail. errors.test.js checks every action against package.json.
   STX020: (ctx) => ({
     diagnosis: `${ctx.filePath} has no "## Steps" heading, so there's nothing to run`,
     fix: 'Add a "## Steps" heading followed by a numbered list, or open as plain Markdown.',
-    actions: [{ label: 'Reopen as Text', command: 'steptix.reopenAsText' }],
   }),
   STX021: () => ({
     diagnosis: 'No step at or below the cursor to run',

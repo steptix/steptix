@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { parseSetStep } from '../../src/parser/set-step.ts';
 import { captureNamesBefore } from '../src/extension/env-data-completion-core.ts';
-import { collectVariables, classifyCaptureSource } from '../src/webview/lib/variables-panel.js';
+import { collectVariables } from '../src/webview/lib/variables-panel.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const LINES = JSON.parse(
@@ -117,14 +117,4 @@ test('variables panel: a declared parameter still wins over a later Set row', ()
   const got = collectVariables(text, { summary: 'seed' }, {});
   assert.equal(got.length, 1);
   assert.equal(got[0].source, 'param');
-});
-
-test('classifyCaptureSource: knows assignment, and still collapses the unknown', () => {
-  assert.equal(classifyCaptureSource('assignment'), 'assignment');
-  assert.equal(classifyCaptureSource('toolOutput'), 'toolOutput');
-  assert.equal(classifyCaptureSource('capture'), 'capture');
-  // The back-compat rule the wire type mandates, and what makes adding a
-  // third value safe for a client that predates it.
-  assert.equal(classifyCaptureSource(undefined), 'capture');
-  assert.equal(classifyCaptureSource('somethingNew'), 'capture');
 });

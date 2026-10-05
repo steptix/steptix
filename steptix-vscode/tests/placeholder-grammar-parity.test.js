@@ -9,8 +9,8 @@
  * catch, and it catches it the one way a copy across that boundary can be
  * caught — one agreed artefact, asserted from both sides. Here the artefact is the runtime
  * module's own text: the root suite (`tests/placeholder-dotted.test.ts`) pins
- * what the constant IS and what every `src/` reader DOES with it, and this
- * file pins that the extension's copy is that same literal.
+ * what every `src/` reader DOES with the constant, and this file pins that
+ * the extension's copy is the same literal as the runtime module's.
  *
  * Reading the source text rather than importing it is deliberate. A regex over
  * one `export const` line is a blunt instrument, and it is the only one
@@ -111,15 +111,11 @@ const PLACEHOLDER_SOURCE = templateLiteral(runtimeSource, 'PLACEHOLDER_SOURCE', 
 // The literal
 // ───────────────────────────────────────────────────────────────────────────
 
-test('the runtime constant is still the string both suites pin', () => {
-  // The same golden as tests/placeholder-dotted.test.ts. Written out rather
-  // than derived, so that a change to the runtime grammar has to be made
-  // deliberately in three places instead of propagating silently into two.
-  assert.equal(NAME_SOURCE, '\\w+(?:\\.[A-Za-z_][A-Za-z0-9_]*)?');
-  assert.equal(PLACEHOLDER_SOURCE, '\\{\\{(\\w+(?:\\.[A-Za-z_][A-Za-z0-9_]*)?)\\}\\}');
-});
-
-test('the extension mirror is that literal, character for character', () => {
+// What the grammar accepts is pinned by behaviour in the root
+// tests/placeholder-dotted.test.ts ("the grammar"). This file pins only that
+// the extension's copy is whatever parameters.ts says — a golden of the
+// literal here would be a change-detector, not a check.
+test('the extension mirror is the runtime literal, character for character', () => {
   assert.equal(PARAM_REF_RE.source, PLACEHOLDER_SOURCE);
   assert.equal(PARAM_REF_RE.flags, 'g');
 });
@@ -335,7 +331,9 @@ function tableReadFiles() {
 
 test('the acceptance corpus is present and actually dotted', () => {
   const files = tableReadFiles();
-  assert.equal(files.length, 12, 'expected the twelve table-read acceptance tests');
+  // At least the twelve: a thirteenth acceptance file is more corpus, not a
+  // grammar regression.
+  assert.ok(files.length >= 12, `expected the twelve table-read acceptance tests, found ${files.length}`);
   for (const file of files) {
     assert.ok(
       /\{\{\w+\.[A-Za-z_]\w*\}\}/.test(file.text),

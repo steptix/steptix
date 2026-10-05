@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { Page, BrowserContext, Browser } from 'playwright';
 import type { AiClient } from '../src/ai/client.js';
 import type { ChatMessage } from '../src/ai/types.js';
@@ -15,12 +14,8 @@ import { executeStep } from '../src/runner/step-executor.js';
 import { buildStepCodePrompt, contentBlocksToText } from '../src/ai/prompts.js';
 import { buildFileReviewPrompt } from '../src/codebehind/review.js';
 import { buildRepairPrompt } from '../src/codebehind/repair.js';
-import { generationRefusal, SKIPPED_BY_RETURN_REFUSAL } from '../src/codebehind/live-compile.js';
-import {
-  runCodeBehindEntry,
-  CodeBehindExitSignal,
-  EXIT_NOT_CLAIMED,
-} from '../src/codebehind/execute.js';
+import { generationRefusal } from '../src/codebehind/live-compile.js';
+import { runCodeBehindEntry, EXIT_NOT_CLAIMED } from '../src/codebehind/execute.js';
 import { buildCodeBehindRegistry, type CodeBehindBinding } from '../src/codebehind/loader.js';
 import { readRecording, spliceRecording, writeRecording } from '../src/codebehind/recording.js';
 import {
@@ -30,6 +25,7 @@ import {
   type CompileRunOutcome,
   type CompileRunner,
 } from '../src/codebehind/compile.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * Code-behind for the `If … then return` step form
@@ -50,8 +46,9 @@ import {
  *    replay that returns proves only what it reached.
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(repoRoot, 'tests', '.tmp-codebehind-flow-control');
+/** This run's own directory, with the house Prettier style pinned at its root
+ *  (tests/codebehind-scratch.ts says why both matter). */
+let tmpBase: string;
 
 const noPage = {} as unknown as Page;
 const noContext = {} as unknown as BrowserContext;
@@ -60,6 +57,10 @@ const noBrowser = {} as unknown as Browser;
 let counter = 0;
 let dir: string;
 
+beforeAll(async () => {
+  tmpBase = await makeScratchBase('codebehind-flow-control');
+});
+
 beforeEach(async () => {
   clearSkillCache();
   dir = path.join(tmpBase, `t${counter++}`);
@@ -67,7 +68,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await removeScratchBase(tmpBase);
 });
 
 async function write(rel: string, contents: string): Promise<string> {
@@ -210,11 +211,6 @@ describe('step.exit()', () => {
     expect(outcome.flowControl).toBeUndefined();
     expect(outcome.nonRetryable).toBeUndefined();
     expect(outcome.error).toContain('redesign');
-  });
-
-  it('exports the signal as a class, so a catch-all in author code can re-throw it', () => {
-    expect(new CodeBehindExitSignal()).toBeInstanceOf(Error);
-    expect(new CodeBehindExitSignal().name).toBe('CodeBehindExitSignal');
   });
 });
 
@@ -1027,17 +1023,19 @@ describe('compile — the unconditional form', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 /**
- * The rules `LiveCompiler.offer` applies per step, asked of the rule directly.
+ * The rule `LiveCompiler.offer` applies to a return step, asked of the rule
+ * directly.
  *
- * A UNIT test, and worth saying so: the `skipped` case below is fed here by
- * hand, and for a while nothing fed it in production — the Sessions API's skip
- * loop built the results and never offered them, so the branch was unreachable
- * and this test passed against a compile that named none of the skipped steps.
- * What actually proves the path is the composition, in
+ * The step a return SKIPPED gets its own sentence, asked the same way in
+ * `tests/codebehind-live-compile.test.ts` → "a skipped row carries its cause",
+ * beside a decision's. Asked by hand is not enough there: for a while nothing
+ * fed that case in production — the Sessions API's skip loop built the results
+ * and never offered them, so the branch was unreachable and its unit test
+ * passed against a compile that named none of the skipped steps. What
+ * actually proves the path is the composition, in
  * `tests/api-server-compile-mode.test.ts` → "compile a run whose section
  * returns", which POSTs a returning run through the real HTTP entry and reads
- * `notAttempted` off the `compile:result` frame. This block pins the wording;
- * that one pins that anybody says it.
+ * `notAttempted` off the `compile:result` frame.
  */
 describe('generationRefusal', () => {
   const binding = (): CodeBehindBinding => ({
@@ -1045,13 +1043,6 @@ describe('generationRefusal', () => {
     source: 'x',
     occurrence: 0,
     scope: { renames: {}, inputs: {} },
-  });
-
-  it('refuses a skipped step with its own reason, not "did not pass"', () => {
-    expect(
-      generationRefusal({ binding: binding(), text: 'Confirm the booking', status: 'skipped' }),
-    ).toBe(SKIPPED_BY_RETURN_REFUSAL);
-    expect(SKIPPED_BY_RETURN_REFUSAL).toContain('a return ended its flow');
   });
 
   it('refuses the unconditional form, and only that one', () => {
@@ -1067,7 +1058,10 @@ describe('generationRefusal', () => {
 });
 
 describe('the recording of a skipped step', () => {
-  it('round-trips the status and the reason, and does not make the run failed', async () => {
+  it('round-trips the skipped status and its reason, outside `error`', async () => {
+    // The run's status is not asserted here: the loops compute it and the
+    // wholesale write copies it, so reading it back would only echo the input.
+    // The splice below is where a recording computes it.
     const md = path.join(dir, 'booking.md');
     await writeRecording(md, {
       steps: [passed(1), returned(2), skipped(3, 2)],
@@ -1079,7 +1073,6 @@ describe('the recording of a skipped step', () => {
 
     const recording = await readRecording(md);
     expect(recording).not.toBeNull();
-    expect(recording!.manifest.status).toBe('passed');
     expect(recording!.steps.map((s) => s.status)).toEqual(['passed', 'passed', 'skipped']);
     // `error` cannot carry the reason: a skipped step did not fail, and every
     // reader of `error` renders it as one.
