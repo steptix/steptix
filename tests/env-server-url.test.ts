@@ -119,6 +119,22 @@ describe('resolveServerUrl (status / stop)', () => {
     fs.writeFileSync(config, JSON.stringify({ server: { host: '::1' } }));
     expect(await resolveServerUrl({ config })).toBe('http://::1:3100');
   });
+
+  it('an unreadable machine .env is reported, not guessed past', async () => {
+    // A folder where the file should be is a portable EISDIR.
+    const envPath = userRootEnvPath(deps());
+    fs.mkdirSync(envPath, { recursive: true });
+    const said: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void said.push(args.map(String).join(' '));
+    try {
+      expect(await resolveServerUrl({})).toBeNull();
+    } finally {
+      console.error = original;
+    }
+    expect(said.join('\n')).toContain(envPath);
+    expect(said.join('\n')).toContain('--url');
+  });
 });
 
 /**

@@ -79,6 +79,12 @@ where each came from, and suggests `steptix serve -p <port>`. If the machine
 STX028 with that reason instead of waiting out the timeout. Start Server
 refuses the same way.
 
+A command that does not show its port is started as before: one with no
+`serve` argument of its own (`npm run serve:dev`, a script), or one passing
+the port as something a shell expands (`--port $PORT`). It may well pin the
+right port, and refusing it would leave no way to use it; a wrong one still
+ends in STX028's timeout.
+
 ## Linux and macOS
 
 The machine `.env` is `$XDG_CONFIG_HOME/steptix/.env` when that variable is

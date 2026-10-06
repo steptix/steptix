@@ -419,15 +419,14 @@ function firstNonEmpty(...values: (string | undefined)[]): string | null {
  * {@link DEFAULT_SERVER_URL} — the same two a bare `steptix serve` takes its
  * port from, so the server auto-start spawns for a project that names none is
  * the one every other client finds. In user scope the map already *is* the
- * user root's `.env`, so the first of those adds nothing there.
+ * user root's `.env`, so the file is not read a second time there; elsewhere
+ * it is read only when neither rung above names a server.
  */
 function withServerDiscovery(fields: ProjectDraft): ProjectContext {
   const serverUrl =
-    firstNonEmpty(
-      fields.env['STEPTIX_SERVER_URL'],
-      process.env['STEPTIX_SERVER_URL'],
-      readMachineServerUrl() ?? undefined,
-    ) ?? DEFAULT_SERVER_URL;
+    firstNonEmpty(fields.env['STEPTIX_SERVER_URL'], process.env['STEPTIX_SERVER_URL']) ??
+    (fields.scope === 'user' ? null : readMachineServerUrl()) ??
+    DEFAULT_SERVER_URL;
 
   // The client chain of stories/machine-key.md: project `.env` → environment
   // → the machine key. A miss on all three is NOT failed here — only

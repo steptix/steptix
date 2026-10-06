@@ -372,27 +372,26 @@ const RETIRED_KEYS: Readonly<Record<string, string>> = {
     + '(stories/machine-server-url.md).',
 };
 
-/** Config files already warned about, so a server re-reading one after every
- *  edit says it once rather than on each read. */
+/** `<file>\0<key>` pairs already warned about, so a server re-reading a file
+ *  after every edit says each once rather than on each read — and a key added
+ *  to a file that was already warned about another still gets its warning. */
 const warnedRetired = new Set<string>();
 
-/** `userConfig` without its {@link RETIRED_KEYS}, warning once per file. */
+/** `userConfig` without its {@link RETIRED_KEYS}, warning once per file and key. */
 function dropRetiredKeys(
   userConfig: Record<string, unknown>,
   configPath: string,
 ): Record<string, unknown> {
   let kept = userConfig;
-  const retired: string[] = [];
   for (const dotted of Object.keys(RETIRED_KEYS)) {
     const next = withoutPath(kept, dotted.split('.'));
-    if (next !== kept) {
-      kept = next;
-      retired.push(dotted);
+    if (next === kept) continue;
+    kept = next;
+    const warnedKey = `${configPath}\0${dotted}`;
+    if (!warnedRetired.has(warnedKey)) {
+      warnedRetired.add(warnedKey);
+      logger.warn(`${configPath}: ${RETIRED_KEYS[dotted]}`);
     }
-  }
-  if (retired.length > 0 && !warnedRetired.has(configPath)) {
-    warnedRetired.add(configPath);
-    for (const key of retired) logger.warn(`${configPath}: ${RETIRED_KEYS[key]}`);
   }
   return kept;
 }

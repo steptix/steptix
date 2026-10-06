@@ -10,6 +10,8 @@
  * the literal name of any setting key involved so the user can grep.
  */
 
+import { serverUrlPort } from './url-port.js';
+
 // STX002 (a project .env without STEPTIX_SERVER_URL) is retired: the URL
 // falls back to the environment, the machine .env, then the default
 // (stories/machine-server-url.md). Its number stays unused.
@@ -260,8 +262,7 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
  *  never throws. */
 function portOf(url: string): string {
   try {
-    const parsed = new URL(url);
-    return parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+    return String(serverUrlPort(url));
   } catch {
     return '<port>';
   }

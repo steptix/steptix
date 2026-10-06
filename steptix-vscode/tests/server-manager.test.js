@@ -512,6 +512,18 @@ test('decide: a URL with no port is compared as its scheme default', () => {
   assert.equal(action.kind, 'spawn');
 });
 
+test('decide: a command whose port cannot be read is started, not refused', () => {
+  // A wrapper script may pin the right port; only a visible mismatch refuses.
+  const action = decideServerAction(
+    'http://localhost:3104',
+    { kind: 'down', detail: 'refused' },
+    CONFIGURED,
+    noDiscovery,
+    () => null,
+  );
+  assert.equal(action.kind, 'spawn');
+});
+
 test('decide: a running server is used whatever port the command would pick', () => {
   // The port check only guards a spawn; it must never refuse a healthy server.
   const health = { service: HEALTH_SERVICE_ID };
@@ -637,6 +649,24 @@ test('servePortOfCommand: a launcher flag before serve is not the server port', 
       port: 3100,
       source: 'the default',
     });
+  });
+});
+
+test('servePortOfCommand: null when the command does not say where it listens', () => {
+  withMachineEnv(null, () => {
+    // No `serve` argument of its own: a script that may pin any port.
+    assert.equal(servePortOfCommand('npm run serve:dev'), null);
+    assert.equal(servePortOfCommand('cmd /c start-server.cmd'), null);
+    // A port that is not a number until a shell expands it.
+    assert.equal(servePortOfCommand('node dist/index.js serve --port $PORT'), null);
+    assert.equal(servePortOfCommand('node dist/index.js serve -p %PORT%'), null);
+  });
+});
+
+test('servePortOfCommand: a quoted launcher path still finds serve and its -p', () => {
+  withMachineEnv(null, () => {
+    const result = servePortOfCommand('"C:\\Program Files\\steptix\\steptix.cmd" serve -p 3104 --idle-timeout 60');
+    assert.equal(result?.ok && result.port, 3104);
   });
 });
 

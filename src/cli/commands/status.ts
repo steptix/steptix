@@ -31,6 +31,7 @@ export function registerStatusCommand(program: Command): void {
  */
 export async function statusCommand(opts: StatusOptions): Promise<number> {
   const baseUrl = await resolveServerUrl(opts);
+  if (baseUrl === null) return 1;
   const result = await probeHealth(baseUrl, PROBE_TIMEOUT_MS);
 
   if (result.kind !== 'ok') {

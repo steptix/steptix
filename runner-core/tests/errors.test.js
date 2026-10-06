@@ -120,6 +120,10 @@ test('STX033 names both ports, where each came from, and the serve command that 
   assert.ok(payload.message.includes('port 3100'));
   assert.ok(payload.message.includes('the default'));
   assert.ok(payload.message.includes('steptix serve -p 3101'));
+
+  // A URL with no port is fixed with its scheme's default.
+  const https = reportError('STX033', { ...SAMPLE_CONTEXTS.STX033, serverUrl: 'https://localhost' });
+  assert.ok(https.message.includes('steptix serve -p 443'));
 });
 
 test('STX005 mentions the offending line number and content', () => {

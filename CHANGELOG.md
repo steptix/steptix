@@ -27,7 +27,8 @@ same server, so nothing has to say which one. See
   to. When `steptix.serverAutoStart.command` would listen elsewhere, Run fails
   with the new **STX033**, naming both ports. Before, it timed out with STX028
   and left a stray server behind. The installed runtime is not affected: it is
-  always started on the run's port.
+  always started on the run's port. Nor is a command that does not show its
+  port (a script, or `--port $PORT`): it is started as before.
 - **MCP**: a project-less call defaults to `http://127.0.0.1:3100` instead of
   3141. A project `.env` without `STEPTIX_SERVER_URL` now falls back the same
   way instead of being refused.
@@ -42,7 +43,7 @@ same server, so nothing has to say which one. See
 - **STX002 is retired.** Nothing raised it any more: a project `.env` without
   `STEPTIX_SERVER_URL` falls back instead of failing. Its number stays unused.
 
-Steptix extension 0.5.174.
+Steptix extension 0.5.175.
 
 ### Changed — `SERVER_URL` is now `STEPTIX_SERVER_URL`
 

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { serverUrlPort } from 'steptix-runner-core';
 import { getOutputChannel } from './output-channel.js';
 import { describeServerUrlOrigin } from './server-url.js';
 import { SERVER_MENU_COMMAND, type ServerStatusBar } from './server-status-bar.js';
@@ -89,7 +90,7 @@ export function registerServerCommands(args: {
         // The run path's STX033: a server on another port is one nothing
         // here would talk to.
         const { servePort } = action;
-        const port = new URL(target.serverUrl).port || '80';
+        const port = serverUrlPort(target.serverUrl);
         void vscode.window.showErrorMessage(
           servePort.ok
             ? `Steptix: ${target.serverUrl} (from ${describeServerUrlOrigin(target.origin)}) is not running, and ` +

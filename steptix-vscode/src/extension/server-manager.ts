@@ -14,6 +14,7 @@ import * as path from 'node:path';
 import {
   bareServePort,
   describeFetchError,
+  serverUrlPort,
   userRootDir,
   type BareServePort,
 } from 'steptix-runner-core';
@@ -500,8 +501,7 @@ export function runtimeServeCommand(
   opts: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv } = {},
 ): string {
   const platform = opts.platform ?? process.platform;
-  const url = new URL(serverUrl);
-  const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+  const port = serverUrlPort(serverUrl);
   const args = `serve --port ${port} --idle-timeout ${AUTO_START_IDLE_TIMEOUT_MINUTES}`;
   if (platform === 'win32') return `"${path.join(runtime.dir, 'steptix.cmd')}" ${args}`;
   const node = (opts.env ?? process.env)['STEPTIX_NODE']?.trim() || 'node';
@@ -574,7 +574,7 @@ export function decideServerAction(
   probe: HealthProbeResult,
   settings: AutoStartSettings,
   discover: RuntimeDiscovery = defaultRuntimeDiscovery,
-  servePortOf: (command: string) => BareServePort = servePortOfCommand,
+  servePortOf: (command: string) => BareServePort | null = servePortOfCommand,
 ): ServerAction {
   switch (probe.kind) {
     case 'healthy':
@@ -590,7 +590,7 @@ export function decideServerAction(
       const { readyTimeoutSeconds } = settings;
       if (settings.command) {
         const servePort = servePortOf(settings.command);
-        if (!servePort.ok || servePort.port !== portOfUrl(serverUrl)) {
+        if (servePort !== null && (!servePort.ok || servePort.port !== serverUrlPort(serverUrl))) {
           return { kind: 'refuse-port', servePort };
         }
         return { kind: 'spawn', config: { command: settings.command, cwd: settings.cwd, readyTimeoutSeconds } };
@@ -621,29 +621,33 @@ export function decideServerAction(
   }
 }
 
-/** `url`'s port, or its scheme's default when it names none. */
-function portOfUrl(url: string): number {
-  const parsed = new URL(url);
-  if (parsed.port !== '') return Number(parsed.port);
-  return parsed.protocol === 'https:' ? 443 : 80;
-}
-
 /**
  * Where the auto-start command will listen: the `-p` / `--port` it passes to
  * `serve`, else wherever a bare `serve` listens — the machine
  * `STEPTIX_SERVER_URL`'s port, else 3100 (stories/machine-server-url.md).
  *
- * Only arguments after a `serve` word are read, so a flag belonging to the
- * launcher (`npx -p <package>`) is never mistaken for the server's. A command
- * that wraps `serve` in a script shows no flag here and is taken to be bare;
- * if it pins a port of its own, a mismatch surfaces as STX028's timeout
- * rather than up front.
+ * Null when the command does not say: it runs no `serve` argument of its own
+ * (`npm run serve:dev`, a script), or passes the port as something other than
+ * a number (`--port $PORT`). Such a command may well pin the right port, so it
+ * is started as before, and a wrong one surfaces as STX028's timeout.
+ *
+ * Only arguments after the `serve` word are read, so a flag belonging to the
+ * launcher (`npx -p <package>`) is never mistaken for the server's.
  */
-export function servePortOfCommand(command: string): BareServePort {
-  const afterServe = command.split(/\bserve\b/).slice(1).join(' serve ');
-  const flag = /(?:^|\s)(?:-p|--port)(?:=|\s+)?(\d+)(?=\s|$|["'])/.exec(afterServe);
-  if (flag?.[1] !== undefined) {
-    return { ok: true, port: Number(flag[1]), source: '-p in "steptix.serverAutoStart.command"' };
+export function servePortOfCommand(command: string): BareServePort | null {
+  const words = command.split(/\s+/).map((word) => word.replace(/^["']+|["']+$/g, ''));
+  const serveAt = words.indexOf('serve');
+  if (serveAt === -1) return null;
+  const args = words.slice(serveAt + 1);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    let value: string | undefined;
+    if (arg === '-p' || arg === '--port') value = args[i + 1] ?? '';
+    else if (arg.startsWith('--port=')) value = arg.slice('--port='.length);
+    else if (/^-p\S/.test(arg)) value = arg.slice(2);
+    if (value === undefined) continue;
+    if (!/^\d+$/.test(value)) return null;
+    return { ok: true, port: Number(value), source: '-p in "steptix.serverAutoStart.command"' };
   }
   try {
     return bareServePort();

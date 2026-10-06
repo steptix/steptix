@@ -160,7 +160,7 @@ export function noKeyForRunningServer(
 }
 
 export function badServerUrl(serverUrl: string, reason: string): McpToolError {
-  return preflightError(`SERVER_URL "${serverUrl}" is unusable: ${reason}`);
+  return preflightError(`STEPTIX_SERVER_URL "${serverUrl}" is unusable: ${reason}`);
 }
 
 export function unrecognizedService(baseUrl: string, detail: string): McpToolError {
@@ -194,7 +194,7 @@ export function remoteServerDown(baseUrl: string): McpToolError {
   return preflightError(
     `${baseUrl} is not responding, and it is not a loopback address, so it will ` +
       'not be started automatically. Start the server yourself, or point ' +
-      'SERVER_URL at localhost.',
+      'STEPTIX_SERVER_URL at localhost.',
   );
 }
 

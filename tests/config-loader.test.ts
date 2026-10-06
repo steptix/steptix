@@ -225,6 +225,25 @@ describe('loadConfig — steptix.config.json loading + deep merge', () => {
     }
   });
 
+  it('warns about a retired key added to a file already warned about another', async () => {
+    // A server re-reads the file after each edit: the first read warned about
+    // `cache`, and an edit that adds `server.port` must still be told.
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const file = await writeConfig({ cache: { enabled: true } });
+      await loadConfig(file);
+      warn.mockClear();
+
+      await writeConfig({ cache: { enabled: true }, server: { port: 4242 } });
+      await loadConfig(file);
+      const said = warn.mock.calls.map((c) => String(c[0]));
+      expect(said.filter((m) => m.includes('"server.port"'))).toHaveLength(1);
+      expect(said.filter((m) => m.includes('step cache was removed'))).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('replaces arrays wholesale (does not concatenate)', async () => {
     const file = await writeConfig({
       execution: { defaultHooks: { beforeEach: ['[skill: only_this]'] } },

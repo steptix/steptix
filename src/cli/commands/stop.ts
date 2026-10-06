@@ -45,7 +45,21 @@ export async function stopCommand(opts: StopOptions): Promise<number> {
   // `serve` started bare. Never generated here: a key that no server holds
   // stops nothing.
   const envKey = process.env['STEPTIX_SERVER_API_KEY'];
-  const apiKey = envKey ?? readMachineKey() ?? undefined;
+  let machineKey: string | null = null;
+  if (envKey === undefined) {
+    try {
+      machineKey = readMachineKey();
+    } catch (err) {
+      // The key may well be in there, so this is not "no key".
+      console.error(
+        chalk.red(`Could not read ${userRootEnvPath()}`) +
+          ` (${err instanceof Error ? err.message : String(err)}), which holds the machine key. ` +
+          'Fix the file, or set STEPTIX_SERVER_API_KEY in this shell.',
+      );
+      return 1;
+    }
+  }
+  const apiKey = envKey ?? machineKey ?? undefined;
   /** Where the key came from, for the 401 message — naming the actual source
    *  is what makes a mismatch diagnosable instead of a hunt. The CLI entry
    *  folds `./.env` into process.env at startup, so a defined env var may
@@ -64,6 +78,7 @@ export async function stopCommand(opts: StopOptions): Promise<number> {
   }
 
   const baseUrl = await resolveServerUrl(opts);
+  if (baseUrl === null) return 1;
 
   // §1: clients MUST check `service` before treating a port as ours. Without
   // this, a foreign process squatting the configured port is handed
