@@ -396,6 +396,52 @@ describe('api-server tool dispatch', () => {
     expect(secondEvents.find((e) => e.type === 'done')?.status).toBe('passed');
   });
 
+  describe('a missing toolsDir', () => {
+    // A fresh `steptix init` project names ./tools/src without creating it,
+    // and the extension sends that path on every batch. The project's DEFAULT
+    // tools dir being absent is debug; a dir the project pointed elsewhere
+    // being absent is still a WARN.
+    let projectDir: string;
+
+    beforeAll(async () => {
+      projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tools-default-project-'));
+      await fs.writeFile(path.join(projectDir, 'steptix.config.json'), '{}\n');
+      await fs.mkdir(path.join(projectDir, 'tests'));
+      await fs.writeFile(path.join(projectDir, 'tests', 'first.md'), '# First\n\n## Steps\n1. Click Sign in\n');
+    });
+
+    afterAll(async () => {
+      await fs.rm(projectDir, { recursive: true, force: true, maxRetries: 3 });
+    });
+
+    async function toolsDirWarnings(toolsDirInProject: string): Promise<string[]> {
+      const { logger } = await import('../src/utils/logger.js');
+      vi.mocked(logger.warn).mockClear();
+      const sessionId = 'tools-missing-default-' + Date.now() + '-' + toolsDirInProject.replace(/\W/g, '');
+      const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
+      const events: any[] = [];
+      for await (const ev of sseEvents(url, {
+        steps: ['Click Sign in'],
+        sourceLines: [4],
+        testFilePath: path.join(projectDir, 'tests', 'first.md'),
+        toolsDir: path.join(projectDir, toolsDirInProject),
+      })) {
+        events.push(ev);
+        if (ev.type === 'done') break;
+      }
+      expect(events.find((e) => e.type === 'done')?.status).toBe('passed');
+      return vi.mocked(logger.warn).mock.calls.map((c) => String(c[0])).filter((l) => l.includes('tools.dir'));
+    }
+
+    it('does not warn when it is the project\'s default tools/src', async () => {
+      expect(await toolsDirWarnings(path.join('tools', 'src'))).toEqual([]);
+    });
+
+    it('warns when the project pointed toolsDir somewhere else', async () => {
+      expect(await toolsDirWarnings('my-tools')).toHaveLength(1);
+    });
+  });
+
   it('pauseAtNextTool emits tool:awaiting-debugger and parks until ack arrives', async () => {
     // Phase 5.B — when the request body sets `pauseAtNextTool: true`,
     // the server emits `tool:awaiting-debugger` before the next

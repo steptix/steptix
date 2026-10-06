@@ -48,7 +48,7 @@ export interface ToolCatalogueOptions {
   cacheDir?: string | undefined;
 }
 
-export interface LoadToolCatalogueOptions extends Pick<ToolCatalogueOptions, 'reload'> {
+export interface LoadToolCatalogueOptions extends ToolCatalogueOptions {
   /**
    * The directory `tests.toolsDir` resolves to when the project leaves it at
    * its default — see `defaultToolsDir`. When `dir` is this directory and is

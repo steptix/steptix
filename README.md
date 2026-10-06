@@ -857,7 +857,8 @@ When you run a test, here's what happens end to end:
                               + the step text, {{placeholders}} intact, with a ## Values block
                               + DOM snapshot, URL, viewport, open tabs, earlier step outcomes
                               (+ a screenshot only if ai.sendScreenshots is on — off by default)
-  3. POST to AI model       — returns ONE action, or reports the step satisfied
+  3. POST to AI model       — returns ONE action (optionally chained with one wait),
+                              or reports the step satisfied
   4. Execute the action     — Playwright browser automation (see table below), then next turn
   Verify / Assert steps     — the model writes a JavaScript check that runs in the page;
                               false fails the step
