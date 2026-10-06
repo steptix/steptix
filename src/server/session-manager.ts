@@ -159,7 +159,7 @@ import type { ChatMessage } from '../ai/types.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { executeToolStep } from '../tools/executor.js';
 import type { ToolStepOutcome } from '../tools/types.js';
-import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
+import { defaultToolsDir, loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import {
@@ -4247,7 +4247,10 @@ export class SessionManager {
         cachedCatalogue.indexedCount === 0);
     if (request.toolsDir && needsFullLoad) {
       try {
-        session.toolCatalogue = await loadToolCatalogue(request.toolsDir, { reload: true });
+        session.toolCatalogue = await loadToolCatalogue(request.toolsDir, {
+          reload: true,
+          ...(projectBundle.projectRoot && { defaultDir: defaultToolsDir(projectBundle.projectRoot) }),
+        });
         session.toolCatalogueDir = request.toolsDir;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

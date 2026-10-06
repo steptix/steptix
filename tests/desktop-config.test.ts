@@ -28,6 +28,8 @@ import Ajv from 'ajv';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { loadConfig } from '../src/config/loader.js';
 import { initCommand, SCAFFOLD_CONFIG } from '../src/cli/commands/init.js';
+import { defaultToolsDir, loadToolCatalogue } from '../src/tools/registry.js';
+import { logger } from '../src/utils/logger.js';
 
 const dirs: string[] = [];
 
@@ -176,6 +178,26 @@ describe('steptix init — a new project does not inherit the fixture workspace\
     expect(config.desktop.enabled).toBe(false);
     expect(config.browser.launchArgs).toBeUndefined();
     expect(config.tests.toolsDir).toBe('./tools/src');
+  });
+
+  it('names a toolsDir it does not create, and the first run does not warn about it', async () => {
+    // The scaffold spells out the default tools/src so a user can see where
+    // tools go, but a new project has none. Resolved the way the CLI runner
+    // resolves it, the missing directory must log at debug, not greet the
+    // user's very first `steptix run` with a WARN once per test.
+    const dir = await initInto();
+    const config = await loadConfig(undefined, dir);
+    const toolsDir = path.resolve(dir, config.tests.toolsDir);
+    expect(existsSync(toolsDir)).toBe(false);
+
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const catalogue = await loadToolCatalogue(toolsDir, { defaultDir: defaultToolsDir(dir) });
+      expect(catalogue.diagnostics?.toolsDirMissing).toBe(true);
+      expect(warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('tools.dir'))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('still scaffolds the example tests beside it', async () => {

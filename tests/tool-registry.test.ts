@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { loadToolCatalogue, ToolCatalogue } from '../src/tools/registry.js';
+import { defaultToolsDir, loadToolCatalogue, ToolCatalogue } from '../src/tools/registry.js';
+import { logger } from '../src/utils/logger.js';
 
 let tmpDir: string;
 let counter = 0;
@@ -45,6 +46,56 @@ describe('loadToolCatalogue — lazy indexing', () => {
     expect(catalogue.size).toBe(0);
     expect(catalogue.indexedCount).toBe(0);
     expect(catalogue.diagnostics?.toolsDirMissing).toBe(true);
+  });
+
+  describe('a missing directory', () => {
+    /** The `tools.dir ... does not exist` lines logged at each level during `fn`. */
+    async function missingDirLines(fn: () => Promise<unknown>): Promise<{ warn: string[]; debug: string[] }> {
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+      const debug = vi.spyOn(logger, 'debug').mockImplementation(() => {});
+      try {
+        await fn();
+        const pick = (spy: typeof warn) =>
+          spy.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('does not exist'));
+        return { warn: pick(warn), debug: pick(debug) };
+      } finally {
+        warn.mockRestore();
+        debug.mockRestore();
+      }
+    }
+
+    it('stays at debug when it is the default tools/src — the project just has no tools yet', async () => {
+      // What `steptix init` leaves behind: the scaffold names ./tools/src but
+      // does not create it, so every first run would otherwise open on a WARN.
+      const dir = defaultToolsDir(tmpDir);
+      const lines = await missingDirLines(() => loadToolCatalogue(dir, { defaultDir: dir }));
+      expect(lines.warn).toEqual([]);
+      expect(lines.debug).toHaveLength(1);
+    });
+
+    it('still records the default as missing, so a [tool: ...] step that runs names the directory', async () => {
+      const dir = defaultToolsDir(tmpDir);
+      const catalogue = await loadToolCatalogue(dir, { defaultDir: dir });
+      expect(catalogue.diagnostics?.toolsDirMissing).toBe(true);
+      expect(catalogue.buildNotFoundMessage('login')).toContain(`tools.dir does not exist: ${dir}`);
+    });
+
+    it('warns when the project pointed toolsDir somewhere else', async () => {
+      const lines = await missingDirLines(() =>
+        loadToolCatalogue(path.join(tmpDir, 'my-tools'), { defaultDir: defaultToolsDir(tmpDir) }),
+      );
+      expect(lines.warn).toHaveLength(1);
+      expect(lines.warn[0]).toContain('tests.toolsDir');
+    });
+
+    it('warns when the caller does not say what the default is', async () => {
+      const lines = await missingDirLines(() => loadToolCatalogue(defaultToolsDir(tmpDir)));
+      expect(lines.warn).toHaveLength(1);
+    });
+
+    it('defaultToolsDir is tools/src under the project root', () => {
+      expect(defaultToolsDir(tmpDir)).toBe(path.join(tmpDir, 'tools', 'src'));
+    });
   });
 
   it('returns an empty catalogue when the directory has no tool files', async () => {

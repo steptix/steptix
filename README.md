@@ -850,17 +850,29 @@ When you run a test, here's what happens end to end:
   └─ Normal step    → executeStep()
        ↓
 [src/runner/step-executor.ts — executeStep()]
-  1. captureDomSnapshot()   — walk live DOM, extract interactive elements + positions
-  2. captureScreenshot()    — Playwright PNG → base64
-  3. Build AI prompt        — system prompt (rules + context) + prior steps + DOM + screenshot
-  4. POST to AI model       — returns { actions: [...], reasoning: "..." }
-  5. Execute each action    — Playwright browser automation (see table below)
-  6. Assertion keywords?    — second AI call to evaluate pass/fail
-  7. On failure             — retry (up to 2×) with failure context appended to prompt
+  Each turn, up to execution.maxTurns (default 15):
+  1. captureDomSnapshot()   — cleaned DOM of the active tab: interactive elements,
+                              visible text, roles, ids, test ids; repetitive runs collapsed
+  2. Build AI prompt        — system prompt + every context/**/*.md file
+                              + the step text, {{placeholders}} intact, with a ## Values block
+                              + DOM snapshot, URL, viewport, open tabs, earlier step outcomes
+                              (+ a screenshot only if ai.sendScreenshots is on — off by default)
+  3. POST to AI model       — returns ONE action, or reports the step satisfied
+  4. Execute the action     — Playwright browser automation (see table below), then next turn
+  Verify / Assert steps     — the model writes a JavaScript check that runs in the page;
+                              false fails the step
+  On failure                — retry (execution.retries, default 1) with what failed in the prompt
        ↓
 [src/report/generator.ts]
-  └─ Self-contained HTML report with screenshots, AI responses, pass/fail per step
+  └─ Self-contained HTML report: AI responses and pass/fail per step, a screenshot
+     on failure (end-of-step and per-action ones with browser.captureScreenshotsPerAction)
 ```
+
+The model works from the DOM, not from pixels. Turn on `ai.sendScreenshots` in
+`steptix.config.json` when a page carries meaning the DOM does not (a canvas, a
+chart), at the cost of an image per turn. See
+[docs/test-writing-handbook.md §1](docs/test-writing-handbook.md#1-how-a-step-is-executed)
+for what this means for how you write steps.
 
 ### AI action types
 
@@ -879,7 +891,7 @@ When you run a test, here's what happens end to end:
 | `keyboard` | `page.keyboard.press()` |
 | `upload` | `locator.setInputFiles(...)`, or click the control and answer `page.waitForEvent('filechooser')` |
 | `api_call` | HTTP fetch (with session cookies or standalone) |
-| `assert` | Second AI call evaluates pass/fail against DOM + screenshot |
+| `assert` | A second AI call writes a JavaScript check; it runs in the page and decides pass/fail |
 
 A file path named in a step is relative to the folder the test file lives in.
 
