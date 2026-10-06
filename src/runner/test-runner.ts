@@ -110,7 +110,7 @@ import { logger, setLogLevel, getLogLevel, type ConsoleLogLevel } from '../utils
 import { openRunLogFile, attachRunLogBridges } from '../utils/run-log.js';
 import { ApiResponseStore } from '../api/response-store.js';
 import { resolveProjectRoot } from '../server/project-root.js';
-import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
+import { defaultToolsDir, loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { executeToolStep, type ExecuteToolStepOptions } from '../tools/executor.js';
 import type { ToolCall } from '../tools/types.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
@@ -718,7 +718,7 @@ export async function runTest(
   let toolCatalogue: ToolCatalogue;
   try {
     const toolsDir = path.resolve(process.cwd(), config.tests.toolsDir);
-    toolCatalogue = await loadToolCatalogue(toolsDir);
+    toolCatalogue = await loadToolCatalogue(toolsDir, { defaultDir: defaultToolsDir(process.cwd()) });
   } catch (err) {
     logger.error(`Failed to load tool catalogue: ${(err as Error).message}`);
     throw err;

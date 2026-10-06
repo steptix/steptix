@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { logger } from '../utils/logger.js';
+import { DEFAULT_CONFIG } from '../config/defaults.js';
 import type { ToolDefinition } from './types.js';
 import { finaliseToolExport } from './finalise.js';
 import { bundleAndImport, resolveToolCacheDir, signatureOf } from './reload.js';
@@ -45,6 +46,16 @@ export interface ToolCatalogueOptions {
   scannedDir?: string;
   /** Where reload writes temp tool modules (see `resolveToolCacheDir`). */
   cacheDir?: string | undefined;
+}
+
+export interface LoadToolCatalogueOptions extends Pick<ToolCatalogueOptions, 'reload'> {
+  /**
+   * The directory `tests.toolsDir` resolves to when the project leaves it at
+   * its default — see `defaultToolsDir`. When `dir` is this directory and is
+   * missing, the load logs at debug instead of warning: the project simply has
+   * no tools yet. Omit it and a missing directory always warns.
+   */
+  defaultDir?: string;
 }
 
 /**
@@ -465,7 +476,7 @@ export function parseToolRef(ref: string): { file: string; tool: string } {
  */
 export async function loadToolCatalogue(
   dir: string,
-  options: ToolCatalogueOptions = {},
+  options: LoadToolCatalogueOptions = {},
 ): Promise<ToolCatalogue> {
   const reload = options.reload ?? false;
   // Where reload writes temp tool modules (a dot-dir inside `dir`); only needed
@@ -491,13 +502,21 @@ export async function loadToolCatalogue(
   }
 
   if (!exists) {
-    // Tools are optional — projects without any keep working — but emit a
-    // warning rather than a debug line so a misconfigured `tests.toolsDir`
-    // surfaces loudly the first time a `[tool:...]` step is invoked.
-    logger.warn(
+    // Tools are optional — projects without any keep working. A `toolsDir`
+    // the project pointed somewhere else that isn't there is probably a typo,
+    // so that one warns. The default directory being absent just means the
+    // project has no tools yet — every fresh `steptix init` project is in that
+    // state — so it stays at debug rather than greeting a new user's first run
+    // with a warning. Either way, a `[tool: ...]` step that does run fails with
+    // `buildNotFoundMessage`, which names the missing directory.
+    const message =
       `tools.dir "${dir}" does not exist — no tools registered. ` +
-      `Update \`tests.toolsDir\` in steptix.config.json if your tools live elsewhere.`,
-    );
+      `Update \`tests.toolsDir\` in steptix.config.json if your tools live elsewhere.`;
+    if (options.defaultDir !== undefined && samePath(dir, options.defaultDir)) {
+      logger.debug(message);
+    } else {
+      logger.warn(message);
+    }
     catalogue.diagnostics = { toolsDir: dir, toolsDirMissing: true, filesScanned: 0 };
     return catalogue;
   }
@@ -510,6 +529,20 @@ export async function loadToolCatalogue(
   catalogue.diagnostics = { toolsDir: dir, toolsDirMissing: false, filesScanned: files.length };
   logger.debug(`Indexed ${files.length} tool file(s) from ${dir} (lazy load)`);
   return catalogue;
+}
+
+/**
+ * Where `tests.toolsDir` points for a project rooted at `projectRoot` that
+ * leaves it at its default (or spells the default out, as the `steptix init`
+ * scaffold does). Pass it as `defaultDir` to `loadToolCatalogue`.
+ */
+export function defaultToolsDir(projectRoot: string): string {
+  return path.resolve(projectRoot, DEFAULT_CONFIG.tests.toolsDir);
+}
+
+/** `path.relative` compares case-insensitively on Windows, as the filesystem does. */
+function samePath(a: string, b: string): boolean {
+  return path.relative(path.resolve(a), path.resolve(b)) === '';
 }
 
 /**

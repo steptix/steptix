@@ -36,6 +36,12 @@ export function registerInitCommand(program: Command): void {
  * project has to decide — the model, the directories — and leaves everything
  * else, `desktop` included, at its default. Exported for the test that pins
  * that.
+ *
+ * `toolsDir` is spelled out, at its default, so a new user can see where tools
+ * go — but init does not create the folder, since an empty one says nothing.
+ * `loadToolCatalogue` logs a missing DEFAULT tools dir at debug, so the first
+ * run stays quiet; change this value away from the default and an absent
+ * directory warns again.
  */
 export const SCAFFOLD_CONFIG = `{
   "ai": {

@@ -9,6 +9,17 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — a new project's first run no longer warns about `tools/src`
+
+`steptix init` names `"toolsDir": "./tools/src"` in the config it writes but
+does not create the folder, so every run in a fresh project logged
+`tools.dir ".../tools/src" does not exist — no tools registered` once per
+test and once per data row. A missing tools directory is now logged at debug
+when it is the default `./tools/src`, under `steptix run` and on the server
+alike: the project simply has no tools yet. A `toolsDir` you pointed somewhere
+else still warns when it is missing, and a `[tool: ...]` step that runs still
+fails with a message naming the missing directory.
+
 ### Changed — `SERVER_URL` is now `STEPTIX_SERVER_URL`
 
 The variable that names the Steptix server is now `STEPTIX_SERVER_URL`, so it
