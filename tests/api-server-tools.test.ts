@@ -402,15 +402,29 @@ describe('api-server tool dispatch', () => {
     // tools dir being absent is debug; a dir the project pointed elsewhere
     // being absent is still a WARN.
     let projectDir: string;
+    // A testFilePath inside a project makes the server load that project's
+    // config, which also reads the machine-wide user root's .env. Point the
+    // user root at the project's own empty dir so the developer's real one
+    // cannot decide what these tests see.
+    const preservedUserRoot: Record<string, string | undefined> = {};
 
     beforeAll(async () => {
       projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tools-default-project-'));
       await fs.writeFile(path.join(projectDir, 'steptix.config.json'), '{}\n');
       await fs.mkdir(path.join(projectDir, 'tests'));
       await fs.writeFile(path.join(projectDir, 'tests', 'first.md'), '# First\n\n## Steps\n1. Click Sign in\n');
+      await fs.mkdir(path.join(projectDir, 'user-root'));
+      for (const key of ['LOCALAPPDATA', 'XDG_CONFIG_HOME'] as const) {
+        preservedUserRoot[key] = process.env[key];
+        process.env[key] = path.join(projectDir, 'user-root');
+      }
     });
 
     afterAll(async () => {
+      for (const [key, value] of Object.entries(preservedUserRoot)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       await fs.rm(projectDir, { recursive: true, force: true, maxRetries: 3 });
     });
 
