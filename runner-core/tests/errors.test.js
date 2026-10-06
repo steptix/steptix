@@ -15,7 +15,6 @@ const STEPTIX_PACKAGE = JSON.parse(
 
 const SAMPLE_CONTEXTS = {
   STX001: { searchedDirs: ['/ws/a/b', '/ws/a', '/ws'], fallbackSetting: '' },
-  STX002: { envPath: '/ws/.env' },
   STX003: { envPath: '/ws/.env', machineEnvPath: '/home/x/.steptix/.env' },
   STX004: { envPath: '/ws/.env', value: 'not-a-url' },
   STX005: { envPath: '/ws/.env', lineNumber: 4, line: 'bad line' },
@@ -76,7 +75,6 @@ test('every code has a message led by its code, a diagnosis, and a fix sentence 
 
 test('errors involving a file path mention the path verbatim', () => {
   const cases = [
-    ['STX002', '/ws/.env'],
     ['STX003', '/ws/.env'],
     ['STX004', '/ws/.env'],
     ['STX005', '/ws/.env'],
@@ -107,6 +105,12 @@ test('STX001 lists searched directories and the fallback setting name', () => {
   assert.ok(payload.message.includes('/ws/a/b'));
   assert.ok(payload.message.includes('/ws'));
   assert.ok(payload.message.includes('steptix.defaultEnvFile'));
+});
+
+test('STX002 is retired: a project .env without STEPTIX_SERVER_URL is not an error', () => {
+  // stories/machine-server-url.md — the URL falls back to the environment, the
+  // machine .env, then the default, so nothing can raise it.
+  assert.ok(!ALL_ERROR_CODES.includes('STX002'));
 });
 
 test('STX033 names both ports, where each came from, and the serve command that fixes it', () => {

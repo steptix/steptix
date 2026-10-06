@@ -10,9 +10,11 @@
  * the literal name of any setting key involved so the user can grep.
  */
 
+// STX002 (a project .env without STEPTIX_SERVER_URL) is retired: the URL
+// falls back to the environment, the machine .env, then the default
+// (stories/machine-server-url.md). Its number stays unused.
 export type ErrorCode =
   | 'STX001'
-  | 'STX002'
   | 'STX003'
   | 'STX004'
   | 'STX005'
@@ -60,7 +62,6 @@ export interface ErrorPayload {
 
 export interface ErrorContextMap {
   STX001: { searchedDirs: string[]; fallbackSetting: string };
-  STX002: { envPath: string };
   STX003: { envPath: string; machineEnvPath: string };
   STX004: { envPath: string; value: string };
   STX005: { envPath: string; lineNumber: number; line: string };
@@ -128,11 +129,6 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
     actions: [
       { label: 'Open Settings', command: 'workbench.action.openSettings', args: ['steptix.defaultEnvFile'] },
     ],
-  }),
-  STX002: (ctx) => ({
-    diagnosis: `STEPTIX_SERVER_URL is missing from ${ctx.envPath}`,
-    fix: 'Add a line like STEPTIX_SERVER_URL=http://localhost:3100 (full URL including scheme and port).',
-    actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
   STX003: (ctx) => ({
     diagnosis: `STEPTIX_SERVER_API_KEY is nowhere: not in ${ctx.envPath}, not in the VS Code process environment, and no machine key at ${ctx.machineEnvPath}`,

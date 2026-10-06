@@ -39,8 +39,10 @@ same server, so nothing has to say which one. See
   - An existing `.env` is set `0600` before the key is added to it.
   - Reading a `.env` other users can read warns once with the `chmod 600`
     command: from the CLI, the server and MCP, and in Steptix's run log.
+- **STX002 is retired.** Nothing raised it any more: a project `.env` without
+  `STEPTIX_SERVER_URL` falls back instead of failing. Its number stays unused.
 
-Steptix extension 0.5.173.
+Steptix extension 0.5.174.
 
 ### Changed — `SERVER_URL` is now `STEPTIX_SERVER_URL`
 
