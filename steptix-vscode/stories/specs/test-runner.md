@@ -267,8 +267,8 @@ A `step:fail` fails the **current** test but does not abort the batch.
 Subsequent tests still run. Standard CI behavior; matches the user's
 expectation that one batch run gives them the full picture.
 
-A `done` with `status: 'error'` (Steptix-level error like `STX001` env
-missing) still fails just that test, attaches the error payload as a
+A `done` with `status: 'error'` (Steptix-level error like an `STX005`
+unparseable `.env`) still fails just that test, attaches the error payload as a
 TestMessage, and proceeds to the next one.
 
 ### 5.4 Interactive steps in batch mode

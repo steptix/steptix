@@ -40,7 +40,7 @@ Every error reaches the user via two channels: **inline run-log** (red banner in
 | Code | Trigger | User-facing message (template) |
 |---|---|---|
 | `STX001` | Walk-up + fallback both miss | `STX001: No .env file found for this test. Searched: <list of dirs up to workspace root>, then fallback setting "steptix.defaultEnvFile" (=<value or "unset">). Fix: create a .env next to this test (or any ancestor folder up to workspace root) with STEPTIX_SERVER_URL and STEPTIX_SERVER_API_KEY, or set "steptix.defaultEnvFile" in Settings. [Open Settings] [Create .env here]` |
-| `STX002` | `.env` found but `STEPTIX_SERVER_URL` missing | `STX002: STEPTIX_SERVER_URL is missing from <abs path to .env>. Fix: add a line like STEPTIX_SERVER_URL=http://localhost:3100 (full URL including scheme and port). [Reveal .env]` |
+| `STX002` | *Retired.* A `.env` without `STEPTIX_SERVER_URL` falls back to the environment, the machine `.env`, then `http://127.0.0.1:3100` ([stories/machine-server-url.md](../stories/machine-server-url.md)). The number stays unused. | — |
 | `STX003` | `.env` found but `STEPTIX_SERVER_API_KEY` missing | `STX003: STEPTIX_SERVER_API_KEY is missing from <abs path to .env>. Fix: add STEPTIX_SERVER_API_KEY=<your-key>. The key must match what the Steptix server was started with. [Reveal .env]` |
 | `STX004` | `STEPTIX_SERVER_URL` present but unparseable | `STX004: STEPTIX_SERVER_URL in <abs path> is not a valid URL: "<value>". Fix: use a full URL like http://localhost:3100 — include scheme, host, and port. [Reveal .env]` |
 | `STX005` | `.env` parse error (malformed line) | `STX005: Could not parse <abs path> at line <n>: "<line>". Fix: each entry must be KEY=VALUE on its own line. Comments start with #. [Reveal .env]` |
@@ -289,7 +289,7 @@ No code changes in this phase.
 
 - `run-controller.ts` — owns one run-per-editor. On `run` message:
   1. Resolve `.env` via `runner-core/env-file.resolveEnvFile`. Log the search to "Steptix" channel. On miss → `reportError('STX001', { searchedDirs, fallbackSetting })` and abort
-  2. Read+parse `.env`. Parse error → `STX005`. Missing `STEPTIX_SERVER_URL` → `STX002`. Unparseable URL → `STX004`. Missing `STEPTIX_SERVER_API_KEY` → `STX003`. All include the absolute `.env` path
+  2. Read+parse `.env`. Parse error → `STX005`. Missing `STEPTIX_SERVER_URL` → the fallback chain (no error; STX002 is retired). Unparseable URL → `STX004`. Missing `STEPTIX_SERVER_API_KEY` → `STX003`. All include the absolute `.env` path
   3. Build session ID = `document.uri.fsPath`
   4. Call `runner-core/api-client.streamSteps(...)`. Map transport failures to error codes: `ECONNREFUSED`/DNS/timeout → `STX010`, 401 → `STX011`, 404 → `STX012`, 5xx → `STX013`, mid-stream drop → `STX014`. All include `STEPTIX_SERVER_URL`
   5. Forward each SSE event to the webview; mirror to "Steptix" output channel

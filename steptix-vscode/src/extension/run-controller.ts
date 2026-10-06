@@ -33,6 +33,7 @@ import {
   resolveEnvFile,
   resolveSection,
   userRootEnvPath,
+  userRootEnvExposed,
   type ClassifiedStep,
   type CompileEvent,
   type CompileProgressEvent,
@@ -222,6 +223,10 @@ export const defaultApiClientFactory: ApiClientFactory = (config) => new ApiClie
  * authenticated GET per interval.
  */
 const KEEP_ALIVE_INTERVAL_MS = 5 * 60_000;
+
+/** Whether a run in this window has already warned that the machine .env is
+ *  readable by other users — once is enough, the file is read on every run. */
+let machineEnvExposureReported = false;
 
 /** Outcome of the pre-run server phase. `proceed` covers both "it's ours" and
  *  the legacy/skip paths — from the run's point of view they are the same
@@ -1503,10 +1508,12 @@ export class RunController {
    */
   private async ensureServerReady(args: {
     serverUrl: string;
+    /** Where `serverUrl` came from — named by STX033. */
+    serverUrlSource: string;
     signal: AbortSignal;
     log: (line: string) => void;
   }): Promise<ServerReadiness> {
-    const { serverUrl, signal, log } = args;
+    const { serverUrl, serverUrlSource, signal, log } = args;
     this.currentInspectorUrl = undefined;
 
     const probe = await this.healthProbe(serverUrl, HEALTH_PROBE_TIMEOUT_MS, signal);
@@ -1557,6 +1564,26 @@ export class RunController {
             ` — not auto-starting (${action.reason})`,
         );
         return { kind: 'proceed' };
+
+      case 'refuse-port': {
+        // Starting it anyway would leave a server on a port this run never
+        // connects to, then fail the wait with STX028
+        // (stories/machine-server-url.md).
+        const { servePort } = action;
+        const payload = servePort.ok
+          ? reportError('STX033', {
+              serverUrl,
+              urlSource: serverUrlSource,
+              servePort: servePort.port,
+              servePortSource: servePort.source,
+            })
+          : reportError('STX028', {
+              serverUrl,
+              reason: `a server started by "steptix.serverAutoStart.command" would not start: ${servePort.reason}`,
+            });
+        log(`${payload.code} ${payload.diagnosis}`);
+        return { kind: 'fail', payload };
+      }
 
       case 'spawn': {
         // A start that just failed is not retried per-test. In a Test
@@ -2166,6 +2193,8 @@ export class RunController {
         envPath: string;
         envName: string | null;
         serverUrl: string;
+        /** Where `serverUrl` came from, for STX033. */
+        serverUrlSource: string;
       }
     | { ok: false; payload: ErrorPayload }
   > {
@@ -2301,13 +2330,22 @@ export class RunController {
     const { serverUrl } = resolved;
     const origin = describeServerUrlOrigin(resolved.origin);
     log(`STEPTIX_SERVER_URL ${serverUrl} — from ${origin}`);
+    if (!machineEnvExposureReported && userRootEnvExposed()) {
+      // Once per window: the file is read on every run, and the fix is one
+      // command. Linux and macOS only — see userRootEnvExposed.
+      machineEnvExposureReported = true;
+      log(
+        `WARNING ${userRootEnvPath()} can be read by other users on this machine, and it holds ` +
+          `the Steptix server key (and any AI_API_KEY in it). Restrict it: chmod 600 "${userRootEnvPath()}"`,
+      );
+    }
     try {
       new URL(serverUrl);
     } catch {
       const payload = reportError('STX004', { envPath: origin, value: serverUrl });
       return { ok: false, payload };
     }
-    return { ok: true, env, envPath, envName: effectiveEnvName, serverUrl };
+    return { ok: true, env, envPath, envName: effectiveEnvName, serverUrl, serverUrlSource: origin };
   }
 
   /**
@@ -3063,7 +3101,12 @@ export class RunController {
     const ac = new AbortController();
     this.active = ac;
 
-    const ready = await this.ensureServerReady({ serverUrl, signal: ac.signal, log });
+    const ready = await this.ensureServerReady({
+      serverUrl,
+      serverUrlSource: target.serverUrlSource,
+      signal: ac.signal,
+      log,
+    });
     // Only now the key: an auto-started `serve` may just have generated it.
     const serverReady = ready.kind === 'proceed' ? this.resolveApiKey(target) : ready;
     if (serverReady.kind !== 'proceed') {
@@ -5629,7 +5672,12 @@ export class RunController {
         await this.closeStaleSession();
       }
 
-      const ready = await this.ensureServerReady({ serverUrl, signal: ac.signal, log });
+      const ready = await this.ensureServerReady({
+        serverUrl,
+        serverUrlSource: target.serverUrlSource,
+        signal: ac.signal,
+        log,
+      });
       if (ready.kind === 'aborted' || ac.signal.aborted) return { status: 'cancelled' };
       if (ready.kind === 'fail') {
         this.fail(ready.payload, log);

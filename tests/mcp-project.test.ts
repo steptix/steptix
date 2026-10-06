@@ -517,18 +517,33 @@ describe('environment composition (§4)', () => {
     });
   });
 
-  it('names both env files and the variable when STEPTIX_SERVER_URL is nowhere', async () => {
+  it('falls back to the machine STEPTIX_SERVER_URL, then the default, when the project names none', async () => {
+    // stories/machine-server-url.md: the same two a bare `steptix serve`
+    // takes its port from, so auto-start and every other client agree.
     const root = seedProject(makeTmp(), {
       env: { STEPTIX_SERVER_API_KEY: 'k' },
       envFiles: { uat: { X: '1' } },
     });
     process.env['STEPTIX_MCP_ROOTS'] = root;
 
-    const text = await refusalText(() => resolveProject({ projectRoot: root, envName: 'uat' }));
-    expect(text).toContain('No STEPTIX_SERVER_URL');
-    expect(text).toContain(path.join(root, '.env'));
-    expect(text).toContain(path.join(root, '.env.uat'));
-    expect(text).toContain('STEPTIX_SERVER_URL environment variable');
+    const bare = await resolveProject({ projectRoot: root, envName: 'uat' });
+    expect(bare.serverUrl).toBe('http://127.0.0.1:3100');
+
+    seedUserRoot({ env: { STEPTIX_SERVER_URL: 'http://127.0.0.1:3200' } });
+    const machine = await resolveProject({ projectRoot: root, envName: 'uat' });
+    expect(machine.serverUrl).toBe('http://127.0.0.1:3200');
+    // The machine value is a fallback for the URL only; it never enters the
+    // project's env map, which ships to the server as the request's `env`.
+    expect(machine.env['STEPTIX_SERVER_URL']).toBeUndefined();
+  });
+
+  it('keeps process.env above the machine STEPTIX_SERVER_URL', async () => {
+    const root = seedProject(makeTmp(), { env: { STEPTIX_SERVER_API_KEY: 'k' } });
+    process.env['STEPTIX_MCP_ROOTS'] = root;
+    seedUserRoot({ env: { STEPTIX_SERVER_URL: 'http://127.0.0.1:3200' } });
+    process.env['STEPTIX_SERVER_URL'] = 'http://127.0.0.1:4100';
+
+    expect((await resolveProject({ projectRoot: root })).serverUrl).toBe('http://127.0.0.1:4100');
   });
 
   it('defers a missing STEPTIX_SERVER_API_KEY as null rather than refusing', async () => {
@@ -644,9 +659,9 @@ describe('user scope (stories/mcp-no-project.md)', () => {
     expect(project.toolsDir).toBeNull();
   });
 
-  it('defaults STEPTIX_SERVER_URL to the distinctive loopback port, below both env layers', async () => {
+  it('defaults STEPTIX_SERVER_URL to the port a bare serve listens on, below both env layers', async () => {
     noProjectCwd();
-    expect((await resolveProject({})).serverUrl).toBe('http://127.0.0.1:3141');
+    expect((await resolveProject({})).serverUrl).toBe('http://127.0.0.1:3100');
 
     // The user root's own .env beats the default…
     seedUserRoot({ env: { STEPTIX_SERVER_URL: 'http://127.0.0.1:4444' } });

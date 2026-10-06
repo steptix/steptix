@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
+import { serverUrlPort } from 'steptix-runner-core';
 import { getOutputChannel } from './output-channel.js';
+import { describeServerUrlOrigin } from './server-url.js';
 import { SERVER_MENU_COMMAND, type ServerStatusBar } from './server-status-bar.js';
 import {
   decideServerAction,
@@ -84,6 +86,21 @@ export function registerServerCommands(args: {
         // command setting or an installed runtime to start.
         await offerAutoStartSettings(`Steptix: cannot start a server — ${action.reason}.`);
         return;
+      case 'refuse-port': {
+        // The run path's STX033: a server on another port is one nothing
+        // here would talk to.
+        const { servePort } = action;
+        const port = serverUrlPort(target.serverUrl);
+        void vscode.window.showErrorMessage(
+          servePort.ok
+            ? `Steptix: ${target.serverUrl} (from ${describeServerUrlOrigin(target.origin)}) is not running, and ` +
+                `"steptix.serverAutoStart.command" would start a server on port ${servePort.port} ` +
+                `(from ${servePort.source}) instead. Start one yourself with \`steptix serve -p ${port}\`, ` +
+                `or add -p ${port} after serve in the command.`
+            : `Steptix: cannot start a server — it would not start: ${servePort.reason}.`,
+        );
+        return;
+      }
       case 'spawn':
         if (action.runtime) {
           log(`using the Steptix runtime ${action.runtime.version} installed in ${action.runtime.dir}`);

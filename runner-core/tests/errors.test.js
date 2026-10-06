@@ -15,7 +15,6 @@ const STEPTIX_PACKAGE = JSON.parse(
 
 const SAMPLE_CONTEXTS = {
   STX001: { searchedDirs: ['/ws/a/b', '/ws/a', '/ws'], fallbackSetting: '' },
-  STX002: { envPath: '/ws/.env' },
   STX003: { envPath: '/ws/.env', machineEnvPath: '/home/x/.steptix/.env' },
   STX004: { envPath: '/ws/.env', value: 'not-a-url' },
   STX005: { envPath: '/ws/.env', lineNumber: 4, line: 'bad line' },
@@ -43,6 +42,12 @@ const SAMPLE_CONTEXTS = {
   },
   STX030: {},
   STX031: {},
+  STX033: {
+    serverUrl: 'http://localhost:3101',
+    urlSource: '/ws/.env',
+    servePort: 3100,
+    servePortSource: 'the default',
+  },
   STX032: {
     // Verbatim `danglingChainMemberError` output, which is verbatim the CLI
     // parser's — see tests/control-line-parity.test.ts.
@@ -70,7 +75,6 @@ test('every code has a message led by its code, a diagnosis, and a fix sentence 
 
 test('errors involving a file path mention the path verbatim', () => {
   const cases = [
-    ['STX002', '/ws/.env'],
     ['STX003', '/ws/.env'],
     ['STX004', '/ws/.env'],
     ['STX005', '/ws/.env'],
@@ -101,6 +105,25 @@ test('STX001 lists searched directories and the fallback setting name', () => {
   assert.ok(payload.message.includes('/ws/a/b'));
   assert.ok(payload.message.includes('/ws'));
   assert.ok(payload.message.includes('steptix.defaultEnvFile'));
+});
+
+test('STX002 is retired: a project .env without STEPTIX_SERVER_URL is not an error', () => {
+  // stories/machine-server-url.md — the URL falls back to the environment, the
+  // machine .env, then the default, so nothing can raise it.
+  assert.ok(!ALL_ERROR_CODES.includes('STX002'));
+});
+
+test('STX033 names both ports, where each came from, and the serve command that fixes it', () => {
+  const payload = reportError('STX033', SAMPLE_CONTEXTS.STX033);
+  assert.ok(payload.message.includes('http://localhost:3101'));
+  assert.ok(payload.message.includes('/ws/.env'));
+  assert.ok(payload.message.includes('port 3100'));
+  assert.ok(payload.message.includes('the default'));
+  assert.ok(payload.message.includes('steptix serve -p 3101'));
+
+  // A URL with no port is fixed with its scheme's default.
+  const https = reportError('STX033', { ...SAMPLE_CONTEXTS.STX033, serverUrl: 'https://localhost' });
+  assert.ok(https.message.includes('steptix serve -p 443'));
 });
 
 test('STX005 mentions the offending line number and content', () => {

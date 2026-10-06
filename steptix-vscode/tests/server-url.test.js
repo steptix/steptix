@@ -16,12 +16,12 @@ import {
 } from '../src/extension/server-url.ts';
 
 /**
- * The framework's own defaults (src/config/defaults.ts, as built into the repo
- * root's dist/ — pretest builds it), which is where `steptix serve` takes its
- * host and port from. The case that uses it skips, saying so, when the root
- * has not been built.
+ * The framework's own default server URL (src/env/server-url.ts, as built into
+ * the repo root's dist/ — pretest builds it): the host and port a bare
+ * `steptix serve` listens on when the machine .env names none. The case that
+ * uses it skips, saying so, when the root has not been built.
  */
-const DEFAULTS_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../dist/config/defaults.js');
+const DEFAULTS_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../dist/env/server-url.js');
 
 /** A user root of its own, with `machineEnv` as its .env (none when null). */
 function machine(machineEnv, env = {}) {
@@ -91,17 +91,17 @@ test('nothing anywhere is the default serve listens on, and the log says where i
 });
 
 test('the default is where the server\'s own defaults say serve listens', async (t) => {
-  // DEFAULT_STEPTIX_SERVER_URL is a copy of `server.host`/`server.port` that nothing
-  // links — the extension bundles separately from the framework — so this is
-  // the one place the two meet. Pinning the constant to its own literal would
-  // stay green if serve moved to 3200 and every unconfigured run missed it.
+  // DEFAULT_STEPTIX_SERVER_URL is a copy of the framework's DEFAULT_SERVER_URL
+  // that nothing links — the extension bundles separately from the framework —
+  // so this is the one place the two meet. Pinning the constant to its own
+  // literal would stay green if serve moved to 3200 and every unconfigured run
+  // missed it.
   if (!existsSync(DEFAULTS_PATH)) {
     t.skip(`the repo root is not built (${DEFAULTS_PATH} is missing)`);
     return;
   }
-  const { DEFAULT_CONFIG } = await import(pathToFileURL(DEFAULTS_PATH).href);
-  const { host, port } = DEFAULT_CONFIG.server;
-  assert.equal(DEFAULT_STEPTIX_SERVER_URL, `http://${host}:${port}`);
+  const { DEFAULT_SERVER_URL } = await import(pathToFileURL(DEFAULTS_PATH).href);
+  assert.equal(DEFAULT_STEPTIX_SERVER_URL, DEFAULT_SERVER_URL);
 });
 
 test('an unreadable machine .env throws rather than falling through to the default', () => {

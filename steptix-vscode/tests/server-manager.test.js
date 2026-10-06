@@ -28,6 +28,7 @@ import {
   readAutoStartSettings,
   readLogTail,
   runtimeServeCommand,
+  servePortOfCommand,
   startServerAndWait,
   HEALTH_SERVICE_ID,
 } from '../src/extension/server-manager.ts';
@@ -436,6 +437,13 @@ test('start: a spawn that throws is refused, not a timeout', async () => {
 
 const LOCAL = 'http://127.0.0.1:3100';
 const CONFIGURED = { command: 'node x.js', cwd: '/repo', readyTimeoutSeconds: 20 };
+/** Where the configured command listens — the same port as LOCAL. Passed as
+ *  the `servePortOf` seam so no test reads this machine's .env. */
+const SERVES_3100 = { ok: true, port: 3100, source: 'the default' };
+const serves = (servePort) => () => servePort;
+const noDiscovery = () => {
+  throw new Error('a command setting must not look for a runtime');
+};
 
 test('decide: healthy ⇒ proceed, carrying the health through', () => {
   const health = { service: HEALTH_SERVICE_ID, inspector: 'ws://x:1/y' };
@@ -455,7 +463,13 @@ test('decide: unknown ⇒ legacy (never refuse, never spawn)', () => {
 });
 
 test('decide: down + localhost + configured ⇒ spawn', () => {
-  const action = decideServerAction(LOCAL, { kind: 'down', detail: 'refused' }, CONFIGURED);
+  const action = decideServerAction(
+    LOCAL,
+    { kind: 'down', detail: 'refused' },
+    CONFIGURED,
+    noDiscovery,
+    serves(SERVES_3100),
+  );
   assert.equal(action.kind, 'spawn');
   assert.deepEqual(action.config, CONFIGURED);
 });
@@ -466,6 +480,60 @@ test('decide: down + REMOTE url ⇒ skip, however configured', () => {
   const action = decideServerAction('http://build-box:3100', { kind: 'down', detail: 'refused' }, CONFIGURED);
   assert.equal(action.kind, 'skip');
   assert.match(action.reason, /not a localhost URL/);
+});
+
+test('decide: down + the command would listen on another port ⇒ refuse-port, never spawn', () => {
+  // stories/machine-server-url.md: a project pointing at 3104 while the
+  // command starts on 3100 would leave a stray server and time out (STX028).
+  const action = decideServerAction(
+    'http://localhost:3104',
+    { kind: 'down', detail: 'refused' },
+    CONFIGURED,
+    noDiscovery,
+    serves(SERVES_3100),
+  );
+  assert.deepEqual(action, { kind: 'refuse-port', servePort: SERVES_3100 });
+});
+
+test('decide: down + the command would not start at all ⇒ refuse-port carrying why', () => {
+  const servePort = { ok: false, reason: 'STEPTIX_SERVER_URL in /m/.env has no port: "http://x"' };
+  const action = decideServerAction(LOCAL, { kind: 'down', detail: 'refused' }, CONFIGURED, noDiscovery, serves(servePort));
+  assert.deepEqual(action, { kind: 'refuse-port', servePort });
+});
+
+test('decide: a URL with no port is compared as its scheme default', () => {
+  const action = decideServerAction(
+    'http://localhost',
+    { kind: 'down', detail: 'refused' },
+    CONFIGURED,
+    noDiscovery,
+    serves({ ok: true, port: 80, source: '-p' }),
+  );
+  assert.equal(action.kind, 'spawn');
+});
+
+test('decide: a command whose port cannot be read is started, not refused', () => {
+  // A wrapper script may pin the right port; only a visible mismatch refuses.
+  const action = decideServerAction(
+    'http://localhost:3104',
+    { kind: 'down', detail: 'refused' },
+    CONFIGURED,
+    noDiscovery,
+    () => null,
+  );
+  assert.equal(action.kind, 'spawn');
+});
+
+test('decide: a running server is used whatever port the command would pick', () => {
+  // The port check only guards a spawn; it must never refuse a healthy server.
+  const health = { service: HEALTH_SERVICE_ID };
+  const asked = [];
+  const action = decideServerAction('http://localhost:3104', { kind: 'healthy', health }, CONFIGURED, noDiscovery, (c) => {
+    asked.push(c);
+    return SERVES_3100;
+  });
+  assert.equal(action.kind, 'proceed');
+  assert.deepEqual(asked, [], 'the port is worked out only for a spawn');
 });
 
 const UNCONFIGURED = { command: '', cwd: '', readyTimeoutSeconds: 20, useInstalledRuntime: true };
@@ -500,11 +568,24 @@ test('decide: down + no command + a runtime installed ⇒ spawn that runtime on 
 
 test('decide: a command setting wins over an installed runtime, which is not even looked for', () => {
   const discover = discovery(RUNTIME);
-  const action = decideServerAction(LOCAL, DOWN, { ...CONFIGURED, useInstalledRuntime: true }, discover);
+  const action = decideServerAction(
+    LOCAL,
+    DOWN,
+    { ...CONFIGURED, useInstalledRuntime: true },
+    discover,
+    serves(SERVES_3100),
+  );
   assert.equal(action.kind, 'spawn');
   assert.deepEqual(action.config, CONFIGURED);
   assert.equal(action.runtime, undefined);
   assert.equal(discover.calls, 0);
+});
+
+test('decide: the installed runtime is never port-checked — its command passes the URL\'s port', () => {
+  const action = decideServerAction('http://127.0.0.1:3207', DOWN, UNCONFIGURED, discovery(RUNTIME), () => {
+    throw new Error('the runtime command must not be port-checked');
+  });
+  assert.equal(action.kind, 'spawn');
 });
 
 test('decide: useInstalledRuntime off ⇒ skip, however many runtimes are installed', () => {
@@ -521,6 +602,91 @@ test('decide: a healthy server costs no runtime scan, and a REMOTE url never sta
   const remote = decideServerAction('http://build-box:3100', DOWN, UNCONFIGURED, discover);
   assert.equal(remote.kind, 'skip');
   assert.equal(discover.calls, 0);
+});
+
+/** Point the machine `.env` at a temp dir for `fn`, holding `content` (or no file). */
+function withMachineEnv(content, fn) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'steptix-machine-env-'));
+  const saved = { LOCALAPPDATA: process.env.LOCALAPPDATA, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  process.env.LOCALAPPDATA = dir;
+  process.env.XDG_CONFIG_HOME = dir;
+  try {
+    if (content !== null) {
+      mkdirSync(path.join(dir, 'steptix'), { recursive: true });
+      writeFileSync(path.join(dir, 'steptix', '.env'), content);
+    }
+    return fn(path.join(dir, 'steptix', '.env'));
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+  }
+}
+
+test('servePortOfCommand: a -p / --port after serve wins, in every spelling', () => {
+  withMachineEnv('STEPTIX_SERVER_URL=http://127.0.0.1:3200\n', () => {
+    for (const command of [
+      'node dist/index.js serve -p 3104 --idle-timeout 60',
+      'node dist/index.js serve --port 3104',
+      'node dist/index.js serve --port=3104',
+      'node dist/index.js serve -p3104',
+    ]) {
+      const result = servePortOfCommand(command);
+      assert.equal(result.ok, true, command);
+      assert.equal(result.port, 3104, command);
+      assert.match(result.source, /serverAutoStart\.command/, command);
+    }
+  });
+});
+
+test('servePortOfCommand: a launcher flag before serve is not the server port', () => {
+  // `npx -p <pkg>` names a package; only flags after `serve` belong to it.
+  withMachineEnv(null, () => {
+    assert.deepEqual(servePortOfCommand('npx -p 5 steptix serve --idle-timeout 60'), {
+      ok: true,
+      port: 3100,
+      source: 'the default',
+    });
+  });
+});
+
+test('servePortOfCommand: null when the command does not say where it listens', () => {
+  withMachineEnv(null, () => {
+    // No `serve` argument of its own: a script that may pin any port.
+    assert.equal(servePortOfCommand('npm run serve:dev'), null);
+    assert.equal(servePortOfCommand('cmd /c start-server.cmd'), null);
+    // A port that is not a number until a shell expands it.
+    assert.equal(servePortOfCommand('node dist/index.js serve --port $PORT'), null);
+    assert.equal(servePortOfCommand('node dist/index.js serve -p %PORT%'), null);
+  });
+});
+
+test('servePortOfCommand: a quoted launcher path still finds serve and its -p', () => {
+  withMachineEnv(null, () => {
+    const result = servePortOfCommand('"C:\\Program Files\\steptix\\steptix.cmd" serve -p 3104 --idle-timeout 60');
+    assert.equal(result?.ok && result.port, 3104);
+  });
+});
+
+test('servePortOfCommand: no -p ⇒ the machine STEPTIX_SERVER_URL port, else 3100', () => {
+  const bare = 'node --inspect=0 dist/index.js serve --idle-timeout 60';
+  withMachineEnv(null, () => {
+    assert.deepEqual(servePortOfCommand(bare), { ok: true, port: 3100, source: 'the default' });
+  });
+  withMachineEnv('STEPTIX_SERVER_URL=http://localhost:3200\n', (envPath) => {
+    assert.deepEqual(servePortOfCommand(bare), {
+      ok: true,
+      port: 3200,
+      source: `STEPTIX_SERVER_URL in ${envPath}`,
+    });
+  });
+  withMachineEnv('STEPTIX_SERVER_URL=http://localhost\n', () => {
+    const result = servePortOfCommand(bare);
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /has no port/);
+  });
 });
 
 // ---------------------------------------------------------------------------

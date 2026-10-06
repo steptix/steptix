@@ -90,3 +90,65 @@ export function readMachineKey(deps?: UserRootDeps): string | null {
 export function readMachineServerUrl(deps?: UserRootDeps): string | null {
   return readUserRootValue(MACHINE_SERVER_URL_VAR, deps);
 }
+
+/**
+ * True when the user root's `.env` exists and other local users can read it
+ * (any group or other permission bit). Always false on Windows, where
+ * `%LOCALAPPDATA%` is private to the account and Node reports no such bits.
+ *
+ * The framework creates the file `0600`; this catches one made by hand to add
+ * `AI_API_KEY`, so Steptix can say `chmod 600` instead of leaving the keys
+ * readable (stories/machine-server-url.md). Never throws.
+ */
+export function userRootEnvExposed(deps?: UserRootDeps): boolean {
+  if ((deps?.platform ?? process.platform) === 'win32') return false;
+  try {
+    return (fs.statSync(userRootEnvPath(deps)).mode & 0o077) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Where a bare `steptix serve` listens (stories/machine-server-url.md)
+// ---------------------------------------------------------------------------
+//
+// Mirrors `resolveServePort` in the framework's `src/env/server-url.ts`, for
+// the same reason the readers above mirror `src/env/user-root.ts`. The two
+// must agree: a bare `serve` listens on the port of this file's
+// `STEPTIX_SERVER_URL` (else 3100), and a client with no project
+// `STEPTIX_SERVER_URL` connects to that URL (else the default) — which is why
+// neither side has to tell the other.
+
+export const DEFAULT_SERVER_PORT = 3100;
+
+/** Where a `steptix serve` started without `-p` will listen, and why. */
+export type BareServePort =
+  | { ok: true; port: number; source: string }
+  /** The machine `STEPTIX_SERVER_URL` is set but names no usable port: that
+   *  `serve` refuses to start, for this reason. */
+  | { ok: false; reason: string };
+
+/**
+ * The port a bare `serve` takes: the machine `STEPTIX_SERVER_URL`'s, else
+ * {@link DEFAULT_SERVER_PORT}. The same rule as `resolveServePort` in the
+ * framework minus `-p`, which only the caller can know about.
+ *
+ * Throws what {@link readMachineServerUrl} throws: an unreadable machine `.env`.
+ */
+export function bareServePort(deps?: UserRootDeps): BareServePort {
+  const machineUrl = readMachineServerUrl(deps);
+  if (machineUrl === null) return { ok: true, port: DEFAULT_SERVER_PORT, source: 'the default' };
+  const where = `${MACHINE_SERVER_URL_VAR} in ${userRootEnvPath(deps)}`;
+  let url: URL;
+  try {
+    url = new URL(machineUrl);
+  } catch {
+    return { ok: false, reason: `${where} is not a valid URL: "${machineUrl}"` };
+  }
+  const port = Number(url.port);
+  if (url.port === '' || port === 0) {
+    return { ok: false, reason: `${where} has no port: "${machineUrl}"` };
+  }
+  return { ok: true, port, source: where };
+}

@@ -40,9 +40,10 @@
 # package and falls through to a node_modules lookup) and 22 root tests fail.
 #
 # THE PORT
-# `steptix.config.json` pins 127.0.0.1:3100 and is tracked, so two checkouts cannot
-# both serve on the default port; the second dies on EADDRINUSE (deliberately
-# fatal — see src/server/api-server.ts). You only need a second server if you
+# A bare `serve` listens on the machine .env's STEPTIX_SERVER_URL port, else 3100
+# (stories/machine-server-url.md), so two checkouts cannot both serve bare; the
+# second exits naming the taken port (deliberately fatal — see
+# src/server/api-server.ts). You only need a second server if you
 # changed `src/`. A running server resolves each request's project bundle from
 # the test file's path (src/server/project-bundle.ts), so it already honours a
 # worktree's own steptix.config.json and .env — but it executes whatever `src/`
@@ -491,8 +492,9 @@ if ($serverUrl) {
 } else {
     Write-Host "    cd `"$dest`"; node dist/index.js serve --idle-timeout 60"
     Write-Host ""
-    Write-Host "NOTE: that binds the default port 3100. If another checkout is already"
-    Write-Host "serving there this will die on EADDRINUSE — re-run this script with"
+    Write-Host "NOTE: that binds the default port (3100, unless STEPTIX_SERVER_URL in the machine"
+    Write-Host ".env names another). If another checkout is already serving there this"
+    Write-Host "exits naming the taken port — re-run this script with"
     Write-Host "-Port <n> to give the worktree its own server."
 }
 Write-Host ""
@@ -504,9 +506,8 @@ Write-Host "yourself with the command above and Steptix will use it."
 if ($serverUrl) {
     Write-Host ""
     Write-Host "That matters more on a non-default port: the auto-start command carries no"
-    Write-Host "-p flag, so if nothing is listening on $Port Steptix starts a server from"
-    Write-Host "the OTHER checkout on 3100, keeps polling $Port, and fails with STX028 —"
-    Write-Host "leaving a stray server behind. Start this worktree's server first."
+    Write-Host "-p flag, so it would listen on the default port rather than $Port, and"
+    Write-Host "Steptix refuses to start it (STX033). Start this worktree's server first."
     Write-Host ""
     Write-Host "Live integration tests read LIVE_STEPTIX_SERVER_URL and fall back to :3100 in every"
     Write-Host "suite, so point them at this worktree's server explicitly:"

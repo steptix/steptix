@@ -10,9 +10,13 @@
  * the literal name of any setting key involved so the user can grep.
  */
 
+import { serverUrlPort } from './url-port.js';
+
+// STX002 (a project .env without STEPTIX_SERVER_URL) is retired: the URL
+// falls back to the environment, the machine .env, then the default
+// (stories/machine-server-url.md). Its number stays unused.
 export type ErrorCode =
   | 'STX001'
-  | 'STX002'
   | 'STX003'
   | 'STX004'
   | 'STX005'
@@ -32,7 +36,8 @@ export type ErrorCode =
   | 'STX028'
   | 'STX030'
   | 'STX031'
-  | 'STX032';
+  | 'STX032'
+  | 'STX033';
 
 /** A button shown beneath the inline banner — `command` is a VS Code command id. */
 export interface ErrorAction {
@@ -59,7 +64,6 @@ export interface ErrorPayload {
 
 export interface ErrorContextMap {
   STX001: { searchedDirs: string[]; fallbackSetting: string };
-  STX002: { envPath: string };
   STX003: { envPath: string; machineEnvPath: string };
   STX004: { envPath: string; value: string };
   STX005: { envPath: string; lineNumber: number; line: string };
@@ -103,6 +107,11 @@ export interface ErrorContextMap {
    *  is the CLI parser's own wording, naming the line and what is wrong with
    *  where it sits (stories/control-flow.md). */
   STX032: { detail: string };
+  /** Auto-start would start a server somewhere other than `serverUrl`, so it
+   *  did not start one. `servePort` is where the configured command listens
+   *  and `servePortSource` why (its own `-p`, the machine STEPTIX_SERVER_URL,
+   *  or the default); `urlSource` is where `serverUrl` came from. */
+  STX033: { serverUrl: string; urlSource: string; servePort: number; servePortSource: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -122,11 +131,6 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
     actions: [
       { label: 'Open Settings', command: 'workbench.action.openSettings', args: ['steptix.defaultEnvFile'] },
     ],
-  }),
-  STX002: (ctx) => ({
-    diagnosis: `STEPTIX_SERVER_URL is missing from ${ctx.envPath}`,
-    fix: 'Add a line like STEPTIX_SERVER_URL=http://localhost:3100 (full URL including scheme and port).',
-    actions: [{ label: 'Reveal .env', command: 'steptix.revealEnvFile' }],
   }),
   STX003: (ctx) => ({
     diagnosis: `STEPTIX_SERVER_API_KEY is nowhere: not in ${ctx.envPath}, not in the VS Code process environment, and no machine key at ${ctx.machineEnvPath}`,
@@ -247,7 +251,22 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
     diagnosis: `This test can't be run as written — ${ctx.detail}`,
     fix: 'Edit the line and run again. Steptix refuses up front because a decision cannot be split across two requests: a member with nothing to be the alternative of would perform its branch unconditionally, and one written below the `Otherwise` that ended the chain is never the branch the decision picks.',
   }),
+  STX033: (ctx) => ({
+    diagnosis:
+      `No Steptix server is running at ${ctx.serverUrl} (from ${ctx.urlSource}), and auto-start would start one on port ${ctx.servePort} (from ${ctx.servePortSource}) instead — so it did not start one`,
+    fix: `Start the server for ${ctx.serverUrl} yourself with \`steptix serve -p ${portOf(ctx.serverUrl)}\`, add -p ${portOf(ctx.serverUrl)} after serve in "steptix.serverAutoStart.command", or point STEPTIX_SERVER_URL at port ${ctx.servePort}.`,
+  }),
 };
+
+/** `url`'s port as written, or its scheme's default — for a fix sentence, so
+ *  never throws. */
+function portOf(url: string): string {
+  try {
+    return String(serverUrlPort(url));
+  } catch {
+    return '<port>';
+  }
+}
 
 /**
  * Build a structured error payload for a given code + context.

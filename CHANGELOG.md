@@ -9,6 +9,42 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Changed — one default server per machine: `serve`, MCP and the CLI agree
+
+Steptix already runs a test with no `.env`: it uses `STEPTIX_SERVER_URL`
+from the machine `.env` (`%LOCALAPPDATA%\steptix\.env`, `~/.steptix/.env`
+elsewhere), else `http://127.0.0.1:3100`. The rest of Steptix now uses the
+same server, so nothing has to say which one. See
+[stories/machine-server-url.md](stories/machine-server-url.md).
+
+- **`steptix serve`** listens on `-p`, else that machine
+  `STEPTIX_SERVER_URL`'s port, else 3100. A project's files no longer decide
+  the port: `server.port` in `steptix.config.json` is ignored with a warning
+  (delete it), and the schema flags it. A taken port now exits naming the port
+  and where it came from. A machine `STEPTIX_SERVER_URL` with no port stops
+  `serve` before it binds.
+- **Auto-start** no longer starts a server on a port the run will not connect
+  to. When `steptix.serverAutoStart.command` would listen elsewhere, Run fails
+  with the new **STX033**, naming both ports. Before, it timed out with STX028
+  and left a stray server behind. The installed runtime is not affected: it is
+  always started on the run's port. Nor is a command that does not show its
+  port (a script, or `--port $PORT`): it is started as before.
+- **MCP**: a project-less call defaults to `http://127.0.0.1:3100` instead of
+  3141. A project `.env` without `STEPTIX_SERVER_URL` now falls back the same
+  way instead of being refused.
+- **`steptix status` / `steptix stop`** look at `--url`, else the machine
+  `STEPTIX_SERVER_URL`, else port 3100 on the config's `server.host`.
+- **Linux and macOS:** the machine folder (`$XDG_CONFIG_HOME/steptix` or
+  `~/.steptix`) is now private, as `%LOCALAPPDATA%` already is on Windows:
+  - It is created `0700` and the key file `0600`.
+  - An existing `.env` is set `0600` before the key is added to it.
+  - Reading a `.env` other users can read warns once with the `chmod 600`
+    command: from the CLI, the server and MCP, and in Steptix's run log.
+- **STX002 is retired.** Nothing raised it any more: a project `.env` without
+  `STEPTIX_SERVER_URL` falls back instead of failing. Its number stays unused.
+
+Steptix extension 0.5.175.
+
 ### Changed — `SERVER_URL` is now `STEPTIX_SERVER_URL`
 
 The variable that names the Steptix server is now `STEPTIX_SERVER_URL`, so it
@@ -20,8 +56,8 @@ the MCP server's usage text and the runtime's readme use the new name too
 (extension 0.5.170).
 
 There is no fallback to the old name. A `SERVER_URL` line is ignored: the VS
-Code extension then uses the default, `http://127.0.0.1:3100`, and the MCP
-server refuses a project with "No STEPTIX_SERVER_URL". Rename the line in
+Code extension and the MCP server then use the default,
+`http://127.0.0.1:3100`. Rename the line in
 each `.env`, `.env.<name>` and the machine `.env`, and rename a `SERVER_URL`
 environment variable if you set one.
 

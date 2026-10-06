@@ -41,7 +41,7 @@ import {
   probeHealth,
   type HealthProbeResult,
 } from '../server/health.js';
-import { ensureMachineKey, userRootEnvPath } from '../env/user-root.js';
+import { ensureMachineKey, userRootEnvPath, PRIVATE_DIR_MODE } from '../env/user-root.js';
 import {
   autoStartFailed,
   autoStartSuppressed,
@@ -672,7 +672,9 @@ function formatCommand(exe: string, args: readonly string[]): string {
  * that reaches the agent and its model provider.
  */
 function openLogFile(logPath: string): { fd: number; startOffset: number } {
-  mkdirSync(path.dirname(logPath), { recursive: true });
+  // Private for the same reason as the file — and in project-less mode this
+  // creates the user root itself, which must not start out world-readable.
+  mkdirSync(path.dirname(logPath), { recursive: true, mode: PRIVATE_DIR_MODE });
   let startOffset = 0;
   try {
     const size = statSync(logPath).size;

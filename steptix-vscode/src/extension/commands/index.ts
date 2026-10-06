@@ -7,6 +7,7 @@ import {
   inertRegionHeading,
   extractSteps,
   sectionBodyLinesAt,
+  userRootEnvPath,
   type StepMode,
 } from 'steptix-runner-core';
 import { extractStepLineIds } from '../step-lines.js';
@@ -1432,10 +1433,13 @@ export function registerCommands(
     vscode.commands.registerCommand('steptix.revealEnvFile', async () => {
       const controller = registry.active();
       if (!controller) return notifyNoActive();
-      const path = controller.lastEnvPath;
+      // A test with no project .env takes STEPTIX_SERVER_URL and the key from the
+      // machine .env, so that is the file the error's "Reveal .env" means.
+      const machineEnv = userRootEnvPath();
+      const path = controller.lastEnvPath ?? (fs.existsSync(machineEnv) ? machineEnv : null);
       if (!path) {
         vscode.window.setStatusBarMessage(
-          'Steptix: no .env resolved yet — run a test first',
+          'Steptix: no .env to reveal — this test has no project .env, and there is no machine .env yet',
           3000,
         );
         return;

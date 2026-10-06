@@ -46,10 +46,10 @@ Environment
                     your project. The user root is always allowed on top,
                     and never counts as a project candidate.
   STEPTIX_SERVER_URL    Sessions API base URL. Normally read from the project's
-                    .env / .env.<name>; this is a lowest-precedence fallback.
-                    Project-less calls default to http://127.0.0.1:3141 —
-                    a distinct port, so they never collide with a project
-                    server on 3100.
+                    .env / .env.<name>; this variable comes next, then
+                    STEPTIX_SERVER_URL in %LOCALAPPDATA%\\steptix\\.env
+                    (~/.steptix elsewhere), then http://127.0.0.1:3100 —
+                    the port a bare \`steptix serve\` listens on.
   STEPTIX_SERVER_API_KEY    Sessions API key. Chain: project .env, then this
                     variable, then the machine key at %LOCALAPPDATA%\steptix\.env
                     (~/.steptix elsewhere) — which is generated on first need,
@@ -62,6 +62,6 @@ Host configuration
 Notes
   Hosts execute dist/, so run \`npm run build\` after changing the source.
   If you let this server auto-start the API server, use
-  \`steptix status --url $STEPTIX_SERVER_URL\` — plain \`steptix status\` reads
-  steptix.config.json, which can name a different host or port.
+  \`steptix status --url $STEPTIX_SERVER_URL\` — plain \`steptix status\` looks
+  where a bare \`steptix serve\` listens, which a project's .env can differ from.
 `.trimStart();

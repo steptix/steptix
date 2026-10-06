@@ -306,8 +306,10 @@ To recall a worktree's port later, read it back off the file that decides it:
 
 ### Which server does the worktree talk to?
 
-`steptix.config.json` pins port 3100 and is tracked, so two checkouts can't both
-serve on the default; the second dies on EADDRINUSE. You only need a second
+A bare `serve` listens on the port of `STEPTIX_SERVER_URL` in
+`%LOCALAPPDATA%\steptix\.env`, else 3100 — never on a port a project's `.env`
+names — so two checkouts can't both serve bare; the second exits naming the
+taken port. You only need a second
 server when you changed `src/` — a running server resolves each request's
 project bundle from the test file's path
 ([src/server/project-bundle.ts](src/server/project-bundle.ts)), so it already
@@ -321,8 +323,8 @@ by design — a workspace-settable value would let any cloned repo run arbitrary
 code on Run), so a worktree window auto-starts the server from whichever
 checkout that setting names. Start the worktree's server yourself. On a
 non-default port that's not optional: the auto-start command carries no `-p`,
-so it would start the *other* checkout's server on 3100, keep polling your
-port, and fail with STX028 — leaving a stray server behind.
+so it would listen on 3100, not your port — Steptix sees that and refuses to
+start it (STX033) instead.
 
 ### Live integration tests in a worktree
 

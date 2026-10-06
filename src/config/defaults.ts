@@ -77,7 +77,6 @@ export const DEFAULT_CONFIG: Config = {
   },
   server: {
     host: '127.0.0.1',
-    port: 3100,
     apiKey: 'dev-api-key',
   },
   // Code-behind has no config section. Execution needs no flag — a `.steps.ts`
