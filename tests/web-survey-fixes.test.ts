@@ -755,11 +755,11 @@ describe('§2.31 a check inside an iframe', () => {
   it('runs the check\'s code in the frame the assert names', async () => {
     const { executeStep } = await import('../src/runner/step-executor.js');
     const { DEFAULT_BROWSER_DIMENSIONS } = await import('../src/config/browser-dimensions.js');
-    const page = await pageWith(`<iframe id="myFrame3" srcdoc="<input type='checkbox' id='cb' checked>"></iframe>`);
+    const page = await pageWith(`<iframe id="iframeResults" srcdoc="<input type='checkbox' id='cb' checked>"></iframe>`);
     try {
-      await page.frameLocator('#myFrame3').locator('#cb').waitFor();
+      await page.frameLocator('#iframeResults').locator('#cb').waitFor();
       const stepReply = JSON.stringify({
-        actions: [{ action: 'assert', frame: '#myFrame3', condition: 'the checkbox is ticked', expected: 'checked', description: 'Checkbox in the frame is ticked' }],
+        actions: [{ action: 'assert', frame: '#iframeResults', condition: 'the checkbox is ticked', expected: 'checked', description: 'Checkbox in the frame is ticked' }],
         reasoning: 'Check the box inside the frame.',
       });
       // Plain document.querySelector: it finds #cb only when run inside the frame.
@@ -884,5 +884,48 @@ describe('§2.35 a navigation that lands on an error page', () => {
     expect(expectsErrorPage('Open the page and verify the Not Found message')).toBe(true);
     expect(expectsErrorPage('Go to the admin page and check it is forbidden')).toBe(true);
     expect(expectsErrorPage('Navigate to the 2024 report')).toBe(false);
+  });
+});
+
+describe('§2.36 dropping on one side of the target', () => {
+  it('reads the side from the model\'s words', () => {
+    expect(one({ action: 'drag', selector: '#a', target: '#b', position: 'below' })).toMatchObject({ position: 'below' });
+    expect(one({ action: 'drag', selector: '#a', target: '#b', dropPosition: 'after' })).toMatchObject({ position: 'below' });
+    expect(one({ action: 'drag', selector: '#a', target: '#b', position: 'top' })).toMatchObject({ position: 'above' });
+    expect(one({ action: 'drag', selector: '#a', target: '#b', position: 'somewhere' }).position).toBeUndefined();
+    expect(one({ action: 'click', selector: '#a', position: 'below' }).position).toBeUndefined();
+  });
+
+  it('puts the item after the target in a list that sorts by which half the pointer is in', async () => {
+    // A minimal pointer-driven sortable: on release, the dragged item goes
+    // before or after the item under the pointer by which half it is in.
+    const page = await pageWith(`
+      <ul id="list" style="list-style: none; padding: 0; width: 200px">
+        <li id="i1" style="height: 40px; border: 1px solid">Item 1</li>
+        <li id="i2" style="height: 40px; border: 1px solid">Item 2</li>
+        <li id="i3" style="height: 40px; border: 1px solid">Item 3</li>
+      </ul>
+      <script>
+        let dragging = null;
+        document.addEventListener('mousedown', (e) => { dragging = e.target.closest('li'); });
+        document.addEventListener('mouseup', (e) => {
+          const over = [...document.querySelectorAll('li')].find((li) => {
+            const r = li.getBoundingClientRect();
+            return li !== dragging && e.clientY >= r.top && e.clientY <= r.bottom;
+          });
+          if (dragging && over) {
+            const r = over.getBoundingClientRect();
+            over.parentNode.insertBefore(dragging, e.clientY > r.top + r.height / 2 ? over.nextSibling : over);
+          }
+          dragging = null;
+        });
+      </script>`);
+    try {
+      const result = await executeAction(page, act({ action: 'drag', selector: '#i1', target: '#i3', position: 'below' }));
+      expect(result.success).toBe(true);
+      expect(await page.evaluate(() => [...document.querySelectorAll('li')].map((li) => li.id))).toEqual(['i2', 'i3', 'i1']);
+    } finally {
+      await page.close();
+    }
   });
 });

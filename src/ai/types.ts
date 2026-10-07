@@ -142,6 +142,12 @@ export interface AIAction {
    * in the same frame as `selector`, with the same visible-first rule.
    */
   target?: string;
+  /**
+   * `drag` only: which side of the target to let go on, for a list that
+   * decides before/after by where the pointer is (SPEC-web-survey-fixes.md
+   * §2.36). Omitted means the target's centre.
+   */
+  position?: 'above' | 'below' | 'left' | 'right';
   /** `click` only: 2 for a double-click. Omitted means one click. */
   clickCount?: 1 | 2;
   /** `click` only: the mouse button. Omitted means left. */

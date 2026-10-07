@@ -83,7 +83,7 @@ export async function tolerateRoleName(root: Page | FrameLocator, selector: stri
 export async function resolveFrame(page: Page, frameSelector: string): Promise<Frame | null> {
   const segments = frameSelector.includes('>>')
     ? frameSelector.split('>>').map((s) => s.trim()).filter(Boolean)
-    : frameSelector.trim().split(/s+/);
+    : frameSelector.trim().split(/\s+/);
   let current: Frame = page.mainFrame();
   for (const segment of segments) {
     try {
@@ -1461,7 +1461,12 @@ async function executeDrag(
   // The target can move once the drag starts (a sortable opens a gap), so its
   // box is read again rather than trusted from before the press.
   const landing = (await destination.boundingBox().catch(() => null)) ?? to;
-  await page.mouse.move(landing.x + landing.width / 2, landing.y + landing.height / 2, { steps: 15 });
+  // A sortable puts the item before or after the target by which half the
+  // pointer is in, so "below Item 3" lets go in the lower part, not on the
+  // midpoint (SPEC-web-survey-fixes.md §2.36).
+  const fx = action.position === 'left' ? 0.2 : action.position === 'right' ? 0.8 : 0.5;
+  const fy = action.position === 'above' ? 0.2 : action.position === 'below' ? 0.8 : 0.5;
+  await page.mouse.move(landing.x + landing.width * fx, landing.y + landing.height * fy, { steps: 15 });
   await page.mouse.up();
 }
 

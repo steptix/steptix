@@ -970,6 +970,11 @@ function parseAction(raw: unknown, index: number): AIAction {
       .find((v): v is string => typeof v === 'string' && v.trim() !== '' && v !== 'top' && v !== 'bottom');
     if (target !== undefined) action.target = target;
     if (action.selector === undefined && typeof obj['source'] === 'string') action.selector = obj['source'];
+    // §2.36: where on the target to let go — "below Item 3" in a sortable.
+    const position = [obj['position'], obj['targetPosition'], obj['dropPosition']]
+      .find((v): v is string => typeof v === 'string');
+    const side = position?.trim().toLowerCase().replace(/^(after|bottom)$/, 'below').replace(/^(before|top)$/, 'above');
+    if (side === 'above' || side === 'below' || side === 'left' || side === 'right') action.position = side;
   }
   if (typeof obj['value'] === 'string') action.value = obj['value'];
   if (typeof obj['url'] === 'string') action.url = obj['url'];

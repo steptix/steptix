@@ -49,6 +49,7 @@ in the test files, not here.
 | 2.33 | Notifications close before they are checked | 62 | A PrimeFaces growl closes after six seconds and a model turn takes several, so "Verify a message confirms the Ajax checkbox was checked" read a page whose message had gone | The page records toast-like notifications as they appear; the snapshot lists the ones that have closed, and assertion code can read `window.__steptixNotices` |
 | 2.34 | Exact role names miss icon buttons | 62 | An icon font draws its glyph with CSS `::before` content, and that counts in the accessible name. PrimeFaces' Dismiss button is named "<glyph> Dismiss", so `role=button[name="Dismiss"]` matched nothing on an open dialog, twice | When an exact `role=…[name="…"]` matches nothing, retry it as `name=/^W*…W*$/i` and keep that only if it finds something |
 | 2.35 | A navigation to a 404 passed | 62 | "Navigate to input.xhtml" was sent to `/pages/input.xhtml`, which answered 404 Not Found; the navigate succeeded because a page loaded, and the next step had no field to type into and asked for clarification | A navigate reports the document's HTTP status; a 4xx or 5xx fails it (retryably) unless the step mentions an error or a status code |
+| 2.36 | A drag cannot say which side to drop on | 72 | "Drag Item 1 below Item 3" let go on Item 3's centre. A jQuery UI sortable decides before or after by which half the pointer is in, so Item 1 landed before Item 3 | `position` on `drag` (`above`, `below`, `left`, `right`) lets go at 20% or 80% of the target's height or width |
 
 ## 2. Fixes
 
@@ -414,7 +415,10 @@ segmenting as action frames) into a Playwright `Frame`. When an assert has
 `frame`, `evaluateAssertion` resolves it once and runs the generated code,
 polling included, in that frame. The code prompt says `document` is the
 frame's own document. If the frame is not found, a warning is logged and the
-code runs on the page. Without `frame`, the code prompt now says frame content
+code runs on the page. (The first build split a frame selector on the letter
+"s" instead of on whitespace, a slip a test frame named `#myFrame3` could not
+catch, so `#iframeResult` was never found; the test now uses a name with an
+"s".) Without `frame`, the code prompt now says frame content
 is not searched by `document.querySelector`, and shows `contentDocument` for
 a same-origin frame. Rule 16 says an `assert` takes `frame` like any other
 action.
@@ -460,6 +464,15 @@ nothing in the step text (a 4xx/5xx number, "error", "not found",
 turns it into a retryable failure: `Navigation answered HTTP 404: <url> is an
 error page, not the page the step asked for. Check the URL against the
 step`. The retry sees that message and the URL it went to.
+
+### 2.36 Drop on a side of the target
+
+**Fix.** `drag` takes `position`. The parser accepts `position`,
+`targetPosition` or `dropPosition`, maps after/bottom to `below` and
+before/top to `above`, and keeps only above, below, left or right, and only on
+a drag. `executeDrag` lets go at 20% (above/left) or 80% (below/right) of the
+target's box on that axis, and at the centre otherwise. Rule 16b tells the model
+to use it for reordering.
 
 ## 3. Failures caused by the test files or the sites
 
