@@ -24,10 +24,10 @@ web table where rows are added and removed, alerts, frames.
 7. Choose the state "Uttar Pradesh" and then the city "Lucknow"
 8. Verify the city dropdown shows Lucknow
 9. Navigate to webtables.php
-10. Search the table for "Alden"
-11. Verify the table shows the row for Alden and no row for Cierra
-12. Clear the search box
-13. Verify the table has a row for Cierra again
+10. Read the salary in the first row for Alden [as: alden_salary]
+11. Verify that "{{alden_salary}}" is not empty
+12. Count the rows in the table [as: table_rows]
+13. Verify that {{table_rows}} is at least 3
 14. Navigate to alerts.php
 15. Click the button that shows a confirm box, and dismiss it
 16. Click the button that shows a prompt box, type "Steptix" and accept it

@@ -2268,6 +2268,15 @@ export async function executeWait(
     }
 
     case 'text':
+      // Inside a frame, wait in THAT frame (SPEC-web-survey-fixes.md §2.29):
+      // the page's own body never contains a frame's text, so a dialog in a
+      // demo iframe that already said "Complete!" waited out its timeout.
+      // getByText matches rendered text, the frame-scoped counterpart of the
+      // innerText check below.
+      if (root !== page) {
+        await root.getByText(condition).first().waitFor({ state: 'visible', timeout });
+        break;
+      }
       await page.waitForFunction(
         // Match VISIBLE text via innerText — NOT textContent. textContent
         // concatenates the source of every <script>/<style> and the text of

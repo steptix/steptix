@@ -42,6 +42,7 @@ in the test files, not here.
 | 2.26 | Shadow DOM missing from the snapshot | 44 | The snapshot walks `childNodes` only, so an open shadow root's content never appeared. LetCode's first-name field sat in `div#open-shadow`'s root, the snapshot showed the div empty, and the model guessed a selector that matched nothing | Walk each open shadow root before the element's light children, between `<!-- shadow-root (open) -->` markers; tell both prompts how to reach it |
 | 2.27 | No way to type where `fill` cannot | 44 | `type` uses `fill`, which only takes inputs, textareas and contenteditables, and `keyboard` only presses keys. A field inside a CLOSED shadow root cannot be queried by anyone, Playwright included, so there was no way to type into it | When the target is not fillable, `type` clicks it and types on the keyboard. `keyboard` takes `text` to type into whatever has focus |
 | 2.28 | `find` does not say a match is hidden | 45 | A sidebar entry two collapsed levels deep shows in the snapshot only as `<ul><!-- hidden --></ul>`. The model could not tell which section held "Dynamic Buttons 01", wandered for 15 turns, then clicked the hidden link until it timed out | Each `find` match that is not rendered says so and names the collapsed sections around it, outermost first; rule 19 says to `find` an unseen menu entry and open those sections first |
+| 2.29 | A text wait ignored its frame | 52 | `wait` with `waitType: text` polled the main page's `document.body.innerText` even when the action named a frame, so it can never see a frame's text. The download dialog inside globalsqa's demo iframe already said "Complete!" and the wait still timed out, twice | Inside a frame, wait for `getByText(condition)` to be visible in that frame |
 
 ## 2. Fixes
 
@@ -374,6 +375,13 @@ while hidden times out`, or `hidden — not visible right now` when no label
 could be read. Rule 19 tells the model to `find` an entry it cannot see before
 guessing, and to open the named sections one per turn.
 
+### 2.29 Text waits in a frame
+
+**Fix.** `executeWait`'s `text` case waits for
+`root.getByText(condition).first()` to be visible when `root` is a frame.
+`getByText` matches rendered text, as the main-page branch's `innerText` check
+does. On the main page nothing changes.
+
 ## 3. Failures caused by the test files or the sites
 
 These are fixed in the test files.
@@ -384,7 +392,9 @@ These are fixed in the test files.
 | 40 | The table offers 3, 5, 10 and All per page, not 25 | Show All entries |
 | 41 | DemoQA's checkbox tree has no "expand all" button any more | Expand Home, then the folders, with the toggle next to each name |
 | 47 | Formy's Places autocomplete fills only the address field | Verify the address field instead of the city |
-| 55 | The web table's Add form posts to `#` and reloads, so no record is ever added | Search for and delete an existing record instead |
+| 55 | The web table's Add form posts to `#` and reloads, so no record is ever added. Its "Type to Search" box filters nothing either: typing changes no rows, and Enter submits the form to `?` | Read a cell and count the rows instead |
+| 44 | LetCode's Button page no longer has a double-click button, and its "new tab" button opens the workspace URL itself | Drop the double-click (covered by 41, 43, 49, 50), and check the new tab's address starts with the site |
+| 48 | "Open Tab" opens qaclickacademy.com, which answers with a Cloudflare 526 (invalid SSL certificate) page | Check the new tab's address rather than its content |
 | 58 | No task in the table mentions jQuery | Search for "Testing" and expect one row |
 | 63 | The dropdown drives the meter and the slider drives the progress bar, not the other way round | Swap the two checks |
 | 64 | "Navigate to signup" clicked a link that opened a new tab, so "the main tab" was a different tab | Stay in one tab: go to the URLs directly, and close the signup tab rather than switching back |

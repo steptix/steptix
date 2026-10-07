@@ -734,3 +734,18 @@ describe('§2.28 find says which collapsed sections hide a match', () => {
     }
   });
 });
+
+describe('§2.29 a text wait inside a frame', () => {
+  it('waits for the text in the frame the action names', async () => {
+    const page = await pageWith(`<iframe id="demo" srcdoc="<p id='s'>Downloading...</p>"></iframe>`);
+    try {
+      await page.frameLocator('#demo').locator('#s').waitFor();
+      // The frame says it only after the wait has begun.
+      const waiting = executeAction(page, act({ action: 'wait', waitType: 'text', condition: 'Complete!', frame: '#demo' }));
+      await page.frameLocator('#demo').locator('#s').evaluate((el) => { el.textContent = 'Complete!'; });
+      expect((await waiting).success).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+});
