@@ -23,7 +23,13 @@ import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
  * the entry, the screenshot and the model do.
  */
 
-const timeline = vi.hoisted(() => ({ events: [] as string[] }));
+const timeline = vi.hoisted(() => ({
+  events: [] as string[],
+  /** What the fake page's `url()` answers, and where a call moves it. */
+  url: 'http://localhost:8787/index.html',
+  urlOnTitle: undefined as string | undefined,
+  urlOnSettle: undefined as string | undefined,
+}));
 
 vi.mock('../src/browser/page-state.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/browser/page-state.js')>();
@@ -35,6 +41,7 @@ vi.mock('../src/browser/page-state.js', async (importOriginal) => {
         ready: Promise.resolve(),
         settle: async () => {
           timeline.events.push('settle');
+          if (timeline.urlOnSettle !== undefined) timeline.url = timeline.urlOnSettle;
           return { waitedMs: 0, tracked: 0, stillPending: [] };
         },
         dispose: () => timeline.events.push('dispose'),
@@ -84,6 +91,9 @@ beforeAll(async () => {
 beforeEach(async () => {
   clearSkillCache();
   timeline.events = [];
+  timeline.url = 'http://localhost:8787/index.html';
+  timeline.urlOnTitle = undefined;
+  timeline.urlOnSettle = undefined;
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });
@@ -98,10 +108,15 @@ function fakePage(): Page {
   return {
     on: () => {},
     off: () => {},
-    url: () => 'http://localhost:8787/index.html',
+    url: () => timeline.url,
     title: async () => {
       timeline.events.push('entry:title');
+      if (timeline.urlOnTitle !== undefined) timeline.url = timeline.urlOnTitle;
       return 'SecureBank';
+    },
+    goto: async (to: string) => {
+      timeline.events.push('entry:goto');
+      timeline.url = `http://localhost:8787${to}`;
     },
     click: async () => {
       timeline.events.push('entry:click');
@@ -155,10 +170,15 @@ function modelThatRecords(): AiClient {
   } as unknown as AiClient;
 }
 
-async function run(body: string, client: AiClient = modelThatRecords()) {
+async function run(
+  body: string,
+  client: AiClient = modelThatRecords(),
+  extra: { codeBehindStrict?: boolean } = {},
+) {
   const { binding, step } = await bindingFor(body);
   timeline.events = [];
   const result = await executeStep(1, 1, step, {
+    ...extra,
     page: fakePage(),
     config: CONFIG,
     aiClient: client,
@@ -200,5 +220,46 @@ describe('the wait after a compiled action (§6.4)', () => {
     );
     expect(result.status).toBe('passed');
     expect(events).toEqual(['arm', 'entry:click', 'settle', 'entry:title', 'settle', 'screenshot', 'dispose']);
+  });
+});
+
+describe('a failed entry names a navigation it ran into (§6.8)', () => {
+  const SIGN_IN_PAGE = 'http://localhost:8787/index.html';
+  const DASHBOARD = 'http://localhost:8787/dashboard.html';
+  const NOTE =
+    `The page navigated from ${SIGN_IN_PAGE} to ${DASHBOARD} while this entry ran. ` +
+    'The previous step may not wait for its navigation.';
+
+  it('says so in the stale error when the URL changed while the entry ran', async () => {
+    timeline.urlOnTitle = DASHBOARD;
+    const { result } = await run("await page.title(); throw new Error('#cookie-reject never appeared');");
+    expect(result.codeBehindStale?.error).toBe(`#cookie-reject never appeared. ${NOTE}`);
+  });
+
+  it('leaves the error as thrown when the page stayed put', async () => {
+    const { result } = await run("await page.title(); throw new Error('#cookie-reject never appeared');");
+    expect(result.codeBehindStale?.error).toBe('#cookie-reject never appeared');
+  });
+
+  it('says nothing of a navigation the entry asked for itself', async () => {
+    const { result } = await run("await page.goto('/dashboard.html'); throw new Error('no #welcome');");
+    expect(result.codeBehindStale?.error).toBe('no #welcome');
+  });
+
+  it('says nothing of a navigation that lands during the wait after the entry', async () => {
+    timeline.urlOnSettle = DASHBOARD;
+    const { result } = await run("await page.click('#cookie-reject'); throw new Error('no banner');");
+    expect(result.codeBehindStale?.error).toBe('no banner');
+  });
+
+  it('says so on a strict replay too, where the error is the step\'s', async () => {
+    timeline.urlOnTitle = DASHBOARD;
+    const { result } = await run(
+      "await page.title(); throw new Error('#cookie-reject never appeared');",
+      modelThatRecords(),
+      { codeBehindStrict: true },
+    );
+    expect(result.status).toBe('failed');
+    expect(result.error).toBe(`#cookie-reject never appeared. ${NOTE}`);
   });
 });

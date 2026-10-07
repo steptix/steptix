@@ -86,6 +86,11 @@ from the one the AI run read with. See
   secrets masked), the generator is told to wait for that page with
   `step.settle()` rather than a URL a data row may not reach, and an entry
   that does not wait after its last action is asked once to fix it.
+- **A ⚠ says when the page moved under the entry.** When compiled code fails
+  and the page's URL changed while it ran, the error adds "The page navigated
+  from … to … while this entry ran. The previous step may not wait for its
+  navigation." Before, the ⚠ pointed at the step that ran into another step's
+  navigation, with nothing to say so.
 
 ### Changed — a run shows the Test Runner, and its error banner follows the latest run
 

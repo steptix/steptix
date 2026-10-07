@@ -23,7 +23,7 @@ import {
 import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome, ScrollPositionInfo, GridStructureSketch } from '../ai/prompts.js';
 import { diagnosePageState, waitForPageStability, waitForPostActionSettle, capturePageSignal, PageActivityTracker, armActionWatcher } from '../browser/page-state.js';
 import type { ActionWatcher, PageStateDiagnosis } from '../browser/page-state.js';
-import { entryFunctionActs } from '../codebehind/entry-actions.js';
+import { actingCalls, entryFunctionActs } from '../codebehind/entry-actions.js';
 import type { ChatMessage } from '../ai/types.js';
 import {
   parseAIResponse,
@@ -1458,6 +1458,44 @@ async function settleAfterAction(
   }
 }
 
+/** A page's URL, or undefined when it cannot say. */
+function urlOf(page: Page): string | undefined {
+  try {
+    return page.url();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A broken entry's error, with the navigation it ran into said out loud
+ * (docs/specs/SPEC-codebehind-robustness.md §6.8).
+ *
+ * In failure A the ⚠ landed on a cookie-banner step whose click timed out
+ * while the PREVIOUS step's sign-in was still taking the page to the
+ * Dashboard, and nothing in the error said the page had moved. The executor
+ * does not know which step ran before, so the sentence names none — and says
+ * "may", because a click of the entry's own can lead away too. An entry that
+ * navigates outright (`goto` and its kin) moved the page itself, and gets no
+ * sentence. The URLs are masked: a URL can carry a secret.
+ */
+function withNavigationNote(
+  error: string,
+  from: string | undefined,
+  to: string | undefined,
+  code: string,
+  secrets: string[],
+): string {
+  if (from === undefined || to === undefined || from === to) return error;
+  if (actingCalls(code).some((call) => call.kind === 'navigation')) return error;
+  const said = error.trimEnd();
+  const stop = /[.!?]$/.test(said) ? ' ' : '. ';
+  return (
+    `${said}${stop}The page navigated from ${redact(from, secrets)} to ${redact(to, secrets)} while this entry ` +
+    'ran. The previous step may not wait for its navigation.'
+  );
+}
+
 /** {@link runCodeBehindStep}, with its watcher armed. */
 async function runCodeBehindStepArmed(
   stepIndex: number,
@@ -1476,6 +1514,9 @@ async function runCodeBehindStepArmed(
   const { context, watcher } = armed;
   const code = armed.code;
   let page = armed.page;
+  // Where the page was when the entry started — so a failure can say that the
+  // page moved under it (§6.8).
+  const urlAtStart = urlOf(armed.page);
 
   const outcome = await runCodeBehindEntry({
     ...context,
@@ -1491,6 +1532,9 @@ async function runCodeBehindStepArmed(
     activePage: () => activePageOf(opts) ?? page,
     readTimeoutMs: actionSettleBudgetMs(opts.config),
   });
+  // Read straight away: a navigation that lands during the wait below did
+  // not happen while the entry ran.
+  const urlAtEnd = urlOf(armed.page);
 
   // The entry may have moved the active tab or browser (`ctx.tabs`,
   // `ctx.browsers`). Everything below has to describe where the step ENDED —
@@ -1521,19 +1565,26 @@ async function runCodeBehindStepArmed(
   // under AI and discard its entry on the first run that took the branch.
   const brokenCode =
     outcome.status === 'failed' && !outcome.expectationFailed && !outcome.nonRetryable;
+  // What the broken entry threw, and — when the page moved while it ran — that
+  // too (§6.8): the ⚠ otherwise points at a step that only ran into the
+  // previous step's navigation.
+  const brokenError =
+    outcome.error === undefined
+      ? undefined
+      : withNavigationNote(outcome.error, urlAtStart, urlAtEnd, code, secretsFor(opts));
   // Strict first: a compile replay that also happens to run keyless is still a
   // replay, and its own copy is the one that explains the red step.
   const healingDeclined = opts.codeBehindStrict || opts.keyless;
   if (brokenCode && !healingDeclined) {
     logger.warn(
-      `Code-behind failed for step ${stepIndex} — falling through to AI: ${outcome.error ?? 'unknown error'}`,
+      `Code-behind failed for step ${stepIndex} — falling through to AI: ${brokenError ?? 'unknown error'}`,
     );
     binding.entry = undefined;
     return {
       stale: {
         file: binding.file,
         source: binding.source,
-        error: outcome.error ?? 'unknown error',
+        error: brokenError ?? 'unknown error',
       },
     };
   }
@@ -1594,11 +1645,11 @@ async function runCodeBehindStepArmed(
   }
 
   if (brokenCode && opts.codeBehindStrict) {
-    logger.error(`Step ${stepIndex} FAILED (code-behind, strict): ${outcome.error ?? ''}`);
+    logger.error(`Step ${stepIndex} FAILED (code-behind, strict): ${brokenError ?? ''}`);
     return {
       result: {
         ...base,
-        error: outcome.error ?? 'Code-behind entry threw',
+        error: brokenError ?? 'Code-behind entry threw',
         aiExplanation:
           'The code-behind entry threw and strict mode is on, so the step was ' +
           'not re-run under AI. This is a compile replay: the point is to find ' +
@@ -1626,7 +1677,7 @@ async function runCodeBehindStepArmed(
     // wording differs, because the reader's next move does.
     const byPolicy = opts.keylessReason === 'policy';
     logger.error(
-      `Step ${stepIndex} FAILED (code-behind, ${byPolicy ? 'AI forbidden by policy' : 'no AI configured'}): ${outcome.error ?? ''}`,
+      `Step ${stepIndex} FAILED (code-behind, ${byPolicy ? 'AI forbidden by policy' : 'no AI configured'}): ${brokenError ?? ''}`,
     );
     return {
       result: {
@@ -1635,7 +1686,7 @@ async function runCodeBehindStepArmed(
         codeBehindHealSkipped: {
           file: binding.file,
           source: binding.source,
-          error: outcome.error ?? 'unknown error',
+          error: brokenError ?? 'unknown error',
         },
         aiExplanation:
           (byPolicy
@@ -1644,7 +1695,7 @@ async function runCodeBehindStepArmed(
               'so the step was not re-run under AI. '
             : 'The code-behind entry threw, and this machine has no AI configured, ' +
               'so the step was not re-run under AI. ') +
-          `The entry failed with: ${outcome.error ?? 'unknown error'}`,
+          `The entry failed with: ${brokenError ?? 'unknown error'}`,
       },
     };
   }
