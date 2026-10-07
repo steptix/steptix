@@ -28,5 +28,5 @@ a table row by a value in it.
 10. Enter "Written by Steptix" in the long message field
 11. Submit the form
 12. Navigate to the baseUrl
-13. Read the occupation of the person with the first name "Clark" from the sample table [as: clark_job]
-14. Verify that "{{clark_job}}" is not empty
+13. Read the occupation of the person with the first name "Joey" from the sample table [as: joey_job]
+14. Verify that "{{joey_job}}" is not empty

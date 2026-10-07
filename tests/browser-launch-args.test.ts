@@ -181,3 +181,37 @@ describe('browser.launchArgs', () => {
     expect(launchedArgs()).toEqual(['--window-size=1280,720', '--marionette']);
   });
 });
+
+// SPEC-web-survey-fixes.md §2.30: Chromium blocks ad hosts in its own resolver,
+// because intercepting every request — even with a route that blocks nothing —
+// changed one page's script timing enough to break it.
+describe('browser.blockAds', () => {
+  it('passes Chromium a host-resolver rule, before the author\'s own switches, and routes nothing', async () => {
+    const browser = launchFake();
+    const context = browser.contexts()[0] as unknown as Record<string, unknown>;
+    context['route'] = vi.fn(async () => {});
+    await launchBrowser(baseConfig({ blockAds: true, launchArgs: ['--disable-print-preview'] }));
+
+    const args = launchedArgs();
+    expect(args[0]).toBe('--window-size=1280,720');
+    expect(args[1]).toMatch(/^--host-resolver-rules=MAP doubleclick\.net ~NOTFOUND, MAP \*\.doubleclick\.net ~NOTFOUND, /);
+    expect(args[1]).toContain('MAP *.googlesyndication.com ~NOTFOUND');
+    expect(args[2]).toBe('--disable-print-preview');
+    expect(context['route']).not.toHaveBeenCalled();
+  });
+
+  it('adds no rule when it is off', async () => {
+    await launchBrowser(baseConfig({ blockAds: false }));
+    expect(launchedArgs()).toEqual(['--window-size=1280,720']);
+  });
+
+  it('falls back to routing on an engine with no resolver switch', async () => {
+    const browser = launchFake();
+    const context = browser.contexts()[0] as unknown as Record<string, unknown>;
+    context['route'] = vi.fn(async () => {});
+    await launchBrowser(baseConfig({ blockAds: true, browser: 'firefox' }));
+
+    expect(launchedArgs().some((a) => a.startsWith('--host-resolver-rules'))).toBe(false);
+    expect(context['route']).toHaveBeenCalledTimes(1);
+  });
+});

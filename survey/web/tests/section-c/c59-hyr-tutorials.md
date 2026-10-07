@@ -23,8 +23,8 @@ fields added after a delay.
 4. Verify the page says the registration was successful
 5. Navigate to frames-practice.html
 6. Type "Steptix" into the name field outside the frames
-7. Select "Baby Cat" in the course name dropdown inside the first frame
-8. Verify the dropdown inside the frame shows "Baby Cat"
+7. Select "Python" in the course name dropdown inside the first frame
+8. Verify the dropdown inside the frame shows "Python"
 9. Navigate to window-handles-practice.html
 10. Click "Open New Tab" and switch to the tab it opened
 11. Capture the current page URL [store as: tab_url]

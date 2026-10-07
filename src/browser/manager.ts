@@ -1432,7 +1432,22 @@ export function isAdRequest(url: string): boolean {
   return AD_HOSTS.some((ad) => host === ad || host.endsWith(`.${ad}`));
 }
 
-/** Abort every request in `context` to an ad host (`browser.blockAds`). */
+/**
+ * The Chromium switch that makes every {@link AD_HOSTS} name fail to resolve
+ * (SPEC-web-survey-fixes.md §2.30). Chromium's own resolver refuses them, so
+ * no request is intercepted: routing every request through Playwright, even
+ * one that blocks nothing, delayed the scripts on one survey page enough to
+ * lose a race in its own start-up, and its download dialog never finished.
+ */
+export function adHostResolverRule(): string {
+  return '--host-resolver-rules=' + AD_HOSTS.flatMap((h) => [`MAP ${h} ~NOTFOUND`, `MAP *.${h} ~NOTFOUND`]).join(', ');
+}
+
+/**
+ * Abort every request in `context` to an ad host (`browser.blockAds`), for
+ * the engines that take no host-resolver switch. Chromium uses
+ * {@link adHostResolverRule} instead.
+ */
 async function blockAdRequests(context: BrowserContext): Promise<void> {
   await context.route(
     (url) => isAdRequest(url.toString()),
@@ -1507,10 +1522,12 @@ export async function launchBrowser(
   // started, and its command line is theirs. `connectOverCdpSession` returns
   // above before reaching here.
   const launchArgs = config.launchArgs ?? [];
+  // Before the author's own switches, so one they pass wins.
+  const adArgs = config.blockAds === true && browserType === 'chromium' ? [adHostResolverRule()] : [];
   const launchOptions = {
     headless: !headed,
     slowMo: config.slowMo,
-    args: [`--window-size=${width},${height}`, ...launchArgs],
+    args: [`--window-size=${width},${height}`, ...adArgs, ...launchArgs],
   };
   if (launchArgs.length > 0) {
     logger.info(`Extra browser launch args: ${launchArgs.join(' ')}`);
@@ -1580,7 +1597,10 @@ export async function launchBrowser(
   // Before the first page exists, so no page can ever raise a dialog into the
   // unguarded default (issues/047).
   installDialogGuard(context);
-  if (config.blockAds === true) await blockAdRequests(context);
+  if (config.blockAds === true) {
+    if (browserType === 'chromium') logger.info('Ad hosts do not resolve in this browser (browser.blockAds)');
+    else await blockAdRequests(context);
+  }
 
   const page = await context.newPage();
   const pageTracker = new PageTracker(page);

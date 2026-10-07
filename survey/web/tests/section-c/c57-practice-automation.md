@@ -24,7 +24,7 @@ whose submit shows an alert, a hover reveal.
 6. Verify the page says Cancel was clicked
 7. Open the prompt popup, type "Steptix" and accept it
 8. Verify the page shows "Steptix"
-9. Navigate to /sliders/
+9. Navigate to /slider/
 10. Set the slider to 75
 11. Verify the slider value shows 75
 12. Navigate to /tables/

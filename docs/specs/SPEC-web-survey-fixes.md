@@ -43,6 +43,7 @@ in the test files, not here.
 | 2.27 | No way to type where `fill` cannot | 44 | `type` uses `fill`, which only takes inputs, textareas and contenteditables, and `keyboard` only presses keys. A field inside a CLOSED shadow root cannot be queried by anyone, Playwright included, so there was no way to type into it | When the target is not fillable, `type` clicks it and types on the keyboard. `keyboard` takes `text` to type into whatever has focus |
 | 2.28 | `find` does not say a match is hidden | 45 | A sidebar entry two collapsed levels deep shows in the snapshot only as `<ul><!-- hidden --></ul>`. The model could not tell which section held "Dynamic Buttons 01", wandered for 15 turns, then clicked the hidden link until it timed out | Each `find` match that is not rendered says so and names the collapsed sections around it, outermost first; rule 19 says to `find` an unseen menu entry and open those sections first |
 | 2.29 | A text wait ignored its frame | 52 | `wait` with `waitType: text` polled the main page's `document.body.innerText` even when the action named a frame, so it can never see a frame's text. The download dialog inside globalsqa's demo iframe already said "Complete!" and the wait still timed out, twice | Inside a frame, wait for `getByText(condition)` to be visible in that frame |
+| 2.30 | Blocking ads broke a page | 58 | `blockAds` (once §2.23 made it work on the server) routed every request through Playwright to abort the ad ones. On LetCode's sister site testmuai, the jQuery download dialog then stuck at "Starting download…" with a page error. A route that blocks NOTHING breaks it the same way, so the interception's own delay loses a race in the page's start-up | In Chromium, block ad hosts with `--host-resolver-rules` (`MAP <host> ~NOTFOUND`), which needs no interception; route only on Firefox and WebKit |
 
 ## 2. Fixes
 
@@ -137,7 +138,8 @@ same.
    to well-known ad hosts (`doubleclick.net`, `googlesyndication.com`,
    `googleadservices.com`, `adservice.google.*`, `amazon-adsystem.com`,
    `adnxs.com`, `taboola.com`, `outbrain.com`). It is off by default because
-   a site under test could depend on one of them.
+   a site under test could depend on one of them. In Chromium those hosts are
+   made unresolvable rather than intercepted (§2.30).
 
 ### 2.6 Key names
 
@@ -382,6 +384,24 @@ guessing, and to open the named sections one per turn.
 `getByText` matches rendered text, as the main-page branch's `innerText` check
 does. On the main page nothing changes.
 
+### 2.30 Block ad hosts without intercepting
+
+**Measured.** testmuai's jQuery download demo, four runs each: no
+interception gave "Complete!" every time. Aborting ad requests, answering them
+with an empty 200, or routing every request and continuing all of them gave
+"Starting download..." and `cannot call methods on button prior to
+initialization` every time. Even routing that matched no request at all broke
+it. With `--host-resolver-rules` the page worked and the ad requests still
+failed.
+
+**Fix.** `adHostResolverRule()` builds
+`--host-resolver-rules=MAP doubleclick.net ~NOTFOUND, MAP *.doubleclick.net
+~NOTFOUND, …` from `AD_HOSTS`. `launchBrowser` passes it to a Chromium launch
+when `blockAds` is on, after `--window-size` and before the author's
+`launchArgs`, so an author's own switch can still override it. No route is
+installed for Chromium. Firefox and WebKit, which have no such switch, keep the
+route. The CDP path is unchanged: it attaches to a browser someone else started.
+
 ## 3. Failures caused by the test files or the sites
 
 These are fixed in the test files.
@@ -394,6 +414,9 @@ These are fixed in the test files.
 | 47 | Formy's Places autocomplete fills only the address field | Verify the address field instead of the city |
 | 55 | The web table's Add form posts to `#` and reloads, so no record is ever added. Its "Type to Search" box filters nothing either: typing changes no rows, and Enter submits the form to `?` | Read a cell and count the rows instead |
 | 44 | LetCode's Button page no longer has a double-click button, and its "new tab" button opens the workspace URL itself | Drop the double-click (covered by 41, 43, 49, 50), and check the new tab's address starts with the site |
+| 57 | `/sliders/` is now a 404; the page moved to `/slider/` | Navigate to `/slider/` |
+| 59 | The first frame's dropdowns are now a course list (Java, Dot Net, Python, Javascript) and an IDE list; "Baby Cat" is gone | Select Python |
+| 60 | The sample table lists Friends characters now; there is no Clark | Read Joey's occupation |
 | 48 | "Open Tab" opens qaclickacademy.com, which answers with a Cloudflare 526 (invalid SSL certificate) page | Check the new tab's address rather than its content |
 | 58 | No task in the table mentions jQuery | Search for "Testing" and expect one row |
 | 63 | The dropdown drives the meter and the slider drives the progress bar, not the other way round | Swap the two checks |
