@@ -261,17 +261,6 @@ describe('Steptix live — compile loops and the conditions that drive them', fu
     const [proposedPath, content] = entries[0];
     assert.equal(path.resolve(proposedPath).toLowerCase(), stepsFile.toLowerCase());
     say(`proposed ${path.basename(stepsFile)}:\n${content}`);
-    // The recording run's own report — written when that run finishes, which
-    // can land just after the proposal does.
-    await waitFor(
-      'the recording run writes its report',
-      () => {
-        const p = hooks.lastReportPath();
-        return Boolean(p) && p !== reportBefore && fs.existsSync(p);
-      },
-      60_000,
-    );
-    const recordedHtml = fs.readFileSync(hooks.lastReportPath(), 'utf8');
 
     await vscode.commands.executeCommand('steptix.applyCodeBehind');
     await waitFor('Apply writes the .steps.ts', () => fs.existsSync(stepsFile), 15_000);
@@ -280,6 +269,18 @@ describe('Steptix live — compile loops and the conditions that drive them', fu
       () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
       15_000,
     );
+    // The recording run's own report. Read only now: the hook answers for the
+    // controller of the FOCUSED test file, and the proposal's diff holds focus
+    // until Apply gives it back — before Apply it answers nothing.
+    await waitFor(
+      'the recording run’s report',
+      () => {
+        const p = hooks.lastReportPath();
+        return Boolean(p) && p !== reportBefore && fs.existsSync(p);
+      },
+      60_000,
+    );
+    const recordedHtml = fs.readFileSync(hooks.lastReportPath(), 'utf8');
     return { content, recordedHtml };
   }
 
