@@ -1605,6 +1605,13 @@ async function handleRequest(
     const body = await parseBody(req) as Record<string, unknown>;
     const email = String(body['email'] ?? '');
     const password = String(body['password'] ?? '');
+    // `?delay=<ms>`, capped at 5 s: a login slower than the 1 s of quiet a
+    // flow-control line waits for, for the slow-login live test
+    // (docs/specs/SPEC-codebehind-robustness.md §8). The sign-in page passes
+    // its own `?loginDelay=` on here.
+    const loginUrl = new URL(req.url ?? '/', `http://localhost:${PORT}`);
+    const delay = Math.min(5000, Math.max(0, Number(loginUrl.searchParams.get('delay')) || 0));
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
 
     if (email === 'demo@securebank.com' && password === 'password123') {
       const sessionId = crypto.randomBytes(16).toString('hex');

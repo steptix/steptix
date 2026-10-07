@@ -116,6 +116,14 @@ export function buildFileReviewPrompt(input: FileReviewInput): ChatMessage {
   }
   const tailBlock =
     tailRules.length === 0 ? '' : `\n${tailRules.map((r, i) => `${10 + i}. ${r}`).join('\n')}`;
+  // `step.check` (docs/specs/SPEC-codebehind-robustness.md §6.5). Gated on the
+  // file using it, as the condition rule is: a reviewer told about a call the
+  // file does not make is invited to add one.
+  const selfCheckNote = /\bstep\s*\.\s*check\s*\(/.test(input.file)
+    ? ' A check an entry that only READS makes about its own read is `step.check(…)`: keep it\n' +
+      '   `step.check`, and never put one in an entry that acts — there it must be `step.expect(…)`.\n' +
+      '   An assertion the step itself states stays `step.expect(…)`.'
+    : '';
   // Rule 3 asks every entry for a post-condition; a condition entry has none —
   // it ends with its `return`.
   const conditionException = hasConditionEntry
@@ -149,7 +157,9 @@ ${input.file}
    literals.
 3. **Every entry ends with a post-condition** — a \`locator.waitFor()\` on what
    the step produced, or a \`step.expect(...)\` over a value read back from the
-   page — so "did not throw" means "the step worked".${flowControlException}${conditionException}
+   page — so "did not throw" means "the step worked". After an action that
+   changes the page, the entry calls \`await step.settle()\` before it reads or
+   asserts anything, then waits for the state the step names.${selfCheckNote}${flowControlException}${conditionException}
 4. **Captures are written**: a step with \`[as: x]\` must call
    \`step.setVar('x', ...)\`.
 5. **Stable selectors** (ids, \`data-testid\`, roles, labels) over positional

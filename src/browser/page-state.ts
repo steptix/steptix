@@ -1,4 +1,4 @@
-import type { Page, Request } from 'playwright';
+import type { BrowserContext, Page, Request } from 'playwright';
 
 /**
  * Tracks in-flight network requests for a Page so callers can cheaply ask
@@ -444,5 +444,305 @@ function pageClosed(page: Page): boolean {
     return typeof page.isClosed === 'function' && page.isClosed();
   } catch {
     return true;
+  }
+}
+
+// ── The wait after a compiled action (docs/specs/SPEC-codebehind-robustness.md §6.4) ──
+
+/** What one {@link ActionWatcher.settle} waited for, and what it left behind. */
+export interface SettleReport {
+  /** How long the settle took. */
+  waitedMs: number;
+  /** First-party requests that began since the watcher was armed (or since
+   *  the previous settle ended) and were waited for. */
+  tracked: number;
+  /** `METHOD /path` of each tracked request still in flight when the budget
+   *  ran out — empty unless it did. */
+  stillPending: string[];
+}
+
+export interface ActionWatcherOptions {
+  /** The most one settle waits, in all — `min(10 s, execution.timeout)`. */
+  budgetMs: number;
+  /** How long the URL and the DOM fingerprint must hold still once every
+   *  tracked request is done. */
+  quietMs: number;
+  /** With nothing tracked and nothing changed, stop after this long. */
+  quickExitMs: number;
+  /** Sampling cadence. Default 100 ms. */
+  pollMs?: number;
+  /** The page to sample, read at each sample — the active tab, after a switch
+   *  the entry made. Defaults to the page the watcher was armed on. */
+  activePage?: () => Page;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** An armed watcher. Dispose of it when the entry is done with it. */
+export interface ActionWatcher {
+  /**
+   * Wait until what began since the watcher was armed — or since the previous
+   * settle ended — is over: every tracked request finished, then the page
+   * quiet for `quietMs`. Never throws and never fails; at the budget it stops
+   * and reports what is still pending.
+   */
+  settle(signal?: AbortSignal): Promise<SettleReport>;
+  dispose(): void;
+}
+
+/** What a sample of the page holds, as one comparable string; `undefined`
+ *  when the page could not be read (closed, or between documents). */
+type Sample = string | undefined;
+
+/** A sample that could not be read. Constant, so a page that stays unreadable
+ *  holds still rather than reading as a change on every sample. */
+const UNREADABLE = 'unreadable';
+
+/**
+ * The bookkeeping of one settle, as a pure state machine: told what happened
+ * and when, asked whether to stop. No clock and no page of its own, so its
+ * rules are tested with no timers at all.
+ */
+export class SettleTracker {
+  private readonly pending = new Map<unknown, string>();
+  private begun = 0;
+  private changed = false;
+  private lastActivityAt: number;
+  private lastSample: string;
+
+  constructor(
+    private readonly startedAt: number,
+    firstSample: string,
+    private readonly options: Pick<ActionWatcherOptions, 'budgetMs' | 'quietMs' | 'quickExitMs'>,
+    /** Requests already in flight that this settle must also wait for — begun
+     *  since the watcher was armed, before this settle started. */
+    inFlight: ReadonlyMap<unknown, string> = new Map(),
+    /** Requests that began, or a change seen, since the watcher was armed or
+     *  the previous settle ended, before this settle started. */
+    carried: { begun: number; changed: boolean } = { begun: 0, changed: false },
+  ) {
+    this.lastActivityAt = startedAt;
+    this.lastSample = firstSample;
+    for (const [key, label] of inFlight) this.pending.set(key, label);
+    this.begun = carried.begun;
+    this.changed = carried.changed;
+  }
+
+  requestBegan(key: unknown, label: string, at: number): void {
+    this.pending.set(key, label);
+    this.begun++;
+    this.lastActivityAt = at;
+  }
+
+  requestEnded(key: unknown, at: number): void {
+    if (this.pending.delete(key)) this.lastActivityAt = at;
+  }
+
+  sampled(sample: string, at: number): void {
+    if (sample === this.lastSample) return;
+    this.lastSample = sample;
+    this.changed = true;
+    this.lastActivityAt = at;
+  }
+
+  /** Whether to keep waiting, or why to stop. */
+  decide(at: number): 'wait' | 'settled' | 'quick-exit' | 'budget' {
+    if (at - this.startedAt >= this.options.budgetMs) return 'budget';
+    if (this.pending.size > 0) return 'wait';
+    if (this.begun === 0 && !this.changed) {
+      return at - this.startedAt >= this.options.quickExitMs ? 'quick-exit' : 'wait';
+    }
+    return at - this.lastActivityAt >= this.options.quietMs ? 'settled' : 'wait';
+  }
+
+  get tracked(): number {
+    return this.begun;
+  }
+
+  stillPending(): string[] {
+    return [...this.pending.values()];
+  }
+}
+
+/**
+ * Arm the wait after a compiled action (docs/specs/SPEC-codebehind-robustness.md
+ * §6.4) — on the browser CONTEXT, so a request from a tab the entry opens
+ * counts too — just before the entry runs.
+ *
+ * `waitForPostActionSettle` cannot see the network at all, on purpose: it
+ * replaced a wait for `networkidle`, which single-page apps with websockets,
+ * long-polls or analytics pings never reach. Measured, it returned on the OLD
+ * page after a click whose API took 2 s, and the compiled entries that follow
+ * a click had no wait at all. This one waits for exactly the network work that
+ * matters and nothing else:
+ *
+ *  - **tracked:** a request that begins after arming, of type `document`,
+ *    `fetch` or `xhr`, and first-party — same origin as the page when armed. A
+ *    main-frame navigation always counts, wherever it goes;
+ *  - **ignored:** WebSockets, EventSource, beacons and pings, images, fonts,
+ *    scripts, third-party hosts, and anything already open when it was armed.
+ *
+ * It cannot tell which code started a request, so any first-party request that
+ * begins while it is armed counts (D2): a poll that starts in the window is
+ * waited for, up to the budget. Never a failure — at the budget the report
+ * names what is still pending and the caller carries on.
+ *
+ * With no DOM signal when armed (no page, a page that cannot be read) the
+ * watcher is inert and every settle returns at once: a page that cannot be
+ * sampled would otherwise read as "changed" on every sample and spin to the
+ * budget.
+ */
+export function armActionWatcher(
+  context: BrowserContext,
+  page: Page,
+  options: ActionWatcherOptions,
+): ActionWatcher & { ready: Promise<void> } {
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const pollMs = options.pollMs ?? 50;
+  const activePage = options.activePage ?? ((): Page => page);
+  const origin = originOf(urlOf(page));
+  /** Tracked requests in flight, keyed by the request itself. */
+  const inFlight = new Map<unknown, string>();
+  /** Requests begun since arming, or since the previous settle ended. */
+  let begunSince = 0;
+  let current: SettleTracker | undefined;
+  let disposed = false;
+
+  const onRequest = (req: Request): void => {
+    if (!trackable(req, origin)) return;
+    const label = requestLabel(req);
+    inFlight.set(req, label);
+    begunSince++;
+    current?.requestBegan(req, label, now());
+  };
+  const onDone = (req: Request): void => {
+    if (!inFlight.delete(req)) return;
+    current?.requestEnded(req, now());
+  };
+  const listening = typeof (context as { on?: unknown } | undefined)?.on === 'function';
+  if (listening) {
+    context.on('request', onRequest);
+    context.on('requestfinished', onDone);
+    context.on('requestfailed', onDone);
+  }
+  /** The page when armed: the baseline a change is measured against, and the
+   *  proof there is a DOM signal at all. */
+  const armed = samplePage(page);
+  let baseline: Sample;
+  const ready = armed.then((s) => {
+    baseline = s;
+  });
+
+  return {
+    ready,
+    async settle(signal?: AbortSignal): Promise<SettleReport> {
+      await ready;
+      if (baseline === undefined || disposed || signal?.aborted) {
+        return { waitedMs: 0, tracked: 0, stillPending: [] };
+      }
+      const startedAt = now();
+      let last = (await samplePage(activePage())) ?? UNREADABLE;
+      const tracker = new SettleTracker(startedAt, last, options, inFlight, {
+        begun: begunSince,
+        changed: last !== baseline,
+      });
+      current = tracker;
+      let decision = tracker.decide(now());
+      try {
+        while (decision === 'wait' && !signal?.aborted && !disposed) {
+          await sleep(pollMs);
+          last = (await samplePage(activePage())) ?? UNREADABLE;
+          tracker.sampled(last, now());
+          decision = tracker.decide(now());
+        }
+      } finally {
+        current = undefined;
+      }
+      // The next settle waits only for what happens after this one.
+      begunSince = 0;
+      baseline = last;
+      return {
+        waitedMs: now() - startedAt,
+        tracked: tracker.tracked,
+        stillPending: decision === 'budget' ? tracker.stillPending() : [],
+      };
+    },
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      if (!listening) return;
+      context.off('request', onRequest);
+      context.off('requestfinished', onDone);
+      context.off('requestfailed', onDone);
+    },
+  };
+}
+
+/** The request types an action's answer arrives as. */
+const TRACKED_TYPES = new Set(['document', 'fetch', 'xhr']);
+
+/** Is `req` network work the wait after an action waits for? */
+function trackable(req: Request, origin: string | undefined): boolean {
+  let type: string;
+  try {
+    type = req.resourceType();
+  } catch {
+    return false;
+  }
+  if (!TRACKED_TYPES.has(type)) return false;
+  if (type === 'document' && isMainFrameNavigation(req)) return true;
+  if (origin === undefined) return false;
+  try {
+    return originOf(req.url()) === origin;
+  } catch {
+    return false;
+  }
+}
+
+function isMainFrameNavigation(req: Request): boolean {
+  try {
+    return req.isNavigationRequest() && req.frame().parentFrame() === null;
+  } catch {
+    return false;
+  }
+}
+
+/** `METHOD /path` — the query left off, since it can carry a token. */
+function requestLabel(req: Request): string {
+  let path = req.url();
+  try {
+    path = new URL(path).pathname;
+  } catch {
+    /* keep the raw url */
+  }
+  return `${req.method()} ${path}`;
+}
+
+/** An http(s) origin, or undefined — `about:blank` has none worth comparing. */
+function originOf(url: string | undefined): string | undefined {
+  if (url === undefined) return undefined;
+  try {
+    const origin = new URL(url).origin;
+    return origin === 'null' ? undefined : origin;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The page's URL and DOM fingerprint as one comparable string, or undefined
+ *  when it cannot be read — unlike `capturePageSignal`, never a fresh value per
+ *  failure, so a page that stays unreadable holds still. */
+async function samplePage(page: Page): Promise<Sample> {
+  try {
+    if (page.isClosed()) return undefined;
+    const fp = (await page.evaluate(FINGERPRINT_SCRIPT)) as {
+      bodyLen: number;
+      textLen: number;
+      elCount: number;
+    };
+    return `${page.url()}|${fp.bodyLen}:${fp.textLen}:${fp.elCount}`;
+  } catch {
+    return undefined;
   }
 }

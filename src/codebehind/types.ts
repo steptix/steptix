@@ -47,6 +47,43 @@ export interface CodeBehindStepApi {
    *  `expect` is a real step failure, never a fall-through to AI. */
   expect(condition: boolean, message?: string): void;
   /**
+   * A SELF-check: what an entry that only reads asserts about its own read —
+   * that the thing it read from was really there and really populated
+   * (docs/specs/SPEC-codebehind-robustness.md §6.5).
+   *
+   * ```ts
+   * const names = await page.locator('#account-list .account-name').allTextContents();
+   * step.check(names.length === rows, 'one name per account row');
+   * ```
+   *
+   * When it fails, the code is what is wrong, not the application — so in an
+   * entry that takes no action it fails as broken code does: "Self-check
+   * failed: …", the step re-runs under AI, the entry is flagged stale and the
+   * next compile repairs it. In an entry that acts it fails the step like
+   * {@link expect}, because a re-run after a click can submit twice. For what
+   * the STEP states — "Verify the total is $4.00" — use {@link expect}.
+   */
+  check(condition: boolean, message?: string): void;
+  /**
+   * Wait until what this entry's actions started is over: the first-party
+   * requests that began since the entry started — or since the last
+   * `settle()` — and then the page holding still for 600 ms, within the
+   * step's budget (docs/specs/SPEC-codebehind-robustness.md §6.4). It names no
+   * URL, so it holds for a data row whose click navigates and one whose click
+   * only shows an error:
+   *
+   * ```ts
+   * await page.locator('#sign-in-btn').click();
+   * await step.settle();
+   * step.expect((await page.title()).includes('Dashboard'), 'signed in');
+   * ```
+   *
+   * Never throws. At its budget it stops, and the run log names what was
+   * still pending. The runner also settles after every entry that acts, so it
+   * is for the reads and checks INSIDE an entry, after its own action.
+   */
+  settle(): Promise<void>;
+  /**
    * End the flow this step is in, as a PASS — the code form of a
    * `If … then return` / `… then stop` step
    * (stories/step-flow-control.md, decision 11).

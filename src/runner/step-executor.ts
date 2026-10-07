@@ -21,8 +21,9 @@ import {
   contentBlocksToText,
 } from '../ai/prompts.js';
 import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome, ScrollPositionInfo, GridStructureSketch } from '../ai/prompts.js';
-import { diagnosePageState, waitForPageStability, waitForPostActionSettle, capturePageSignal, PageActivityTracker } from '../browser/page-state.js';
-import type { PageStateDiagnosis } from '../browser/page-state.js';
+import { diagnosePageState, waitForPageStability, waitForPostActionSettle, capturePageSignal, PageActivityTracker, armActionWatcher } from '../browser/page-state.js';
+import type { ActionWatcher, PageStateDiagnosis } from '../browser/page-state.js';
+import { entryFunctionActs } from '../codebehind/entry-actions.js';
 import type { ChatMessage } from '../ai/types.js';
 import {
   parseAIResponse,
@@ -1388,6 +1389,94 @@ async function runCodeBehindStep(
   const context = codeBehindRunContext(binding, opts, `codebehind:${stepIndex}`);
   let page = context.page;
 
+  // The wait after an action (docs/specs/SPEC-codebehind-robustness.md §6.4),
+  // armed on the context just before the entry runs, so the requests its
+  // first action starts — in this tab or one it opens — are seen. What
+  // `step.settle()` waits on inside the entry, and what the runner waits on
+  // after an entry that acts. Not on the computer surface: there is no DOM.
+  const watcher = opts.computer
+    ? undefined
+    : armActionWatcher(context.context, page, {
+        budgetMs: actionSettleBudgetMs(opts.config),
+        quietMs: 600,
+        quickExitMs: 250,
+        activePage: () => activePageOf(opts) ?? page,
+      });
+  try {
+    await watcher?.ready;
+    return await runCodeBehindStepArmed(stepIndex, instruction, binding, opts, startTime, {
+      entry,
+      code,
+      context,
+      page,
+      watcher,
+    });
+  } finally {
+    watcher?.dispose();
+  }
+}
+
+/**
+ * The most the wait after a compiled action waits — the flow-control gate's
+ * own budget (§6.4): up to 10 s, capped by `execution.timeout`.
+ */
+function actionSettleBudgetMs(config: Config): number {
+  return Math.min(10_000, config.execution.timeout * 1000);
+}
+
+/** The active page right now — after a switch the entry made — or undefined
+ *  when no tracker can say. */
+function activePageOf(opts: StepExecutorOptions): Page | undefined {
+  try {
+    if (opts.browserTracker) return opts.browserTracker.getActivePage();
+    if (opts.pageTracker) return opts.pageTracker.getActive();
+  } catch {
+    /* closeBrowser left none */
+  }
+  return undefined;
+}
+
+/**
+ * Wait for what an acting entry's actions started (§6.4) — before the
+ * screenshot, so the report shows the result, and before a heal, so the model
+ * that takes the step over sees the page the entry left rather than one
+ * mid-request. Never a failure: at the budget the log names what is pending.
+ */
+async function settleAfterAction(
+  watcher: ActionWatcher,
+  stepIndex: number,
+  opts: StepExecutorOptions,
+): Promise<void> {
+  const report = await traceOp('settle.codebehind-action', () => watcher.settle(opts.signal)).catch(
+    () => undefined,
+  );
+  if (report && report.stillPending.length > 0) {
+    logger.info(
+      `The wait after step ${stepIndex} stopped at ${Math.round(actionSettleBudgetMs(opts.config) / 1000)} s; ` +
+        `still pending: ${report.stillPending.join(', ')}`,
+    );
+  }
+}
+
+/** {@link runCodeBehindStep}, with its watcher armed. */
+async function runCodeBehindStepArmed(
+  stepIndex: number,
+  instruction: string,
+  binding: CodeBehindBinding,
+  opts: StepExecutorOptions,
+  startTime: number,
+  armed: {
+    entry: NonNullable<CodeBehindBinding['entry']>;
+    code: string;
+    context: ReturnType<typeof codeBehindRunContext>;
+    page: Page;
+    watcher: ActionWatcher | undefined;
+  },
+): Promise<{ result?: StepResult; stale?: StepResult['codeBehindStale'] }> {
+  const { context, watcher } = armed;
+  const code = armed.code;
+  let page = armed.page;
+
   const outcome = await runCodeBehindEntry({
     ...context,
     ...(opts.codeBehindPauseBeforeRun && { pauseBeforeRun: true }),
@@ -1395,6 +1484,8 @@ async function runCodeBehindStep(
     // decision 11). The claim is the authored line's, computed by the run loop,
     // so a compiled return is legal exactly where the AI `return` action is.
     ...(opts.flowControlClaim !== undefined && { flowControlClaim: opts.flowControlClaim }),
+    ...(watcher && { watcher }),
+    ...(opts.signal && { signal: opts.signal }),
   });
 
   // The entry may have moved the active tab or browser (`ctx.tabs`,
@@ -1407,6 +1498,12 @@ async function runCodeBehindStep(
     catch { /* closeBrowser left none — keep the last handle for the report */ }
   } else if (opts.pageTracker) {
     page = opts.pageTracker.getActive();
+  }
+
+  // After an entry that ACTS — passed, threw or failed — wait for what its
+  // actions started (§6.4). A read-only entry started nothing and skips it.
+  if (watcher && typeof armed.entry.run === 'function' && entryFunctionActs(armed.entry.run)) {
+    await settleAfterAction(watcher, stepIndex, opts);
   }
 
   // A `step.filePath` that could not resolve is not broken code: the entry is

@@ -1528,6 +1528,23 @@ function readsWithSelector(actions: TranscriptAction[]): boolean {
   );
 }
 
+/**
+ * Is this step offered `step.check`? (docs/specs/SPEC-codebehind-robustness.md
+ * §6.5.) Only when every recorded action reads, counts or explores — `find`,
+ * `expand` — and one of them reads or counts: a capture step like "Read the
+ * name of every account", whose self-check is about its own read. A step that
+ * acts, or that states an expectation (an `assert`), is not: its check is
+ * `step.expect`, and a failed self-check there would re-run an action.
+ */
+export function offersSelfCheck(actions: readonly { action: string }[]): boolean {
+  const reads = actions.some((a) => a.action === 'read' || a.action === 'count');
+  return reads && actions.every((a) => ['read', 'count', 'find', 'expand'].includes(a.action));
+}
+
+/** The API line for `step.check`, for a step {@link offersSelfCheck} offers it to. */
+const SELF_CHECK_API =
+  "\n- `step.check(condition, message)` — a self-check on your OWN read, for an entry like this one that only reads: that what you read from was really there and the right shape (one name per row, a populated value). If it fails, the step falls back to AI and this entry is regenerated — it does not fail the run. Use it, not `step.expect`, for the check a capture makes on itself.";
+
 /** Rule 7's half of the read-selector rule (§6.2). */
 function readSelectorRule7(actions: TranscriptAction[]): string {
   if (!readsWithSelector(actions)) return '';
@@ -2041,6 +2058,7 @@ The "entry" string holds one TypeScript object literal with exactly this shape:
 - \`page\`, \`context\`, \`browser\` — the live Playwright instances the run is driving.
 - \`step.getVar(name)\` / \`step.setVar(name, value)\` — the test's variable scope, by the name as written in the markdown: \`{{username}}\` is \`step.getVar('username')\`. An environment placeholder is read by the name inside its braces: \`\${data.url}\` is \`step.getVar('data.url')\`, \`\${env.BASE_URL}\` is \`step.getVar('env.BASE_URL')\`. It returns a string (or undefined).
 - \`step.expect(condition, message)\` — a failed expectation fails the step.
+- \`await step.settle()\` — wait until what your actions so far started is over: every request they began on this site (the navigation a login answer starts included), then the page holding still. It names no URL, so it is right for a data row whose click navigates and one whose click only shows an error. It never throws.${offersSelfCheck(input.actions) ? SELF_CHECK_API : ''}
 - \`step.filePath(relative)\` — turns a path written in a step (relative to the test file's folder) into the absolute path Playwright needs. Synchronous; throws if the file is missing.${claimsFlowControl ? FLOW_CONTROL_API : ''}${claimsFail ? FAIL_API : ''}
 - \`log.info(...)\` / \`log.warn(...)\` / \`log.error(...)\` — recorded into the report.
 - \`baseUrl\` — the test's configured base URL, when it has one.
@@ -2062,7 +2080,7 @@ Rules — all of them are enforced:
 2. **Compute dynamic values at runtime.** If the step describes a computation (today's date, a derived code, a formatted number), do the computation in the code. Never freeze this run's answer as a literal.
 3. **Write the step's outputs** with \`step.setVar\`, using the capture name from the step text.
 4. **Turn assertions into \`step.expect(condition, message)\`**, with a message that names what was compared.
-5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake.
+5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake. After an action that changes the page — a click that submits or navigates, anything that starts a request — \`await step.settle()\` before you read or assert anything: a locator's auto-wait finds the OLD page's element just as happily, and a title or URL read does not wait at all.
 6. **No imports.** Everything you need arrives via the context object — and everything you use must be in \`run\`'s destructured parameter list. The shape above shows \`{ page, step, log }\` because that is the common case, not because it is the whole context: an entry that calls \`tabs.open(...)\` must be written \`async run({ page, step, log, tabs })\`. A name you use but do not destructure is a \`ReferenceError\` on the first replay.
 7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.${readSelectorRule7(input.actions)} A \`role=…[name="…"]\` selector from the transcript matches the WHOLE name: keep it as written in \`page.locator(…)\`, or pass \`exact: true\` if you rewrite it as \`getByRole\` — without it \`getByRole\` matches any name that contains the text, in any capitalisation.${historyRule(input.actions)}${dragRule(input.actions)}${tabHandleRule(input.actions)}
 7b. **Files come through \`step.filePath\`.** An \`upload\` action's \`filePath\` / \`filePaths\` in the transcript are relative to the test file, so pass each through \`step.filePath('…')\` — the verbatim string — and give the result to Playwright. When the action's \`upload.via\` is \`"input"\`, that is \`await page.locator('#statement-file').setInputFiles(step.filePath('attachments/logo.png'))\`. When it is \`"chooser"\`, the action clicked a control that opened a picker, so write:
@@ -2078,9 +2096,9 @@ ${postConditionNumber}. **End with a post-condition, and make it wait.** The las
 
    **Wait for the NEW state, then assert — never the other way round.** \`step.expect\` does not retry, and neither does a read. Code arrives a millisecond after the click that triggered the change, while the request producing it is still in flight, so \`step.expect((await el.textContent())?.includes('Uploaded logo.png'))\` compares the text the page had BEFORE the step and fails. A bare \`locator.waitFor()\` has the same hole: its default state is \`visible\`, so on an element that is already on the page it returns at once having proved nothing — and a status region reused between steps is already visible, still showing the previous message.
 
-   Wait on the state itself. \`await page.locator('#upload-status', { hasText: 'Uploaded logo.png' }).waitFor()\` — or \`.filter({ hasText: '…' })\` on a locator you already hold — does not resolve until that text is there, so the wait IS the assertion. \`await page.waitForFunction(...)\` covers what a text filter cannot: a count that has to change, an attribute that has to flip, a value computed from the page. Reading a value into \`step.expect\` is right once something has proved the page moved — wait first, then read. (Rule 6 rules out Playwright's \`expect(locator).toHaveText(...)\`; the forms above are the waiting ones you have.)
+   After the step's action, \`await step.settle()\` first: the requests the action started are then answered and the page has stopped moving. Then, when the step states what should happen, wait on that state itself. \`await page.locator('#upload-status', { hasText: 'Uploaded logo.png' }).waitFor()\` — or \`.filter({ hasText: '…' })\` on a locator you already hold — does not resolve until that text is there, so the wait IS the assertion. \`await page.waitForFunction(...)\` covers what a text filter cannot: a count that has to change, an attribute that has to flip, a value computed from the page. Reading a value into \`step.expect\` is right once something has proved the page moved — wait first, then read. (Rule 6 rules out Playwright's \`expect(locator).toHaveText(...)\`; the forms above are the waiting ones you have.)
 
-   **And it has to be able to FAIL.** A post-condition that cannot go red proves nothing at all — it is the same as having none, only harder to notice. Never compare a value to itself, or to a variable you just assigned from the same read: \`step.expect((await rows.count()) === rowCount)\` re-reads what it has already stored, so it passes just as happily on an empty page. When the step states an expectation, assert THAT — the literal it names, the count it names. When it states none, which is the usual shape of a capture step ("Count the rows [as: n]", "Read the balance [as: b]"), assert what makes the capture worth trusting instead: that the thing you read from was really there and really populated, e.g. \`await page.locator('#documents-body > tr').first().waitFor()\` before reading the count. Never that the number equals itself.${trackerPostCondition(input.actions)}${claimsFlowControl ? flowControlRule(postConditionNumber) : ''}${claimsFail ? failRule(postConditionNumber) : ''}${failureTail ? failureTailRule(postConditionNumber, failureTail) : ''}
+   **And it has to be able to FAIL.** A post-condition that cannot go red proves nothing at all — it is the same as having none, only harder to notice. Never compare a value to itself, or to a variable you just assigned from the same read: \`step.expect((await rows.count()) === rowCount)\` re-reads what it has already stored, so it passes just as happily on an empty page. When the step states an expectation, assert THAT — the literal it names, the count it names. When it states none, which is the usual shape of a capture step ("Count the rows [as: n]", "Read the balance [as: b]"), assert what makes the capture worth trusting instead: that the thing you read from was really there and really populated, e.g. \`await page.locator('#documents-body > tr').first().waitFor()\` before reading the count. Never that the number equals itself.${offersSelfCheck(input.actions) ? ' In this step, write that check as `step.check(condition, message)`: it is about your own read, so if it fails the step falls back to AI rather than failing the run.' : ''}${trackerPostCondition(input.actions)}${claimsFlowControl ? flowControlRule(postConditionNumber) : ''}${claimsFail ? failRule(postConditionNumber) : ''}${failureTail ? failureTailRule(postConditionNumber, failureTail) : ''}
 
 Respond with ONLY the JSON object — no prose around it.`;
 

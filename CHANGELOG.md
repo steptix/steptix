@@ -23,6 +23,31 @@ from the one the AI run read with. See
   during it, for compiled lines and compiled conditions, instead of ending
   the moment the old page goes away. A compiled sign-in followed by such a
   line used to read the title of a page that was still loading.
+- **A compiled step that acts waits for what its action started.** After an
+  entry that clicks, fills, navigates or calls a helper, the runtime waits for
+  the requests the action began on the page's own site — a login request and
+  the navigation it triggers included — and then for the page to hold still,
+  up to 10 s. A read-only entry does not wait; one that starts no request
+  waits at most 250 ms. Polls, WebSockets, analytics and third-party requests
+  are not waited for; a wait that reaches its limit says in the log what was
+  still pending and the run carries on. Before, a compiled sign-in passed
+  57 ms after its click, and the next step judged a page that had not
+  changed yet.
+- **New `step.settle()`** for code-behind entries: the same wait, inside the
+  entry — `await page.click(…); await step.settle();` and then read or
+  assert. It names no URL, so it suits a data row whose click navigates and
+  one whose click shows an error. Compile now writes it after an action that
+  changes the page, and its wait check accepts it.
+- **New `step.check(condition, message)`: a compiled read's own self-check
+  falls back to AI instead of failing the run.** A capture step's code checks
+  what it read ("one name per account row"). When that check fails, the code
+  is wrong, not the app — so in an entry that only reads, a failed
+  `step.check` is treated like code that threw: the step re-runs under AI,
+  shows ⚠ with "Self-check failed: …", and the next compile repairs it. In an
+  entry that acts it fails the step, as `step.expect` does, because a re-run
+  after a click would click twice. `step.expect` is unchanged, and strict
+  replays and runs with no AI still never fall back. Compile writes
+  `step.check` for steps that only read, and refuses it in an entry that acts.
 - **Compile's wait check fires only on a read after an action.** An entry that
   only reads is no longer re-asked to wait, which had led to captures losing
   the selector the run read with. The check now also knows `title()`,

@@ -279,6 +279,17 @@ invalidate-and-fall-through has at step-executor.ts:303. A `step.expect`
 failure is a *real* step failure, not a fall-through — same rule as the
 assertion code cache: broken code heals, a failed assertion fails.
 
+> **Amended by [SPEC-codebehind-robustness.md](../docs/specs/SPEC-codebehind-robustness.md)
+> §6.5.** A failed self-check in an entry that takes no action is broken code:
+> it heals. The self-check is `step.check(condition, message)` — what a
+> generated capture writes to prove it read something real — and it fails with
+> "Self-check failed: …", which the runner treats as a throw: the step re-runs
+> under AI, the entry is flagged stale, and the next compile repairs it. In an
+> entry that acts, `step.check` fails like `step.expect`, because a heal after a
+> click re-runs the step and can submit twice. `step.expect` is unchanged: an
+> assertion the step states still fails the run. Strict replay and keyless runs
+> still never heal.
+
 **Reporting.** The step result carries `fromCodeBehind: true` (sibling of
 `fromCache`), rendered with its own glyph (`</>` next to the cache's `⚡`), plus
 the entry's code in a collapsed block (as `assertionCode` renders today) and

@@ -783,8 +783,21 @@ describe('unwaitedReadComplaint', () => {
     // It names the action, and says how to wait for a page the action leads to
     // without freezing one data row's URL into the code.
     expect(complaint).toContain('`.click(`');
-    expect(complaint).toContain("page.waitForFunction(() => document.title.includes('Dashboard'))");
-    expect(complaint).toMatch(/never with a URL taken from one data row/);
+    // §6.4 is in, so the advice is the wait on the entry's own watcher.
+    expect(complaint).toContain('`await step.settle()` straight after it');
+    expect(complaint).toMatch(/Never wait with a URL taken from one data row/);
+  });
+
+  it('accepts step.settle() as the wait after the action (§6.4)', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    await page.locator('#sign-in-btn').click();\n` +
+          `    await step.settle();\n` +
+          `    step.expect((await page.title()).includes('Dashboard'), 'signed in');`,
+        ),
+      ),
+    ).toBeUndefined();
   });
 
   // Failure B (§3.2): a capture that only reads. The check fired on it, the

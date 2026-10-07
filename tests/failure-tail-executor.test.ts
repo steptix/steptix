@@ -51,6 +51,13 @@ vi.mock('../src/browser/page-state.js', () => ({
   waitForPageStability: async () => {},
   waitForPostActionSettle: async () => {},
   capturePageSignal: async () => ({ url: 'https://app.test/', domLength: 1 }),
+  // The wait after a compiled action (SPEC-codebehind-robustness.md §6.4):
+  // nothing here to wait for.
+  armActionWatcher: () => ({
+    ready: Promise.resolve(),
+    settle: async () => ({ waitedMs: 0, tracked: 0, stillPending: [] }),
+    dispose: () => {},
+  }),
   PageActivityTracker: class {
     isIdle(): boolean { return true; }
     dispose(): void {}

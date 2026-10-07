@@ -114,7 +114,7 @@ export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
       'it holds, and does nothing when it does not. It needs NO post-condition — that call throws, ' +
       'so there is nothing after it to assert on. Do not add one; fix the condition or the read it is ' +
       'built from.'
-    : '5. End with a post-condition — a `locator.waitFor()` on what the step produced, or a `step.expect(...)` over a value read back from the page.';
+    : '5. End with a post-condition — a `locator.waitFor()` on what the step produced, or a `step.expect(...)` over a value read back from the page. After an action that changes the page, `await step.settle()` before reading or asserting: it waits for the requests the action started and for the page to stop moving.';
 
   const roundLine = input.round
     ? `\nThis is repair round ${input.round.number} of ${input.round.max}. If you cannot make this step work as code, say so with {"entry": null, "reason": "..."} rather than guessing again.\n`

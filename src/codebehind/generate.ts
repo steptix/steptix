@@ -545,7 +545,8 @@ async function askChecked(
     staticEntryComplaint(code, checks.actions, checks.substitute) ??
     undeclaredContextComplaint(code) ??
     staleHandleComplaint(code) ??
-    unwaitedReadComplaint(code);
+    unwaitedReadComplaint(code) ??
+    selfCheckInActingEntryComplaint(code);
 
   const firstRead = readFault(first.code);
   const firstOther = otherFault(first.code);
@@ -649,11 +650,25 @@ function warnRemainingFaults(code: string, label: string, checks: EntryCheckCont
         `it may read the state from before the step. ${stillUnwaited}`,
     );
   }
+  const stillSelfCheck = selfCheckInActingEntryComplaint(code);
+  if (stillSelfCheck !== undefined) {
+    logger.warn(
+      `Code-behind for "${label}" still self-checks in an entry that acts; the runtime fails that ` +
+        `check as an assertion. ${stillSelfCheck}`,
+    );
+  }
 }
 
 /** One static check's finding about one entry. */
 export interface EntryFault {
-  check: 'read' | 'ambiguous-selector' | 'upload-path' | 'undeclared-context' | 'stale-handle' | 'unwaited-read';
+  check:
+    | 'read'
+    | 'ambiguous-selector'
+    | 'upload-path'
+    | 'undeclared-context'
+    | 'stale-handle'
+    | 'unwaited-read'
+    | 'self-check-in-acting-entry';
   complaint: string;
   /** The recorded selector, for a `read` fault. */
   selector?: string;
@@ -691,6 +706,7 @@ export function entryFaults(
     ['undeclared-context', undeclaredContextComplaint(code)],
     ['stale-handle', staleHandleComplaint(code)],
     ['unwaited-read', unwaitedReadComplaint(code)],
+    ['self-check-in-acting-entry', selfCheckInActingEntryComplaint(code)],
   ];
   for (const [check, complaint] of found) {
     if (complaint !== undefined) out.push({ check, complaint });
@@ -1110,6 +1126,10 @@ const WAITS_FOR_STATE = new RegExp(
     'toContainText',
     'toHaveValue',
     'toHaveCount',
+    // The wait after an action, on the entry's own watcher
+    // (docs/specs/SPEC-codebehind-robustness.md §6.4): every first-party
+    // request the action started, then the page quiet.
+    String.raw`\bstep\s*\.\s*settle\s*\(`,
   ].join('|'),
 );
 
@@ -1146,7 +1166,9 @@ const WAITS_FOR_STATE = new RegExp(
  * re-asked, rewritten, and lost the selector the recording read with.
  */
 export function unwaitedReadComplaint(code: string): string | undefined {
-  if (!/\bstep\s*\.\s*expect\s*\(/.test(code)) return undefined;
+  // `step.check` is an assertion too (§6.5) — and it never belongs after an
+  // action, which `selfCheckInActingEntryComplaint` says separately.
+  if (!/\bstep\s*\.\s*(?:expect|check)\s*\(/.test(code)) return undefined;
   if (WAITS_FOR_STATE.test(code)) return undefined;
   const action = actingCalls(code)[0];
   if (action === undefined) return undefined;
@@ -1161,10 +1183,33 @@ export function unwaitedReadComplaint(code: string): string | undefined {
     + "for the NEW state first: `await page.locator('#upload-status', { hasText: 'Uploaded logo.png' })"
     + ".waitFor()` (or `.filter({ hasText: ... })` on a locator you already have) does not resolve "
     + 'until that text is present, and `page.waitForFunction` covers what a text filter cannot. '
-    + 'When the action leads to another page, wait for THAT page before reading anything — '
-    + "`await page.waitForFunction(() => document.title.includes('Dashboard'))` — and never with a "
-    + 'URL taken from one data row: other rows of the same test may stay on this page. Read the '
-    + 'value into `step.expect` after that, not instead of it.'
+    + 'When the action leads to another page, or starts a request, `await step.settle()` straight '
+    + 'after it: it waits for every request the action started — the navigation a login answer '
+    + 'begins included — and then for the page to hold still. Never wait with a URL taken from one '
+    + 'data row: other rows of the same test may stay on this page. Read the value into '
+    + '`step.expect` after that, not instead of it.'
+  );
+}
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * a `step.check` in an entry that acts (docs/specs/SPEC-codebehind-robustness.md
+ * §6.5).
+ *
+ * A failed self-check heals: the step re-runs under AI. After a click that can
+ * submit twice, so the runtime fails an acting entry's `step.check` like a
+ * `step.expect` — and this says so at compile time, where the model can still
+ * write the assertion it meant. "Acting" is `entryActs`'s, so a call to a
+ * helper counts.
+ */
+export function selfCheckInActingEntryComplaint(code: string): string | undefined {
+  if (!/\bstep\s*\.\s*check\s*\(/.test(codeText(code))) return undefined;
+  const action = actingCalls(code)[0];
+  if (action === undefined) return undefined;
+  return (
+    `The entry calls \`step.check\` and also acts on the page (\`${action.call}\`). \`step.check\` is ` +
+    'the self-check of an entry that only reads: when it fails the step re-runs under AI, and after an ' +
+    'action that would do the action twice. In an entry that acts, assert with `step.expect(…)`.'
   );
 }
 
@@ -2334,7 +2379,9 @@ const CONDITION_FORBIDDEN: ReadonlyArray<{ re: RegExp; why: string }> = [
     why: 'navigates. A condition is asked about the page the run is on, and must leave it there',
   },
   {
-    re: /\.\s*waitFor\w*\s*\(/,
+    // `step.settle()` too (docs/specs/SPEC-codebehind-robustness.md §6.4): it
+    // waits for an entry's own actions, and a condition takes none.
+    re: /\.\s*(?:waitFor\w*|settle)\s*\(/,
     why:
       'waits. The framework has already waited for the page to settle before it asks, so answer ' +
       'about the page now — an absent element is an answer, so check `await locator.count()` first',

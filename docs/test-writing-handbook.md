@@ -2146,6 +2146,57 @@ writes a `.steps.ts` beside the test so future runs replay eligible steps as
 code with no tokens; the Markdown stays the authored test and steps that the
 compiler declines stay AI-driven.
 
+Compiled code is fast — a step that took seconds of model time runs in
+milliseconds — so it has to wait for what it causes. A compiled step that acts
+on the page (a click, a fill, a navigation, a helper of its own) is followed by
+a wait for what its action started: the requests it began on the app's own
+site, a login and the navigation it triggers included, then the page holding
+still, for up to 10 s. Polls, WebSockets, analytics and other sites' requests
+are not waited for. Inside an entry, `await step.settle()` is that same wait,
+for code that reads or asserts after its own action:
+
+```ts
+{
+  source: 'Click the Sign in button',
+  async run({ page, step }) {
+    await page.locator('#sign-in-btn').click();
+    await step.settle();
+    await page.getByRole('heading', { name: 'Dashboard' }).waitFor();
+  },
+},
+```
+
+`step.settle()` names no URL, so one entry is right for a data row whose
+sign-in navigates and one whose sign-in only shows an error. A compiled `If …
+then return` waits for the page before it reads it, as the AI's judgement does.
+
+A compiled read keeps the selector the AI read with. When the compile's code
+reads with a different one — even one that looks more stable — it is asked to
+fix it once, and if it still differs the step is left without code: it stays
+AI, which reads what the run read, and the next compile tries again.
+
+An entry that only reads checks its own read with `step.check(condition,
+message)` rather than `step.expect`:
+
+```ts
+{
+  source: 'Read the name of every account in the Your accounts panel [store as: accounts]',
+  async run({ page, step }) {
+    const names = await page.locator('#account-list .account-name').allTextContents();
+    const rows = await page.locator('#account-list [data-testid="account-row"]').count();
+    step.check(names.length === rows, `one name per account row (${names.length} for ${rows})`);
+    step.setVar('accounts', JSON.stringify(names));
+  },
+},
+```
+
+When a self-check fails, what is wrong is the code, not the application, so it
+is handled like an entry that throws: the step re-runs under AI and shows ⚠
+with "Self-check failed: …", and the next compile regenerates the entry. In an
+entry that acts, `step.check` fails the step as `step.expect` does, because a
+re-run after a click would click twice. Use `step.expect` for what the step
+itself states ("Verify the total is $4.00"): that is a real failure.
+
 A file that decides and loops (§3.5) compiles too. Each line of a loop body
 gets ONE entry, generated from the first pass that ran it and replayed on
 every pass; a value that changes per pass (a `For each` item, `{{order.id}}`)
@@ -2167,8 +2218,8 @@ It answers whether the condition as written holds right now — for `Repeat …
 until` that is the `until` part — and it only reads the page. A run decides a
 condition from its values first, then from its entry, then with the model; a
 chain is decided in code only when every member has an answer without the
-model. An entry that throws is flagged ⚠ and the model decides for the rest of
-the run. A compiled loop that reaches its cap asks the model once whether the
+model. An entry that throws, or whose `step.check` fails, is flagged ⚠ and the
+model decides for the rest of the run. A compiled loop that reaches its cap asks the model once whether the
 condition really still holds, so an entry that never says stop is caught
 rather than trusted. `steptix compile` also compares each loop's passes on its
 replay with the recording's, and prints a `Warning:` — naming the step that

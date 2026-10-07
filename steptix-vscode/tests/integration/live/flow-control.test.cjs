@@ -128,6 +128,8 @@ describe('Steptix live — a step that leaves its flow early', function () {
   let testFile;
   let stepsFile;
   let cacheDir;
+  /** The slow-login twin (docs/specs/SPEC-codebehind-robustness.md §8). */
+  let slowFile;
 
   before(async () => {
     const ext = vscode.extensions.getExtension(EXT_ID);
@@ -177,12 +179,15 @@ describe('Steptix live — a step that leaves its flow early', function () {
     assert.ok(fs.existsSync(testFile), `flow-control-live.md not found at ${testFile}`);
     stepsFile = testFile.replace(/\.md$/, '.steps.ts');
     cacheDir = path.join(path.dirname(testFile), '.steptix-codebehind-cache');
+    slowFile = path.resolve(workspaceRoot, 'init', 'tests', 'flow-control-slow-live.md');
+    assert.ok(fs.existsSync(slowFile), `flow-control-slow-live.md not found at ${slowFile}`);
   });
 
   after(async () => {
     // The compiled file is this test's output, not a fixture: leaving it would
     // make the AI half of the next run replay code instead of asking a model.
     fs.rmSync(stepsFile, { force: true });
+    fs.rmSync(slowFile.replace(/\.md$/, '.steps.ts'), { force: true });
     fs.rmSync(cacheDir, { recursive: true, force: true });
     if (startedApp && testApp) {
       try {
@@ -193,16 +198,16 @@ describe('Steptix live — a step that leaves its flow early', function () {
     }
   });
 
-  /** Open the fixture and wait until Steptix owns it. */
-  async function focusTestFile() {
-    const uri = vscode.Uri.file(testFile);
+  /** Open a fixture (the main one by default) and wait until Steptix owns it. */
+  async function focusTestFile(file = testFile) {
+    const uri = vscode.Uri.file(file);
     // Shown, not just opened: `vscode.open` can return before the editor has
     // focus, and the activeTextEditor wait then races its budget under load.
     await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), {
       preview: false,
     });
     await waitFor(
-      'flow-control-live.md becomes the active editor',
+      `${path.basename(file)} becomes the active editor`,
       () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
       15_000,
     );
@@ -322,21 +327,39 @@ describe('Steptix live — a step that leaves its flow early', function () {
   });
 
   it('compiles the return to step.exit() and returns as code on replay', async () => {
-    fs.rmSync(stepsFile, { force: true });
+    await compileAndReplay(testFile);
+  });
+
+  // The slow-login twin (docs/specs/SPEC-codebehind-robustness.md §8). The
+  // login API takes 1.5 s, longer than the 1 s of quiet the compiled return
+  // waits for before it reads the title — so the page is still the sign-in
+  // form when that wait ends, unless the compiled sign-in click waited for
+  // the login request and the navigation it starts (§6.4). That wait is the
+  // runtime's, after every entry that acts, so this holds whatever the model
+  // wrote into the click's entry.
+  it('with a 1.5 s login, still returns as code on replay — the click\'s entry waits for the request', async () => {
+    await compileAndReplay(slowFile);
+  });
+
+  /** Run & Compile `file`, apply, replay, and assert the second call returned
+   *  in code. */
+  async function compileAndReplay(file) {
+    const steps = file.replace(/\.md$/, '.steps.ts');
+    fs.rmSync(steps, { force: true });
     fs.rmSync(cacheDir, { recursive: true, force: true });
 
-    const uri = await focusTestFile();
+    const uri = await focusTestFile(file);
     await vscode.commands.executeCommand('steptix.restartSession');
     await sleep(1_000);
 
     // ===== Run & Compile =====
-    say('compiling flow-control-live.md');
+    say(`compiling ${path.basename(file)}`);
     void vscode.commands.executeCommand('steptix.runAndCompile');
     await waitFor(
       'the compile proposes files for THIS test',
       // Not merely "a proposal exists": one slot serves the whole extension
       // host, so a proposal an earlier test left behind answers instantly.
-      () => hooks.pendingCodeBehind()?.testFilePath.toLowerCase() === testFile.toLowerCase(),
+      () => hooks.pendingCodeBehind()?.testFilePath.toLowerCase() === file.toLowerCase(),
       900_000,
     );
 
@@ -344,7 +367,7 @@ describe('Steptix live — a step that leaves its flow early', function () {
     const [proposedPath, content] = Object.entries(proposal.files)[0];
     assert.equal(
       path.basename(proposedPath),
-      'flow-control-live.steps.ts',
+      path.basename(steps),
       'the proposal must name the sibling .steps.ts',
     );
     // THE code assertion. `step.exit()` is the code form of the authored
@@ -368,8 +391,8 @@ describe('Steptix live — a step that leaves its flow early', function () {
 
     // ===== Apply =====
     await vscode.commands.executeCommand('steptix.applyCodeBehind');
-    await waitFor('Apply writes the .steps.ts', () => fs.existsSync(stepsFile), 15_000);
-    assert.equal(fs.readFileSync(stepsFile, 'utf-8'), content, 'Apply must write it verbatim');
+    await waitFor('Apply writes the .steps.ts', () => fs.existsSync(steps), 15_000);
+    assert.equal(fs.readFileSync(steps, 'utf-8'), content, 'Apply must write it verbatim');
     await waitFor(
       'focus returns to the test file after Apply',
       () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
@@ -379,7 +402,7 @@ describe('Steptix live — a step that leaves its flow early', function () {
     // ===== The next run is the proof =====
     await vscode.commands.executeCommand('steptix.restartSession');
     await sleep(1_000);
-    say('replaying flow-control-live.md against the applied entries');
+    say(`replaying ${path.basename(file)} against the applied entries`);
     void vscode.commands.executeCommand('steptix.runAll');
     await waitFor('the proving run starts', () => hooks.isRunning(), 60_000);
     await waitFor('the proving run finishes', () => !hooks.isRunning(), 900_000);
@@ -415,5 +438,5 @@ describe('Steptix live — a step that leaves its flow early', function () {
     // would be demanding the feature not work.
 
     await vscode.commands.executeCommand('steptix.restartSession');
-  });
+  }
 });

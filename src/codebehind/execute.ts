@@ -3,6 +3,7 @@ import { bindVariable, dottedThroughRename, interpolate } from '../parser/parame
 import { envDataRefsIn, interpolateEnvData, resolveEnvDataRef, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { createCapturingLog, type CapturedLog } from '../tools/step-api.js';
 import type { CodeBehindBinding, CodeBehindVarScope } from './loader.js';
+import { entryFunctionActs } from './entry-actions.js';
 import { unavailableBrowserApi, unavailableTabApi } from './tabs.js';
 import {
   resolveUploadPathSync,
@@ -51,6 +52,31 @@ export class CodeBehindDeliberateFailure extends CodeBehindExpectationError {
   constructor(message: string) {
     super(message);
     this.name = 'CodeBehindDeliberateFailure';
+  }
+}
+
+/** What a failed self-check's message starts with, whichever way it fails. */
+export const SELF_CHECK_FAILED = 'Self-check failed: ';
+
+/**
+ * What a failed `step.check` throws in an entry that takes no action
+ * (docs/specs/SPEC-codebehind-robustness.md §6.5, D4).
+ *
+ * Deliberately NOT a {@link CodeBehindExpectationError}. A self-check is the
+ * one the GENERATOR wrote to prove its own read was right — "one name per
+ * account row" — and when it fails, what is wrong is the generated code, not
+ * the application. So the runner reads it as broken code: the step heals under
+ * AI, which reads what the run read, the entry is flagged stale, and the next
+ * compile repairs it. Strict replay and keyless runs still never heal.
+ *
+ * In an entry that ACTS, `step.check` throws a `CodeBehindExpectationError`
+ * instead: a heal re-runs the step under AI, and after a click that can submit
+ * twice.
+ */
+export class CodeBehindCheckError extends Error {
+  constructor(message: string) {
+    super(`${SELF_CHECK_FAILED}${message}`);
+    this.name = 'CodeBehindCheckError';
   }
 }
 
@@ -189,6 +215,16 @@ export interface RunCodeBehindOptions {
    * boolean answer can still pass `{ verb: 'return' }`.
    */
   flowControlClaim?: ParsedFlowControlStep | undefined;
+  /**
+   * The wait after an action, armed for this entry just before it runs
+   * (`armActionWatcher`, docs/specs/SPEC-codebehind-robustness.md §6.4) —
+   * what `step.settle()` waits on. Absent where there is nothing to wait for
+   * (the computer surface, a caller with no page), and `step.settle()` then
+   * returns at once.
+   */
+  watcher?: { settle(signal?: AbortSignal): Promise<unknown> } | undefined;
+  /** The run's abort signal: a Stop ends a `step.settle()` at once. */
+  signal?: AbortSignal | undefined;
 }
 
 export interface CodeBehindOutcome {
@@ -266,6 +302,15 @@ export async function runCodeBehindEntry(
       options.envData,
       options.uploadPaths,
       options.flowControlClaim !== undefined && isReturnClaim(options.flowControlClaim),
+      {
+        settle: async () => {
+          await options.watcher?.settle(options.signal);
+        },
+        // Decided once, when the entry loads (§6.5): whether a failed
+        // `step.check` may heal. Any call the entry makes that is not known
+        // to be read-only counts as acting (`entryActs`).
+        acts: typeof entry.run === 'function' && entryFunctionActs(entry.run),
+      },
     ),
     log: createCapturingLog(options.label, logs),
     tabs: options.tabs ?? unavailableTabApi(),
@@ -452,6 +497,9 @@ export async function runCodeBehindCondition(
       options.envData,
       options.uploadPaths,
       false,
+      // No watcher: the framework has settled the page before a condition is
+      // asked, and a condition does not act, so `step.settle()` returns at once.
+      {},
     ),
     log: createCapturingLog(options.label, logs),
     tabs: options.tabs ?? unavailableTabApi(),
@@ -491,6 +539,18 @@ export async function runCodeBehindCondition(
       }),
     };
   }
+}
+
+/** What a run lends the step API beyond the variable view. */
+interface StepApiRuntime {
+  /** `step.settle()` — the wait on this entry's armed watcher (§6.4). */
+  settle?: () => Promise<void>;
+  /**
+   * The entry ACTS on the page (`entryActs`, §6.3): its failed `step.check`
+   * fails the step rather than healing it (§6.5). Absent — a condition entry,
+   * which never acts — and a failed check heals like any throw.
+   */
+  acts?: boolean;
 }
 
 /**
@@ -535,6 +595,9 @@ function makeStepApi(
    *  not `fail` — which is what `step.exit()` is allowed on
    *  (stories/step-flow-control.md, decision 11). */
   claimsReturn = false,
+  /** What the entry's run lends the step API beyond variables — see
+   *  {@link StepApiRuntime}. */
+  runtime: StepApiRuntime = {},
 ): CodeBehindStepApi {
   return {
     getVar(name) {
@@ -610,6 +673,21 @@ function makeStepApi(
       if (!condition) {
         throw new CodeBehindExpectationError(message ?? 'Code-behind expectation failed');
       }
+    },
+    check(condition, message) {
+      if (condition) return;
+      const said = typeof message === 'string' && message.trim() !== '' ? message : "the entry's own check";
+      // A heal re-runs the step under AI, and after a click that can submit
+      // twice: in an entry that acts, a failed self-check fails the step, as a
+      // failed `expect` does (§6.5).
+      if (runtime.acts === true) throw new CodeBehindExpectationError(`${SELF_CHECK_FAILED}${said}`);
+      throw new CodeBehindCheckError(said);
+    },
+    async settle() {
+      // The wait after an action (docs/specs/SPEC-codebehind-robustness.md
+      // §6.4), on the watcher armed for this entry. Never throws: a settle
+      // that cannot complete leaves the entry to read the page as it is.
+      await runtime.settle?.().catch(() => {});
     },
     fail(message) {
       // No claim guard, the mirror of `exit`'s (decision 10): the unsafe direction
