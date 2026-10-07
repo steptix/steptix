@@ -18,7 +18,7 @@ import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import type { RecordedAction } from '../src/codebehind/recording.js';
 import type { Candidate } from '../src/codebehind/candidate.js';
 import type { StepCodeEntry } from '../src/codebehind/types.js';
-import { entryFromRecording } from '../src/codebehind/generate.js';
+import { entryFromRecording, recordedReadMismatch } from '../src/codebehind/generate.js';
 import { runCodeBehindEntry } from '../src/codebehind/execute.js';
 import { buildFileReviewPrompt, reviewCandidate } from '../src/codebehind/review.js';
 import { LiveCompiler, type LiveCompileEvent } from '../src/codebehind/live-compile.js';
@@ -196,6 +196,28 @@ describe('entryFromRecording — which steps are written from the recording', ()
     expect(text).toContain(`selector: '#account-list [data-account="{{account}}"] .account-balance',`);
     expect(text).toContain("as: 'balance',");
     expect(text).not.toContain('__skill1');
+  });
+});
+
+describe('a model entry that does its read with step.read', () => {
+  it('passes the read check: the recorded selector is there, as a selector', () => {
+    const source = 'Open the accounts panel and read every name [store as: accounts]';
+    const code =
+      `{ source: '${source}', async run({ page, step }) { await page.click('#show-accounts'); await step.settle(); ` +
+      `await step.read({ selector: '${B_SELECTOR}', multiple: true, as: 'accounts', kinds: ['span.account-name'] }); } }`;
+    expect(
+      recordedReadMismatch(code, [{ action: 'click', selector: '#show-accounts' }, B_READ], {
+        source,
+        recordedCaptures: { accounts: B_NAMES },
+      }),
+    ).toBeUndefined();
+    // …and one that dropped the :first-child is still caught.
+    expect(
+      recordedReadMismatch(code.replace(':first-child', ''), [{ action: 'click', selector: '#show-accounts' }, B_READ], {
+        source,
+        recordedCaptures: { accounts: B_NAMES },
+      }),
+    ).toBeDefined();
   });
 });
 
