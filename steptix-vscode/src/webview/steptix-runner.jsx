@@ -64,6 +64,7 @@ const HOST_MSG_TYPES = new Set([
   "activeFile",
   "runEvent",
   "runError",
+  "dismissRunError",
   "prompt",
   "promptDone",
   "parametersResolved",
@@ -988,6 +989,9 @@ function SteptixRunner() {
   const [stepsCollapsed, setStepsCollapsed] = useState(false);
   const [logCollapsed, setLogCollapsed] = useState(false);
   const [hostError, setHostError] = useState(null);
+  /** Whether this panel holds keyboard focus — reported to the host so a test
+   *  can prove a run's reveal left focus in the editor. */
+  const [hasFocus, setHasFocus] = useState(() => document.hasFocus());
   /**
    * Batch-run banner state. Non-null while a Test Explorer batch is in
    * flight; carries the progress (running / total). Cleared when the batch
@@ -1065,13 +1069,29 @@ function SteptixRunner() {
   // — clobbering it).
   const runningRef = useRef(false);
 
-  // Diagnostic — push the current runtimeVariables map to the host on
-  // every change so test hooks can observe the webview-side state
-  // without round-tripping a request. Test-only consumer; production
-  // code reads the same state from the controller's per-frame map.
+  // Diagnostic — push the current runtimeVariables map, error banner and
+  // focus to the host on every change so test hooks can observe the
+  // webview-side state without round-tripping a request. Test-only
+  // consumer; production code reads the same state from the controller's
+  // per-frame map.
   useEffect(() => {
-    hostBridge.postWebviewState(runtimeVariables);
-  }, [runtimeVariables]);
+    hostBridge.postWebviewState({
+      runtimeVariables,
+      hostError: hostError && { code: hostError.code, diagnosis: hostError.diagnosis },
+      hasFocus,
+    });
+  }, [runtimeVariables, hostError, hasFocus]);
+
+  useEffect(() => {
+    const onFocus = () => setHasFocus(true);
+    const onBlur = () => setHasFocus(false);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
 
   // Subscribe to host messages on mount.
   useEffect(() => {
@@ -1109,6 +1129,9 @@ function SteptixRunner() {
             // `running` carries no URI — a lost prefix on some other file is
             // cheaper than one that lies about this run.
             setRowFailuresByUri({});
+            // The banner describes the last run too. If this run fails, its
+            // own `runError` puts a new one up; if it passes, none is left.
+            setHostError(null);
           }
           runningRef.current = msg.running;
           setRunning(msg.running);
@@ -1119,6 +1142,9 @@ function SteptixRunner() {
         case "runError":
           setHostError(msg.payload);
           setRunning(false);
+          break;
+        case "dismissRunError":
+          setHostError(null);
           break;
         case "prompt":
           setPendingPrompt({ mode: msg.mode, message: msg.message, varName: msg.varName });

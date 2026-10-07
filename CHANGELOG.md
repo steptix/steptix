@@ -9,6 +9,25 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Changed — a run shows the Test Runner, and its error banner follows the latest run
+
+A run's errors land in the Steptix **Test Runner** view, which was easy to
+miss with the view closed. See
+[steptix/steptix#13](https://github.com/steptix/steptix/issues/13).
+
+- **A run started from the editor shows the Test Runner** when it is not
+  visible: Run, F5, Run All, Run This Row, Run Step Here, Run and Compile,
+  Continue. It opens wherever you put the view, and keyboard focus stays in the
+  editor, so F5 still pauses. A visible detached runner (*Open in Editor*)
+  counts as visible. Test Explorer batch runs still point at Test Results.
+- **A new run closes the previous run's error banner** as it starts. Before, the
+  banner stayed up through the next run, even one that passed. A run that fails
+  shows its own.
+- **Steptix: Dismiss Error** now closes the banner, as its ✕ does. It used to
+  do nothing.
+
+Steptix extension 0.5.176.
+
 ### Changed — one default server per machine: `serve`, MCP and the CLI agree
 
 Steptix already runs a test with no `.env`: it uses `STEPTIX_SERVER_URL`

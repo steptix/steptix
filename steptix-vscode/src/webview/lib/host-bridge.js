@@ -92,8 +92,8 @@ export const hostBridge = {
   postPause() { post({ type: 'pause' }); },
   postFocusTestResults() { post({ type: 'focusTestResults' }); },
   postClearStatus(line) { post({ type: 'clearStatus', line }); },
-  postWebviewState(runtimeVariables) {
-    post({ type: 'webviewState', runtimeVariables });
+  postWebviewState({ runtimeVariables, hostError, hasFocus }) {
+    post({ type: 'webviewState', runtimeVariables, hostError, hasFocus });
   },
   /** Re-run the failed skill step (identified by its test URI) with the user's
    *  edited captured vars. */

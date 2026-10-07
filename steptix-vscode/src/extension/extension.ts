@@ -3,6 +3,7 @@ import {
   type HostRowsMsg,
   type HostToWebviewMsg,
   type StepFailureDetail,
+  type WebviewStateMsg,
   type WebviewToHostMsg,
   isSkippedPass,
   stepFailureDetail,
@@ -611,14 +612,39 @@ class RunControllerRegistry implements vscode.Disposable {
    *  the host except via this readback channel). */
   private lastWebviewRuntimeVariables: Record<string, string> = {};
   private webviewStateUpdateCount = 0;
+  /** The rest of the last `webviewState`: the error banner and focus. With a
+   *  detached panel open as well, whichever surface posted last. */
+  private lastWebviewBanner: Pick<WebviewStateMsg, 'hostError' | 'hasFocus'> = {
+    hostError: null,
+    hasFocus: false,
+  };
+  /** The banner's code each time the reported banner changed, null for
+   *  "no banner", oldest first. Only the sequence can tell the same error
+   *  shown again (`STX011, null, STX011`) from a banner that never closed. */
+  private readonly webviewBannerHistory: Array<string | null> = [];
 
-  recordWebviewRuntimeVariables(runtimeVariables: Record<string, string>): void {
-    this.lastWebviewRuntimeVariables = { ...runtimeVariables };
+  recordWebviewState(msg: WebviewStateMsg): void {
+    this.lastWebviewRuntimeVariables = { ...msg.runtimeVariables };
+    const code = msg.hostError?.code ?? null;
+    if (code !== (this.lastWebviewBanner.hostError?.code ?? null)) {
+      this.webviewBannerHistory.push(code);
+      // A real window posts this too; keep the readback from growing with it.
+      if (this.webviewBannerHistory.length > 200) this.webviewBannerHistory.shift();
+    }
+    this.lastWebviewBanner = { hostError: msg.hostError, hasFocus: msg.hasFocus };
     this.webviewStateUpdateCount += 1;
   }
 
   getWebviewRuntimeVariables(): Record<string, string> {
     return { ...this.lastWebviewRuntimeVariables };
+  }
+
+  getWebviewBanner(): Pick<WebviewStateMsg, 'hostError' | 'hasFocus'> {
+    return { ...this.lastWebviewBanner };
+  }
+
+  getWebviewBannerHistory(): Array<string | null> {
+    return [...this.webviewBannerHistory];
   }
 
   /** Count of `webviewState` messages received from the webview since
@@ -1656,6 +1682,11 @@ class RunControllerRegistry implements vscode.Disposable {
   notifyRunning(running: boolean): void {
     if (running) {
       this.setRunningContext(true);
+      // A run's errors land in the Test Runner — its banner and the failure
+      // text under each step — so a run puts it on screen. Every editor-side
+      // start passes through here; a start from the panel's own buttons finds
+      // it visible already, and Test Explorer batches never come this way.
+      void this.view.reveal();
     } else {
       this.refreshRunningContext();
       // A run that just ended is where a failing row set comes from, and
@@ -1666,6 +1697,10 @@ class RunControllerRegistry implements vscode.Disposable {
     // A run just started or ended — both change what /health reports, and a
     // 30s poll would leave the item stale for most of that window (§6).
     void this.serverStatusBar?.refresh();
+  }
+
+  dismissRunError(): void {
+    this.view.post({ type: 'dismissRunError' });
   }
 
   private setRunningContext(value: boolean): void {
@@ -1905,6 +1940,20 @@ export interface SteptixTestHooks {
    *  has received since activation. Zero means the webview never
    *  mounted (e.g. sidebar never opened); positive means it's posting. */
   webviewStateUpdateCount: () => number;
+  /** The Test Runner webview's error banner and whether the panel holds
+   *  keyboard focus, as the webview last reported them. Its DOM is not
+   *  readable from the extension host. */
+  webviewBanner: () => Pick<WebviewStateMsg, 'hostError' | 'hasFocus'>;
+  /** The banner's code each time it changed (null = closed), oldest first. */
+  webviewBannerHistory: () => Array<string | null>;
+  /** Whether any Test Runner surface is on screen. */
+  runnerVisible: () => boolean;
+  /** Whether the sidebar Test Runner view has been created in this window. */
+  runnerResolved: () => boolean;
+  /** Every action the run-start reveal took, oldest first. */
+  runnerRevealHistory: () => import('./runner-view.js').RevealAction[];
+  /** Settles when every reveal started so far has finished. */
+  runnerRevealSettled: () => Promise<void>;
   /** Active controller's `lastReportPath` — the absolute HTML report
    *  path from the most recently completed run, or null if none.
    *  Backs the integration test that verifies the protocol's
@@ -2443,6 +2492,12 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
       },
       webviewRuntimeVariables: () => registry.getWebviewRuntimeVariables(),
       webviewStateUpdateCount: () => registry.getWebviewStateUpdateCount(),
+      webviewBanner: () => registry.getWebviewBanner(),
+      webviewBannerHistory: () => registry.getWebviewBannerHistory(),
+      runnerVisible: () => view.isVisible(),
+      runnerResolved: () => view.isResolved(),
+      runnerRevealHistory: () => [...view.revealHistory],
+      runnerRevealSettled: () => view.revealSettled(),
       runningScope: () => {
         const controller = registry.runningController();
         return controller ? { ...controller.currentScope() } : {};
@@ -2735,11 +2790,11 @@ async function handleWebviewMessage(
     }
     case 'webviewState': {
       // Test-hook channel: the webview posts its current
-      // `runtimeVariables` map on every state change. We cache it
-      // on the registry so integration tests can read the
-      // webview-visible variable state without round-tripping a
+      // `runtimeVariables` map, error banner and focus on every state
+      // change. We cache them on the registry so integration tests can
+      // read the webview-visible state without round-tripping a
       // query. Production code path is unchanged.
-      registry.recordWebviewRuntimeVariables(msg.runtimeVariables);
+      registry.recordWebviewState(msg);
       return;
     }
     case 'rerunSkillStep': {
