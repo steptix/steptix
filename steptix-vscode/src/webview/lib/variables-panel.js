@@ -7,6 +7,7 @@
  *   1. Declared `## Parameters`            (source: 'param')
  *   2. `[input: var]` markers in steps     (source: 'input')
  *   3. `[output: var]` markers in steps    (source: 'output')
+ *      and `[store as: var]` / `[as: var]` (source: 'output')
  *   4. `Set {{var}} to "…"` steps          (source: 'set')
  *   5. `[use ai]` steps naming one value   (source: 'generated')
  *
@@ -40,6 +41,11 @@ const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
 const STEP_LINE_RE = /^\s*\d+\.\s+\S/;
 const INPUT_PATTERN = /\[input:\s*(\w+)\]/i;
 const OUTPUT_PATTERN = /\[output:\s*(\w+)\]/i;
+// `Read the order number … [store as: order_id]` — the handbook's capture
+// marker, a table read into one variable included — and its short form
+// `[as: x]`. Filled by a `capture` event exactly as an `[output:]` row is.
+// Missing from this list, the panel held such a value and showed no row for it.
+const STORE_AS_RE = /\[(?:store[ \t]+as|as)[ \t]*:[ \t]*(\w+(?:[ \t]*,[ \t]*\w+)*)[ \t]*\]/gi;
 // `[skill: name ... out.foo="caller_alias"]` exposes `caller_alias` into
 // the caller's scope. Authors reference it later via `{{caller_alias}}`
 // but never declare it under `## Parameters` — without surfacing it from
@@ -176,6 +182,14 @@ export function collectVariables(text, parameterValues, runtimeValues, runtimeSo
         ...captureSourceFor(outputMatch[1]),
       });
       seen.add(outputMatch[1]);
+    }
+    for (const m of raw.matchAll(STORE_AS_RE)) {
+      for (const part of m[1].split(",")) {
+        const name = part.trim();
+        if (seen.has(name)) continue;
+        out.push({ name, source: "output", line: i + 1, value: runtime[name], ...captureSourceFor(name) });
+        seen.add(name);
+      }
     }
     // `Set {{name}} to "…"`. Matched on the INSTRUCTION — the text after the
     // `N. ` ordinal — because the runtime's own reading is anchored to the

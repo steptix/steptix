@@ -609,6 +609,303 @@ describe('Steptix Variables panel (Phase 4)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
+  describe('copying a variable', () => {
+    // The copy commands write the real system clipboard. Put back whatever
+    // the person running the suite had on it.
+    let savedClipboard;
+    before(async () => { savedClipboard = await vscode.env.clipboard.readText(); });
+    after(async () => { await vscode.env.clipboard.writeText(savedClipboard); });
+
+    it("a row's menu commands copy its value, unmasked value, name and placeholder", async () => {
+      void vscode.commands.executeCommand('steptix.runSelected');
+      await waitFor('stream active', () => fake.hasActiveStream);
+
+      fake.push({
+        type: 'frame:scope',
+        frameId: '',
+        scope: { username: 'alice', token: 'variables-copy-test-token' },
+      });
+      await waitFor('scope arrived', () => hooks.runningScope().username === 'alice');
+
+      const byName = Object.fromEntries(hooks.variablesViewItems().map((i) => [i.name, i]));
+      // The contextValue decides which value item the row's menu offers:
+      // a masked row says "Copy Unmasked Value", so the menu names what is
+      // about to land on the clipboard.
+      assert.equal(byName.username.contextValue, 'steptixVariable');
+      assert.equal(byName.token.contextValue, 'steptixVariable.masked');
+      assert.notEqual(byName.token.description, 'variables-copy-test-token');
+
+      const copied = async (command, node) => {
+        await vscode.commands.executeCommand(command, node);
+        return vscode.env.clipboard.readText();
+      };
+      assert.equal(await copied('steptix.copyVariableValue', byName.username.node), 'alice');
+      // A tree row cannot animate: the copied row's icon turns into a tick for
+      // a moment, then back.
+      const iconOf = (name) => hooks.variablesViewItems().find((i) => i.name === name)?.icon;
+      assert.equal(iconOf('username'), 'check');
+      assert.equal(iconOf('token'), 'symbol-variable');
+      await waitFor('the tick goes back to the variable icon', () => iconOf('username') === 'symbol-variable');
+      assert.equal(
+        await copied('steptix.copyVariableUnmaskedValue', byName.token.node),
+        'variables-copy-test-token',
+        'the masked row copies its real value, not the stars it shows',
+      );
+      assert.equal(await copied('steptix.copyVariableName', byName.username.node), 'username');
+      assert.equal(
+        await copied('steptix.copyVariablePlaceholder', byName.username.node),
+        '{{username}}',
+      );
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it("the Test Runner panel's copyVariable message copies through the same host path", async () => {
+      await hooks.dispatchWebviewMessage({
+        type: 'copyVariable',
+        kind: 'value',
+        name: 'password',
+        value: 'variables-copy-test-password',
+        masked: true,
+      });
+      assert.equal(await vscode.env.clipboard.readText(), 'variables-copy-test-password');
+
+      await hooks.dispatchWebviewMessage({ type: 'copyVariable', kind: 'placeholder', name: 'order.id' });
+      assert.equal(await vscode.env.clipboard.readText(), '{{order.id}}');
+
+      // Nothing to copy leaves the clipboard alone: a row with no value yet,
+      // and a name no placeholder can reference.
+      await vscode.env.clipboard.writeText('untouched');
+      const mark = hooks.hostMessageCount();
+      await hooks.dispatchWebviewMessage({ type: 'copyVariable', kind: 'value', name: 'orderId' });
+      await hooks.dispatchWebviewMessage({ type: 'copyVariable', kind: 'placeholder', name: 'order.Order ID' });
+      assert.equal(await vscode.env.clipboard.readText(), 'untouched');
+      await hooks.dispatchWebviewMessage({ type: 'copyVariable', kind: 'name', name: 'orderId' });
+
+      // The panel shows its "copied" tick from this answer — so a refused copy
+      // must say so, and only the one that happened says ok.
+      const answers = hooks.hostMessagesSince(mark).filter((m) => m.type === 'variableCopied');
+      assert.deepEqual(answers, [
+        { type: 'variableCopied', name: 'orderId', kind: 'value', ok: false },
+        { type: 'variableCopied', name: 'order.Order ID', kind: 'placeholder', ok: false },
+        { type: 'variableCopied', name: 'orderId', kind: 'name', ok: true },
+      ]);
+    });
+
+    it('Ctrl+C copies the row selected in the Variables view', async () => {
+      // The keybinding runs Copy Value with no row; the view's selection
+      // stands in. Select the row in the view itself rather than handing the
+      // command a node — through `reveal`, which a click is equivalent to and
+      // which, unlike the list commands, does not depend on which list last
+      // had keyboard focus.
+      void vscode.commands.executeCommand('steptix.runSelected');
+      await waitFor('stream active', () => fake.hasActiveStream);
+      fake.push({
+        type: 'frame:scope',
+        frameId: '',
+        scope: { alpha: 'first-row-value', beta: 'second-row-value' },
+      });
+      await waitFor('scope arrived', () => hooks.runningScope().beta === 'second-row-value');
+
+      await vscode.env.clipboard.writeText('untouched');
+      await vscode.commands.executeCommand('steptix.variables.focus');
+      await hooks.selectVariable('beta');
+      // The selection reaches the extension host as an event; wait on the
+      // clipboard rather than on time.
+      await waitFor('the selected row reaches the clipboard', async () => {
+        await vscode.commands.executeCommand('steptix.copyVariableValue');
+        return (await vscode.env.clipboard.readText()) === 'second-row-value';
+      });
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('paused at a breakpoint, the view still lists the run and copies from it; Close Session empties it', async () => {
+      // A breakpoint ends the run's request: nothing is RUNNING while it is
+      // parked, which used to leave the view on "No active run" at exactly the
+      // moment an author stops to look.
+      vscode.debug.addBreakpoints([
+        new vscode.SourceBreakpoint(
+          new vscode.Location(fixtureUri('test-with-steps.md'), new vscode.Position(9, 0)),
+          true,
+        ),
+      ]);
+      vscode.window.activeTextEditor.selection = new vscode.Selection(0, 0, 0, 0);
+      void vscode.commands.executeCommand('steptix.runSelected');
+      await waitFor('stream active', () => fake.hasActiveStream);
+      fake.push({ type: 'step:start', line: 9 });
+      fake.push({ type: 'frame:scope', frameId: '', scope: { orderId: 'ORD-1042', token: 'variables-pause-test-token' } });
+      fake.push({ type: 'step:pass', line: 9 });
+      fake.end();
+      await waitFor('paused at line 10', () => hooks.tracker.snapshot().breakpointStop === 10);
+      await waitFor('nothing running while paused', () => !hooks.isRunning());
+
+      await waitFor('the view lists the paused run', () =>
+        hooks.variablesViewItems().some((i) => i.name === 'orderId'));
+      const byName = Object.fromEntries(hooks.variablesViewItems().map((i) => [i.name, i]));
+      assert.equal(hooks.variablesDescription(), 'test');
+      await vscode.commands.executeCommand('steptix.copyVariableValue', byName.orderId.node);
+      assert.equal(await vscode.env.clipboard.readText(), 'ORD-1042');
+      await vscode.commands.executeCommand('steptix.copyVariableUnmaskedValue', byName.token.node);
+      assert.equal(await vscode.env.clipboard.readText(), 'variables-pause-test-token');
+
+      await vscode.commands.executeCommand('steptix.restartSession');
+      await waitFor('Close Session clears the pause', () => hooks.tracker.snapshot().breakpointStop === null);
+      await waitFor('and the view with it', () => hooks.variablesViewItems().length === 0);
+    });
+
+    it("package.json's menus and keybinding name the rows the view renders", async () => {
+      // A `when` clause that names a contextValue no row carries hides its
+      // menu item silently. Check every clause against what rows really set.
+      void vscode.commands.executeCommand('steptix.runSelected');
+      await waitFor('stream active', () => fake.hasActiveStream);
+      fake.push({ type: 'frame:scope', frameId: '', scope: { username: 'alice', token: 'variables-copy-test-token' } });
+      await waitFor('scope arrived', () => hooks.runningScope().username === 'alice');
+      const contextValues = new Set(hooks.variablesViewItems().map((i) => i.contextValue));
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+
+      const pkg = vscode.extensions.getExtension(EXT_ID).packageJSON.contributes;
+      const itemMenu = pkg.menus['view/item/context'].filter((m) => m.when.includes('steptix.variables'));
+      const offered = (contextValue) => itemMenu
+        .filter((m) => {
+          const exact = /viewItem == (\S+)/.exec(m.when);
+          const pattern = /viewItem =~ \/(.+)\//.exec(m.when);
+          return exact ? exact[1] === contextValue : pattern ? new RegExp(pattern[1]).test(contextValue) : false;
+        })
+        .map((m) => `${m.command}${m.group === 'inline' ? ' (inline)' : ''}`)
+        .sort();
+      assert.deepEqual([...contextValues].sort(), ['steptixVariable', 'steptixVariable.masked']);
+      assert.deepEqual(offered('steptixVariable'), [
+        'steptix.copyVariableName',
+        'steptix.copyVariablePlaceholder',
+        'steptix.copyVariableValue',
+        'steptix.copyVariableValue (inline)',
+      ]);
+      assert.deepEqual(offered('steptixVariable.masked'), [
+        'steptix.copyVariableName',
+        'steptix.copyVariablePlaceholder',
+        'steptix.copyVariableUnmaskedValue',
+        'steptix.copyVariableUnmaskedValue (inline)',
+      ]);
+      assert.ok(
+        pkg.keybindings.some((k) => k.command === 'steptix.copyVariableValue' && k.key === 'ctrl+c'
+          && k.mac === 'cmd+c' && k.when === 'focusedView == steptix.variables && !inputFocus'),
+        'Ctrl+C / Cmd+C bound to Copy Value while the Variables view has focus — but not while its '
+          + 'find/filter box does, where Ctrl+C must copy the typed text',
+      );
+      assert.ok(
+        pkg.menus['view/title'].some((m) => m.command === 'steptix.exportVariablesCsv'
+          && m.when === 'view == steptix.variables'),
+        "Export as CSV in the Variables view's title bar",
+      );
+      // The title-bar button's tooltip is the command title, and the panel's
+      // twin says the same (EXPORT_VARIABLES_LABEL in steptix-runner.jsx) with
+      // the same VS Code icon.
+      const exportCommand = pkg.commands.find((c) => c.command === 'steptix.exportVariablesCsv');
+      assert.equal(exportCommand.title, 'Export variables as CSV…');
+      assert.equal(exportCommand.icon, '$(download)');
+    });
+  });
+
+  describe('exporting variables as CSV', () => {
+    const fs = require('node:fs');
+    const os = require('node:os');
+    const BOM = '﻿';
+    let dir;
+    beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-vars-csv-')); });
+    afterEach(() => {
+      hooks.setVariablesExportPicker(null);
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+    });
+
+    /** Answer the save dialog with `name` in this test's directory, and
+     *  record what it suggested. */
+    const answerSaveDialogWith = (name) => {
+      const asked = [];
+      hooks.setVariablesExportPicker(async (suggested) => {
+        asked.push(suggested);
+        return vscode.Uri.file(path.join(dir, name));
+      });
+      return asked;
+    };
+
+    it("the view's title-bar action writes every row, secrets masked as shown", async () => {
+      void vscode.commands.executeCommand('steptix.runSelected');
+      await waitFor('stream active', () => fake.hasActiveStream);
+      const payments = JSON.stringify([{ _row: 1, payee: 'Origin Energy, Ltd', amount: '$140.00' }]);
+      fake.push({
+        type: 'frame:scope',
+        frameId: '',
+        scope: { username: 'alice', token: 'variables-export-test-token', payments },
+      });
+      await waitFor('scope arrived', () => hooks.runningScope().username === 'alice');
+      const shown = Object.fromEntries(hooks.variablesViewItems().map((i) => [i.name, i.description]));
+      assert.notEqual(shown.token, 'variables-export-test-token');
+
+      const asked = answerSaveDialogWith('out.csv');
+      await vscode.commands.executeCommand('steptix.exportVariablesCsv');
+      const csv = fs.readFileSync(path.join(dir, 'out.csv'), 'utf8');
+      const quoted = `"${payments.replace(/"/g, '""')}"`;
+      assert.equal(
+        csv,
+        `${BOM}name,value\r\npayments,${quoted}\r\ntoken,${shown.token}\r\nusername,alice\r\n`,
+      );
+      assert.ok(!csv.includes('variables-export-test-token'), 'the secret never reaches the file');
+      // The dialog suggests <test>-variables.csv beside the test.
+      assert.equal(path.basename(asked[0].fsPath), 'test-with-steps-variables.csv');
+      // `Uri.fsPath` lower-cases a Windows drive letter; `path.resolve` does not.
+      const folder = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+      assert.equal(folder(path.dirname(asked[0].fsPath)), folder(path.resolve(FIXTURES_DIR)));
+
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it("the panel's exportVariables message writes its rows, and Cancel writes nothing", async () => {
+      answerSaveDialogWith('panel.csv');
+      await hooks.dispatchWebviewMessage({
+        type: 'exportVariables',
+        rows: [
+          { name: 'orderId', value: 'ORD-1042' },
+          { name: 'password', value: '*******' },
+          { name: 'confirmation', value: '' },
+        ],
+        uri: fixtureUri('test-with-steps.md').toString(),
+      });
+      assert.equal(
+        fs.readFileSync(path.join(dir, 'panel.csv'), 'utf8'),
+        `${BOM}name,value\r\norderId,ORD-1042\r\npassword,*******\r\nconfirmation,\r\n`,
+      );
+
+      hooks.setVariablesExportPicker(async () => undefined); // Cancel
+      await hooks.dispatchWebviewMessage({
+        type: 'exportVariables',
+        rows: [{ name: 'orderId', value: 'ORD-1042' }],
+      });
+      assert.deepEqual(fs.readdirSync(dir), ['panel.csv']);
+
+      // Nothing listed: no dialog at all.
+      let opened = false;
+      hooks.setVariablesExportPicker(async () => { opened = true; return undefined; });
+      await hooks.dispatchWebviewMessage({ type: 'exportVariables', rows: [] });
+      assert.equal(opened, false);
+    });
+
+    it('a CSV that cannot be written is reported, not thrown', async () => {
+      // The panel's button has nothing above it to catch a rejection, so a
+      // failed write used to vanish — the commonest being a CSV still open in
+      // Excel, which Windows locks. A directory stands in for the locked file.
+      hooks.setVariablesExportPicker(async () => vscode.Uri.file(dir));
+      await assert.doesNotReject(
+        hooks.dispatchWebviewMessage({ type: 'exportVariables', rows: [{ name: 'orderId', value: 'ORD-1042' }] }),
+      );
+      assert.ok(fs.statSync(dir).isDirectory(), 'the target is left as it was');
+    });
+  });
+
   it('test-frame view hides __skillN_ entries from previous skill descents', async () => {
     // Phase 4.1.b — after a skill exits, its internal vars survive in
     // resolvedParameters (the expander never garbage-collects them).

@@ -519,8 +519,8 @@ const SCOPE_WIRE_SITES = [
   ],
   [
     resolve(here, '..', 'src', 'extension', 'extension.ts'),
-    /currentMasking: \(\) => registry\.runningController\(\)\?\.currentScopeMasking\(\)/,
-    'the Variables TreeView is given a way to read the running controller’s masking',
+    /currentMasking: \(\) => registry\.inspectedController\(\)\?\.currentScopeMasking\(\)/,
+    'the Variables TreeView is given a way to read the inspected (running or paused) controller’s masking',
   ],
   [
     resolve(here, '..', 'src', 'extension', 'run-controller.ts'),
@@ -529,7 +529,8 @@ const SCOPE_WIRE_SITES = [
   ],
   [
     resolve(here, '..', 'src', 'extension', 'variables-view.ts'),
-    /const masking = this\.source\.currentMasking\?\.\(\)[\s\S]{0,200}?masking\s*\}\)\);/,
+    // Room for the row cache that sits between the read and the map.
+    /const masking = this\.source\.currentMasking\?\.\(\)[\s\S]{0,1200}?masking\s*\}\)\);/,
     'the TreeView snapshots the masking once per render and puts it on every row',
   ],
   [

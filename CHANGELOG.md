@@ -100,6 +100,52 @@ from the one the AI run read with. See
   (method, path, status, time) go into the recording and are shown to the
   generator as what was observed on that run. Ordinary runs are unchanged.
 
+### Added — copy a variable, or export them all as CSV, from the Variables view and panel
+
+Right-click a variable in Steptix's Variables view, or in the Test Runner
+panel's Variables section, for **Copy Value**, **Copy Name** and **Copy as
+{{placeholder}}**. Hovering a row shows a copy button for its value, and
+**Ctrl+C** (**⌘C**) copies the selected row in the Variables view.
+
+**Export as CSV** writes every variable the view lists to a file you choose.
+Both Variables headers have the same button, a download icon with the
+tooltip *Export variables as CSV…*, shown while you hover the section as VS
+Code shows a view's title-bar buttons. A panel row's menu has it too. The
+file has a `name,value` header, and the dialog suggests
+`<test>-variables.csv` beside the test.
+
+- **A copy shows what it copied.** In the panel the part that went to the
+  clipboard, the value or the name, glows green, and a copied value also turns
+  the copy button into a green tick; both fade back after a moment.
+  In the Variables view the row's icon turns into a tick for the same moment.
+  A copy that is refused, such as a name no `{{placeholder}}` can reference,
+  shows neither.
+- **A masked value copies unmasked, and exports masked.** The menu item on a
+  masked row reads **Copy Unmasked Value**, and the status bar says the same
+  after the copy. The CSV is a file, so it keeps the stars, as the report does.
+- **The placeholder is the one you would write.** Inside a skill it drops the
+  expander's prefix (`{{query}}`, not `{{__skill2_query}}`). A name that no
+  placeholder can reference, such as a column with a space in it, is refused
+  rather than copied.
+- **Copy part of a value** in the panel by selecting it, then Ctrl+C, or
+  right-click the selection for VS Code's own **Copy**.
+- **A long value stays on one line** in the panel, cut with an ellipsis as in
+  the Variables view. A whole JSON table used to fill the section and push the
+  variable's name out of sight. Hover for more of it; Copy Value copies all of
+  it.
+
+Two fixes found while testing this against a real run:
+
+- **The Variables view shows the run while it is paused at a breakpoint.** A
+  breakpoint ends the run's request, and the view only read a running test, so
+  it said *No active run* for the whole pause. It now shows the paused run and
+  clears when the run ends.
+- **The panel lists `[store as: x]` and `[as: x]` captures.** Its rows come
+  from the test text, which knew `[output:]` but not these. So a table read
+  into `{{payments}}`, or a value read into `{{order_id}}`, had no row.
+
+Steptix extension 0.5.185.
+
 ### Changed — a run shows the Test Runner, and its error banner follows the latest run
 
 A run's errors land in the Steptix **Test Runner** view, which was easy to
