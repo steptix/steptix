@@ -1613,6 +1613,26 @@ describe("steptix compile — a replay whose loop runs a different number of pas
         },
       ],
     });
+  /** {@link readRow} with a click before the read. A step that ONLY reads is
+   *  written from its recording with no model at all
+   *  (docs/specs/SPEC-codebehind-robustness.md §6.6), so the tests about what
+   *  the MODEL is shown and may write use a step that also acts. */
+  const readRowActing = (value: string): StepResult => {
+    const row = readRow(value);
+    const turn = row.turns[0]!;
+    return {
+      ...row,
+      turns: [
+        {
+          ...turn,
+          subActions: [
+            { index: 1, action: { action: 'click', selector: '#show-accounts' }, durationMs: 1 },
+            { ...turn.subActions[0]!, index: 2 },
+          ],
+        },
+      ],
+    };
+  };
   const recordOf = (first: StepResult): CompileRunOutcome =>
     outcome(
       [
@@ -1884,7 +1904,7 @@ describe("steptix compile — a replay whose loop runs a different number of pas
       [`{ source: ${JSON.stringify(READ)}, async run({ step }) { step.setVar('accounts', '${RECORDED}'); } }`, CLEAN_READ],
       (p) => !isStepRepair(p),
     );
-    const { runner } = scriptedRunner(recordOf(readRow(RECORDED)), [
+    const { runner } = scriptedRunner(recordOf(readRowActing(RECORDED)), [
       replayOf(codeRow(1, { outputs: { accounts: RECORDED } }), RECORDED),
     ]);
 
@@ -1916,7 +1936,7 @@ describe("steptix compile — a replay whose loop runs a different number of pas
       ],
       isStepRepair,
     );
-    const { runner } = scriptedRunner(recordOf(readRow(RECORDED)), [
+    const { runner } = scriptedRunner(recordOf(readRowActing(RECORDED)), [
       // The generated read throws on the replay, having stored six values.
       outcome([codeRow(1, { status: 'failed', error: 'strict mode violation: resolved to 9 elements', outputs: { accounts: SIX } })], 4),
       replayOf(codeRow(1, { outputs: { accounts: RECORDED } }), RECORDED),

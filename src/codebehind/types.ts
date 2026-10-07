@@ -65,6 +65,31 @@ export interface CodeBehindStepApi {
    */
   check(condition: boolean, message?: string): void;
   /**
+   * The AI's `read` action, run again: what a step that only reads is compiled
+   * to, straight from its recording and with no model
+   * (docs/specs/SPEC-codebehind-robustness.md §6.6). The options are the
+   * recorded action's fields; it goes through the same path the action took
+   * (selector cleaning, frame resolution, the same per-element reader) and
+   * stores the result under `as` the way the run stored it. Returns the value,
+   * or the list for `multiple`.
+   *
+   * ```ts
+   * await step.read({
+   *   selector: '#account-list [data-testid="account-row"] > span > span:first-child',
+   *   multiple: true,
+   *   as: 'accounts',
+   *   kinds: ['span.account-name'],
+   * });
+   * ```
+   *
+   * `kinds` is its self-check: the kinds of element the run's read matched.
+   * A match of any other kind fails as {@link check} does.
+   */
+  read(options: StepReadOptions): Promise<string | string[]>;
+  /** The AI's `count` action, run again — {@link read}'s sibling. Returns the
+   *  number of matches, and stores it under `as` as the run did. */
+  count(options: StepCountOptions): Promise<number>;
+  /**
    * Wait until what this entry's actions started is over: the first-party
    * requests that began since the entry started — or since the last
    * `settle()` — and then the page holding still for 600 ms, within the
@@ -125,6 +150,31 @@ export interface CodeBehindStepApi {
    * ordinary step's entry has written a failing step.
    */
   fail(message: string): never;
+}
+
+/** What `step.read` takes: a recorded `read` action's fields. */
+export interface StepReadOptions {
+  selector: string;
+  /** Read every match, into a list. */
+  multiple?: boolean;
+  /** Read this attribute rather than the text (`href` and `src` resolved). */
+  attribute?: string;
+  /** Keep this pattern's first capture group (or its whole match), per value. */
+  pattern?: string;
+  /** The iframe the selector is in. */
+  frame?: string;
+  /** Store the result under this name, as `[store as: …]` does. */
+  as?: string;
+  /** The kinds of element the run's read matched — the self-check. */
+  kinds?: string[];
+}
+
+/** What `step.count` takes: a recorded `count` action's fields. */
+export interface StepCountOptions {
+  selector: string;
+  frame?: string;
+  as?: string;
+  kinds?: string[];
 }
 
 /** One tab, as `tabs.list()` reports it. */
@@ -266,6 +316,14 @@ export interface StepCodeEntry {
    * writes over this entry. An `ai: true` entry needs no `run`.
    */
   ai?: boolean;
+  /**
+   * This entry was written from the step's recording, with no model
+   * (docs/specs/SPEC-codebehind-robustness.md §6.6): a step that only reads,
+   * whose `run` is the recorded actions handed to `step.read` / `step.count`.
+   * The compile's Review pass leaves it alone, and a stale one is written again
+   * from the run that healed it, again with no model.
+   */
+  fromRecording?: boolean;
   /** The step's code: what it does, in place of the model's turns. */
   run?: (ctx: CodeBehindContext) => Promise<void> | void;
   /**

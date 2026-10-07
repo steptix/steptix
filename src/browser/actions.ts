@@ -129,6 +129,18 @@ export interface ActionTargeting {
    * Travels with `resolvedSelector`: both present, or neither.
    */
   resolvedBy?: ResolvedBy;
+  /**
+   * The KINDS of element a `read` or `count` matched: each one's tag name and
+   * its class names, leaving out generated-looking ones (any with a digit) —
+   * `span.account-name` (docs/specs/SPEC-codebehind-robustness.md §6.6).
+   *
+   * What a read compiled from the recording carries as its self-check: on
+   * replay, a match of any other kind means the selector no longer reads what
+   * the run read — failure B's selector matched `span.account-number` beside
+   * every `span.account-name`. Measured with the rest of `targeting`, and only
+   * for reads and counts.
+   */
+  kinds?: string[];
 }
 
 /** How a `resolvedSelector` was arrived at. See {@link ActionTargeting}. */
@@ -191,6 +203,23 @@ export interface ExecuteActionOptions {
    * answer and a remembered one are the same object. Absent means `model`.
    */
   structureSource?: TableStructureSource | undefined;
+  /**
+   * Collect the {@link ActionTargeting.kinds} of what a `read` or `count`
+   * matched, onto the result's `kinds`, without the rest of the measurement —
+   * what a read compiled from the recording checks itself against on replay
+   * (docs/specs/SPEC-codebehind-robustness.md §6.6). `measure` collects them
+   * too, onto `targeting`.
+   */
+  kinds?: boolean | undefined;
+  /**
+   * Before a `count` or a `read` of every match, wait until the number of
+   * matches has stopped changing for `quietMs`, within `timeoutMs`
+   * (docs/specs/SPEC-codebehind-robustness.md §6.6). Neither waits for
+   * elements on its own — each returns whatever matches at that instant — and
+   * the AI's read always came after the page had settled and the model had
+   * thought; a compiled one arrives milliseconds after the step before it.
+   */
+  settleMatches?: { quietMs: number; timeoutMs: number } | undefined;
 }
 
 /** Result of executing a single Playwright action */
@@ -220,6 +249,9 @@ export interface ActionExecutionResult {
   /** What the runtime found at the instant it acted. Absent unless the caller
    *  asked to measure, and absent whenever measurement was impossible. */
   targeting?: ActionTargeting;
+  /** The kinds of element a `read` or `count` matched, when the caller asked
+   *  for them ({@link ExecuteActionOptions.kinds}). */
+  kinds?: string[];
   /**
    * Do not retry this failure, and do not treat it as a broken plan: the
    * action was never attempted because the file it names is missing, is a
@@ -355,6 +387,8 @@ export async function executeAction(
   // the cheap half on by itself.
   const wantMeasure = options?.measure === true;
   const wantGate = options?.ambiguousTarget === 'fail';
+  /** Collect what kinds of element a read or count matched (§6.6). */
+  const wantKinds = wantMeasure || options?.kinds === true;
   /** What the runtime found. Absent unless we measured and the numbers held. */
   let targeting: ActionTargeting | undefined;
   /** What is left of the action's own budget after the wait hoisted out of it. */
@@ -513,18 +547,29 @@ export async function executeAction(
           // across every match, so many matches is the PURPOSE. The count is
           // free here (the page already returned every element), and there is
           // no `resolvedSelector` because there is no single element.
+          if (options?.settleMatches) await settleMatchCount(root, requireSelector(eff), options.settleMatches, signal);
           const list = await executeReadMultiple(root, eff);
+          const kinds = wantKinds ? await matchedKinds(root, requireSelector(eff)) : undefined;
           return {
             success: true,
             capturedValues: list.values,
-            ...(wantMeasure && { targeting: { matchCount: list.matchCount } }),
+            ...(wantMeasure && {
+              targeting: { matchCount: list.matchCount, ...(kinds !== undefined && { kinds }) },
+            }),
+            ...(kinds !== undefined && { kinds }),
           };
         }
         const captured = await executeRead(root, eff, remainingMs);
+        // The kind of the element read: the first match, as the read took.
+        const kinds = wantKinds ? await matchedKinds(root, requireSelector(eff), 1) : undefined;
+        const measured = targeting !== undefined || (wantMeasure && kinds !== undefined)
+          ? { ...(targeting ?? {}), ...(kinds !== undefined && { kinds }) }
+          : undefined;
         return {
           success: true,
           capturedValue: captured,
-          ...(targeting !== undefined && { targeting }),
+          ...(measured !== undefined && { targeting: measured }),
+          ...(kinds !== undefined && { kinds }),
         };
       }
 
@@ -554,12 +599,17 @@ export async function executeAction(
 
       case 'count': {
         // Also plural, and its count IS its result — free, and never gated.
+        if (options?.settleMatches) await settleMatchCount(root, requireSelector(eff), options.settleMatches, signal);
         const counted = await executeCount(root, eff);
         const total = Number(counted);
+        const kinds = wantKinds ? await matchedKinds(root, requireSelector(eff)) : undefined;
         return {
           success: true,
           capturedValue: counted,
-          ...(wantMeasure && Number.isFinite(total) && { targeting: { matchCount: total } }),
+          ...(wantMeasure && Number.isFinite(total) && {
+            targeting: { matchCount: total, ...(kinds !== undefined && { kinds }) },
+          }),
+          ...(kinds !== undefined && { kinds }),
         };
       }
 
@@ -2269,6 +2319,93 @@ async function executeReadMultiple(
     `read[multiple] captured: ${result.length} value${result.length === 1 ? '' : 's'} → variable "${action.as ?? '(unnamed)'}"`,
   );
   return { values: result, matchCount };
+}
+
+/**
+ * The kinds of element `selector` matches — each one's tag name and its class
+ * names without a digit in them, sorted: `span.account-name`
+ * (docs/specs/SPEC-codebehind-robustness.md §6.6). Deduplicated, in the order
+ * first met; at most {@link READ_MULTIPLE_MAX} elements looked at, or `limit`.
+ *
+ * Class names with digits are left out because build tools generate them
+ * (`css-1x2y3z`, `jsx-482`): they change between deployments without the
+ * element changing what it is. Undefined when the page cannot say.
+ */
+async function matchedKinds(
+  root: Page | FrameLocator,
+  selector: string,
+  limit = READ_MULTIPLE_MAX,
+): Promise<string[] | undefined> {
+  try {
+    return await root.locator(selector).evaluateAll(
+      (els, max) => {
+        const seen: string[] = [];
+        for (const el of els.slice(0, max as number)) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const e = el as any;
+          const classes = (Array.from(e.classList ?? []) as string[])
+            .filter((c) => !/\d/.test(c))
+            .sort();
+          const kind = [String(e.tagName ?? '').toLowerCase(), ...classes].join('.');
+          if (!seen.includes(kind)) seen.push(kind);
+        }
+        return seen;
+      },
+      limit,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Wait until the number of elements `selector` matches has held still for
+ * `quietMs`, within `timeoutMs` — a count or a read of every match takes what
+ * is there at that instant, and a list still rendering reads short
+ * (docs/specs/SPEC-codebehind-robustness.md §6.6). Never throws: at the budget
+ * the read goes ahead with what is there, as an AI read would.
+ */
+async function settleMatchCount(
+  root: Page | FrameLocator,
+  selector: string,
+  opts: { quietMs: number; timeoutMs: number },
+  signal?: AbortSignal,
+): Promise<void> {
+  await waitForStableCount(() => root.locator(selector).count().catch(() => -1), opts, signal);
+}
+
+/**
+ * {@link settleMatchCount}'s loop, with the count, the clock and the sleep
+ * injected — exported for its tests. Returns once `count()` has answered the
+ * same number for `quietMs`, or at `timeoutMs`, or on abort.
+ */
+export async function waitForStableCount(
+  count: () => Promise<number>,
+  opts: {
+    quietMs: number;
+    timeoutMs: number;
+    pollMs?: number;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+  },
+  signal?: AbortSignal,
+): Promise<void> {
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const pollMs = opts.pollMs ?? 50;
+  const started = now();
+  let last: number | undefined;
+  let since = started;
+  while (now() - started < opts.timeoutMs && !signal?.aborted) {
+    const current = await count();
+    if (current !== last) {
+      last = current;
+      since = now();
+    } else if (now() - since >= opts.quietMs) {
+      return;
+    }
+    await sleep(pollMs);
+  }
 }
 
 // ── Structured table reads ───────────────────────────────────────────────────

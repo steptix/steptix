@@ -279,7 +279,15 @@ export async function applyGenerated(
   try {
     if (generated.kind === 'entry') {
       await candidate.apply(step, generated.code);
-      stepEvent(phase, step, phase === 'repair' ? 'repaired' : 'generated');
+      stepEvent(
+        phase,
+        step,
+        generated.fromRecording
+          ? 'written from the recording, with no model call'
+          : phase === 'repair'
+            ? 'repaired'
+            : 'generated',
+      );
     } else if (generated.kind === 'declined') {
       await candidate.apply(step, aiEntryFor(step.text, generated.reason));
       stepEvent(phase, step, `kept as AI: ${generated.reason}`);

@@ -21,6 +21,7 @@ import {
   capturedValueGuards,
   compilePromptSecrets,
   compilableCondition,
+  entryFromRecording,
   generateConditionEntry,
   generateStepEntry,
   guardedValues,
@@ -947,10 +948,24 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // that broke, what it threw, and the page it threw on. Plain generation
     // hands the model the same page and lets it write the same broken selector
     // again. No entry text to repair from (the file was edited) falls through.
-    const healed = result?.codeBehindStale
+    //
+    // Ahead of both: a step that only reads is written from the evidence
+    // pass's recording, with no model (docs/specs/SPEC-codebehind-robustness.md
+    // §6.6) — healed or not, since the pass that healed it chose its read
+    // afresh.
+    const fromRecording = entryFromRecording({
+      binding: step.binding!,
+      actions: actionsOf(result),
+      resolvedParameters: passValues,
+      ...(test.envData && { envData: test.envData }),
+      ...(result?.surface !== undefined && { surface: result.surface }),
+    });
+    const healed = fromRecording === undefined && result?.codeBehindStale
       ? await repairHealedStep(step, result, passValues, promptSecretsFor(passValues, step.binding), options, candidate, loop)
       : undefined;
-    const generated = healed ?? await generateStepEntry({
+    const generated: GeneratedEntry = fromRecording !== undefined
+      ? { kind: 'entry', code: fromRecording, fromRecording: true }
+      : healed ?? await generateStepEntry({
       binding: step.binding!,
       actions: actionsOf(result),
       ...(result?.assertions && { assertions: result.assertions }),
@@ -1381,6 +1396,28 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     declined++;
     writtenOffAi.push(step.number);
   };
+  /**
+   * An entry written from the recording that failed a strict replay
+   * (docs/specs/SPEC-codebehind-robustness.md §6.6): take back the compile's
+   * entry for it, list it as not compiled, and drop it from the selection, so
+   * it stays on AI until a Run & Compile writes it again from a live run.
+   * False — and nothing done — for any other entry, or when taking it back is
+   * unsafe; the caller then does what it did before.
+   */
+  const leaveWithoutCode = async (step: CompileStep, error: string): Promise<boolean> => {
+    if (step.kind === 'condition' || step.key === undefined) return false;
+    if (!/\bfromRecording\s*:\s*true\b/.test(candidate.entryTextFor(step) ?? '')) return false;
+    if (!(await candidate.retract(step))) return false;
+    await candidate.persist();
+    proven.delete(step.key);
+    // The summary adds "It stays AI; compile again to retry" — and a compile's
+    // own AI run is the live run this entry is written again from.
+    const message = `its code, written from the recording, failed on the replay (${error})`;
+    stepsNotCompiled.push({ number: step.number, message });
+    dropFromSelection([step.number]);
+    stepEvent('replay', step, `not compiled — ${message}`);
+    return true;
+  };
 
   for (let round = 1; round <= maxRounds; round++) {
     const outcome = await replay(round);
@@ -1463,6 +1500,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       test.envData ? envDataSecretValues(test.envData) : [],
     );
     if (round === maxRounds) break;
+
+    // An entry written from the recording failed (§6.6). Strict replay does
+    // not heal, so this round has no fresh transcript to write it again from,
+    // and a model repair would be the reinvention §6.6 removed. It gets no
+    // entry instead — never `ai: true`, so the next Run & Compile writes it
+    // again from a live run.
+    if (await leaveWithoutCode(failed.step, failed.error)) {
+      lastFailure = undefined;
+      continue;
+    }
 
     stepEvent('repair', failed.step, 'regenerating from the failure');
     // The failing pass's values, from the same fold generation reads — over
@@ -1566,10 +1613,11 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   }
 
   // A step that failed every round is written off: `ai: true` with the last
-  // error as its comment, then one round to confirm the rest still passes.
+  // error as its comment, then one round to confirm the rest still passes. An
+  // entry written from the recording is left without code instead (§6.6).
   if (!green && !failure && lastFailure) {
     const { step, error } = lastFailure;
-    await writeOff(step, error, `after ${maxRounds} round(s)`);
+    if (!(await leaveWithoutCode(step, error))) await writeOff(step, error, `after ${maxRounds} round(s)`);
     const outcome = await replay(rounds + 1);
     const failed = failureOf(outcome);
     // The same two ways a round can be complete as the loop above: a test can

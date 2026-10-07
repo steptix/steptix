@@ -329,6 +329,13 @@ describe('Steptix live — compile loops and the conditions that drive them', fu
       1,
       'one entry for the Repeat tail',
     );
+    // The read the For each walks only reads, so it is written from the
+    // recording (§6.6): `step.read` with the AI's own fields, not a model's code.
+    const readBlocks = entriesFor(content, text.readAccounts);
+    assert.equal(readBlocks.length, 1, `exactly one entry for "${text.readAccounts}", got ${readBlocks.length}`);
+    assert.match(readBlocks[0], /fromRecording:\s*true/, `"${text.readAccounts}" must be written from the recording:\n${readBlocks[0]}`);
+    assert.match(readBlocks[0], /step\.read\(\{[\s\S]*multiple:\s*true[\s\S]*as:\s*'accounts'/, `"${text.readAccounts}" must read every match into {{accounts}}:\n${readBlocks[0]}`);
+
     // The For each body reads the item per pass — or, if the placeholder rule
     // declined it, says so. What it must never do is carry pass 1's value.
     const accountEntry = entriesFor(content, text.accountBody)[0];
@@ -378,24 +385,20 @@ describe('Steptix live — compile loops and the conditions that drive them', fu
     }
     // The `For each`'s count is not decided by any condition: it is the length
     // of the list the compiled READ stored (step 11, "Read the name of every
-    // account … [store as: accounts]"), so it measures the model's selector for
-    // that read, not the loop and condition machinery. Measured on a real-model
-    // run: one of three compiles read each row's three spans and stored nine
-    // values, and this replay ran nine passes. Generation is now shown the
-    // recorded value and refuses one written in, which makes that rarer but
-    // cannot make a model's selector right — and Run & Compile has no replay to
-    // catch it (the boxed `steptix compile` does, by decision 11's pass-count
-    // check). So a wrong count here is said loudly, with the entry that caused
-    // it, rather than failing a test about conditions.
-    const accountPasses = passesOf('Check the account');
-    if (JSON.stringify(accountPasses) !== JSON.stringify(['1/3', '2/3', '3/3'])) {
-      const readEntry = entriesFor(content, text.readAccounts)[0] ?? '(no entry was proposed for it)';
-      say(
-        `WARNING: "For each {{account}} in {{accounts}}" ran ${accountPasses.length} pass(es) on the replay ` +
-          `(${JSON.stringify(accountPasses)}), not 3. The list came from the compiled step 11 ` +
-          `("${text.readAccounts}"), whose entry was:\n  source:${readEntry}`,
-      );
-    }
+    // account … [store as: accounts]"). That count used to be a warning,
+    // because it measured a model's selector — one compile read each row's
+    // spans and stored nine values. That step only reads, so its entry is now
+    // written from the recording with no model
+    // (docs/specs/SPEC-codebehind-robustness.md §6.6): the AI's own read, run
+    // again, which on the same page stores the same three names. So it is an
+    // assertion.
+    const readEntry = entriesFor(content, text.readAccounts)[0] ?? '(no entry was proposed for it)';
+    assert.deepEqual(
+      passesOf('Check the account'),
+      ['1/3', '2/3', '3/3'],
+      `"For each {{account}} in {{accounts}}" must run three passes on the replay. The list came from ` +
+        `step 11 ("${text.readAccounts}"), whose entry was:\n  source:${readEntry}`,
+    );
   });
 
   it('control-flow-otherwise.md: an If and an Else if that both answer false in code fall through to Otherwise', async () => {

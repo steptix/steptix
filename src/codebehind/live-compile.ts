@@ -27,6 +27,7 @@ import {
   capturedValueGuards,
   compilableCondition,
   compilePromptSecrets,
+  entryFromRecording,
   generateConditionEntry,
   generateStepEntry,
   guardedValues,
@@ -1566,6 +1567,20 @@ export class LiveCompiler {
       substitute: stepSubstitution(binding, input.resolvedParameters, this.options.envData),
       ...(recordedCaptures && { recordedCaptures }),
     });
+    // A step that only reads is written from this pass's recording, with no
+    // model (docs/specs/SPEC-codebehind-robustness.md §6.6). Ahead of the
+    // repair branch too: a stale `fromRecording` entry is written again from
+    // the AI pass that healed it, whose read the AI chose afresh — so a change
+    // to the page repairs itself, from the live run rather than the recording
+    // on disk (stories/codebehind-selector-ambiguity.md).
+    const fromRecording = entryFromRecording({
+      binding,
+      actions: actionsOf(input.result),
+      resolvedParameters: input.resolvedParameters,
+      ...(this.options.envData && { envData: this.options.envData }),
+      ...(input.result.surface !== undefined && { surface: input.result.surface }),
+    });
+    if (fromRecording !== undefined) return { kind: 'entry', code: fromRecording, fromRecording: true };
     const failed = await this.priorFailure(binding, input.result.codeBehindStale?.error);
     if (failed !== undefined) {
       const repaired = await this.askForRepair(step, input, failed);

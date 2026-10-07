@@ -62,8 +62,8 @@ import {
   substituteText,
   type PlaceholderValues,
 } from './placeholder-substitution.js';
-import { bindVariable } from '../parser/parameters.js';
 import { decideConditionLocally, type LocalDecision } from './literal-decision.js';
+import { storeCapture } from './store-capture.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import {
   isReturnClaim,
@@ -77,7 +77,7 @@ import {
 } from '../parser/failure-tail.js';
 import { envDataRefsIn, resolveEnvDataRef } from '../parser/interpolate-env-data.js';
 import { parseOutputPrefixes, buildEnrichedInstruction } from '../server/run-helpers.js';
-import { maskRecordSecrets, redact, runSecrets } from '../utils/secrets.js';
+import { redact, runSecrets } from '../utils/secrets.js';
 import { warnBindingOnce, type CodeBehindBinding } from '../codebehind/loader.js';
 import {
   entrySourceText,
@@ -1486,6 +1486,10 @@ async function runCodeBehindStepArmed(
     ...(opts.flowControlClaim !== undefined && { flowControlClaim: opts.flowControlClaim }),
     ...(watcher && { watcher }),
     ...(opts.signal && { signal: opts.signal }),
+    // What a `step.read` / `step.count` reads from, and how long a plural one
+    // waits for its matches to hold still (§6.6).
+    activePage: () => activePageOf(opts) ?? page,
+    readTimeoutMs: actionSettleBudgetMs(opts.config),
   });
 
   // The entry may have moved the active tab or browser (`ctx.tabs`,
@@ -3706,65 +3710,12 @@ async function executeStepAttempt(
       }
 
       // Store captured value from "read" / "count" / "readTable" actions into
-      // the live parameter map.
-      //
-      // All three through `bindVariable` (src/parser/parameters.ts), because a
-      // capture can land on a name a `For each` is binding — `Read the order
-      // id from the summary [store as: order]` after `For each {{order}} in
-      // {{orders}}` — and §8.2 says a rebind of a root erases that root's
-      // dotted keys. A plain `resolvedParameters[as] =` left `order.id`
-      // holding the LAST PASS's id, so `{{order.id}}` in a later step
-      // substituted a row the author had just overwritten, silently, with
-      // §8.3's refusal unable to fire on a key that was still there.
-      if (result.capturedRecords !== undefined && action.as && opts.resolvedParameters) {
-        // Structured capture (readTable) — JSON-encoded like the flat list, so
-        // the map stays Record<string, string> and no protocol or session
-        // storage migrates (SPEC-structured-table-reads.md §7.1). `For each`
-        // parses it back and binds each record's properties.
-        //
-        // The capture itself is summarised by `readTable captured N rows × M
-        // columns as "{{name}}"` (§7.6), written where the bound and the
-        // placeholder-skip count are known — in executeAction. This line is
-        // about STORAGE, and reads like its two siblings below.
-        const rows = result.capturedRecords.length;
-        bindVariable(opts.resolvedParameters, action.as, JSON.stringify(result.capturedRecords));
-        logger.info(
-          `Stored ${rows} row record${rows === 1 ? '' : 's'} as "{{${action.as}}}"`,
-        );
-      } else if (result.capturedValues !== undefined && action.as && opts.resolvedParameters) {
-        // List capture (read multiple: true) — JSON-encode so it round-trips
-        // through the string-valued param map. Tools that declare an
-        // array-typed parameter decode this back into a typed array at the
-        // bridge boundary.
-        const json = JSON.stringify(result.capturedValues);
-        bindVariable(opts.resolvedParameters, action.as, json);
-        logger.info(
-          `Stored ${result.capturedValues.length} captured value${
-            result.capturedValues.length === 1 ? '' : 's'
-          } as "{{${action.as}}}"`,
-        );
-      } else if (result.capturedValue !== undefined && action.as && opts.resolvedParameters) {
-        bindVariable(opts.resolvedParameters, action.as, result.capturedValue);
-        // The only one of the three "Stored …" lines that prints the VALUE,
-        // and it printed it raw. `logger` does not redact — the run-log file
-        // does, on its way to disk, and the SSE `output` bridge does not — so
-        // a `[store as: password]` capture reached the console and every
-        // client watching the stream in clear (§7.6). Masked after the bind,
-        // so the name the author just chose is already in the map the set is
-        // built from; by shape as well as by value, because a one-row read
-        // stores a record under a name that says nothing.
-        //
-        // It is also the ONLY line that prints a capture. `executeRead`
-        // (src/browser/actions.ts) had one of its own — raw, and one frame too
-        // deep to ever mask, because down there the value has no name yet
-        // (review 6, finding 2). Masking has to happen where the name is, so
-        // the line lives here and there is exactly one of it.
-        logger.info(
-          `Stored captured value as "{{${action.as}}}": "${redact(
-            maskRecordSecrets(result.capturedValue),
-            secretsFor(opts),
-          )}"`,
-        );
+      // the live parameter map — through the one helper a compiled
+      // `step.read` / `step.count` stores through too, so a step compiled
+      // from its recording stores exactly what this run stores
+      // (src/runner/store-capture.ts; SPEC-codebehind-robustness.md §6.6).
+      if (action.as && opts.resolvedParameters) {
+        storeCapture(opts.resolvedParameters, action.as, result, () => secretsFor(opts));
       }
 
       // Capture state after action (full-page for report visibility).

@@ -40,6 +40,9 @@ export interface FileReviewInput {
   steps: string[];
 }
 
+/** `fromRecording: true` — an entry written from the recording (§6.6). */
+const FROM_RECORDING = /\bfromRecording\s*:\s*true\b/;
+
 /** A `condition` function in an entry — `async condition({ … })` or
  *  `condition: async (…) =>` — the shape a condition line's entry has. */
 const CONDITION_ENTRY = /\bcondition\s*(?:\(|:\s*(?:async\b|\())/;
@@ -112,6 +115,15 @@ export function buildFileReviewPrompt(input: FileReviewInput): ChatMessage {
         '   turn one into a `run` entry, never give an entry both, and never add a `condition` entry\n' +
         '   for a line that has none. A `Repeat … until` entry answers whether its until-condition\n' +
         '   holds (true ends the loop) — do not invert it.',
+    );
+  }
+  // Entries written from the recording (docs/specs/SPEC-codebehind-robustness.md
+  // §6.6). Gated on the file holding one, like the rules above.
+  if (FROM_RECORDING.test(input.file)) {
+    tailRules.push(
+      '**An entry marked `fromRecording: true` was written from the run\'s recording, not by a\n' +
+        '   model: leave it exactly as it is, flag included.** Its `step.read` / `step.count` calls are\n' +
+        '   the actions the AI took, run again, so changing one changes what the step reads.',
     );
   }
   const tailBlock =
@@ -383,6 +395,17 @@ export async function reviewCandidate(
     // the reviewer is held to the entry it was given, not to perfection.
     const changed = changedEntries(entriesBefore, entriesAfter);
     for (const pair of changed) logSelectorChanges(file, pair);
+    // An entry written from the recording is the run's own read, not a
+    // model's (§6.6), and is not the reviewer's to rewrite. Keyed on the entry
+    // BEFORE the revision, because a revision can delete the flag.
+    const recorded = changed.find((pair) => FROM_RECORDING.test(pair.before));
+    if (recorded) {
+      emit(
+        `rejected: the revision changes the entry for ${JSON.stringify(recorded.identity.source)}, ` +
+          'which was written from the recording — the generated file stands',
+      );
+      continue;
+    }
     const newFault = newlyFaulted(file, changed, input.evidence);
     if (newFault) {
       emit(`rejected: the revision ${newFault} — the generated file stands`);

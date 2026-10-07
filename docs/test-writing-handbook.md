@@ -2175,17 +2175,50 @@ reads with a different one — even one that looks more stable — it is asked t
 fix it once, and if it still differs the step is left without code: it stays
 AI, which reads what the run read, and the next compile tries again.
 
-An entry that only reads checks its own read with `step.check(condition,
-message)` rather than `step.expect`:
+A step that only reads or counts is not given to a model at all. When the AI
+ran it, it chose a `read` or `count` action and Steptix carried it out, so the
+compile writes that action into the entry:
 
 ```ts
 {
   source: 'Read the name of every account in the Your accounts panel [store as: accounts]',
+  fromRecording: true,
+  async run({ step }) {
+    await step.read({
+      selector: '#account-list [data-testid="account-row"] > span > span:first-child',
+      multiple: true,
+      as: 'accounts',
+      kinds: ['span.account-name'],
+    });
+  },
+},
+```
+
+`step.read` and `step.count` run the AI's own action again — the same selector
+cleaning, frame handling and reader — and store the result the same way, so on
+the same page they store what the run stored. A count or a read of every match
+first waits until the number of matches stops changing. `kinds` lists the kinds
+of element the run read; a read that matches any other kind fails its
+self-check (below), and an empty result passes. Review leaves an entry marked
+`fromRecording: true` alone. A step that also acts — a click, then a read —
+still goes to the model, which does its read with `step.read` and the recorded
+fields; so does a read whose recorded selector held a parameter's value.
+
+When the model writes a read, it checks its own read with
+`step.check(condition, message)` rather than `step.expect`:
+
+```ts
+{
+  source: 'Read the balance of the {{account}} account [store as: balance]',
   async run({ page, step }) {
-    const names = await page.locator('#account-list .account-name').allTextContents();
-    const rows = await page.locator('#account-list [data-testid="account-row"]').count();
-    step.check(names.length === rows, `one name per account row (${names.length} for ${rows})`);
-    step.setVar('accounts', JSON.stringify(names));
+    const account = step.getVar('account') ?? '';
+    const balances = await page
+      .locator('#account-list [data-testid="account-row"]')
+      .filter({ hasText: account })
+      .locator('.account-balance')
+      .allTextContents();
+    step.check(balances.length === 1, `one row for ${account} (${balances.length} found)`);
+    step.setVar('balance', balances[0].trim());
   },
 },
 ```

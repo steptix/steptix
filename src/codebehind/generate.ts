@@ -308,8 +308,9 @@ export interface PlaceholderReport {
 
 /** What one generation call produced. */
 export type GeneratedEntry =
-  /** Code, guard-checked, ready for the candidate. */
-  | { kind: 'entry'; code: string; references?: PlaceholderReport }
+  /** Code, guard-checked, ready for the candidate. `fromRecording`: written
+   *  from the step's recording with no model (§6.6, `entryFromRecording`). */
+  | { kind: 'entry'; code: string; references?: PlaceholderReport; fromRecording?: true }
   /** Not expressible as code — becomes an `ai: true` entry with this reason. */
   | { kind: 'declined'; reason: string }
   /**
@@ -3342,4 +3343,155 @@ export async function generateConditionEntry(
     );
   }
   return second;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Steps that only read, written from the recording
+// (docs/specs/SPEC-codebehind-robustness.md §6.6)
+// ───────────────────────────────────────────────────────────────────────────
+
+/** What a step that only reads is compiled from: its pass's transcript and values. */
+export interface RecordingEntryInput {
+  binding: CodeBehindBinding;
+  actions: RecordedAction[];
+  resolvedParameters: Record<string, string>;
+  envData?: EnvDataContext | undefined;
+  /** The surface the step ran on; a computer-mode step never qualifies. */
+  surface?: 'browser' | 'computer' | undefined;
+}
+
+/**
+ * The entry for a step that only reads or counts, written from its recording
+ * with NO model — or undefined when the step does not qualify, and goes to the
+ * model as before (docs/specs/SPEC-codebehind-robustness.md §6.6, D7).
+ *
+ * When the AI performed such a step it did not write code: it chose a `read`
+ * or `count` action, and Steptix carried it out — cleaned the selector,
+ * resolved its frame, read each match, stored the result. The model chose only
+ * the action's fields, and the recording keeps them exactly. So the entry is
+ * those fields handed to `step.read` / `step.count`, which run the same path:
+ * on the same page it produces exactly what the run produced, and failure B —
+ * a compiled read whose selector lost a `:first-child` — cannot happen.
+ *
+ * A step qualifies when ALL of these hold:
+ *  - it ran on the browser surface, and nothing refuses it (`refuseReason`);
+ *  - every recorded action is a `read` or a `count` (`find` and `expand` only
+ *    showed the model the page, and are left out), each with a selector;
+ *  - each of them stores into a capture the step's own line declares, and
+ *    every capture the line declares is stored by one of them — so the entry
+ *    stores exactly what the run stored;
+ *  - no recorded field holds a resolved parameter value: a model that wrote
+ *    row 1's value where `{{account}}` belonged would freeze row 1 into the
+ *    file. The leak guard decides, as it does for generated code;
+ *  - no read falls under the selector story's positional carve-out — a
+ *    positional target the step distinguishes by name. That one needs the
+ *    model, to build a locator from the value.
+ *
+ * Names: the recorded `as` and any `{{placeholder}}` in a recorded field are
+ * the RUN's names, which a skill body or a looped section renames
+ * (`__skill1_total`). They are written back as the authored names
+ * (`binding.scope.renames`), which `step.read` resolves through the frame at
+ * replay.
+ */
+export function entryFromRecording(input: RecordingEntryInput): string | undefined {
+  const { binding } = input;
+  if (input.surface === 'computer') return undefined;
+  if (refuseReason(binding.source, input.actions) !== undefined) return undefined;
+  if (parseFlowControlStep(binding.source.trim())) return undefined;
+
+  const reads = input.actions.filter((a) => !EXPLORATION_ACTIONS.has(a.action));
+  if (reads.length === 0) return undefined;
+  if (!reads.every((a) => a.action === 'read' || a.action === 'count')) return undefined;
+
+  const authored = authoredNameOf(binding);
+  const { captures } = referencedVariableNames(binding.source);
+  const declared = new Set([...captures, ...inlineCaptureNames(binding.source)]);
+  if (declared.size === 0) return undefined;
+  const stored = new Set<string>();
+  for (const action of reads) {
+    if (typeof action.selector !== 'string' || action.selector.trim() === '') return undefined;
+    if (typeof action.as !== 'string' || action.as.trim() === '') return undefined;
+    const name = authored(action.as);
+    if (!declared.has(name)) return undefined;
+    stored.add(name);
+    if (action.targeting?.resolvedBy === 'positional' && namesItsTarget(binding.source)) return undefined;
+  }
+  for (const name of declared) if (!stored.has(name)) return undefined;
+
+  // The leak guard over the recorded fields, exactly as over generated code.
+  const parameters = stepParameters(binding, input.resolvedParameters, input.envData);
+  const envRefs = stepEnvRefs(binding, input.envData);
+  if (envRefs.unresolved.length > 0) return undefined;
+  const guarded = guardedValues(parameters, envRefs.resolved, binding.source);
+  const fieldText = reads
+    .map((a) => [a.selector, a.attribute, a.pattern, a.frame].filter((f) => typeof f === 'string').join('\n'))
+    .join('\n');
+  if (findInlinedParameterValue(fieldText, guarded)) return undefined;
+
+  const calls = reads.flatMap((action) => {
+    const fields: string[] = [`selector: ${tsString(authoredPlaceholders(action.selector!, binding))}`];
+    if (action.action === 'read' && action.multiple === true) fields.push('multiple: true');
+    if (action.action === 'read' && typeof action.attribute === 'string') {
+      fields.push(`attribute: ${tsString(authoredPlaceholders(action.attribute, binding))}`);
+    }
+    if (action.action === 'read' && typeof action.pattern === 'string') {
+      fields.push(`pattern: ${tsString(authoredPlaceholders(action.pattern, binding))}`);
+    }
+    if (typeof action.frame === 'string') fields.push(`frame: ${tsString(authoredPlaceholders(action.frame, binding))}`);
+    fields.push(`as: ${tsString(authored(action.as!))}`);
+    const kinds = action.targeting?.kinds;
+    if (kinds !== undefined && kinds.length > 0) fields.push(`kinds: [${kinds.map(tsString).join(', ')}]`);
+    return [
+      `    await step.${action.action === 'count' ? 'count' : 'read'}({`,
+      ...fields.map((field) => `      ${field},`),
+      '    });',
+    ];
+  });
+
+  return [
+    '{',
+    `  source: ${tsString(binding.source)},`,
+    '  fromRecording: true,',
+    '  async run({ step }) {',
+    ...calls,
+    '  },',
+    '}',
+  ].join('\n');
+}
+
+/** A single-quoted TypeScript string literal for `text` — the file's own
+ *  style, and a selector's `[data-testid="x"]` stays readable. */
+function tsString(text: string): string {
+  const body = text
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n');
+  return `'${body}'`;
+}
+
+/** The authored name for a run name the binding's frame renamed — or the
+ *  name itself, when nothing renamed it. */
+function authoredNameOf(binding: CodeBehindBinding): (runName: string) => string {
+  const back = new Map<string, string>();
+  for (const [authored, run] of Object.entries(binding.scope.renames)) back.set(run, authored);
+  return (runName: string): string => back.get(runName) ?? runName;
+}
+
+/** `text` with every `{{run_name}}` (or `{{run_name.prop}}`) written back as
+ *  the authored name. */
+function authoredPlaceholders(text: string, binding: CodeBehindBinding): string {
+  const authored = authoredNameOf(binding);
+  return text.replace(PLACEHOLDER_REF_RE, (match, name: string) => {
+    const dot = name.indexOf('.');
+    const root = dot < 0 ? name : name.slice(0, dot);
+    const mapped = authored(root);
+    if (mapped === root) return match;
+    return `{{${mapped}${dot < 0 ? '' : name.slice(dot)}}}`;
+  });
+}
+
+/** `store as {{x}}` names in the step's own words. */
+function inlineCaptureNames(source: string): string[] {
+  return [...source.matchAll(CAPTURE_DEFINITION_RE)].map((m) => m[1]!);
 }

@@ -1541,6 +1541,26 @@ export function offersSelfCheck(actions: readonly { action: string }[]): boolean
   return reads && actions.every((a) => ['read', 'count', 'find', 'expand'].includes(a.action));
 }
 
+/**
+ * The API lines for `step.read` / `step.count`, and for a step that ALSO acts
+ * the instruction to read with them (docs/specs/SPEC-codebehind-robustness.md
+ * §6.6) — or '' for a step that reads nothing. A step that ONLY reads is
+ * written from its recording with no model at all, so a prompt that shows
+ * these is normally one for a step that clicks, then reads.
+ */
+function recordedReadApi(actions: TranscriptAction[]): string {
+  if (!readsWithSelector(actions)) return '';
+  const acts = actions.some(
+    (a) => !['read', 'count', 'find', 'expand'].includes(a.action),
+  );
+  return (
+    "\n- `await step.read({ selector, multiple, attribute, pattern, frame, as, kinds })` / `await step.count({ selector, frame, as, kinds })` — the AI's own `read` / `count` action, run again: the same selector cleaning, frame resolution and per-element reader, and the result stored under `as` exactly as the run stored it. Returns the value (the list for `multiple`) or the count. Pass the `kinds` the transcript shows for that action: a match of any other kind then fails the read's self-check." +
+    (acts
+      ? ' **Do this step\'s read with it**, passing the recorded action\'s own fields as they appear in the transcript, rather than writing the read yourself: it then reads exactly what the run read.'
+      : '')
+  );
+}
+
 /** The API line for `step.check`, for a step {@link offersSelfCheck} offers it to. */
 const SELF_CHECK_API =
   "\n- `step.check(condition, message)` — a self-check on your OWN read, for an entry like this one that only reads: that what you read from was really there and the right shape (one name per row, a populated value). If it fails, the step falls back to AI and this entry is regenerated — it does not fail the run. Use it, not `step.expect`, for the check a capture makes on itself.";
@@ -1587,7 +1607,11 @@ function targetingLegend(actions: TranscriptAction[]): string {
     `- \`matchCount\` — elements the selector matched, hidden ones included. This is the number strict mode counts, so it is the one that decides whether your entry throws.\n` +
     `- \`visibleMatchCount\` — how many of those were visible: what the runtime chose between when it took the first.\n` +
     `- \`resolvedSelector\` — a selector for the element that was actually acted on, verified in the page to match it and nothing else.\n` +
-    `- \`resolvedBy\` — how that handle was built: \`attribute\` (the element's own id / data-testid / name / aria-label / href), \`scoped\` (that same handle qualified by an addressable ancestor), \`positional\` (an \`nth-of-type\` chain).\n\n` +
+    `- \`resolvedBy\` — how that handle was built: \`attribute\` (the element's own id / data-testid / name / aria-label / href), \`scoped\` (that same handle qualified by an addressable ancestor), \`positional\` (an \`nth-of-type\` chain).\n` +
+    (actions.some((a) => (a.targeting?.kinds?.length ?? 0) > 0)
+      ? `- \`kinds\` — on a \`read\` or \`count\`: the kinds of element it matched, each as its tag name and class names (\`span.account-name\`). A selector that would also match another kind reads something else.\n`
+      : '') +
+    `\n` +
     `An \`upload\` action also carries \`upload.via\`: \`"input"\` means the files were set straight onto an \`<input type="file">\`, \`"chooser"\` means a control was clicked and the picker it opened was answered. Write whichever shape the transcript shows.\n\n` +
     `An action with no \`targeting\` was not measured. Nothing follows from its absence.\n\n`
   );
@@ -2058,7 +2082,7 @@ The "entry" string holds one TypeScript object literal with exactly this shape:
 - \`page\`, \`context\`, \`browser\` — the live Playwright instances the run is driving.
 - \`step.getVar(name)\` / \`step.setVar(name, value)\` — the test's variable scope, by the name as written in the markdown: \`{{username}}\` is \`step.getVar('username')\`. An environment placeholder is read by the name inside its braces: \`\${data.url}\` is \`step.getVar('data.url')\`, \`\${env.BASE_URL}\` is \`step.getVar('env.BASE_URL')\`. It returns a string (or undefined).
 - \`step.expect(condition, message)\` — a failed expectation fails the step.
-- \`await step.settle()\` — wait until what your actions so far started is over: every request they began on this site (the navigation a login answer starts included), then the page holding still. It names no URL, so it is right for a data row whose click navigates and one whose click only shows an error. It never throws.${offersSelfCheck(input.actions) ? SELF_CHECK_API : ''}
+- \`await step.settle()\` — wait until what your actions so far started is over: every request they began on this site (the navigation a login answer starts included), then the page holding still. It names no URL, so it is right for a data row whose click navigates and one whose click only shows an error. It never throws.${offersSelfCheck(input.actions) ? SELF_CHECK_API : ''}${recordedReadApi(input.actions)}
 - \`step.filePath(relative)\` — turns a path written in a step (relative to the test file's folder) into the absolute path Playwright needs. Synchronous; throws if the file is missing.${claimsFlowControl ? FLOW_CONTROL_API : ''}${claimsFail ? FAIL_API : ''}
 - \`log.info(...)\` / \`log.warn(...)\` / \`log.error(...)\` — recorded into the report.
 - \`baseUrl\` — the test's configured base URL, when it has one.

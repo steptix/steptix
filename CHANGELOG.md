@@ -63,6 +63,24 @@ from the one the AI run read with. See
   A Review revision that changes such a selector is rejected, and the log
   names any selector Review changes. Before, one rewrite dropped a
   `:first-child`, and a replay read six values where the run had read three.
+- **A step that only reads or counts is compiled from the recording, with no
+  model call.** When the AI ran such a step it wrote no code: it chose a
+  `read` or `count` action and Steptix carried it out. Compile now writes that
+  action into the entry as `step.read({ selector, multiple, as, … })` or
+  `step.count({ … })`, marked `fromRecording: true`, and these run the same
+  path the AI's action took and store the result the same way — on the same
+  page they store exactly what the run stored. A step that also clicks, asserts
+  or uses a parameter's value in its selector still goes to the model, which
+  is told to do its read with `step.read`.
+- **New `step.read(options)` and `step.count(options)`** for code-behind
+  entries. A count or a read of every match first waits until the number of
+  matches stops changing for 300 ms. Given `kinds` — the kinds of element the
+  run read, such as `span.account-name` — a read that matches another kind
+  fails its self-check, so the step falls back to AI and is written again;
+  an empty result passes, as under AI. Review leaves an entry written from the
+  recording alone. One that fails a `steptix compile` replay is left without
+  code rather than marked `ai: true`, so the next compile writes it again from
+  a fresh run.
 
 ### Changed — a run shows the Test Runner, and its error banner follows the latest run
 

@@ -617,9 +617,17 @@ describe('Run & Compile reviews an entry used twice against its FIRST pass', () 
   it('rejects a revision that reads with the second pass\'s selector', async () => {
     const testFile = path.join(dir, 'twice.md');
     const stepsFile = path.join(dir, 'twice.steps.ts');
-    const STEP = 'Read the heading [store as: heading]';
-    const first: RecordedAction[] = [{ action: 'read', selector: '#first-pass h1', as: 'heading' }];
-    const second: RecordedAction[] = [{ action: 'read', selector: '#second-pass h1', as: 'heading' }];
+    const STEP = 'Open the panel and read the heading [store as: heading]';
+    // A click before each read: a step that only reads is written from its
+    // recording with no model (§6.6), and this is about a model's entry.
+    const first: RecordedAction[] = [
+      { action: 'click', selector: '#open-panel' },
+      { action: 'read', selector: '#first-pass h1', as: 'heading' },
+    ];
+    const second: RecordedAction[] = [
+      { action: 'click', selector: '#open-panel' },
+      { action: 'read', selector: '#second-pass h1', as: 'heading' },
+    ];
     const entryReading = (selector: string): string =>
       `{ source: ${JSON.stringify(STEP)}, async run({ page, step }) { step.setVar('heading', await page.locator('${selector}').innerText()); } }`;
     const events: LiveCompileEvent[] = [];

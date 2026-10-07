@@ -142,9 +142,14 @@ vi.mock('../src/runner/step-executor.js', async (importOriginal) => ({
             attemptNumber: 1,
             timestamp: new Date().toISOString(),
             aiInteractions: [],
+            // A click, then the read: a step that ONLY reads is written from
+            // its recording with no model (docs/specs/SPEC-codebehind-robustness.md
+            // §6.6), and what the test below is about is what the MODEL is
+            // shown and may write.
             subActions: [
+              { index: 1, action: { action: 'click', selector: '#show-accounts' }, durationMs: 1 },
               {
-                index: 1,
+                index: 2,
                 action: {
                   action: 'read',
                   selector: '#account-list > li[data-testid="account-row"] > span > span:first-child',
