@@ -131,6 +131,24 @@ function isMutatingAction(action: AIAction): boolean {
 }
 
 /**
+ * Actions after which a step may still be unfinished, so a response that
+ * skipped the wrapper and left needs_reeval unstated
+ * (AIResponse.reevalUnstated) gets one more look. The page-changing actions
+ * minus `wait` — a wait is usually the whole step, and a second bare wait on
+ * an idle page would trip stall detection — plus the tab and browser moves,
+ * which the system prompt already says to always re-evaluate after.
+ */
+const REEVAL_WHEN_UNSTATED: ReadonlySet<AIAction['action']> = new Set<AIAction['action']>([
+  ...[...MUTATING_ACTIONS].filter((a) => a !== 'wait'),
+  'openPage',
+  'switchPage',
+  'closePage',
+  'openBrowser',
+  'switchBrowser',
+  'closeBrowser',
+]);
+
+/**
  * What a step whose entry broke says on a keyless run
  * (stories/keyless-replay-and-gateway-env.md §Part B).
  *
@@ -2305,6 +2323,10 @@ async function executeStepAttempt(
   trackerFor(page); // attach to initial page
   let prevPageFingerprint: string | undefined;
   let lastActionWasWait = false;
+  // At most one inferred re-evaluation per step (9a below): a model that
+  // answers bare once tends to answer bare again, and re-evaluating every
+  // time would repeat a "Click Next" until the turn cap.
+  let inferredReevalUsed = false;
   let stallCount = 0;
   const STALL_LIMIT = 2;
 
@@ -3747,8 +3769,29 @@ async function executeStepAttempt(
       break;
     }
 
-    // 9a. Check needs_reeval: if false/absent, the step is complete after this turn
-    if (!aiResponse.needs_reeval) {
+    // 9a. A bare action object that changed the page and said nothing about
+    // needs_reeval has not said the step is done (AIResponse.reevalUnstated):
+    // "Upload the file, then click Upload" answered with a bare upload once
+    // passed without the click. Look once more; a finished step answers that
+    // turn with a noop. Only once per step (inferredReevalUsed). Bare
+    // noop/assert/return/fail/prompt/count and wait stay terminal
+    // (REEVAL_WHEN_UNSTATED), and the last turn ends as it always did rather
+    // than failing a step on a re-evaluation the model never asked for.
+    const inferredReeval =
+      !aiResponse.needs_reeval &&
+      aiResponse.reevalUnstated === true &&
+      !inferredReevalUsed &&
+      aiResponse.actions.some((a) => REEVAL_WHEN_UNSTATED.has(a.action)) &&
+      currentTurn < maxTurns;
+    if (inferredReeval) {
+      inferredReevalUsed = true;
+      logger.info(
+        `Turn ${currentTurn}: bare "${aiResponse.actions[0]?.action}" action gave no needs_reeval — re-evaluating to check the step is complete`,
+      );
+    }
+
+    // 9b. Check needs_reeval: if false/absent, the step is complete after this turn
+    if (!aiResponse.needs_reeval && !inferredReeval) {
       break;
     }
 

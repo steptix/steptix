@@ -21,10 +21,10 @@ part B's rule. All three files live under `tests/attachments/` and are
 allowed types.
 
 Choosing the file and clicking Upload are two steps, not one. A step that
-says "upload, then click Upload" needs a second turn, and gets one only if
-the model's answer to the first says so. When it does not, the step passes
-having chosen the file and never clicked, and the assertion reads the
-previous iteration's status line (`Uploaded logo.png` on row 2).
+says "upload, then click Upload" needs a second turn, which the runner gives
+when the model's first answer asks for one or leaves it unsaid. One action
+per step keeps this file off that judgement: a missed click would leave the
+assertion reading the previous row's status line (`Uploaded logo.png`).
 
 The cookie banner is remembered in `localStorage`, so step 2 has a banner to
 reject on a fresh browser and none on a re-run in the same one — which is

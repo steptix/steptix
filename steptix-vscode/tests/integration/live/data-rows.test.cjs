@@ -385,11 +385,18 @@ describe('Steptix live — a run-level data table', function () {
     this.timeout(420_000);
 
     const apiKey = serverApiKey(workspaceRoot);
-    const sessionsBefore = await listSessions(serverUrl(), apiKey);
+    // This file's sessions only: a shard's server is shared by every file the
+    // shard ran before this one, and compile-loops leaves control-flow.md's
+    // session behind. Case-insensitive for the reason given in the section
+    // narrowing test below.
+    const mineOf = (sessions) =>
+      sessions.filter((s) => s.sessionId.toLowerCase() === uri.fsPath.toLowerCase());
+    const allBefore = await listSessions(serverUrl(), apiKey);
     say(`sessions before: ${JSON.stringify(
-        sessionsBefore.map((s) => [s.sessionId, s.totalStepsExecuted, s.tab?.targetId]),
+        allBefore.map((s) => [s.sessionId, s.totalStepsExecuted, s.tab?.targetId]),
       )}`,
     );
+    const sessionsBefore = mineOf(allBefore);
     assert.equal(
       sessionsBefore.length,
       1,
@@ -435,14 +442,16 @@ describe('Steptix live — a run-level data table', function () {
       `expected row 2's step-2 banner. Got ${JSON.stringify(banners)}`,
     );
 
-    // Step 2's line ran and reached a terminal mark. Which one is the AI's
-    // business — the cookie banner is remembered in localStorage, so on a
-    // session that has already dismissed it there may be nothing to click.
+    // Step 2's line ran and was decided. It is an `If`: the cookie banner is
+    // remembered in localStorage, so on this session, which has already
+    // dismissed it, the condition is normally false and the line wears ◌; a
+    // banner still showing would be rejected, ✓. A ✗ is a real failure now —
+    // before the `If`, asking to reject a missing banner could end either way.
     const stepMark = statusesOn(hooks, uri, [MATRIX_STEPS[1]])[0];
     say(`step 2 mark: ${stepMark}`);
     assert.ok(
-      stepMark === 'pass' || stepMark === 'fail',
-      `step 2 must have run and ended; got ${stepMark}`,
+      stepMark === 'pass' || stepMark === 'skip',
+      `step 2 must have run and been decided; got ${stepMark}`,
     );
 
     // THE no-relaunch assertion. A fresh browser per row belongs to the
@@ -454,8 +463,8 @@ describe('Steptix live — a run-level data table', function () {
         sessionsAfter.map((s) => [s.sessionId, s.totalStepsExecuted, s.tab?.targetId]),
       )}`,
     );
-    assert.equal(sessionsAfter.length, 1, 'still exactly one session');
-    const afterSession = sessionsAfter[0];
+    assert.equal(mineOf(sessionsAfter).length, 1, 'still exactly one session for this file');
+    const afterSession = mineOf(sessionsAfter)[0];
     assert.equal(afterSession.sessionId, beforeSession.sessionId, 'same session id');
     assert.ok(
       afterSession.totalStepsExecuted > beforeSession.totalStepsExecuted,
@@ -784,11 +793,12 @@ describe('Steptix live — a selection narrows a section\'s body', function () {
     );
 
     // The server's own count, which is the half no client-side assertion can
-    // reach: THREE steps executed, not four. A section call is REPLACED by its
-    // body rather than run alongside it, so the expansion is `Navigate`,
-    // `Reject`, and the one body step the selection kept. Without `runSteps`
-    // reaching the expander it would be four, and body step 1 would have a
-    // mark above.
+    // reach: FOUR steps executed, not five. A section call is REPLACED by its
+    // body rather than run alongside it, so the expansion is `Navigate`, step
+    // 2's `If` (its condition and its `Reject` each count, as they do in any
+    // conditional step — and a fresh browser always shows the banner), and the
+    // one body step the selection kept. Without `runSteps` reaching the
+    // expander it would be five, and body step 1 would have a mark above.
     // Case-insensitive: GET /sessions reports the Map's internal key, which
     // session-manager.ts's sessionKey() lower-cases whole on win32 for any
     // drive-letter/UNC path (so two spellings of one file are one session).
@@ -804,8 +814,8 @@ describe('Steptix live — a selection narrows a section\'s body', function () {
     assert.ok(mine, `no server session for ${uri.fsPath}`);
     assert.equal(
       mine.totalStepsExecuted,
-      3,
-      'two main-flow steps plus the one body step the selection kept',
+      4,
+      'Navigate, the If and its Reject, plus the one body step the selection kept',
     );
   });
 
