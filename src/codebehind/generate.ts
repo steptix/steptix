@@ -450,6 +450,7 @@ export async function generateStepEntry(
         substitute: stepSubstitution(binding, options.resolvedParameters, options.envData),
         ...(recordedCaptures && { recordedCaptures }),
         ...(options.secrets && { secrets: options.secrets }),
+        variables: new Set(Object.keys(options.resolvedParameters)),
       },
       options.signal,
     ),
@@ -486,6 +487,9 @@ export interface EntryCheckContext {
   recordedCaptures?: Record<string, string> | undefined;
   /** The run's mask set, applied to anything the checks quote. */
   secrets?: readonly string[] | undefined;
+  /** The variable names the run had when the step ran — so a context value read
+   *  as a variable (`step.getVar('baseUrl')`) is told from a real one. */
+  variables?: ReadonlySet<string> | undefined;
 }
 
 /**
@@ -548,7 +552,8 @@ async function askChecked(
     staleHandleComplaint(code) ??
     unwaitedReadComplaint(code) ??
     selfCheckInActingEntryComplaint(code) ??
-    unwaitedNavigationComplaint(code, checks.actions, checks.secrets);
+    unwaitedNavigationComplaint(code, checks.actions, checks.secrets) ??
+    contextValueAsVariableComplaint(code, checks.variables);
 
   const firstRead = readFault(first.code);
   const firstOther = otherFault(first.code);
@@ -672,6 +677,13 @@ function warnRemainingFaults(code: string, label: string, checks: EntryCheckCont
         `check as an assertion. ${stillSelfCheck}`,
     );
   }
+  const stillContextVariable = contextValueAsVariableComplaint(code, checks.variables);
+  if (stillContextVariable !== undefined) {
+    logger.warn(
+      `Code-behind for "${label}" still reads a context value as a variable; it answers undefined on ` +
+        `replay. ${stillContextVariable}`,
+    );
+  }
   const stillUnwaitedNavigation = unwaitedNavigationComplaint(code, checks.actions, checks.secrets);
   if (stillUnwaitedNavigation !== undefined) {
     logger.warn(
@@ -691,7 +703,8 @@ export interface EntryFault {
     | 'stale-handle'
     | 'unwaited-read'
     | 'self-check-in-acting-entry'
-    | 'unwaited-navigation';
+    | 'unwaited-navigation'
+    | 'context-value-as-variable';
   complaint: string;
   /** The recorded selector, for a `read` fault. */
   selector?: string;
@@ -712,6 +725,7 @@ export function entryFaults(
     substitute?: ((text: string) => string) | undefined;
     recordedCaptures?: Record<string, string> | undefined;
     secrets?: readonly string[] | undefined;
+    variables?: ReadonlySet<string> | undefined;
   },
 ): EntryFault[] {
   const actions = [...(ctx.actions ?? [])];
@@ -731,6 +745,7 @@ export function entryFaults(
     ['unwaited-read', unwaitedReadComplaint(code)],
     ['self-check-in-acting-entry', selfCheckInActingEntryComplaint(code)],
     ['unwaited-navigation', unwaitedNavigationComplaint(code, actions, ctx.secrets)],
+    ['context-value-as-variable', contextValueAsVariableComplaint(code, ctx.variables)],
   ];
   for (const [check, complaint] of found) {
     if (complaint !== undefined) out.push({ check, complaint });
@@ -1345,6 +1360,36 @@ export function undeclaredContextComplaint(code: string): string | undefined {
     return complaint(name);
   }
   return undefined;
+}
+
+/** `step.getVar('baseUrl')` — a context value asked for as a test variable. */
+const GETVAR_OF_CONTEXT_VALUE = /\bgetVar\s*\(\s*(['"`])(baseUrl)\1\s*\)/;
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * a context VALUE read as a test variable: `step.getVar('baseUrl')`.
+ *
+ * Measured live: the entry for "Navigate to the baseUrl" read
+ * `const baseUrl = step.getVar('baseUrl')` and called `page.goto(baseUrl)`. No
+ * variable of that name exists — the base URL is the context's `baseUrl` — so
+ * `getVar` answered undefined and the step fell back to AI on the replay.
+ * `undeclaredContextComplaint` cannot see it: the name IS declared, as a local.
+ * `variables` are the names the run had when the step ran; a test that does
+ * define a variable of that name gets no complaint.
+ */
+export function contextValueAsVariableComplaint(
+  code: string,
+  variables?: ReadonlySet<string>,
+): string | undefined {
+  const found = GETVAR_OF_CONTEXT_VALUE.exec(code);
+  if (!found) return undefined;
+  const name = found[2]!;
+  if (variables?.has(name)) return undefined;
+  return (
+    `The entry reads \`step.getVar('${name}')\`, but no test variable is called \`${name}\` — on replay it ` +
+    `answers undefined. \`${name}\` is part of the context: take it in the parameter list ` +
+    `(\`async run({ page, step, ${name} })\`) and use it directly.`
+  );
 }
 
 /** `page.locator(` / `await frame.click(` — a strict-mode call on the raw page.

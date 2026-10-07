@@ -288,6 +288,9 @@ export interface EntryEvidence {
   /** `stepSubstitution` for that pass. */
   substitute?: ((text: string) => string) | undefined;
   recordedCaptures?: Record<string, string> | undefined;
+  /** The variable names that pass had, so a context value read as a variable
+   *  (`step.getVar('baseUrl')`) is told from a real one. */
+  variables?: ReadonlySet<string> | undefined;
 }
 
 /** The key an {@link EntryEvidence} is stored and found under. */
@@ -544,6 +547,7 @@ function newlyFaulted(
         actions: known.actions,
         ...(known.substitute && { substitute: known.substitute }),
         ...(known.recordedCaptures && { recordedCaptures: known.recordedCaptures }),
+        ...(known.variables && { variables: known.variables }),
       }),
     };
     const had = new Set(entryFaults(pair.before, ctx).map((f) => f.check));

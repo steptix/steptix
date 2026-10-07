@@ -1566,6 +1566,7 @@ export class LiveCompiler {
       actions: actionsOf(input.result),
       substitute: stepSubstitution(binding, input.resolvedParameters, this.options.envData),
       ...(recordedCaptures && { recordedCaptures }),
+      variables: new Set(Object.keys(input.resolvedParameters)),
     });
     // A step that only reads is written from this pass's recording, with no
     // model (docs/specs/SPEC-codebehind-robustness.md §6.6). Ahead of the
@@ -1718,6 +1719,7 @@ export class LiveCompiler {
         substitute: stepSubstitution(binding, input.resolvedParameters, this.options.envData),
         ...(recordedCaptures && { recordedCaptures }),
         secrets,
+        variables: new Set(Object.keys(input.resolvedParameters)),
       },
       this.signal,
     );

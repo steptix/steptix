@@ -941,6 +941,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       actions: actionsOf(result),
       substitute: stepSubstitution(step.binding!, passValues, test.envData),
       ...(evidenceCaptures && { recordedCaptures: evidenceCaptures }),
+      variables: new Set(Object.keys(passValues)),
     });
     // An evidence pass that HEALED — its entry threw and the step ran under AI,
     // which is how a stale step joins the selection — is repaired rather than
@@ -3101,6 +3102,7 @@ async function repairStep(
       substitute: stepSubstitution(step.binding!, values, options.test.envData),
       ...(extras.recordedCaptures && { recordedCaptures: extras.recordedCaptures }),
       secrets: extras.secrets,
+      variables: new Set(Object.keys(values)),
     },
     options.signal,
   );
@@ -3210,6 +3212,7 @@ async function repairHealedStep(
       substitute: stepSubstitution(binding, values, options.test.envData),
       ...(recordedCaptures && { recordedCaptures }),
       secrets,
+      variables: new Set(Object.keys(values)),
     },
     options.signal,
   );

@@ -2133,7 +2133,7 @@ The "entry" string holds one TypeScript object literal with exactly this shape:
 - \`await step.settle()\` — wait until what your actions so far started is over: every request they began on this site (the navigation a login answer starts included), then the page holding still. It names no URL, so it is right for a data row whose click navigates and one whose click only shows an error. It never throws.${offersSelfCheck(input.actions) ? SELF_CHECK_API : ''}${recordedReadApi(input.actions)}
 - \`step.filePath(relative)\` — turns a path written in a step (relative to the test file's folder) into the absolute path Playwright needs. Synchronous; throws if the file is missing.${claimsFlowControl ? FLOW_CONTROL_API : ''}${claimsFail ? FAIL_API : ''}
 - \`log.info(...)\` / \`log.warn(...)\` / \`log.error(...)\` — recorded into the report.
-- \`baseUrl\` — the test's configured base URL, when it has one.
+- \`baseUrl\` — the test's configured base URL, when it has one. It is part of the context, not a variable: take it in the parameter list (\`async run({ page, step, baseUrl })\`), never \`step.getVar('baseUrl')\`, which answers undefined.
 - \`tabs\` — tab control, the code equivalent of the \`openPage\` / \`switchPage\` / \`closePage\` actions:
   - \`await tabs.open(url, { as })\` — open a new tab at \`url\` and make it active. \`as\` is optional and names it.
   - \`await tabs.openedBy(() => ...)\` — run the callback and adopt the tab the PAGE opened (a \`window.open\`, or a click on \`target="_blank"\`). Use this whenever the transcript is a \`click\` followed by a \`switchPage\`: the wait is armed before the click, so there is no race.

@@ -15,6 +15,8 @@ import { readFileSync } from 'node:fs';
 import {
   aiEntryFor,
   ambiguousSelectorComplaint,
+  contextValueAsVariableComplaint,
+  entryFaults,
   generateStepEntry,
   refuseReason,
   stepParameters,
@@ -645,6 +647,84 @@ describe('undeclaredContextComplaint', () => {
       // `info.browsers` is a property access, not a bare `browsers.` use —
       // but `step` IS used bare and undeclared, so that is what it reports.
     ).toMatch(/`step`/);
+  });
+});
+
+describe('contextValueAsVariableComplaint', () => {
+  // Reproduced live (compile-codebehind.test.cjs, 2 of 5 runs): the reviewed
+  // entry for "Navigate to the baseUrl", verbatim. No variable is called
+  // `baseUrl`, so `getVar` answered undefined and every replay healed it.
+  const READS_BASEURL_AS_VARIABLE = `{
+  source: 'Navigate to the baseUrl',
+  async run({ page, step }) {
+    const baseUrl = step.getVar('baseUrl');
+    await page.goto(baseUrl);
+    await step.settle();
+    const destination = new URL(baseUrl).href;
+    await page.waitForURL(destination);
+    step.expect(page.url() === destination, 'The page URL matches the base URL');
+  },
+}`;
+  const TAKES_BASEURL_FROM_CONTEXT = READS_BASEURL_AS_VARIABLE.replace(
+    "async run({ page, step }) {\n    const baseUrl = step.getVar('baseUrl');",
+    'async run({ page, step, baseUrl }) {',
+  );
+
+  it('catches the context value read as a variable', () => {
+    const complaint = contextValueAsVariableComplaint(READS_BASEURL_AS_VARIABLE, new Set(['username']));
+    expect(complaint).toBe(
+      "The entry reads `step.getVar('baseUrl')`, but no test variable is called `baseUrl` — on replay it " +
+        'answers undefined. `baseUrl` is part of the context: take it in the parameter list ' +
+        '(`async run({ page, step, baseUrl })`) and use it directly.',
+    );
+    expect(contextValueAsVariableComplaint('await page.goto(step.getVar("baseUrl"));')).toBeDefined();
+    expect(contextValueAsVariableComplaint('await page.goto(step.getVar(`baseUrl`));')).toBeDefined();
+  });
+
+  it('stays quiet for the context value taken from the context, or a test that has such a variable', () => {
+    expect(contextValueAsVariableComplaint(TAKES_BASEURL_FROM_CONTEXT, new Set())).toBeUndefined();
+    expect(contextValueAsVariableComplaint(READS_BASEURL_AS_VARIABLE, new Set(['baseUrl']))).toBeUndefined();
+    expect(contextValueAsVariableComplaint("step.getVar('baseUrlForApi')")).toBeUndefined();
+  });
+
+  it('is one of the faults Review holds a revision to', () => {
+    expect(entryFaults(READS_BASEURL_AS_VARIABLE, { source: 'Navigate to the baseUrl' }).map((f) => f.check)).toContain(
+      'context-value-as-variable',
+    );
+    expect(
+      entryFaults(READS_BASEURL_AS_VARIABLE, { source: 'Navigate to the baseUrl', variables: new Set(['baseUrl']) })
+        .map((f) => f.check),
+    ).not.toContain('context-value-as-variable');
+  });
+
+  it('makes generation re-ask once, and keeps the answer that takes it from the context', async () => {
+    const prompts: string[] = [];
+    const answers = [READS_BASEURL_AS_VARIABLE, TAKES_BASEURL_FROM_CONTEXT];
+    const client = {
+      complete: async (messages: ChatMessage[]) => {
+        const last = messages[messages.length - 1]!;
+        prompts.push(typeof last.content === 'string' ? last.content : contentBlocksToText(last.content));
+        return { text: JSON.stringify({ entry: answers[Math.min(prompts.length - 1, 1)] }), model: 'stub' };
+      },
+    } as unknown as AiClient;
+    const result = await generateStepEntry({
+      binding: {
+        file: path.resolve(path.sep, 'nowhere', 'x.steps.ts'),
+        source: 'Navigate to the baseUrl',
+        occurrence: 0,
+        scope: { renames: {}, inputs: {} },
+      },
+      actions: [{ action: 'navigate', url: 'http://localhost:8787', description: 'Navigate to the base URL' }],
+      resolvedParameters: {},
+      aiClient: client,
+      contextContent: '',
+      testName: 'compile-codebehind.md',
+      baseUrl: 'http://localhost:8787',
+    });
+    expect(result).toMatchObject({ kind: 'entry', code: TAKES_BASEURL_FROM_CONTEXT });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toContain("never `step.getVar('baseUrl')`, which answers undefined");
+    expect(prompts[1]).toContain("The entry reads `step.getVar('baseUrl')`, but no test variable is called `baseUrl`");
   });
 });
 
