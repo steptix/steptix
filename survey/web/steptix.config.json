@@ -1,0 +1,12 @@
+{
+  "browser": {
+    "headed": true
+  },
+  "tests": {
+    "dir": "./tests",
+    "contextDir": "./context"
+  },
+  "reports": {
+    "outputDir": "./reports"
+  }
+}
