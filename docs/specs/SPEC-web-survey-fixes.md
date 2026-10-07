@@ -28,6 +28,7 @@ in the test files, not here.
 | 2.12 | Wrong "no value" warnings | every run that captures a value | The MCP run result warns that `{{x}}` "will reach the AI literally" when an earlier `[as: x]` step fills it | Treat names captured by earlier steps as defined |
 | 2.13 | Waits cannot compare numbers | 42 | A `wait` on an attribute matches one exact value, so `aria-valuenow=75` misses a bar that steps past 75 | Accept `>=`, `<=`, `>` and `<` in attribute waits |
 | 2.14 | Assertion replies in the wrong shape | 53, 54 in the first run with the fixes; 51, 68 recovered earlier | The assertion prompt asks for `{ "code": … }` but goes out beside the action system prompt, so the model sometimes replies `{ "actions": [ … ] }`. The retry sent the same prompt and got the same reply | Take the code from inside an `actions` reply or a ```` ```js ```` fence, and tell the model what was wrong before asking again |
+| 2.16 | Passed checks are forgotten | 46 in the first run with the fixes | Passed assertions are left out of the "completed actions" the next turn is shown. A step that verifies two things checked the first, asked to continue, and checked it again, 15 times | List each passed assertion in the next turn's completed actions, with the value it read |
 | 2.15 | Range values outside the slider | 46 in the first run with the fixes | "Set the slider to its maximum" was typed as `100` into a slider that stops at 10, which Playwright refuses as malformed | Clamp a range value to the input's own `min` and `max`, and read `max` and `min` as the two ends |
 
 ## 2. Fixes
@@ -197,6 +198,13 @@ to send, instead of the first prompt again.
 **Fix.** `executeType` reads a range input's `min` and `max` (HTML's defaults
 are 0 and 100) and clamps a numeric value to them. `max`, `maximum`, `min` and
 `minimum` are taken as the two ends.
+
+### 2.16 Passed checks are remembered
+
+**Fix.** The step loop records each assertion that passes and adds it to the
+next turn's "completed actions" as `Verified, and it PASSED: <description>
+(read "<value>"). Do not check this again`. A failed assertion still ends the
+turn as before.
 
 ## 3. Failures caused by the test files or the sites
 

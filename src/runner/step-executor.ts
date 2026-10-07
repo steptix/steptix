@@ -1902,6 +1902,12 @@ export function secretsFor(opts: StepExecutorOptions): string[] {
 
 /** Every name the test's steps capture — `[store as: x]` and `store as {{x}}`.
  *  Used only to make a refusal say "captured later" instead of "unknown". */
+/** A value short enough to quote back to the model in one line. */
+function truncateForPrompt(value: string, max = 120): string {
+  const flat = value.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
 function namesDefinedIn(steps: readonly string[]): ReadonlySet<string> {
   const out = new Set<string>();
   for (const step of steps) {
@@ -2547,6 +2553,8 @@ async function executeStepAttempt(
   // Accumulated across all turns
   const allTurns: TurnResult[] = [];
   const allCompletedActions: Array<{ action: string; description: string; selector?: string }> = [];
+  /** This turn's passed assertions, moved into `allCompletedActions` at its end. */
+  const passedChecks: Array<{ action: string; description: string }> = [];
   const collectedFailures: PriorFailureContext[] = [];
   const attemptStartUrl = page.url();
   /** Results from find/expand exploration actions — included in the continuation message */
@@ -3237,6 +3245,16 @@ async function executeStepAttempt(
           turnError = `Assertion failed: ${assertResult.description} — expected "${assertResult.expected}", got "${assertResult.actual}"`;
           break;
         }
+        // A check that PASSED is progress the next turn must be told about.
+        // Asserts are kept out of the continuation's action list (below), so
+        // a step that verifies two things checked the first, asked to go on,
+        // and was shown nothing saying it had: it checked "Form submitted"
+        // fifteen times and never reached "Received!"
+        // (docs/specs/SPEC-web-survey-fixes.md §2.16).
+        passedChecks.push({
+          action: 'assert',
+          description: `Verified, and it PASSED: ${assertResult.description} (read "${truncateForPrompt(assertResult.actual)}"). Do not check this again`,
+        });
         continue;
       }
 
@@ -3951,6 +3969,8 @@ async function executeStepAttempt(
           description: a.description,
           ...(a.selector ? { selector: a.selector } : {}),
         })),
+      // …and the checks that passed, as checks rather than as actions.
+      ...passedChecks.splice(0),
     );
 
     // Remember whether this turn's effective action was a "wait" so next turn
