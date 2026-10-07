@@ -607,6 +607,132 @@ describe('executeStep — multi-turn integration', () => {
   });
 });
 
+// ─── A bare action object with no needs_reeval ───────────────────────────────
+//
+// Measured in a live run: "Upload file \attachments\statement.pdf as the
+// statement, then click Upload" was answered with a bare upload object and no
+// needs_reeval, and the step passed without ever clicking Upload. A bare action
+// that changed the page gets one more look; anything else ends the step as
+// before.
+
+describe('executeStep — a bare action that leaves needs_reeval unstated', () => {
+  function run(responses: object[], instruction: string, maxTurns = 5) {
+    const page = makeMockPage();
+    const aiClient = makeAiClient(responses.map((r) => JSON.stringify(r)));
+    const result = executeStep(1, 1, instruction, {
+      page,
+      config: makeConfig(maxTurns),
+      aiClient,
+      contextContent: '',
+      testName: 'test',
+      conversationHistory: [],
+      csrfTokens: {},
+    });
+    return { page, aiClient, result };
+  }
+
+  const actionsOf = (turns: Awaited<ReturnType<typeof executeStep>>['turns']) =>
+    turns.map((t) => t.subActions.map((s) => s.action.action));
+
+  it('re-evaluates after a bare mutating action, so the rest of the step still runs', async () => {
+    const { page, aiClient, result } = run(
+      [
+        { action: 'type', selector: '#name', value: 'Ada', description: 'Enter the name' },
+        { actions: [{ action: 'click', selector: '#save', description: 'Click Save' }], reasoning: 'r', needs_reeval: false },
+      ],
+      'enter Ada as the name, then click Save',
+    );
+    const step = await result;
+
+    expect(step.status).toBe('passed');
+    expect(actionsOf(step.turns)).toEqual([['type'], ['click']]);
+    expect(aiClient.complete).toHaveBeenCalledTimes(2);
+    expect(page.locator('#save').click).toHaveBeenCalled();
+  });
+
+  it('ends a finished step on the noop the extra turn answers with', async () => {
+    const { aiClient, result } = run(
+      [
+        { action: 'click', selector: '#save', description: 'Click Save' },
+        { action: 'noop', description: 'Save was clicked; nothing left to do' },
+      ],
+      'click Save',
+    );
+    const step = await result;
+
+    expect(step.status).toBe('passed');
+    expect(step.turns).toHaveLength(2);
+    expect(aiClient.complete).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['noop', { action: 'noop', description: 'Already on the page' }],
+    ['count', { action: 'count', selector: '.row', as: 'rows', description: 'Count rows' }],
+    // A wait settles the page rather than leaving the step half done, and a
+    // second bare wait on an idle page would trip stall detection.
+    ['wait', { action: 'wait', waitType: 'selector', condition: '#ready', description: 'Wait for ready' }],
+  ])('a bare %s stays terminal', async (_label, response) => {
+    const { aiClient, result } = run([response], 'count the rows if there are any');
+    const step = await result;
+
+    expect(step.status).toBe('passed');
+    expect(step.turns).toHaveLength(1);
+    expect(aiClient.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('a bare mutating action that says needs_reeval: false is taken at its word', async () => {
+    const { aiClient, result } = run(
+      [{ action: 'click', selector: '#save', description: 'Click Save', needs_reeval: false }],
+      'click Save',
+    );
+    const step = await result;
+
+    expect(step.status).toBe('passed');
+    expect(step.turns).toHaveLength(1);
+    expect(aiClient.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('a wrapped mutating action that omits needs_reeval still ends the step (rule 15)', async () => {
+    const { aiClient, result } = run(
+      [{ actions: [{ action: 'click', selector: '#save', description: 'Click Save' }], reasoning: 'r' }],
+      'click Save',
+    );
+    const step = await result;
+
+    expect(step.status).toBe('passed');
+    expect(step.turns).toHaveLength(1);
+    expect(aiClient.complete).toHaveBeenCalledTimes(1);
+  });
+
+  // A model that answers bare once tends to answer bare again. Re-evaluating
+  // every time would click a wizard's Next until the turn cap.
+  it('re-evaluates at most once per step', async () => {
+    const { page, aiClient, result } = run(
+      [{ action: 'click', selector: '#next', description: 'Click Next' }],
+      'click Next',
+    );
+    const step = await result;
+
+    expect(step.status).toBe('passed');
+    expect(step.turns).toHaveLength(2);
+    expect(aiClient.complete).toHaveBeenCalledTimes(2);
+    expect(page.locator('#next').click).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not fail on the turn cap: the model never asked for another turn', async () => {
+    const { aiClient, result } = run(
+      [{ action: 'click', selector: '#next', description: 'Click Next' }],
+      'click Next',
+      1,
+    );
+    const step = await result;
+
+    expect(step.status).toBe('passed');
+    expect(step.turns).toHaveLength(1);
+    expect(aiClient.complete).toHaveBeenCalledTimes(1);
+  });
+});
+
 // ─── switchPage / openPage bring the tab forward (cdp-tab-focus.md §4) ───────
 
 import { PageTracker } from '../src/browser/manager.js';

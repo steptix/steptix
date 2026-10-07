@@ -27,7 +27,7 @@ network.
 
 ### Sign in
 1. If the page title contains "Dashboard" then return
-2. Reject non-essential cookies in the cookie banner
+2. If the cookie banner is shown, then Reject non-essential cookies in the cookie banner
 3. Enter the username {{username}}
 4. Enter the password {{password}}
 5. Click the Sign in button

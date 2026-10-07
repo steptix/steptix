@@ -90,6 +90,44 @@ describe('parseAIResponse', () => {
     expect(result.actions[0]?.action).toBe('keyboard');
     expect(result.actions[0]?.key).toBe('Enter');
     expect(result.needs_reeval).toBe(true);
+    expect(result.reevalUnstated).toBeUndefined();
+  });
+
+  // A bare action that says nothing about needs_reeval has not said the step
+  // is done; the executor decides what to do about that (multi-turn.test.ts).
+  it('flags a bare action object that leaves needs_reeval unstated', () => {
+    const raw = JSON.stringify({
+      action: 'upload',
+      selector: '#statement-file',
+      filePath: '/attachments/statement.pdf',
+      description: 'Upload statement.pdf as the statement',
+    });
+    const result = parseAIResponse(raw);
+    expect(result.actions[0]?.action).toBe('upload');
+    expect(result.needs_reeval).toBeUndefined();
+    expect(result.reevalUnstated).toBe(true);
+  });
+
+  it.each([true, false])('does not flag a bare action object that sets needs_reeval: %s', (value) => {
+    const raw = JSON.stringify({ action: 'click', selector: '#upload', description: 'Click Upload', needs_reeval: value });
+    expect(parseAIResponse(raw).reevalUnstated).toBeUndefined();
+  });
+
+  it('flags a bare action whose needs_reeval is not a boolean', () => {
+    const raw = JSON.stringify({ action: 'click', selector: '#upload', description: 'Click Upload', needs_reeval: 'false' });
+    expect(parseAIResponse(raw).reevalUnstated).toBe(true);
+  });
+
+  // A bare array skipped the wrapper too, and has no place for the field.
+  it('flags a bare array, which cannot carry needs_reeval', () => {
+    const raw = JSON.stringify([{ action: 'click', selector: '#b', description: 'Click' }]);
+    expect(parseAIResponse(raw).reevalUnstated).toBe(true);
+  });
+
+  // Rule 15 lets the wrapper omit needs_reeval to mean "done".
+  it('does not flag a wrapped response that omits needs_reeval', () => {
+    const raw = JSON.stringify({ actions: [{ action: 'click', selector: '#b', description: 'Click' }], reasoning: 'r' });
+    expect(parseAIResponse(raw).reevalUnstated).toBeUndefined();
   });
 
   // Every field parseAction copies as it comes, one row each: a field the copy

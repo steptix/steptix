@@ -356,6 +356,14 @@ export interface AIResponse {
    * The executor will re-evaluate after executing the returned actions.
    */
   needs_reeval?: boolean;
+  /**
+   * True when the model answered with a bare action object or bare array —
+   * no `actions` wrapper — and gave no boolean `needs_reeval` either. A wrapped response
+   * that omits `needs_reeval` is saying "done" (system prompt rule 15); a bare
+   * one has skipped the whole wrapper, so its silence says nothing about
+   * whether the step is finished. The executor decides what that means.
+   */
+  reevalUnstated?: true;
 }
 
 /** AI response for a branched (conditional) step evaluation */

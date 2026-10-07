@@ -21,9 +21,9 @@ credentials are rejected. Neither matters to the narrowing scenario, which
 never gets as far as clicking Sign In — the section types and stops, and what
 is being checked is which steps ran, not whether the sign-in worked.
 
-The cookie banner is remembered in `localStorage`, so step 2 has something to
-click on the first run of a fresh browser and nothing to click on a re-run in
-the same one.
+The cookie banner is remembered in `localStorage`: a fresh browser shows it,
+a re-run in the same one does not, and the model asked to reject a missing
+banner answers with a question that fails an unattended run. Hence the `If`.
 
 ## Config
 - baseUrl: http://localhost:8787/
@@ -32,7 +32,7 @@ the same one.
 
 ## Steps
 1. Navigate to the baseUrl
-2. Reject non-essential cookies in the cookie banner
+2. If the cookie banner is shown, then Reject non-essential cookies in the cookie banner
 3. Log In
 
 ### Log In

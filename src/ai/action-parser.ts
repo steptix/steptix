@@ -722,16 +722,21 @@ function validateAndNormaliseResponse(parsed: unknown): AIResponse {
   // Accept three response shapes:
   //   1. { actions: [...] }            — canonical
   //   2. [...]                         — bare array
-  //   3. { action: "...", ... }        — single action object (common with smaller
-  //                                      models that read "Return exactly ONE action"
-  //                                      literally and skip the actions wrapper)
+  //   3. { action: "...", ... }        — single action object (models that read
+  //                                      "Return exactly ONE action" literally and
+  //                                      skip the actions wrapper; about 1 response
+  //                                      in 16 in live runs). Flagged below when it
+  //                                      also leaves needs_reeval unstated.
   let rawActions: unknown[];
+  let bare = false;
   if (Array.isArray(obj)) {
     rawActions = obj;
+    bare = true;
   } else if (Array.isArray(obj['actions'])) {
     rawActions = obj['actions'];
   } else if (typeof obj['action'] === 'string') {
     rawActions = [obj];
+    bare = true;
   } else {
     throw new Error('AI response must have an "actions" array');
   }
@@ -744,8 +749,17 @@ function validateAndNormaliseResponse(parsed: unknown): AIResponse {
     typeof obj['reasoning'] === 'string' ? obj['reasoning'] : 'No reasoning provided';
 
   const needs_reeval = obj['needs_reeval'] === true ? true : undefined;
+  // A bare action or bare array that says nothing about needs_reeval has not
+  // told us the step is done — see AIResponse.reevalUnstated. An explicit
+  // false still is. (An array cannot carry the field at all.)
+  const reevalUnstated = bare && typeof obj['needs_reeval'] !== 'boolean';
 
-  return { actions, reasoning, ...(needs_reeval !== undefined && { needs_reeval }) };
+  return {
+    actions,
+    reasoning,
+    ...(needs_reeval !== undefined && { needs_reeval }),
+    ...(reevalUnstated && { reevalUnstated: true as const }),
+  };
 }
 
 function parseAction(raw: unknown, index: number): AIAction {
