@@ -799,6 +799,13 @@ export interface DomSearchMatch {
   attributes: string;
   /** Ancestor chain for orientation (e.g. "main > div#content > table") */
   context: string;
+  /**
+   * Present when the match is not rendered: the labels of the collapsed
+   * sections around it, outermost first — what a person would open to reach
+   * it (SPEC-web-survey-fixes.md §2.28). Empty when it is hidden but no label
+   * could be read.
+   */
+  collapsedUnder?: string[];
 }
 
 /** Aggregate result of a findInDom call. */
@@ -1203,7 +1210,12 @@ export function formatFindResults(result: DomSearchResult, query: string, contai
 
   const lines = result.matches.map((m, i) => {
     const contextPart = m.context ? ` (in ${m.context})` : '';
-    return `${i + 1}. <${m.tag}${m.attributes ? ' ' + m.attributes : ''}> "${m.text}"${contextPart}\n   selector: ${m.selector}`;
+    const hiddenPart = m.collapsedUnder === undefined
+      ? ''
+      : m.collapsedUnder.length > 0
+        ? `\n   hidden — inside collapsed: ${m.collapsedUnder.join(' › ')}. Open those first, outermost first; clicking it while hidden times out`
+        : '\n   hidden — not visible right now; reveal it before acting on it';
+    return `${i + 1}. <${m.tag}${m.attributes ? ' ' + m.attributes : ''}> "${m.text}"${contextPart}\n   selector: ${m.selector}${hiddenPart}`;
   });
 
   const shown = result.matches.length;

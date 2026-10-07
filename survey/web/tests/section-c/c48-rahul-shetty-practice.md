@@ -36,7 +36,7 @@ whole other site.
 16. Verify that {{course_price}} equals 25
 17. Hover over "Mouse Hover" and click "Top"
 18. Click "Open Tab" and switch to the tab it opened
-19. Verify the tab shows the Rahul Shetty Academy site
+19. Verify the address of the tab contains "qaclickacademy.com"
 20. Switch back to the main tab
 21. Read the heading of the first section inside the iframe [as: iframe_heading]
 22. Verify that "{{iframe_heading}}" is not empty

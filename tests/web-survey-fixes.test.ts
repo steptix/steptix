@@ -13,7 +13,7 @@ import { executeAction, normaliseColour, normaliseKeyName, scrollToFitBoth, wait
 import { parseAIResponse, parseAssertionCode } from '../src/ai/action-parser.js';
 import { installDialogGuard, isAdRequest } from '../src/browser/manager.js';
 import { dialogRecords, disarmDialog } from '../src/browser/dialogs.js';
-import { captureDomSnapshot } from '../src/browser/dom-cleaner.js';
+import { captureDomSnapshot, findInDom, formatFindResults } from '../src/browser/dom-cleaner.js';
 import { describeWhereExpectedIs, expectedFragments } from '../src/browser/locate-text.js';
 import type { AIAction } from '../src/ai/types.js';
 
@@ -639,6 +639,96 @@ describe('§2.25 a failed check says where the expected text is', () => {
       // A hidden copy is not somewhere the step could mean.
       expect(where).not.toContain('span');
       expect(await describeWhereExpectedIs(page, 'Nowhere to be found')).toBe('');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('§2.26 open shadow roots are in the snapshot', () => {
+  it('shows a field inside an open root, marks where the root is, and leaves a closed one out', async () => {
+    const page = await pageWith(`
+      <div id="open-shadow"></div>
+      <closed-thing></closed-thing>
+      <iframe id="light" srcdoc="<p>light frame</p>"></iframe>
+      <script>
+        document.getElementById('open-shadow').attachShadow({ mode: 'open' }).innerHTML =
+          '<label for="fname">First name</label><input id="fname"><iframe srcdoc="<p>shadow frame</p>"></iframe>';
+        document.querySelector('closed-thing').attachShadow({ mode: 'closed' }).innerHTML = '<input id="lname">';
+      </script>`);
+    try {
+      await page.waitForFunction(() => document.querySelectorAll('iframe').length === 1);
+      await page.frameLocator('#light').locator('p').waitFor();
+      const snap = await captureDomSnapshot(page);
+      expect(snap).toMatch(/<div id="open-shadow">\s*<!-- shadow-root \(open\) -->[\s\S]*<input id="fname">[\s\S]*<!-- \/shadow-root -->/);
+      expect(snap).not.toContain('lname');
+      // The frame inside the root is shown, not expanded; the light-DOM frame
+      // still gets its own content, so the frame indices did not shift.
+      expect(snap).toContain('inside a shadow root: contents not captured');
+      expect(snap).toContain('light frame');
+      expect(snap).not.toContain('shadow frame');
+      // And the selector the snapshot suggests works as an action selector.
+      const result = await executeAction(page, act({ action: 'type', selector: '#fname', value: 'Survey' }));
+      expect(result.success).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('§2.27 typing where fill cannot', () => {
+  it('clicks a custom element and types into the field in its closed shadow root', async () => {
+    const page = await pageWith(`
+      <my-web-component style="display: block; width: 300px"></my-web-component>
+      <script>
+        const root = document.querySelector('my-web-component').attachShadow({ mode: 'closed' });
+        root.innerHTML = '<input id="lname" style="width: 290px">';
+        window.__lname = () => root.getElementById('lname').value;
+      </script>`);
+    try {
+      const result = await executeAction(page, act({ action: 'type', selector: 'my-web-component', value: 'Tester' }));
+      expect(result.success).toBe(true);
+      expect(await page.evaluate(() => (window as unknown as { __lname: () => string }).__lname())).toBe('Tester');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('types text into whatever has focus with keyboard "text"', async () => {
+    expect(one({ action: 'keyboard', text: 'Tester' })).toMatchObject({ action: 'keyboard', text: 'Tester' });
+    const page = await pageWith('<input id="f">');
+    try {
+      await page.focus('#f');
+      const result = await executeAction(page, act({ action: 'keyboard', text: 'Tester' }));
+      expect(result.success).toBe(true);
+      expect(await page.inputValue('#f')).toBe('Tester');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('§2.28 find says which collapsed sections hide a match', () => {
+  it('names the sections to open, outermost first, and says nothing for a visible match', async () => {
+    // The shape of a Docsy sidebar: LI > label + a folded UL, two levels deep.
+    const page = await pageWith(`
+      <ul>
+        <li><label>Challenges</label>
+          <ul style="display: none">
+            <li><label>Synchronization</label>
+              <ul style="display: none"><li><a href="/dyn1">Dynamic Buttons 01</a></li></ul>
+            </li>
+          </ul>
+        </li>
+      </ul>
+      <p>Dynamic Buttons 01 is a challenge</p>`);
+    try {
+      const out = formatFindResults(await findInDom(page, 'Dynamic Buttons 01'), 'Dynamic Buttons 01');
+      expect(out).toContain('hidden — inside collapsed: Challenges › Synchronization');
+      const [hiddenLine, visibleLine] = out.split(/\n(?=\d+\. )/).slice(1);
+      expect(hiddenLine).toContain('<a href="/dyn1">');
+      expect(visibleLine).toContain('<p>');
+      expect(visibleLine).not.toContain('hidden');
     } finally {
       await page.close();
     }

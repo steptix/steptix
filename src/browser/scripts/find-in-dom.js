@@ -149,6 +149,43 @@
     return parts.join(' > ');
   }
 
+  function oneLine(v) {
+    return String(v || '').replace(/\s+/g, ' ').trim();
+  }
+
+  // What a person opens to reveal `container`: the text beside it in its parent
+  // — a Docsy or Bootstrap sidebar is LI > (label | a | button) + UL — else its
+  // previous sibling's text. '' when there is none to read.
+  function sectionLabel(container) {
+    var parent = container.parentElement;
+    if (parent) {
+      for (var i = 0; i < parent.children.length; i++) {
+        var c = parent.children[i];
+        if (c === container) continue;
+        var t = oneLine(c.textContent);
+        if (t) return t.substring(0, 60);
+      }
+    }
+    var prev = container.previousElementSibling;
+    return prev ? oneLine(prev.textContent).substring(0, 60) : '';
+  }
+
+  // null when `el` is rendered; otherwise the labels of the collapsed
+  // containers around it, outermost first (§2.28).
+  function collapsedUnder(el) {
+    var labels = [];
+    var hidden = false;
+    for (var cur = el; cur && cur !== document.body; cur = cur.parentElement) {
+      var cs = getComputedStyle(cur);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cur.hidden) {
+        hidden = true;
+        var label = cur === el ? '' : sectionLabel(cur);
+        if (label && labels.indexOf(label) < 0) labels.unshift(label);
+      }
+    }
+    return hidden ? labels : null;
+  }
+
   function walk(el) {
     if (totalMatches >= HARD_MAX) { hitHardMax = true; return; }
     var tag = el.tagName.toLowerCase();
@@ -170,13 +207,16 @@
     if (!hasChildMatch) {
       totalMatches++;
       if (matches.length < DISPLAY_CAP) {
-        matches.push({
+        var match = {
           selector: stableSelector(el),
           tag: tag,
           text: text.substring(0, 200),
           attributes: getKeyAttrs(el),
           context: getAncestorChain(el),
-        });
+        };
+        var under = collapsedUnder(el);
+        if (under !== null) match.collapsedUnder = under;
+        matches.push(match);
       }
       // Leaf match — no descendant contains the text, nothing deeper to find here.
       return;

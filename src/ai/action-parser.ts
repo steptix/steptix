@@ -994,6 +994,8 @@ function parseAction(raw: unknown, index: number): AIAction {
       .find((v): v is string => typeof v === 'string');
     if (text !== undefined) action.text = text;
   }
+  // §2.27: text typed into whatever has focus.
+  if (actionType === 'keyboard' && typeof obj['text'] === 'string' && obj['text'] !== '') action.text = obj['text'];
   applyAliasDefaults(action, rawActionType);
   // Upload paths (stories/upload-action.md §2). Normalised here so the cached
   // action and the compiled code-behind carry a relative, forward-slashed path

@@ -426,6 +426,8 @@
   }
 
   var iframeIdx = 0;
+  /** How many open shadow roots the walk is inside. */
+  var shadowDepth = 0;
 
   function processElement(el, depth) {
     var tag = el.tagName.toLowerCase();
@@ -474,6 +476,13 @@
            + indent + '</svg>\n';
     }
 
+    if (tag === 'iframe' && shadowDepth > 0) {
+      // Playwright's locator('iframe').all() lists shadow-root frames after
+      // every light-DOM one, so an index here would point injectFrameContent
+      // at the wrong frame. Shown, not expanded.
+      return indent + '<iframe' + getAttributes(el, tag) + '> <!-- inside a shadow root: contents not captured -->\n';
+    }
+
     if (tag === 'iframe') {
       var attrs = getAttributes(el, tag);
       var frameSelector = buildSelector(el);
@@ -489,8 +498,24 @@
       return indent + '<' + tag + attrs + '>\n';
     }
 
+    // An open shadow root is what the page renders, and Playwright's CSS
+    // selectors reach into it as written; without it a web component's fields
+    // were simply absent (SPEC-web-survey-fixes.md §2.26). A closed root is
+    // unreachable from page script, for Playwright too, so it stays invisible.
+    var shadowOutput = '';
+    if (el.shadowRoot) {
+      shadowDepth++;
+      try {
+        shadowOutput = indent + '  <!-- shadow-root (open) -->\n'
+          + processChildNodes(el.shadowRoot, depth + 1)
+          + indent + '  <!-- /shadow-root -->\n';
+      } finally {
+        shadowDepth--;
+      }
+    }
     var childOutput = processChildNodes(el, depth + 1);
     return indent + '<' + tag + attrs + '>\n'
+         + shadowOutput
          + childOutput
          + indent + '</' + tag + '>\n';
   }
@@ -577,7 +602,8 @@
 
               var firstOmitted = headCount + 1;
               var lastOmitted = headCount + omittedCount;
-              if (parentSel === null) parentSel = buildSelector(parent);
+              // A shadow root is not an element; its host is what a selector names.
+              if (parentSel === null) parentSel = buildSelector(parent.nodeType === 11 ? parent.host : parent);
               var parentPart = parentSel ? parentSel + ' > ' : '';
               output += indent + '<!-- ' + omittedCount + ' similar <' + runTag
                      + '> elements omitted (nth-of-type ' + firstOmitted + '..' + lastOmitted

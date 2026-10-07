@@ -481,7 +481,7 @@ export async function executeAction(
         break;
 
       case 'type':
-        await executeType(root, eff, remainingMs);
+        await executeType(page, root, eff, remainingMs);
         break;
 
       case 'dialog': {
@@ -923,6 +923,7 @@ const MALFORMED_WHEN_EMPTY = /Malformed value/i;
 const END_KEY_SAFE_TYPES = new Set(['text', 'search', 'email', 'password', 'url', 'tel', 'textarea', 'contenteditable']);
 
 async function executeType(
+  page: Page,
   root: Page | FrameLocator,
   action: AIAction,
   clearTimeoutMs?: number,
@@ -931,6 +932,16 @@ async function executeType(
   let value = action.value ?? '';
   const locator = root.locator(selector).locator('visible=true').first();
   await uncoverForTyping(locator);
+  // A custom element whose field lives in a CLOSED shadow root, a canvas
+  // editor, anything `fill` refuses as "not an <input>": click it and type,
+  // which is how a person reaches a field nothing can query
+  // (SPEC-web-survey-fixes.md §2.27).
+  if (!(await isFillable(locator))) {
+    await locator.click({ timeout: clearTimeoutMs ?? TYPE_CLEAR_TIMEOUT_MS });
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.type(value);
+    return;
+  }
   // Clear existing content first, then type. A colour, date or range input
   // cannot be empty, so its clear throws; `fill` replaces its value anyway.
   let clearable = true;
@@ -991,6 +1002,28 @@ async function uncoverForTyping(locator: Locator): Promise<void> {
     );
   } catch {
     // Best effort, never a reason to fail the type.
+  }
+}
+
+/**
+ * Can Playwright's `fill` take this element: an `<input>`, `<textarea>`,
+ * `<select>` or contenteditable, or a `<label>` for one? True when it cannot
+ * be told, so the ordinary path reports what is wrong.
+ */
+async function isFillable(locator: Locator): Promise<boolean> {
+  try {
+    return await locator.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any) => {
+        const tag = String(el.tagName);
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable) return true;
+        return tag === 'LABEL' && el.control != null;
+      },
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    return true;
   }
 }
 
@@ -2627,8 +2660,14 @@ async function executeDismiss(root: Page | FrameLocator, action: AIAction): Prom
 }
 
 async function executeKeyboard(page: Page, action: AIAction): Promise<void> {
+  // `text` types into whatever has focus (§2.27): after a click on a canvas,
+  // an editor, or a field inside a closed shadow root.
+  if (action.text !== undefined && action.text !== '') {
+    await page.keyboard.type(action.text);
+    if (action.key === undefined) return;
+  }
   const key = action.key ?? action.value ?? '';
-  if (!key) throw new Error('keyboard action requires a key');
+  if (!key) throw new Error('keyboard action requires a "key" to press or a "text" to type');
   await page.keyboard.press(normaliseKeyName(key));
 }
 

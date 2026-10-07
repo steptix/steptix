@@ -159,7 +159,8 @@ export interface AIAction {
   values?: string[];
   /** `count` only: count hidden matches too. Omitted counts visible matches. */
   includeHidden?: boolean;
-  /** `dialog` only: the text a prompt dialog is answered with. */
+  /** `dialog`: the text a prompt dialog is answered with. `keyboard`: text typed
+   *  into whatever has focus (SPEC-web-survey-fixes.md §2.27). */
   text?: string;
   /** Text to type, option value to select, or condition to wait for */
   value?: string;

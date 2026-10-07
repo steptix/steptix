@@ -39,6 +39,9 @@ in the test files, not here.
 | 2.23 | `browser.blockAds` ignored on the server | every survey run | On the server path, `browser.*` comes from the server's own config except for a listed few keys, and `blockAds` was not one of them. The survey project set it, and no session ever blocked an ad. A Google vignette covered test 40's last steps | Read `blockAds` off the session's project config at launch, as `launchArgs` already is |
 | 2.24 | No press-and-hold | 44 | There was no way to hold a button down. LetCode's "Click and Hold" button only reacts to a press of about two seconds, and `click` releases at once | `holdMs` on `click` (Playwright's `delay` between press and release), with `longPress`, `pressAndHold`, `clickAndHold` and similar names mapped onto it at 2 s |
 | 2.25 | A failed check does not say where the expected text is | 45 | An assertion that reads the wrong element fails with "expected X, got Y", and the retry is shown only that, so it reads the same element again. The form results page repeats the empty form above the results; both attempts read the empty textarea ("Comments...") | On a failed DOM assertion, find the smallest visible elements whose text contains the expected value (or a part of it) and add their CSS paths to the failure |
+| 2.26 | Shadow DOM missing from the snapshot | 44 | The snapshot walks `childNodes` only, so an open shadow root's content never appeared. LetCode's first-name field sat in `div#open-shadow`'s root, the snapshot showed the div empty, and the model guessed a selector that matched nothing | Walk each open shadow root before the element's light children, between `<!-- shadow-root (open) -->` markers; tell both prompts how to reach it |
+| 2.27 | No way to type where `fill` cannot | 44 | `type` uses `fill`, which only takes inputs, textareas and contenteditables, and `keyboard` only presses keys. A field inside a CLOSED shadow root cannot be queried by anyone, Playwright included, so there was no way to type into it | When the target is not fillable, `type` clicks it and types on the keyboard. `keyboard` takes `text` to type into whatever has focus |
+| 2.28 | `find` does not say a match is hidden | 45 | A sidebar entry two collapsed levels deep shows in the snapshot only as `<ul><!-- hidden --></ul>`. The model could not tell which section held "Dynamic Buttons 01", wandered for 15 turns, then clicked the hidden link until it timed out | Each `find` match that is not rendered says so and names the collapsed sections around it, outermost first; rule 19 says to `find` an unseen menu entry and open those sections first |
 
 ## 2. Fixes
 
@@ -329,6 +332,47 @@ the earlier attempts' check failures as a separate message, with the instruction
 not to read the same element again unless it is what the step means. When
 the text is nowhere on the page, nothing is added. The hint never passes a
 check; the retried assertion still has to read the value and compare.
+
+### 2.26 Open shadow roots in the snapshot
+
+**Fix.** `processElement` (capture-dom.js) emits an element's open
+`shadowRoot` children before its light children, between
+`<!-- shadow-root (open) -->` and `<!-- /shadow-root -->`, at the next indent.
+Hiding, attribute and collapse rules apply inside as anywhere else; a collapse
+marker inside a root names the host. A closed root is unreachable from page
+script, so it is not shown. An `<iframe>` inside a root is shown with
+`<!-- inside a shadow root: contents not captured -->` and no `[iframe:N]`
+placeholder. Playwright's `locator('iframe').all()` lists shadow-root frames
+after every light-DOM frame (measured), so leaving them unnumbered keeps every
+light-DOM frame on its index. The action prompt says a selector reaches open
+shadow content as written (Playwright CSS searches open roots). The assertion
+code prompt says `document.querySelector` does not, and shows going through
+`host.shadowRoot`.
+
+### 2.27 Typing where fill cannot
+
+**Fix.** `executeType` asks first whether the target can be filled: an
+`<input>`, `<textarea>`, `<select>`, a contenteditable, or a `<label>` with
+a control. When it cannot, it clicks the element, presses
+`ControlOrMeta+A` so the text replaces what is there, and types the value on
+the keyboard. That is how a person reaches a field inside a closed shadow root,
+and it also covers canvas and editor surfaces. When the check itself cannot run,
+the ordinary path runs and reports what is wrong. `keyboard` takes `text`,
+typed into whatever has focus, before any `key` it also names. Rule 9b
+describes both.
+
+### 2.28 `find` names the collapsed sections
+
+**Fix.** For each match, `find-in-dom.js` walks up to `body`. Every ancestor
+with `display: none`, `visibility: hidden` or the `hidden` attribute marks the
+match hidden. The ancestor's section label is the text of the first sibling
+beside it in its parent that has any, else its previous sibling's, capped at 60
+characters. Labels are collected outermost first, without repeats, into
+`collapsedUnder`. `formatFindResults` appends `hidden — inside collapsed:
+Challenges › Synchronization. Open those first, outermost first; clicking it
+while hidden times out`, or `hidden — not visible right now` when no label
+could be read. Rule 19 tells the model to `find` an entry it cannot see before
+guessing, and to open the named sections one per turn.
 
 ## 3. Failures caused by the test files or the sites
 
