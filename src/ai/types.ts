@@ -147,6 +147,12 @@ export interface AIAction {
   /** `click` only: the mouse button. Omitted means left. */
   button?: 'left' | 'right' | 'middle';
   /**
+   * `click` only: milliseconds to hold the button down before releasing, for
+   * a press-and-hold (SPEC-web-survey-fixes.md §2.24). Omitted means an
+   * ordinary click.
+   */
+  holdMs?: number;
+  /**
    * `select` only, on a `<select multiple>`: every option to select, each
    * matched by value and then by label. A single-select ignores it.
    */

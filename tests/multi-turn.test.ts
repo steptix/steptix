@@ -1052,3 +1052,56 @@ describe('executeStep — a switched-to tab is brought to the front (§4)', () =
     expect(await pageTracker.switchToAsync('page:2')).toBeNull();
   });
 });
+
+// SPEC-web-survey-fixes.md §2.25: a failed check is recorded for the retry,
+// with where the expected text really is, and the call that writes the next
+// check's code is told.
+describe('executeStep — a failed check is passed on to the retry', () => {
+  it('tells the retry and its code generator what the check read and where the text is', async () => {
+    const page = makeMockPage();
+    (page as unknown as { title: unknown }).title = vi.fn().mockResolvedValue('Results');
+    (page.evaluate as ReturnType<typeof vi.fn>).mockImplementation((fn: unknown, arg: unknown) => {
+      if (typeof fn === 'string' && fn.includes('READ_THE_FORM')) return Promise.resolve({ pass: false, actual: 'Comments...' });
+      if (typeof fn === 'string' && fn.includes('loadingIndicators')) {
+        return Promise.resolve({ readyState: 'complete', loadingIndicators: [], errorMessages: [], hasModal: false });
+      }
+      if (typeof fn === 'function' && arg !== null && typeof arg === 'object' && 'fragments' in arg) {
+        return Promise.resolve([{ text: 'Steptix survey', selectors: ['li#_valuecomments'] }]);
+      }
+      return Promise.resolve(null);
+    });
+    const stepReply = JSON.stringify({
+      actions: [{ action: 'assert', condition: 'the comment shows Steptix survey', expected: 'Steptix survey', description: 'Comment shown' }],
+      reasoning: 'Check the comment.',
+    });
+    const codeReply = JSON.stringify({ code: "(() => { /* READ_THE_FORM */ return { pass: false, actual: 'Comments...' }; })()" });
+    let call = 0;
+    const aiClient = {
+      complete: vi.fn().mockImplementation(() =>
+        Promise.resolve({ text: call++ % 2 === 0 ? stepReply : codeReply, model: 'test-model' })),
+    } as unknown as AiClient;
+    const config = makeConfig();
+    config.execution.retries = 1;
+
+    const result = await executeStep(1, 1, 'Verify the comment says "Steptix survey"', {
+      page,
+      config,
+      aiClient,
+      contextContent: '',
+      testName: 'test',
+      conversationHistory: [],
+      csrfTokens: {},
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('the page does show "Steptix survey" at li#_valuecomments');
+    const sent = (aiClient.complete as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => JSON.stringify(c[0]));
+    // The second attempt's step call (index 2) hears about the failed check…
+    expect(sent[2]).toContain('Action \\"assert\\" failed');
+    expect(sent[2]).toContain('li#_valuecomments');
+    // …and so does the call that writes its code (index 3); the first did not.
+    expect(sent[3]).toContain('An earlier attempt at this check failed');
+    expect(sent[1]).not.toContain('An earlier attempt at this check failed');
+  });
+});

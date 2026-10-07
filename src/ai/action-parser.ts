@@ -185,6 +185,12 @@ export const ACTION_TYPE_ALIASES: Readonly<Record<string, ActionType>> = {
   rightClick: 'click',
   contextClick: 'click',
   contextMenu: 'click',
+  // §2.24: press and hold is a click held down before release.
+  longPress: 'click',
+  longClick: 'click',
+  pressAndHold: 'click',
+  clickAndHold: 'click',
+  holdClick: 'click',
   // §2.1. The six spellings the survey's runs sent for "answer the dialog".
   acceptDialog: 'dialog',
   acceptAlert: 'dialog',
@@ -264,12 +270,22 @@ const FOLDED_ACTION_TYPES: ReadonlyMap<string, ActionType> = new Map<string, Act
  * `click`, but a single click would be the wrong action: the alias has to say
  * how many. A field the model sent itself wins over the default.
  */
+/** How long a press-and-hold holds when the step does not say (§2.24). */
+const DEFAULT_HOLD_MS = 2000;
+/** The longest hold accepted; a press nobody would make is a model mistake. */
+const MAX_HOLD_MS = 30_000;
+
 const ALIAS_DEFAULTS: ReadonlyMap<string, Partial<AIAction>> = new Map<string, Partial<AIAction>>([
   ['doubleclick', { clickCount: 2 }],
   ['dblclick', { clickCount: 2 }],
   ['rightclick', { button: 'right' }],
   ['contextclick', { button: 'right' }],
   ['contextmenu', { button: 'right' }],
+  ['longpress', { holdMs: DEFAULT_HOLD_MS }],
+  ['longclick', { holdMs: DEFAULT_HOLD_MS }],
+  ['pressandhold', { holdMs: DEFAULT_HOLD_MS }],
+  ['clickandhold', { holdMs: DEFAULT_HOLD_MS }],
+  ['holdclick', { holdMs: DEFAULT_HOLD_MS }],
   ['acceptdialog', { value: 'accept' }],
   ['acceptalert', { value: 'accept' }],
   ['acceptconfirm', { value: 'accept' }],
@@ -965,6 +981,8 @@ function parseAction(raw: unknown, index: number): AIAction {
     if (count === 2) action.clickCount = 2;
     const button = obj['button'];
     if (button === 'right' || button === 'middle') action.button = button;
+    const hold = Number(obj['holdMs'] ?? obj['holdDuration']);
+    if (Number.isFinite(hold) && hold > 0) action.holdMs = Math.min(Math.round(hold), MAX_HOLD_MS);
   }
   if (actionType === 'select' && Array.isArray(obj['values'])) {
     const values = obj['values'].filter((v): v is string => typeof v === 'string' && v !== '');

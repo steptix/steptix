@@ -34,6 +34,7 @@ import {
   isKnownActionType,
   unknownActionTypeError,
 } from '../ai/action-parser.js';
+import { describeWhereExpectedIs } from '../browser/locate-text.js';
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
@@ -3219,6 +3220,7 @@ async function executeStepAttempt(
           aiClient,
           apiResponseStore,
           attemptNumber,
+          priorCheckFailures: priorFailures.filter((f) => f.actionType === 'assert').map((f) => f.error),
           dismissalGuidance: opts.dismissalGuidance ?? false,
           fullPageScreenshots: config.browser.fullPageScreenshots,
           sendScreenshots: config.ai.sendScreenshots,
@@ -3242,7 +3244,23 @@ async function executeStepAttempt(
 
         if (!assertResult.pass) {
           turnFailed = true;
-          turnError = `Assertion failed: ${assertResult.description} — expected "${assertResult.expected}", got "${assertResult.actual}"`;
+          // Where the expected text really is, when it is on the page at all:
+          // the retry is shown only this sentence, and without it read the
+          // same wrong element again (SPEC-web-survey-fixes.md §2.25).
+          const where = against === 'predicate'
+            ? ''
+            : await describeWhereExpectedIs(page, assertResult.expected);
+          turnError = `Assertion failed: ${assertResult.description} — expected "${assertResult.expected}", got "${assertResult.actual}"${where}`;
+          // Recorded like a failed action, so the retry is told what the
+          // check read — it was told nothing, and read the same element again.
+          collectedFailures.push({
+            selector: '',
+            error: turnError,
+            actionType: 'assert',
+            startUrl: attemptStartUrl,
+            failureUrl: page.url(),
+            navigated: page.url() !== attemptStartUrl,
+          });
           break;
         }
         // A check that PASSED is progress the next turn must be told about.
@@ -4237,6 +4255,13 @@ interface EvaluateAssertionParams {
   aiClient: AiClient;
   apiResponseStore: ApiResponseStore | undefined;
   attemptNumber: number;
+  /**
+   * How this step's checks failed on earlier attempts, each with where the
+   * expected text really is when it was found (SPEC-web-survey-fixes.md
+   * §2.25). The code generator is the call that picks the element, so it is
+   * the one that has to hear it.
+   */
+  priorCheckFailures?: string[];
   dismissalGuidance: boolean;
   fullPageScreenshots: boolean;
   sendScreenshots: boolean;
@@ -4319,9 +4344,14 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
       const assertSystemPrompt = buildSystemPrompt(p.contextContent, apiContext, {
         dismissalGuidance: p.dismissalGuidance,
       });
+      const priorNote = p.priorCheckFailures !== undefined && p.priorCheckFailures.length > 0
+        ? `An earlier attempt at this check failed:\n${p.priorCheckFailures.map((e) => `- ${e}`).join('\n')}\n`
+          + 'Do not read the same element again unless it really is what the step means.'
+        : undefined;
       const codeCompletion = await p.aiClient.complete([
         { role: 'system', content: assertSystemPrompt },
         codeMsg,
+        ...(priorNote !== undefined ? [{ role: 'user' as const, content: priorNote }] : []),
         // After an unreadable reply, the same prompt again tends to get the
         // same reply. Say what was wrong (SPEC-web-survey-fixes.md §2.14).
         ...(unreadableReply !== undefined

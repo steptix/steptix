@@ -14,6 +14,7 @@ import { parseAIResponse, parseAssertionCode } from '../src/ai/action-parser.js'
 import { installDialogGuard, isAdRequest } from '../src/browser/manager.js';
 import { dialogRecords, disarmDialog } from '../src/browser/dialogs.js';
 import { captureDomSnapshot } from '../src/browser/dom-cleaner.js';
+import { describeWhereExpectedIs, expectedFragments } from '../src/browser/locate-text.js';
 import type { AIAction } from '../src/ai/types.js';
 
 let browser: Browser;
@@ -568,6 +569,76 @@ describe('§2.22 a drag whose source an ad covers', () => {
       expect(result.success).toBe(true);
       expect(await page.locator('#target #red').count()).toBe(1);
       expect(await page.locator('#aswift_1').isVisible()).toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('§2.24 press and hold', () => {
+  it('reads a long press as a click held down, 2 s unless the model says how long', () => {
+    expect(one({ action: 'longPress', selector: '#b' })).toMatchObject({ action: 'click', holdMs: 2000 });
+    expect(one({ action: 'press_and_hold', selector: '#b' })).toMatchObject({ action: 'click', holdMs: 2000 });
+    expect(one({ action: 'clickAndHold', selector: '#b', holdMs: 3500 })).toMatchObject({ action: 'click', holdMs: 3500 });
+    expect(one({ action: 'click', selector: '#b', holdMs: 1500 })).toMatchObject({ action: 'click', holdMs: 1500 });
+    // A hold no person would make is clamped, and nonsense is dropped.
+    expect(one({ action: 'click', selector: '#b', holdMs: 600_000 }).holdMs).toBe(30_000);
+    expect(one({ action: 'click', selector: '#b', holdMs: 'long' }).holdMs).toBeUndefined();
+    // Only a click holds.
+    expect(one({ action: 'hover', selector: '#b', holdMs: 1500 }).holdMs).toBeUndefined();
+  });
+
+  it('keeps the button down for the hold before releasing', async () => {
+    // The page times the press itself; the only claim is a lower bound, which a
+    // slow machine can only make longer.
+    const page = await pageWith(`
+      <button id="hold">Hold!</button><p id="out"></p>
+      <script>
+        let down = 0;
+        const b = document.getElementById('hold');
+        b.addEventListener('mousedown', () => { down = performance.now(); });
+        b.addEventListener('mouseup', () => {
+          document.getElementById('out').textContent = performance.now() - down >= 1000 ? 'held' : 'tapped';
+        });
+      </script>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: '#hold', holdMs: 1200 }));
+      expect(result.success).toBe(true);
+      expect(await page.textContent('#out')).toBe('held');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('§2.25 a failed check says where the expected text is', () => {
+  it('splits an expected value into the pieces worth looking for', () => {
+    expect(expectedFragments('username: survey; comments: Steptix survey')).toEqual([
+      'username: survey; comments: Steptix survey',
+      'survey',
+      'Steptix survey',
+      'username: survey',
+      'comments: Steptix survey',
+    ].slice(0, 4));
+    expect(expectedFragments('true')).toEqual([]);
+    expect(expectedFragments(undefined)).toEqual([]);
+    expect(expectedFragments('"Red" and "Green"')).toEqual(['"Red" and "Green"', 'Red', 'Green']);
+  });
+
+  it('points at the results, not at the empty copy of the form above them', async () => {
+    // The shape of testpages.eviltester.com's form results page.
+    const page = await pageWith(`
+      <form><textarea name="comments">Comments...</textarea><input name="username"></form>
+      <div id="_username"><p><strong>username</strong></p><ul><li id="_valueusername">survey</li></ul></div>
+      <div id="_comments"><p><strong>comments</strong></p><ul><li id="_valuecomments">Steptix survey</li></ul></div>
+      <div style="display: none"><span>Steptix survey</span></div>`);
+    try {
+      const where = await describeWhereExpectedIs(page, 'survey; Steptix survey');
+      expect(where).toContain('"Steptix survey" at li#_valuecomments');
+      expect(where).toContain('li#_valueusername');
+      // A hidden copy is not somewhere the step could mean.
+      expect(where).not.toContain('span');
+      expect(await describeWhereExpectedIs(page, 'Nowhere to be found')).toBe('');
     } finally {
       await page.close();
     }

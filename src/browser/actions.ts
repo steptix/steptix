@@ -792,9 +792,13 @@ async function executeClick(
   timeoutMs?: number,
 ): Promise<void> {
   const selector = requireSelector(action);
+  const hold = action.clickCount === 2 ? 0 : (action.holdMs ?? 0);
   const options = {
-    timeout: timeoutMs ?? CLICK_TIMEOUT_MS,
+    // The hold is part of the click, so it is added to the time allowed.
+    timeout: (timeoutMs ?? CLICK_TIMEOUT_MS) + hold,
     ...(action.button !== undefined && action.button !== 'left' && { button: action.button }),
+    // Playwright's `delay` is the time between mousedown and mouseup (§2.24).
+    ...(hold > 0 && { delay: hold }),
   };
   const press = (target: Locator): Promise<void> =>
     action.clickCount === 2 ? target.dblclick(options) : target.click(options);

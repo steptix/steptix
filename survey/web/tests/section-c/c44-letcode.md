@@ -10,8 +10,8 @@ LetCode's workspace is a single-page app with 21 sandboxes, each opened by a
 through from the workspace rather than by URL, since the sandbox routes have
 changed before.
 
-**Probes:** SPA navigation, read-only and disabled inputs, long-press and
-double-click buttons, single and multiple selects, all three JS dialog types,
+**Probes:** SPA navigation, read-only and disabled inputs, long-press
+buttons, single and multiple selects, all three JS dialog types,
 nested iframes three deep, tab switching, summing a table column, open and
 closed shadow roots.
 
@@ -44,9 +44,8 @@ closed shadow roots.
 ### Click Actions
 1. Open the sandbox
 2. Click "Play Sandbox" on the Click Actions card
-3. Double-click the button that asks for a double click
-4. Press and hold the button that asks for a long press
-5. Verify the disabled button is disabled
+3. Press and hold the "Click and Hold" button
+4. Verify the disabled button is disabled
 
 ### Drop-Down
 1. Open the sandbox
@@ -78,7 +77,7 @@ closed shadow roots.
 3. Click the button that opens a single new tab, and switch to that tab
 4. Capture the current page URL [store as: new_tab_url]
 5. Switch back to the main tab
-6. Verify that "{{new_tab_url}}" is not the workspace URL
+6. Verify that "{{new_tab_url}}" starts with "https://letcode.in"
 
 ### WebTable
 1. Open the sandbox

@@ -37,6 +37,8 @@ in the test files, not here.
 | 2.21 | A threshold wait with a fixed timeout | 42 | A numeric attribute wait (§2.13) fails after 10 s. The progress bar reached 75% after 8, 18 and 22 s on three runs, so the wait timed out on a slow run and the retry clicked Stop at 87% by eye | While the value keeps moving towards the limit, push the deadline out by the timeout each time, up to the 10-minute cap. A value that stands still or moves away still fails after the timeout |
 | 2.22 | A drag pressed through an ad | 40 | A drag presses at the source's coordinates without checking what is there. The circles page has side-rail Google ad frames that reposition after a scroll, and about one drag in five pressed on one: no `mousedown` reached the page, the drag "succeeded", and the red circle stayed put | Move the pointer onto the source first and check the source received the `mousemove`. If not, hide the page's ads (as §2.5 does for a click) and try once more; if something else covers it, fall back to `dragTo`, whose actionability check reports what intercepts the pointer |
 | 2.23 | `browser.blockAds` ignored on the server | every survey run | On the server path, `browser.*` comes from the server's own config except for a listed few keys, and `blockAds` was not one of them. The survey project set it, and no session ever blocked an ad. A Google vignette covered test 40's last steps | Read `blockAds` off the session's project config at launch, as `launchArgs` already is |
+| 2.24 | No press-and-hold | 44 | There was no way to hold a button down. LetCode's "Click and Hold" button only reacts to a press of about two seconds, and `click` releases at once | `holdMs` on `click` (Playwright's `delay` between press and release), with `longPress`, `pressAndHold`, `clickAndHold` and similar names mapped onto it at 2 s |
+| 2.25 | A failed check does not say where the expected text is | 45 | An assertion that reads the wrong element fails with "expected X, got Y", and the retry is shown only that, so it reads the same element again. The form results page repeats the empty form above the results; both attempts read the empty textarea ("Comments...") | On a failed DOM assertion, find the smallest visible elements whose text contains the expected value (or a part of it) and add their CSS paths to the failure |
 
 ## 2. Fixes
 
@@ -293,6 +295,40 @@ the server's own setting when the project says nothing. A project can turn it
 off where the server has it on. `ProjectBundle`'s list of per-project
 `browser.*` keys names it. Under the CLI it already worked, since there the
 project's config is the run's config.
+
+### 2.24 Press and hold
+
+**Fix.** `click` takes `holdMs`, the milliseconds between mousedown and
+mouseup, passed to Playwright as `delay` and added to the click's timeout. It
+is read only on a `click`, rounded, and capped at 30 s; a double-click
+ignores it. The parser maps `longPress`, `longClick`, `pressAndHold`,
+`clickAndHold` and `holdClick` (in any case or separator) to `click` with
+`holdMs: 2000` unless the model sent its own. Rule 9a tells the model to use
+the time the step names, else 2000.
+
+### 2.25 A failed check says where the expected text is
+
+**Fix.** When a non-predicate assertion fails, the step loop calls
+`describeWhereExpectedIs` (src/browser/locate-text.ts). It splits the expected
+value into at most four fragments: the whole value, then the parts of a list
+split on `;`, newlines, `, ` and ` and `, then the value of each
+`label: value` part. Booleans and fragments under three characters are dropped.
+For each fragment it finds the smallest visible elements whose `innerText`
+contains it (no child holds the whole fragment) and builds a CSS path to up to
+three of them, anchored at the nearest unique `id`. Those paths are appended
+to the failure: `— the page does show "Steptix survey" at li#_valuecomments. If
+that is what the step means, read it from there`. The retry sees the
+sentence in its prior failures; a person reading the report sees it too.
+
+Two gaps had kept even the bare failure from the retry. A failed assertion was
+never added to the attempt's failure list, so the retry prompt had nothing to
+say about it; it is now recorded like a failed action (`Action "assert"
+failed: …`). And the second model call, the one that writes the check's code
+and so picks the element, saw no prior failures at all; on a retry it now gets
+the earlier attempts' check failures as a separate message, with the instruction
+not to read the same element again unless it is what the step means. When
+the text is nowhere on the page, nothing is added. The hint never passes a
+check; the retried assertion still has to read the value and compare.
 
 ## 3. Failures caused by the test files or the sites
 
