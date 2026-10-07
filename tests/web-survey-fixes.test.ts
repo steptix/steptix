@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
-import { executeAction, normaliseColour, normaliseKeyName } from '../src/browser/actions.js';
+import { executeAction, normaliseColour, normaliseKeyName, scrollToFitBoth, waitForThreshold } from '../src/browser/actions.js';
 import { parseAIResponse, parseAssertionCode } from '../src/ai/action-parser.js';
 import { installDialogGuard, isAdRequest } from '../src/browser/manager.js';
 import { dialogRecords, disarmDialog } from '../src/browser/dialogs.js';
@@ -412,5 +412,164 @@ describe('§2.18 textless elements keep a readable class', () => {
     expect(snapshot).toContain('class="rc-tree-switcher rc-tree-switcher_close"');
     expect(snapshot).not.toContain('class="lead"');
     await page.close();
+  });
+});
+
+describe('§2.19 a drag whose target starts below the screen', () => {
+  it('centres the two boxes when they fit together, and gives up when they do not', () => {
+    const viewport = { width: 800, height: 600 };
+    expect(scrollToFitBoth(
+      { x: 300, y: 570, width: 60, height: 60 },
+      { x: 200, y: 560, width: 120, height: 200 },
+      viewport,
+    )).toEqual({ dx: -120, dy: 360 });
+    // Already centred: nothing to do.
+    expect(scrollToFitBoth({ x: 370, y: 270, width: 60, height: 60 }, { x: 370, y: 270, width: 60, height: 60 }, viewport))
+      .toBeNull();
+    // Further apart than one screen: no scroll shows both.
+    expect(scrollToFitBoth({ x: 0, y: 0, width: 10, height: 10 }, { x: 0, y: 900, width: 10, height: 10 }, viewport))
+      .toBeNull();
+  });
+
+  // A headed launch and every CDP page have no pinned viewport, so
+  // `viewportSize()` is null there — the case the survey's run actually hit.
+  it.each([
+    ['a pinned viewport', { width: 800, height: 600 }],
+    ['no pinned viewport', null],
+  ] as const)('drops an HTML5 draggable onto a target that was off-screen when the drag began, with %s', async (_, viewport) => {
+    const own = await browser.newContext({ viewport });
+    const page = await own.newPage();
+    await page.setContent(`<!doctype html><html><body>
+      <div style="height: 520px"></div>
+      <div id="source"><div id="red" draggable="true" style="width: 60px; height: 60px; background: red"></div></div>
+      <div id="target" style="width: 120px; height: 200px; border: 3px solid #333"></div>
+      <div style="height: 1200px"></div>
+      <script>
+        document.querySelector('#red').addEventListener('dragstart', (e) => e.dataTransfer.setData('text', 'red'));
+        const target = document.querySelector('#target');
+        target.addEventListener('dragover', (e) => e.preventDefault());
+        target.addEventListener('drop', (e) => {
+          e.preventDefault();
+          target.appendChild(document.getElementById(e.dataTransfer.getData('text')));
+        });
+      </script></body></html>`);
+    try {
+      const height = await page.evaluate(() => innerHeight);
+      // Start the source just inside the bottom edge, with the target below it.
+      await page.evaluate((h) => { document.body.firstElementChild!.setAttribute('style', `height: ${h - 80}px`); }, height);
+      const result = await executeAction(page, act({ action: 'drag', selector: '#red', target: '#target' }));
+      expect(result.success).toBe(true);
+      expect(await page.locator('#target #red').count()).toBe(1);
+    } finally {
+      await own.close();
+    }
+  });
+});
+
+describe('§2.20 typing into a field something covers', () => {
+  it('scrolls the field clear first, so a page that checks keeps the text', async () => {
+    // The shape of uitestingplayground.com/overlapped: a field in a short
+    // scrolling box, half under a panel, and an input handler that empties the
+    // field when anything covers its centre.
+    const page = await pageWith(`
+      <div style="position: relative">
+        <div style="overflow-y: scroll; height: 100px">
+          <input id="id" placeholder="Id"><br><br>
+          <input id="name" placeholder="Name"><br><br>
+          <input id="subject" placeholder="Subject">
+        </div>
+        <div style="position: absolute; width: 300px; height: 50px; background: #ccc; top: 67px"></div>
+      </div>
+      <script>
+        const name = document.querySelector('#name');
+        name.addEventListener('input', () => {
+          const r = name.getBoundingClientRect();
+          const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          if (hit !== name) name.value = '';
+        });
+      </script>`);
+    try {
+      const result = await executeAction(page, act({ action: 'type', selector: '#name', value: 'Survey' }));
+      expect(result.success).toBe(true);
+      expect(await page.inputValue('#name')).toBe('Survey');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('§2.21 a threshold wait keeps going while the value moves', () => {
+  // A fake clock: `sleep` advances it, and the reader computes the value from
+  // it, so no test waits on real time.
+  function clock(): { now: () => number; sleep: (ms: number) => Promise<void> } {
+    let t = 0;
+    return { now: () => t, sleep: async (ms) => { t += ms; } };
+  }
+
+  it('waits past its timeout for a bar that is still climbing, and stops when it passes', async () => {
+    const c = clock();
+    // 1% every 300 ms: 75% at 22.5 s, more than twice the 10 s timeout.
+    const read = async (): Promise<number> => Math.floor(c.now() / 300);
+    await waitForThreshold({ read, op: '>=', limit: 75, idleMs: 10_000, maxMs: 600_000, what: 'bar', ...c });
+    expect(await read()).toBe(75);
+  });
+
+  it('fails after the timeout when the value stands still, naming how far it got', async () => {
+    const c = clock();
+    await expect(waitForThreshold({
+      read: async () => 42, op: '>=', limit: 75, idleMs: 10_000, maxMs: 600_000, what: 'bar', ...c,
+    })).rejects.toThrow(/no further than 42.*10000ms/);
+    expect(c.now()).toBe(10_000);
+  });
+
+  it('does not count movement away from the limit as progress', async () => {
+    const c = clock();
+    await expect(waitForThreshold({
+      read: async () => 50 - Math.floor(c.now() / 300), op: '>=', limit: 75, idleMs: 10_000, maxMs: 600_000, what: 'bar', ...c,
+    })).rejects.toThrow(/no further than 50/);
+    expect(c.now()).toBe(10_000);
+  });
+
+  it('stops at the ceiling however steadily the value moves', async () => {
+    const c = clock();
+    await expect(waitForThreshold({
+      read: async () => c.now() / 1000, op: '>=', limit: 1e9, idleMs: 10_000, maxMs: 60_000, what: 'bar', ...c,
+    })).rejects.toThrow(/Timeout/);
+    expect(c.now()).toBe(60_000);
+  });
+
+  it('waits for a value to fall below a limit, and for an element that is not there yet', async () => {
+    const c = clock();
+    await waitForThreshold({
+      read: async () => (c.now() < 2_000 ? null : 100 - Math.floor(c.now() / 200)),
+      op: '<', limit: 10, idleMs: 10_000, maxMs: 600_000, what: 'countdown', ...c,
+    });
+    expect(100 - Math.floor(c.now() / 200)).toBeLessThan(10);
+  });
+});
+
+describe('§2.22 a drag whose source an ad covers', () => {
+  it('hides the ad and drags, rather than pressing on the ad', async () => {
+    const page = await pageWith(`
+      <div id="red" draggable="true" style="width: 60px; height: 60px; background: red"></div>
+      <div id="target" style="width: 120px; height: 120px; border: 3px solid #333; margin-top: 40px"></div>
+      <iframe id="aswift_1" title="Advertisement" style="position: fixed; left: 0; top: 0; width: 200px; height: 80px; border: 0"></iframe>
+      <script>
+        document.querySelector('#red').addEventListener('dragstart', (e) => e.dataTransfer.setData('text', 'red'));
+        const target = document.querySelector('#target');
+        target.addEventListener('dragover', (e) => e.preventDefault());
+        target.addEventListener('drop', (e) => {
+          e.preventDefault();
+          target.appendChild(document.getElementById(e.dataTransfer.getData('text')));
+        });
+      </script>`);
+    try {
+      const result = await executeAction(page, act({ action: 'drag', selector: '#red', target: '#target' }));
+      expect(result.success).toBe(true);
+      expect(await page.locator('#target #red').count()).toBe(1);
+      expect(await page.locator('#aswift_1').isVisible()).toBe(false);
+    } finally {
+      await page.close();
+    }
   });
 });

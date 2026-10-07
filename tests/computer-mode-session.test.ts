@@ -1197,6 +1197,44 @@ describe('browser.launchArgs reaches the launch from the project (§5.10)', () =
   });
 });
 
+// SPEC-web-survey-fixes.md §2.23: the survey's project set `blockAds`, and the
+// server path launched with the server's `browser` section, so no run of it
+// ever blocked an ad.
+describe('browser.blockAds reaches the launch from the project', () => {
+  it('the project setting is passed to launchBrowser', async () => {
+    const manager = makeManager();
+    const testFilePath = writeProject({ browser: { blockAds: true } });
+
+    await manager.executeSteps('s-ads', { steps: ['Click Print'], testFilePath });
+
+    expect(launchConfig().blockAds).toBe(true);
+  });
+
+  it('a project that says nothing keeps the server setting', async () => {
+    const manager = makeManager({
+      ...baseConfig,
+      browser: { ...baseConfig.browser, blockAds: true },
+    } as Config);
+    const testFilePath = writeProject({ desktop: { enabled: true } });
+
+    await manager.executeSteps('s-ads-server', { steps: ['Click Print'], testFilePath });
+
+    expect(launchConfig().blockAds).toBe(true);
+  });
+
+  it('a project can turn it off where the server has it on', async () => {
+    const manager = makeManager({
+      ...baseConfig,
+      browser: { ...baseConfig.browser, blockAds: true },
+    } as Config);
+    const testFilePath = writeProject({ browser: { blockAds: false } });
+
+    await manager.executeSteps('s-ads-off', { steps: ['Click Print'], testFilePath });
+
+    expect(launchConfig().blockAds).toBe(false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // §5.4 — a bracket directive nobody dispatched never reaches the model
 // ---------------------------------------------------------------------------

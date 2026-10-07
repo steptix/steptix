@@ -3421,6 +3421,10 @@ export class SessionManager {
     let created: ManagedSession | undefined;
     const launcher = async (): Promise<BrowserSession> => {
       const launchArgs = created?.browserConfig?.launchArgs ?? this.config.browser.launchArgs;
+      // `browser.blockAds` is per project for the same reason
+      // (SPEC-web-survey-fixes.md §2.23): a project of public sites wants ad
+      // requests stopped, a project testing an ad integration does not.
+      const blockAds = created?.browserConfig?.blockAds ?? this.config.browser.blockAds;
       // Override only `video` with the per-project record mode; the rest of the
       // browser config stays server-global. videoDir is co-located with where
       // reports are written (the project-anchored reportOutputDir) so the
@@ -3436,6 +3440,7 @@ export class SessionManager {
           // Present only when someone configured it, so the server's own stays
           // in force for a project that said nothing.
           ...(launchArgs !== undefined && { launchArgs }),
+          ...(blockAds !== undefined && { blockAds }),
           ...(fixedViewport ? { fixedViewport } : {}),
         },
         sessionConfig?.cdp,

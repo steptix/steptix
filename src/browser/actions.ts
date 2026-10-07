@@ -926,6 +926,7 @@ async function executeType(
   const selector = requireSelector(action);
   let value = action.value ?? '';
   const locator = root.locator(selector).locator('visible=true').first();
+  await uncoverForTyping(locator);
   // Clear existing content first, then type. A colour, date or range input
   // cannot be empty, so its clear throws; `fill` replaces its value anyway.
   let clearable = true;
@@ -945,6 +946,47 @@ async function executeType(
   // End fires keydown and keyup and leaves the text as it is.
   if (clearable && kind !== undefined && END_KEY_SAFE_TYPES.has(kind)) {
     await locator.press('End', { timeout: MEASUREMENT_TIMEOUT_MS }).catch(() => {});
+  }
+}
+
+/**
+ * Scroll a field out from under whatever covers it before typing
+ * (SPEC-web-survey-fixes.md §2.20). `click` retries scroll alignments until
+ * the element is what the pointer would hit; `fill` does not, so it types
+ * into a field a person could not reach. A page that checks — the survey's
+ * overlapped-element page clears the field on `input` when its centre is
+ * covered — then loses every character. A person scrolls the field clear
+ * first; so does this. Best effort: a field nothing will uncover is typed
+ * into as before.
+ */
+async function uncoverForTyping(locator: Locator): Promise<void> {
+  try {
+    await locator.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any) => {
+        const root = el.getRootNode();
+        const w = globalThis as any;
+        const finder = typeof root.elementFromPoint === 'function' ? root : w.document;
+        const reachable = (): boolean => {
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) return true;
+          const x = r.left + r.width / 2;
+          const y = r.top + r.height / 2;
+          if (x < 0 || y < 0 || x > w.innerWidth || y > w.innerHeight) return false;
+          const hit = finder.elementFromPoint(x, y);
+          return hit === el || (hit !== null && el.contains(hit));
+        };
+        if (reachable()) return;
+        for (const block of ['center', 'start', 'end']) {
+          el.scrollIntoView({ block, inline: 'nearest', behavior: 'instant' });
+          if (reachable()) return;
+        }
+      },
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    // Best effort, never a reason to fail the type.
   }
 }
 
@@ -1242,20 +1284,69 @@ async function executeDrag(
   const source = root.locator(selector).locator('visible=true').first();
   const destination = root.locator(target).locator('visible=true').first();
   await source.scrollIntoViewIfNeeded({ timeout }).catch(() => {});
-  const from = await source.boundingBox({ timeout }).catch(() => null);
-  const to = await destination.boundingBox({ timeout }).catch(() => null);
-  const viewport = page.viewportSize();
+  // A headed launch has `viewport: null`, and so does every CDP page, so
+  // `viewportSize()` is null exactly where drags run most. The window's own
+  // inner size is in the same CSS pixels as `boundingBox` either way.
+  let viewport: { width: number; height: number } | null;
+  try {
+    viewport = await page.evaluate(() => ({
+      width: (globalThis as any).innerWidth as number,
+      height: (globalThis as any).innerHeight as number,
+    }));
+  } catch {
+    viewport = page.viewportSize();
+  }
   const inView = (box: { x: number; y: number; width: number; height: number } | null): boolean =>
     box !== null && (viewport === null
       || (box.x + box.width / 2 >= 0 && box.y + box.height / 2 >= 0
         && box.x + box.width / 2 <= viewport.width && box.y + box.height / 2 <= viewport.height));
+  let from = await source.boundingBox({ timeout }).catch(() => null);
+  let to = await destination.boundingBox({ timeout }).catch(() => null);
+  if (from !== null && to !== null && viewport !== null && (!inView(from) || !inView(to))) {
+    // Scrolling the source in leaves it at the viewport's edge, often with the
+    // target still below (SPEC-web-survey-fixes.md §2.19). `dragTo` would then
+    // scroll mid-drag, and Chromium abandons an HTML5 drag that scrolls: the
+    // drag "succeeds" and nothing is dropped. Centre the pair instead, when
+    // they fit on one screen together.
+    const scroll = scrollToFitBoth(from, to, viewport);
+    if (scroll !== null) {
+      // `instant` overrides a page's `scroll-behavior: smooth`, so the boxes
+      // read next are where the pointer will actually be.
+      try {
+        await page.evaluate(({ dx, dy }) => (globalThis as any).scrollBy({ left: dx, top: dy, behavior: 'instant' }), scroll);
+      } catch {
+        // The boxes are read again below; an unscrolled pair falls back to `dragTo`.
+      }
+      from = await source.boundingBox({ timeout }).catch(() => null);
+      to = await destination.boundingBox({ timeout }).catch(() => null);
+    }
+  }
   if (from === null || to === null || !inView(from) || !inView(to)) {
     await source.dragTo(destination, { timeout });
     return;
   }
-  const startX = from.x + from.width / 2;
-  const startY = from.y + from.height / 2;
-  await page.mouse.move(startX, startY);
+  // A click refuses to press through something laid over its target; a drag
+  // by mouse coordinates does not, so an ad frame that slid over the source
+  // took the press and the drag "succeeded" with nothing moved (§2.22). Put
+  // the pointer on the source and ask whether the source felt it — at the
+  // moment of pressing, since side-rail ads reposition after a scroll. Hide
+  // ads in the way, as a click does (§2.5). Anything else in the way goes to
+  // `dragTo`, whose actionability check names what intercepts the pointer.
+  let startX = from.x + from.width / 2;
+  let startY = from.y + from.height / 2;
+  let reached = await pointerReaches(page, source, startX, startY);
+  if (!reached && (await hideAds(page)) > 0) {
+    const again = await source.boundingBox({ timeout }).catch(() => null);
+    if (again !== null && inView(again)) {
+      startX = again.x + again.width / 2;
+      startY = again.y + again.height / 2;
+      reached = await pointerReaches(page, source, startX, startY);
+    }
+  }
+  if (!reached) {
+    await source.dragTo(destination, { timeout });
+    return;
+  }
   await page.mouse.down();
   // Past the 1–5 px threshold libraries wait for before they call it a drag.
   await page.mouse.move(startX + 6, startY + 6, { steps: 3 });
@@ -1264,6 +1355,73 @@ async function executeDrag(
   const landing = (await destination.boundingBox().catch(() => null)) ?? to;
   await page.mouse.move(landing.x + landing.width / 2, landing.y + landing.height / 2, { steps: 15 });
   await page.mouse.up();
+}
+
+type Box = { x: number; y: number; width: number; height: number };
+
+/**
+ * Move the pointer to (x, y) and say whether the element felt it: a
+ * `mousemove` there whose path includes the element. False means something
+ * else is on top at that point — a frame over it takes the event and the
+ * element's own window sees nothing. True when it cannot be told, so a probe
+ * that fails to install leaves the drag as it was.
+ */
+async function pointerReaches(page: Page, element: Locator, x: number, y: number): Promise<boolean> {
+  try {
+    await element.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any) => {
+        const w = globalThis as any;
+        if (w.__steptixPointerProbe) w.removeEventListener('mousemove', w.__steptixPointerProbe, true);
+        w.__steptixPointerOver = false;
+        w.__steptixPointerProbe = (e: any) => { w.__steptixPointerOver = e.composedPath().includes(el); };
+        w.addEventListener('mousemove', w.__steptixPointerProbe, true);
+      },
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    await page.mouse.move(x, y);
+    return true;
+  }
+  // Two moves, so the last one is a real change of position even when the
+  // pointer was already resting at (x, y).
+  await page.mouse.move(x - 1, y - 1);
+  await page.mouse.move(x, y);
+  try {
+    return await element.evaluate(
+      () => {
+        const w = globalThis as any;
+        w.removeEventListener('mousemove', w.__steptixPointerProbe, true);
+        delete w.__steptixPointerProbe;
+        return w.__steptixPointerOver === true;
+      },
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The scroll that centres two boxes in the viewport together, or null when
+ * their combined extent is wider or taller than the viewport, so no single
+ * scroll position shows both centres. Boxes are viewport-relative.
+ */
+export function scrollToFitBoth(
+  a: Box,
+  b: Box,
+  viewport: { width: number; height: number },
+): { dx: number; dy: number } | null {
+  const left = Math.min(a.x, b.x);
+  const top = Math.min(a.y, b.y);
+  const right = Math.max(a.x + a.width, b.x + b.width);
+  const bottom = Math.max(a.y + a.height, b.y + b.height);
+  if (right - left > viewport.width || bottom - top > viewport.height) return null;
+  const dx = Math.round((left + right) / 2 - viewport.width / 2);
+  const dy = Math.round((top + bottom) / 2 - viewport.height / 2);
+  return dx === 0 && dy === 0 ? null : { dx, dy };
 }
 
 /**
@@ -1956,6 +2114,64 @@ async function pollUntil(
   }
 }
 
+export interface ThresholdWait {
+  /** The current number, or null when the element or a number is not there. */
+  read: () => Promise<number | null>;
+  op: '>=' | '<=' | '>' | '<';
+  limit: number;
+  /** How long the value may stand still (or move away) before the wait fails. */
+  idleMs: number;
+  /** The ceiling however steadily it moves. */
+  maxMs: number;
+  what: string;
+  signal?: AbortSignal | undefined;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Wait for a moving number to pass a limit, for as long as it keeps moving
+ * towards it (SPEC-web-survey-fixes.md §2.21). The survey's progress bar
+ * reached 75% after 8, 18 and 22 seconds on three runs, so any fixed timeout
+ * either fails a slow run or makes a wrong selector wait for ages. A person
+ * keeps watching while the bar moves and gives up when it stops: each step
+ * towards the limit pushes the deadline out by `idleMs`, up to `maxMs`. A
+ * value that stands still, or moves the wrong way, fails after `idleMs`, as an
+ * ordinary wait would.
+ */
+export async function waitForThreshold(w: ThresholdWait): Promise<void> {
+  const now = w.now ?? Date.now;
+  const sleep = w.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const passes = (n: number): boolean =>
+    w.op === '>=' ? n >= w.limit : w.op === '<=' ? n <= w.limit : w.op === '>' ? n > w.limit : n < w.limit;
+  const towards = (from: number, to: number): boolean => (w.op === '>=' || w.op === '>' ? to > from : to < from);
+  const start = now();
+  const ceiling = start + w.maxMs;
+  let deadline = Math.min(start + w.idleMs, ceiling);
+  let best: number | null = null;
+  for (;;) {
+    if (w.signal?.aborted) return;
+    const n = await w.read();
+    if (n !== null) {
+      if (passes(n)) return;
+      if (best === null || towards(best, n)) {
+        if (best !== null) deadline = Math.min(now() + w.idleMs, ceiling);
+        best = n;
+      }
+    }
+    const left = deadline - now();
+    if (left <= 0) {
+      const seen = best === null ? 'no number was read' : `it got no further than ${best}`;
+      const err = new Error(
+        `Timeout exceeded waiting for ${w.what}: ${seen}, and it stopped moving towards ${w.limit} for ${w.idleMs}ms`,
+      );
+      err.name = 'TimeoutError';
+      throw err;
+    }
+    await sleep(Math.min(100, left));
+  }
+}
+
 // Exported for unit tests (issue 022) — verifies the clamped `timeout` is the
 // value actually forwarded into Playwright's wait calls. Not part of the public
 // API; `executeAction` is the entry point in normal use.
@@ -2076,6 +2292,35 @@ export async function executeWait(
       const comparison = compared ? { op: compared[2]!, limit: Number(compared[3]) } : null;
       const target = root.locator(sanitizeCssSelector(selector));
 
+      if (comparison !== null) {
+        await waitForThreshold({
+          read: async () => {
+            if ((await target.count()) === 0) return null;
+            try {
+              return await target.first().evaluate(
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                (el: any, attribute) => {
+                  const raw = el.getAttribute(attribute) ?? (attribute === 'value' ? el.value : null);
+                  const n = Number.parseFloat(String(raw ?? ''));
+                  return Number.isNaN(n) ? null : n;
+                },
+                attr,
+                { timeout: 1_000 },
+              );
+            } catch {
+              return null;
+            }
+          },
+          op: comparison.op as ThresholdWait['op'],
+          limit: comparison.limit,
+          idleMs: timeout,
+          maxMs: MAX_WAIT_TIMEOUT_MS,
+          what: `${selector} to have ${expr}`,
+          signal,
+        });
+        break;
+      }
+
       await pollUntil(
         async () => {
           // A bad selector throws here, at once, rather than timing out.
@@ -2083,21 +2328,12 @@ export async function executeWait(
           try {
             return await target.first().evaluate(
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (el: any, { attribute, expected, shouldBeAbsent, compare }) => {
+              (el: any, { attribute, expected, shouldBeAbsent }) => {
                 if (shouldBeAbsent) return !el.hasAttribute(attribute);
-                if (compare !== null) {
-                  const raw = el.getAttribute(attribute) ?? (attribute === 'value' ? el.value : null);
-                  const n = Number.parseFloat(String(raw ?? ''));
-                  if (Number.isNaN(n)) return false;
-                  if (compare.op === '>=') return n >= compare.limit;
-                  if (compare.op === '<=') return n <= compare.limit;
-                  if (compare.op === '>') return n > compare.limit;
-                  return n < compare.limit;
-                }
                 if (expected === null) return el.hasAttribute(attribute);
                 return el.getAttribute(attribute) === expected;
               },
-              { attribute: attr, expected: val, shouldBeAbsent: negate, compare: comparison },
+              { attribute: attr, expected: val, shouldBeAbsent: negate },
               { timeout: 1_000 },
             );
           } catch {

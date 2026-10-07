@@ -32,6 +32,11 @@ in the test files, not here.
 | 2.17 | Settling inside an immediate chain | 42 | After each page-changing action the step loop waits up to 3.5 s for the page to stop changing. On a progress bar that changes every 100 ms, it waited the full 3.5 s after "click Start" and again after the wait, so "click Stop at 75%" clicked Stop at 100% | Skip the settle after a trigger with a `wait` right behind it, and after a `wait` with an action right behind it |
 | 2.18 | Textless elements have no identity in the snapshot | 40, 41 | The snapshot keeps only allow-listed attributes, so `class` is always dropped. Three empty circle divs and a tree's empty expand toggle came out as bare `<div>` and `<span>`, and the model could only guess by position | When an element has no text and no naming attribute, keep up to four readable class names (never hashed or generated ones), and allow `draggable` |
 | 2.15 | Range values outside the slider | 46 in the first run with the fixes | "Set the slider to its maximum" was typed as `100` into a slider that stops at 10, which Playwright refuses as malformed | Clamp a range value to the input's own `min` and `max`, and read `max` and `min` as the two ends |
+| 2.19 | A drag whose target starts below the screen | 40 | `drag` scrolled the source into view, which leaves it at the viewport's bottom edge. The target was still below, so the drag fell back to `dragTo`, which scrolls mid-drag. Chromium drops an HTML5 drag that scrolls, so both circle drags "succeeded" and moved nothing | Before pressing, scroll so source and target are centred on screen together when they fit |
+| 2.20 | Typing into a field something covers | 42 | `type` uses `fill`, which types into a field even when another element covers it. The overlapped-element page clears the field on `input` when its centre is covered, so the text vanished | Before typing, when the field is not what the browser hits at its centre, scroll it into view centred, then at the start, then at the end, stopping at the first that uncovers it |
+| 2.21 | A threshold wait with a fixed timeout | 42 | A numeric attribute wait (§2.13) fails after 10 s. The progress bar reached 75% after 8, 18 and 22 s on three runs, so the wait timed out on a slow run and the retry clicked Stop at 87% by eye | While the value keeps moving towards the limit, push the deadline out by the timeout each time, up to the 10-minute cap. A value that stands still or moves away still fails after the timeout |
+| 2.22 | A drag pressed through an ad | 40 | A drag presses at the source's coordinates without checking what is there. The circles page has side-rail Google ad frames that reposition after a scroll, and about one drag in five pressed on one: no `mousedown` reached the page, the drag "succeeded", and the red circle stayed put | Move the pointer onto the source first and check the source received the `mousemove`. If not, hide the page's ads (as §2.5 does for a click) and try once more; if something else covers it, fall back to `dragTo`, whose actionability check reports what intercepts the pointer |
+| 2.23 | `browser.blockAds` ignored on the server | every survey run | On the server path, `browser.*` comes from the server's own config except for a listed few keys, and `blockAds` was not one of them. The survey project set it, and no session ever blocked an ad. A Google vignette covered test 40's last steps | Read `blockAds` off the session's project config at launch, as `launchArgs` already is |
 
 ## 2. Fixes
 
@@ -228,6 +233,66 @@ row, framework prefixes (`css-`, `sc-`, `jsx-`, `emotion-` and similar), and
 mixed-case-plus-digit or `__hash` tokens, which are generated. `draggable` joins
 the allow-list. An element with text, or with a naming attribute, is captured
 exactly as before.
+
+### 2.19 A drag whose target starts below the screen
+
+**Fix.** `executeDrag` scrolls the source into view, then reads both boxes
+against the window's own `innerWidth` and `innerHeight`. `viewportSize()` is
+null for a headed launch and for every CDP page, and with a null size every box
+counted as on screen, so the survey's headed run never scrolled at all.
+When either centre is off-screen and the two fit on one screen together
+(`scrollToFitBoth`), it scrolls the window by the offset that centres their
+combined box, with `behavior: 'instant'` so a page's smooth scrolling cannot
+move them after they are measured. It then reads the boxes again and drags in
+steps as before. A pair too far apart for one screen, or one that scrolls
+inside a container the window scroll does not move, still falls back to
+`dragTo`.
+
+### 2.20 Typing into a field something covers
+
+**Fix.** Before clearing and filling, `executeType` checks whether the field
+is what `elementFromPoint` returns at its centre (the field or something
+inside it). If not, it calls `scrollIntoView` with `block` set to
+`center`, then `start`, then `end`, and stops at the first that makes the
+field reachable. This is the same idea as Playwright's own retry of scroll
+alignments for a covered click. If nothing uncovers the field, it is typed into
+as before.
+
+### 2.21 Threshold waits follow the value
+
+**Fix.** An attribute wait with `>=`, `<=`, `>` or `<` runs through
+`waitForThreshold`. It reads the number every 100 ms and remembers the best
+value so far, meaning the closest to the limit. Each new best pushes the
+deadline to now plus the wait's timeout, never past `MAX_WAIT_TIMEOUT_MS`. A
+reading that does not improve on the best leaves the deadline where it was. So
+a wrong selector, a stalled bar, or a value moving the wrong way fails after
+the timeout, exactly as before, and the error says how far the value got.
+Exact-match and presence waits are unchanged.
+
+### 2.22 A drag checks the pointer reaches the source
+
+**Fix.** Before pressing, `executeDrag` installs a capture-phase
+`mousemove` listener on the source's window and moves the pointer to the
+source's centre (two moves, so the last is a real change of position). The
+source "felt" it when the event's composed path includes the source. A frame
+on top takes the event, so the source's window sees nothing. When the source
+did not feel it, `hideAds` runs; if it hid anything, the box is read again
+and the probe repeats. A source that still does not feel the pointer goes to
+`dragTo`, so a non-ad cover fails loudly instead of dragging nothing. The
+probe runs at the moment of pressing rather than before the scroll, because the
+covering ads move in response to the scroll. If the probe cannot be installed,
+the drag proceeds as before. Releasing a press that landed on an ad would click
+the ad, which is why the check moves the pointer rather than pressing.
+
+### 2.23 `browser.blockAds` is per project on the server
+
+**Fix.** The session launcher reads `blockAds` the way it reads
+`launchArgs`: off `session.browserConfig` (the project's `browser`
+section, written by the steps handler before the first step), falling back to
+the server's own setting when the project says nothing. A project can turn it
+off where the server has it on. `ProjectBundle`'s list of per-project
+`browser.*` keys names it. Under the CLI it already worked, since there the
+project's config is the run's config.
 
 ## 3. Failures caused by the test files or the sites
 

@@ -56,7 +56,7 @@ export interface ProjectBundle {
    * The full list of per-project keys the server threads deliberately, so the
    * next person does not have to rediscover it: `browser.video` (read at
    * session creation by `resolveSessionOutput`), `browser.fixedViewport` (the
-   * per-test `## Config: viewport`), `browser.launchArgs` and the whole
+   * per-test `## Config: viewport`), `browser.launchArgs`, `browser.blockAds` and the whole
    * `desktop` section (both stored on the session by the steps handler from
    * `projectBundle.config`, then read at LAUNCH time and at `[use computer]`
    * respectively). Every other `browser.*` key on the server path is the
