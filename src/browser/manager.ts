@@ -7,6 +7,7 @@ import type { BrowserConfig } from '../config/types.js';
 import { formatViewport } from '../config/viewport.js';
 import { logger } from '../utils/logger.js';
 import { loopbackFetch } from './loopback-fetch.js';
+import { installNoticeRecorder } from './notices.js';
 import { answerDialog } from './dialogs.js';
 
 /**
@@ -1597,6 +1598,7 @@ export async function launchBrowser(
   // Before the first page exists, so no page can ever raise a dialog into the
   // unguarded default (issues/047).
   installDialogGuard(context);
+  await installNoticeRecorder(context);
   if (config.blockAds === true) {
     if (browserType === 'chromium') logger.info('Ad hosts do not resolve in this browser (browser.blockAds)');
     else await blockAdRequests(context);
@@ -1706,6 +1708,7 @@ async function connectOverCdpSession(
     // dialog on a tab we deliberately ignore could otherwise kill the server
     // (issues/047).
     installDialogGuard(context);
+    await installNoticeRecorder(context);
 
     const preExistingPages = new Set<Page>(context.pages());
     let page: Page;

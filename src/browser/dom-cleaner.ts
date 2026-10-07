@@ -1,3 +1,4 @@
+import { noticeNote } from './notices.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Frame, Page } from 'playwright';
@@ -465,7 +466,7 @@ export async function captureDomSnapshot(page: Page, opts: CaptureDomOptions = {
       + DOM_SNAPSHOT_TRUNCATION_MARKER;
   }
 
-  return snapshot + dialogNote(page);
+  return snapshot + dialogNote(page) + (await noticeNote(page));
 }
 
 /**

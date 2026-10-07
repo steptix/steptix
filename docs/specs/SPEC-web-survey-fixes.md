@@ -44,6 +44,9 @@ in the test files, not here.
 | 2.28 | `find` does not say a match is hidden | 45 | A sidebar entry two collapsed levels deep shows in the snapshot only as `<ul><!-- hidden --></ul>`. The model could not tell which section held "Dynamic Buttons 01", wandered for 15 turns, then clicked the hidden link until it timed out | Each `find` match that is not rendered says so and names the collapsed sections around it, outermost first; rule 19 says to `find` an unseen menu entry and open those sections first |
 | 2.29 | A text wait ignored its frame | 52 | `wait` with `waitType: text` polled the main page's `document.body.innerText` even when the action named a frame, so it can never see a frame's text. The download dialog inside globalsqa's demo iframe already said "Complete!" and the wait still timed out, twice | Inside a frame, wait for `getByText(condition)` to be visible in that frame |
 | 2.30 | Blocking ads broke a page | 58 | `blockAds` (once §2.23 made it work on the server) routed every request through Playwright to abort the ad ones. On LetCode's sister site testmuai, the jQuery download dialog then stuck at "Starting download…" with a page error. A route that blocks NOTHING breaks it the same way, so the interception's own delay loses a race in the page's start-up | In Chromium, block ad hosts with `--host-resolver-rules` (`MAP <host> ~NOTFOUND`), which needs no interception; route only on Firefox and WebKit |
+| 2.31 | Checks cannot see inside an iframe | 63 | Assertion code runs with `page.evaluate` in the top document, so `document.querySelector('#checkBox6')` never finds a checkbox inside `#myFrame3`. The click into the frame worked; the check that it was ticked said "element not found", twice | An assert with `frame` runs its code inside that frame; both prompts say how to reach frame content |
+| 2.32 | The hidden-toggle stand-in clicked a 1 px wrapper | 62 | §2.10 clicks the nearest visible ancestor of a hidden checkbox input. PrimeFaces wraps the input in a 1×1 px `ui-helper-hidden-accessible` div, which Playwright counts as visible and the real checkbox box covers, so the click timed out on "intercepts pointer events" | A stand-in must also have a box of at least 4×4 px |
+| 2.33 | Notifications close before they are checked | 62 | A PrimeFaces growl closes after six seconds and a model turn takes several, so "Verify a message confirms the Ajax checkbox was checked" read a page whose message had gone | The page records toast-like notifications as they appear; the snapshot lists the ones that have closed, and assertion code can read `window.__steptixNotices` |
 
 ## 2. Fixes
 
@@ -401,6 +404,38 @@ when `blockAds` is on, after `--window-size` and before the author's
 `launchArgs`, so an author's own switch can still override it. No route is
 installed for Chromium. Firefox and WebKit, which have no such switch, keep the
 route. The CDP path is unchanged: it attaches to a browser someone else started.
+
+### 2.31 Checks inside an iframe
+
+**Fix.** `resolveFrame` (actions.ts) turns a frame selector (same `>>` or space
+segmenting as action frames) into a Playwright `Frame`. When an assert has
+`frame`, `evaluateAssertion` resolves it once and runs the generated code,
+polling included, in that frame. The code prompt says `document` is the
+frame's own document. If the frame is not found, a warning is logged and the
+code runs on the page. Without `frame`, the code prompt now says frame content
+is not searched by `document.querySelector`, and shows `contentDocument` for
+a same-origin frame. Rule 16 says an `assert` takes `frame` like any other
+action.
+
+### 2.32 Stand-ins a person could click
+
+**Fix.** In `standInForHiddenToggle`, a candidate (label or ancestor) must be
+visible **and** have a bounding box of at least 4×4 px. The 1 px clip wrapper is
+skipped, and the next ancestor, the toggle's container, takes the click.
+
+### 2.33 Notifications are remembered
+
+**Fix.** `installNoticeRecorder` (notices.ts) adds an init script to every
+launched or attached context, and runs it in the pages already open. It keeps
+`window.__steptixNotices`, up to 20 `{ text, at }` records with a WeakRef to
+the element, newest last. It records any element matching `role="alert"`,
+`role="status"`, `aria-live`, or a class containing toast, growl, snackbar or
+notification, both when it is added and when its text changes. The same text
+within 3 s is recorded once. `captureDomSnapshot` appends a comment listing
+records from the last 60 s whose element is gone, hidden or now says something
+else, with their age. A notification still on screen is in the snapshot itself.
+The assertion code prompt shows reading `window.__steptixNotices` for a
+message that may have closed. Nothing on the page changes.
 
 ## 3. Failures caused by the test files or the sites
 

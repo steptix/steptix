@@ -7,12 +7,13 @@
  * library that ignores a single jump, a checkbox whose `<input>` is hidden, an
  * ad over a button, a prompt dialog.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { executeAction, normaliseColour, normaliseKeyName, scrollToFitBoth, waitForThreshold } from '../src/browser/actions.js';
 import { parseAIResponse, parseAssertionCode } from '../src/ai/action-parser.js';
 import { installDialogGuard, isAdRequest } from '../src/browser/manager.js';
 import { dialogRecords, disarmDialog } from '../src/browser/dialogs.js';
+import { installNoticeRecorder } from '../src/browser/notices.js';
 import { captureDomSnapshot, findInDom, formatFindResults } from '../src/browser/dom-cleaner.js';
 import { describeWhereExpectedIs, expectedFragments } from '../src/browser/locate-text.js';
 import type { AIAction } from '../src/ai/types.js';
@@ -746,6 +747,96 @@ describe('§2.29 a text wait inside a frame', () => {
       expect((await waiting).success).toBe(true);
     } finally {
       await page.close();
+    }
+  });
+});
+
+describe('§2.31 a check inside an iframe', () => {
+  it('runs the check\'s code in the frame the assert names', async () => {
+    const { executeStep } = await import('../src/runner/step-executor.js');
+    const { DEFAULT_BROWSER_DIMENSIONS } = await import('../src/config/browser-dimensions.js');
+    const page = await pageWith(`<iframe id="myFrame3" srcdoc="<input type='checkbox' id='cb' checked>"></iframe>`);
+    try {
+      await page.frameLocator('#myFrame3').locator('#cb').waitFor();
+      const stepReply = JSON.stringify({
+        actions: [{ action: 'assert', frame: '#myFrame3', condition: 'the checkbox is ticked', expected: 'checked', description: 'Checkbox in the frame is ticked' }],
+        reasoning: 'Check the box inside the frame.',
+      });
+      // Plain document.querySelector: it finds #cb only when run inside the frame.
+      const codeReply = JSON.stringify({ code: "(() => { const el = document.querySelector('#cb'); return el ? { pass: el.checked, actual: el.checked ? 'checked' : 'unchecked' } : { pass: false, actual: 'element not found: #cb' }; })()" });
+      let call = 0;
+      const aiClient = { complete: vi.fn(() => Promise.resolve({ text: call++ % 2 === 0 ? stepReply : codeReply, model: 'test' })) };
+      const result = await executeStep(1, 1, 'Verify the checkbox inside the iframe is ticked', {
+        page,
+        config: {
+          ai: { gatewayUrl: '', model: 'test', maxInputTokens: 1000, streamResponses: false },
+          browser: { headed: false, viewport: { ...DEFAULT_BROWSER_DIMENSIONS }, windowSize: { ...DEFAULT_BROWSER_DIMENSIONS }, slowMo: 0, browser: 'chromium', fullPageScreenshots: false },
+          tests: { dir: '.', contextDir: '.', pattern: '**/*.md' },
+          execution: { timeout: 30000, retries: 0, screenshotOnFailure: false, promptOnAmbiguity: false, maxTurns: 3 },
+          reports: { outputDir: '.', includeScreenshots: false, includeDomSnapshots: false, includeAiReasoning: false, embedScreenshots: true },
+          api: { specsDir: '.', requestTimeout: 5000, redactSensitive: false },
+        } as never,
+        aiClient: aiClient as never,
+        contextContent: '',
+        testName: 'test',
+        conversationHistory: [],
+        csrfTokens: {},
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe('passed');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('§2.32 a stand-in click skips the 1px wrapper', () => {
+  it('clicks the toggle\'s visible container, not the clip wrapper around its input', async () => {
+    // PrimeFaces' checkbox: the input sits in a 1×1 px clipped wrapper, and a
+    // sibling box covering it is what takes the click.
+    const page = await pageWith(`
+      <div class="ui-chkbox" id="wrap" style="position: relative; display: inline-block; padding: 4px"
+           onclick="const c = document.getElementById('cb'); c.checked = !c.checked">
+        <div class="ui-helper-hidden-accessible" style="position: absolute; top: 12px; left: 12px; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0)">
+          <input type="checkbox" id="cb" aria-label="Ajax" style="width: 0; height: 0; margin: 0; border: 0; padding: 0">
+        </div>
+        <div class="ui-chkbox-box" style="position: relative; z-index: 1; width: 20px; height: 20px; border: 1px solid #333; background: #fff"></div>
+      </div>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: 'input[aria-label="Ajax"]' }));
+      expect(result.success).toBe(true);
+      expect(await page.isChecked('#cb')).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('§2.33 notifications that close are remembered', () => {
+  it('names a toast that has closed in the next snapshot, and leaves out one still shown', async () => {
+    const own = await browser.newContext();
+    await installNoticeRecorder(own);
+    const page = await own.newPage();
+    try {
+      await page.setContent(`<!doctype html><html><body>
+        <div role="status" id="still">Connected</div>
+        <button id="b" onclick="
+          const t = document.createElement('div');
+          t.className = 'ui-growl-item';
+          t.textContent = 'Checked';
+          document.body.appendChild(t);
+          setTimeout(() => t.remove(), 50);
+        ">Tick</button></body></html>`);
+      await page.click('#b');
+      await page.waitForFunction(() => !document.querySelector('.ui-growl-item'));
+      const snap = await captureDomSnapshot(page);
+      expect(snap).toContain('Notifications that appeared and have since closed');
+      expect(snap).toMatch(/- "Checked" \(\d+ s ago\)/);
+      expect(snap).not.toMatch(/- "Connected"/);
+      expect(await page.evaluate(() => (window as unknown as { __steptixNotices: Array<{ text: string }> })
+        .__steptixNotices.map((n) => n.text))).toEqual(expect.arrayContaining(['Checked', 'Connected']));
+    } finally {
+      await own.close();
     }
   });
 });

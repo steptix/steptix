@@ -1,6 +1,6 @@
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import type { Browser, BrowserContext, Page } from 'playwright';
+import type { Frame, Browser, BrowserContext, Page } from 'playwright';
 import type { Config } from '../config/types.js';
 import { effectiveViewport } from '../config/viewport.js';
 import type { AIAction, BranchedAIResponse, TableReadMapping } from '../ai/types.js';
@@ -35,6 +35,7 @@ import {
   unknownActionTypeError,
 } from '../ai/action-parser.js';
 import { describeWhereExpectedIs } from '../browser/locate-text.js';
+import { resolveFrame } from '../browser/actions.js';
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
@@ -3221,6 +3222,7 @@ async function executeStepAttempt(
           apiResponseStore,
           attemptNumber,
           priorCheckFailures: priorFailures.filter((f) => f.actionType === 'assert').map((f) => f.error),
+          ...(action.frame !== undefined && { frame: action.frame }),
           dismissalGuidance: opts.dismissalGuidance ?? false,
           fullPageScreenshots: config.browser.fullPageScreenshots,
           sendScreenshots: config.ai.sendScreenshots,
@@ -4262,6 +4264,12 @@ interface EvaluateAssertionParams {
    * the one that has to hear it.
    */
   priorCheckFailures?: string[];
+  /**
+   * The assert's `frame`: the check reads an iframe's content, so its code runs
+   * in that frame (SPEC-web-survey-fixes.md §2.31). `document.querySelector`
+   * on the page never reaches into a frame.
+   */
+  frame?: string;
   dismissalGuidance: boolean;
   fullPageScreenshots: boolean;
   sendScreenshots: boolean;
@@ -4290,6 +4298,12 @@ const MAX_ASSERTION_CODE_ATTEMPTS = 2;
  */
 async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionResult> {
   let assertionCode: string | null = null;
+  let target: Page | Frame = p.page;
+  if (p.frame !== undefined && p.against !== 'predicate' && p.against !== 'api') {
+    const frame = await resolveFrame(p.page, p.frame);
+    if (frame) target = frame;
+    else logger.warn(`Assertion frame "${p.frame}" not found — the check runs on the page instead`);
+  }
   let aiInteraction: AiInteraction | undefined;
   /** Every code generation before the current one — calls made and paid for,
    *  which the result must still count (`supersededAiInteractions`). */
@@ -4335,6 +4349,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
         apiHistory,
         p.against,
         formatTestInfo(p.testName, p.baseUrl),
+        target === p.page ? undefined : p.frame,
       );
 
       const apiContext: ApiPromptContext | undefined = p.contextContent.includes('Type:')
@@ -4391,7 +4406,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
 
     // 2. Run the JS — with optional polling
     try {
-      evalResult = await runAssertionCode(p.page, assertionCode, p.poll);
+      evalResult = await runAssertionCode(target, assertionCode, p.poll);
       if (!evalResult || typeof evalResult.pass !== 'boolean' || typeof evalResult.actual !== 'string') {
         throw new Error(`Assertion code returned unexpected shape: ${JSON.stringify(evalResult)}`);
       }
@@ -4434,7 +4449,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
 
 /** Run assertion JS code, optionally polling until pass or timeout. */
 async function runAssertionCode(
-  page: Page,
+  page: Page | Frame,
   code: string,
   poll: { timeoutMs?: number; intervalMs?: number } | undefined,
 ): Promise<{ pass: boolean; actual: string }> {

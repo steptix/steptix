@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { Page, FrameLocator, Locator } from 'playwright';
+import type { Frame, Page, FrameLocator, Locator } from 'playwright';
 import type { AIAction, ActionType, TableReadColumn, TableReadMapping } from '../ai/types.js';
 // §9.2: one validator for both paths into the table extractor. The dependency
 // points this way because the parser owns the §6.2 rules and their wording;
@@ -41,6 +41,30 @@ function resolveLocatorRoot(page: Page, frameSelector?: string): Page | FrameLoc
     root = root.frameLocator(segment);
   }
   return root;
+}
+
+/**
+ * The Playwright `Frame` a frame selector names, with the same segmenting as
+ * {@link resolveLocatorRoot}, or null when any level is missing. For code that
+ * has to run INSIDE the frame — an assertion's `page.evaluate` — where a
+ * FrameLocator will not do (SPEC-web-survey-fixes.md §2.31).
+ */
+export async function resolveFrame(page: Page, frameSelector: string): Promise<Frame | null> {
+  const segments = frameSelector.includes('>>')
+    ? frameSelector.split('>>').map((s) => s.trim()).filter(Boolean)
+    : frameSelector.trim().split(/s+/);
+  let current: Frame = page.mainFrame();
+  for (const segment of segments) {
+    try {
+      const handle = await current.locator(segment).first().elementHandle({ timeout: 5_000 });
+      const next = handle ? await handle.contentFrame() : null;
+      if (!next) return null;
+      current = next;
+    } catch {
+      return null;
+    }
+  }
+  return current;
 }
 
 /**
@@ -861,7 +885,13 @@ async function standInForHiddenToggle(root: Page | FrameLocator, matches: Locato
     }
     for (const candidate of candidates) {
       const first = candidate.first();
-      if (await first.isVisible().catch(() => false)) return first;
+      if (!(await first.isVisible().catch(() => false))) continue;
+      // "Visible" includes the 1×1 px clip wrapper accessible toggles hide
+      // their input in (PrimeFaces' ui-helper-hidden-accessible): something
+      // else covers it, so the click timed out (SPEC-web-survey-fixes.md
+      // §2.32). Only stand in with something a person could click.
+      const box = await first.boundingBox().catch(() => null);
+      if (box !== null && box.width >= 4 && box.height >= 4) return first;
     }
   } catch {
     // Anything unexpected leaves the ordinary click to report what is wrong.
