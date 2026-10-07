@@ -1283,6 +1283,9 @@ export function unwaitedNavigationComplaint(
  *  `ReferenceError` unless the entry destructured it. */
 const CONTEXT_PROPERTIES = ['page', 'context', 'browser', 'step', 'log', 'tabs', 'browsers'] as const;
 
+/** The context's plain values — used bare as values, not through a `.`. */
+const CONTEXT_VALUES = ['baseUrl'] as const;
+
 /** The destructured parameter list of `async run({ ... })` — or of `async
  *  condition({ ... })`, which receives the same context object
  *  (stories/codebehind-loops-and-conditions.md). Group 1 is which function,
@@ -1318,16 +1321,28 @@ export function undeclaredContextComplaint(code: string): string | undefined {
       .map((part) => part.split(':')[0]!.trim())
       .filter(Boolean),
   );
+  const complaint = (name: string): string =>
+    `The entry uses \`${name}\` but \`${fn}\` does not destructure it — the parameter list is ` +
+    `\`{ ${[...declared].join(', ')} }\`, so this throws \`ReferenceError: ${name} is not defined\` ` +
+    `on the first replay. Add \`${name}\` to the destructured context object.`;
   for (const name of CONTEXT_PROPERTIES) {
     if (declared.has(name)) continue;
     if (!new RegExp(`(?:^|[^\\w$.])${name}\\s*\\.`).test(code)) continue;
     // A local of the same name is defined, whatever the parameter list says.
     if (new RegExp(`(?:const|let|var)\\s+${name}\\b`).test(code)) continue;
-    return (
-      `The entry uses \`${name}\` but \`${fn}\` does not destructure it — the parameter list is ` +
-      `\`{ ${[...declared].join(', ')} }\`, so this throws \`ReferenceError: ${name} is not defined\` ` +
-      `on the first replay. Add \`${name}\` to the destructured context object.`
-    );
+    return complaint(name);
+  }
+  // The context's VALUES are used bare, not through a member access —
+  // `page.goto(baseUrl)`, `${baseUrl}/login` — so they are looked for as a
+  // name on its own, outside strings and comments, and not as an object key.
+  // Measured live: an entry for "Navigate to the baseUrl" called
+  // `page.goto(baseUrl)` from `run({ page, step })`, and threw on replay.
+  const text = codeText(code);
+  for (const name of CONTEXT_VALUES) {
+    if (declared.has(name)) continue;
+    if (!new RegExp(`(?:^|[^\\w$.])${name}\\b(?!\\s*:)`).test(text)) continue;
+    if (new RegExp(`(?:const|let|var|function)\\s+${name}\\b`).test(text)) continue;
+    return complaint(name);
   }
   return undefined;
 }

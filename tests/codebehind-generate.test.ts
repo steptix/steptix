@@ -606,6 +606,34 @@ describe('undeclaredContextComplaint', () => {
     ).toBeUndefined();
   });
 
+  // Measured live: the entry for "Navigate to the baseUrl" in
+  // flow-control-slow-live.md called `page.goto(baseUrl)` from
+  // `run({ page, step })` and threw `baseUrl is not defined` on replay.
+  it('catches baseUrl used bare without being destructured', () => {
+    const complaint = undeclaredContextComplaint(
+      `{\n  source: 'Navigate to the baseUrl',\n  async run({ page, step }) {\n    await page.goto(baseUrl);\n  },\n}`,
+    );
+    expect(complaint).toMatch(/`baseUrl`/);
+    expect(complaint).toMatch(/ReferenceError: baseUrl is not defined/);
+    expect(
+      undeclaredContextComplaint(
+        '{ source: \'x\', async run({ page }) { await page.goto(`${baseUrl}/login.html`); } }',
+      ),
+    ).toMatch(/`baseUrl`/);
+  });
+
+  it('stays quiet about baseUrl when it is destructured, a local, a key, a property or only in a string', () => {
+    for (const body of [
+      `async run({ page, baseUrl }) { await page.goto(baseUrl); }`,
+      `async run({ page, step }) { const baseUrl = step.getVar('base'); await page.goto(baseUrl); }`,
+      `async run({ page, step }) { step.setVar('target', JSON.stringify({ baseUrl: 'x' })); await page.click('#go'); }`,
+      `async run(ctx) { await ctx.page.goto(ctx.baseUrl); }`,
+      `async run({ page, log }) { log.info('baseUrl is set'); await page.click('#go'); }`,
+    ]) {
+      expect(undeclaredContextComplaint(`{ source: 'x', ${body} }`), body).toBeUndefined();
+    }
+  });
+
   it('is not fooled by a property access on something else', () => {
     expect(
       undeclaredContextComplaint(
