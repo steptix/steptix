@@ -47,6 +47,7 @@ in the test files, not here.
 | 2.31 | Checks cannot see inside an iframe | 63 | Assertion code runs with `page.evaluate` in the top document, so `document.querySelector('#checkBox6')` never finds a checkbox inside `#myFrame3`. The click into the frame worked; the check that it was ticked said "element not found", twice | An assert with `frame` runs its code inside that frame; both prompts say how to reach frame content |
 | 2.32 | The hidden-toggle stand-in clicked a 1 px wrapper | 62 | §2.10 clicks the nearest visible ancestor of a hidden checkbox input. PrimeFaces wraps the input in a 1×1 px `ui-helper-hidden-accessible` div, which Playwright counts as visible and the real checkbox box covers, so the click timed out on "intercepts pointer events" | A stand-in must also have a box of at least 4×4 px |
 | 2.33 | Notifications close before they are checked | 62 | A PrimeFaces growl closes after six seconds and a model turn takes several, so "Verify a message confirms the Ajax checkbox was checked" read a page whose message had gone | The page records toast-like notifications as they appear; the snapshot lists the ones that have closed, and assertion code can read `window.__steptixNotices` |
+| 2.34 | Exact role names miss icon buttons | 62 | An icon font draws its glyph with CSS `::before` content, and that counts in the accessible name. PrimeFaces' Dismiss button is named "<glyph> Dismiss", so `role=button[name="Dismiss"]` matched nothing on an open dialog, twice | When an exact `role=…[name="…"]` matches nothing, retry it as `name=/^W*…W*$/i` and keep that only if it finds something |
 
 ## 2. Fixes
 
@@ -437,6 +438,17 @@ else, with their age. A notification still on screen is in the snapshot itself.
 The assertion code prompt shows reading `window.__steptixNotices` for a
 message that may have closed. Nothing on the page changes.
 
+### 2.34 Role names tolerate an icon glyph
+
+**Fix.** Before acting, `executeAction` passes the selector through
+`tolerateRoleName`. If it contains an exact role name, and the selector as
+written matches nothing, each `role=X[name="Y"]` is rewritten to
+`role=X[name=/^W*YW*$/i]` (Y regex-escaped, inner spaces as `s+`). The
+rewrite is used only when it matches. It still anchors the whole name, so
+"Dismiss all" is not "Dismiss". A selector that matched as written is never
+touched, and one the rewrite cannot help is kept as written, so the failure
+quotes what the model sent.
+
 ## 3. Failures caused by the test files or the sites
 
 These are fixed in the test files.
@@ -450,6 +462,7 @@ These are fixed in the test files.
 | 55 | The web table's Add form posts to `#` and reloads, so no record is ever added. Its "Type to Search" box filters nothing either: typing changes no rows, and Enter submits the form to `?` | Read a cell and count the rows instead |
 | 44 | LetCode's Button page no longer has a double-click button, and its "new tab" button opens the workspace URL itself | Drop the double-click (covered by 41, 43, 49, 50), and check the new tab's address starts with the site |
 | 57 | `/sliders/` is now a 404; the page moved to `/slider/` | Navigate to `/slider/` |
+| 63 | The drag-and-drop row is `display: none` until the FIRST checkbox is ticked, and the test ticks 2 and 4 | Tick checkbox 1 first |
 | 59 | The first frame's dropdowns are now a course list (Java, Dot Net, Python, Javascript) and an IDE list; "Baby Cat" is gone | Select Python |
 | 60 | The sample table lists Friends characters now; there is no Clark | Read Joey's occupation |
 | 48 | "Open Tab" opens qaclickacademy.com, which answers with a Cloudflare 526 (invalid SSL certificate) page | Check the new tab's address rather than its content |

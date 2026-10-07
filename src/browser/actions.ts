@@ -43,6 +43,37 @@ function resolveLocatorRoot(page: Page, frameSelector?: string): Page | FrameLoc
   return root;
 }
 
+/** `role=button[name="Dismiss"]`: the exact-name form, without Playwright's `i`/`s` flags. */
+const EXACT_ROLE_NAME = /role=([\w-]+)\[name=(["'])((?:(?!\2).)+)\2\]/g;
+
+/**
+ * An exact role name that matches nothing, retried with icon glyphs and
+ * punctuation around the name allowed (SPEC-web-survey-fixes.md §2.34).
+ * An icon font draws its glyph with CSS `::before` content, which counts in the
+ * accessible name, so PrimeFaces' Dismiss button is named "<glyph> Dismiss"
+ * and `role=button[name="Dismiss"]` matched nothing on a dialog showing it.
+ * The rewrite still anchors the whole name — "Dismiss all" stays a different
+ * button — and is kept only when it finds something; otherwise the selector is
+ * returned as written, so the failure names what the model wrote.
+ */
+export async function tolerateRoleName(root: Page | FrameLocator, selector: string): Promise<string> {
+  if (!new RegExp(EXACT_ROLE_NAME.source).test(selector)) return selector;
+  try {
+    if ((await root.locator(selector).count()) > 0) return selector;
+    const tolerant = selector.replace(EXACT_ROLE_NAME, (_m, role: string, _q: string, name: string) => {
+      const pattern = name.trim().replace(/[.*+?^${}()|[\]\\/]/g, '\\$&').replace(/\s+/g, '\\s+');
+      return `role=${role}[name=/^\\W*${pattern}\\W*$/i]`;
+    });
+    if (tolerant !== selector && (await root.locator(tolerant).count()) > 0) {
+      logger.debug(`No element is named exactly as in ${selector}; matched ${tolerant}`);
+      return tolerant;
+    }
+  } catch {
+    // An unparsable rewrite leaves the selector as the model wrote it.
+  }
+  return selector;
+}
+
 /**
  * The Playwright `Frame` a frame selector names, with the same segmenting as
  * {@link resolveLocatorRoot}, or null when any level is missing. For code that
@@ -381,6 +412,7 @@ export async function executeAction(
 
   // Resolve frame context once — used by all locator-based actions and the error handler
   const root = resolveLocatorRoot(page, effectiveFrame);
+  if (effectiveSelector) effectiveSelector = await tolerateRoleName(root, effectiveSelector);
   if (effectiveFrame) {
     // For nested frames ("A >> B" or "A B"), validate the outermost iframe exists on the page
     const outerSelector = effectiveFrame.includes('>>')

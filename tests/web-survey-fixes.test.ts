@@ -840,3 +840,20 @@ describe('§2.33 notifications that close are remembered', () => {
     }
   });
 });
+
+describe('§2.34 role names with an icon glyph', () => {
+  it('clicks the button whose accessible name carries an icon font glyph, and not a longer name', async () => {
+    const page = await pageWith(`
+      <style>.pi-check::before { content: "\\2714"; }</style>
+      <button id="all" onclick="document.body.dataset.hit = 'all'">Dismiss all</button>
+      <button id="one" onclick="document.body.dataset.hit = 'one'"><span class="pi-check"></span><span>Dismiss</span></button>`);
+    try {
+      expect(await page.locator('role=button[name="Dismiss"]').count()).toBe(0);
+      const result = await executeAction(page, act({ action: 'click', selector: 'role=button[name="Dismiss"]' }));
+      expect(result.success).toBe(true);
+      expect(await page.evaluate(() => document.body.dataset['hit'])).toBe('one');
+    } finally {
+      await page.close();
+    }
+  });
+});

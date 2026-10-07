@@ -28,7 +28,8 @@ button whose label changes on click.
 8. Tick checkboxes 2 and 4
 9. Tick the checkbox inside the iframe
 10. Verify the checkbox inside the iframe is ticked
-11. Drag the logo image into the drop box
-12. Verify the logo is now inside the drop box
-13. Click "Click Me (Green)"
-14. Verify the button now says "Click Me (Purple)"
+11. Tick checkbox 1, which shows the drag-and-drop row
+12. Drag the logo image into the drop box
+13. Verify the logo is now inside the drop box
+14. Click "Click Me (Green)"
+15. Verify the button now says "Click Me (Purple)"
