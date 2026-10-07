@@ -7,6 +7,7 @@ import type { BrowserConfig } from '../config/types.js';
 import { formatViewport } from '../config/viewport.js';
 import { logger } from '../utils/logger.js';
 import { loopbackFetch } from './loopback-fetch.js';
+import { answerDialog } from './dialogs.js';
 
 /**
  * How much bigger the headed OS window is than the page inside it, when
@@ -1390,38 +1391,61 @@ const dialogGuarded = new WeakSet<BrowserContext>();
  * own tabs that `PageTracker` deliberately ignores. Guarding only the pages we
  * track would leave a dialog on an unrelated tab able to kill the server.
  *
- * The disposition mirrors Playwright's own default exactly (accept
- * `beforeunload`, dismiss the rest), so runs behave as they always have. The
- * difference is that the failures are caught and the dialogs are finally
- * visible: until now every dialog in every run was dismissed silently, with
- * nothing in the log to say it ever happened.
+ * Unless a `dialog` action armed an answer first, the disposition mirrors
+ * Playwright's own default exactly (accept `beforeunload`, dismiss the rest),
+ * so runs behave as they always have. An armed answer, the record of every
+ * dialog, and the `.catch` that is the point of this function all live in
+ * `answerDialog` (src/browser/dialogs.ts, SPEC-web-survey-fixes.md §2.1). A
+ * dialog that is already gone by the time our answer reaches Chromium is an
+ * ordinary race, not a reason to lose every session on the server.
  */
+/**
+ * Hosts that serve ads and nothing a page under test needs to work
+ * (docs/specs/SPEC-web-survey-fixes.md §2.5). Matched against the request's
+ * host name, as a suffix, so `pagead2.googlesyndication.com` is caught by
+ * `googlesyndication.com`.
+ */
+export const AD_HOSTS: readonly string[] = [
+  'doubleclick.net',
+  'googlesyndication.com',
+  'googleadservices.com',
+  'adservice.google.com',
+  'googletagservices.com',
+  'amazon-adsystem.com',
+  'adnxs.com',
+  'taboola.com',
+  'outbrain.com',
+  'criteo.com',
+  'pubmatic.com',
+  'rubiconproject.com',
+  'adsrvr.org',
+];
+
+/** Is `url` served by one of {@link AD_HOSTS}? */
+export function isAdRequest(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return AD_HOSTS.some((ad) => host === ad || host.endsWith(`.${ad}`));
+}
+
+/** Abort every request in `context` to an ad host (`browser.blockAds`). */
+async function blockAdRequests(context: BrowserContext): Promise<void> {
+  await context.route(
+    (url) => isAdRequest(url.toString()),
+    (route) => route.abort('blockedbyclient').catch(() => {}),
+  );
+  logger.info('Ad requests are blocked for this browser (browser.blockAds)');
+}
+
 export function installDialogGuard(context: BrowserContext): void {
   if (dialogGuarded.has(context)) return;
   dialogGuarded.add(context);
 
-  context.on('dialog', (dialog: Dialog) => {
-    const type = dialog.type();
-    // `beforeunload` is accepted rather than dismissed for the same reason
-    // Playwright accepts it: dismissing one means "stay on this page", which
-    // silently cancels the navigation the step just asked for.
-    const accepting = type === 'beforeunload';
-    const where = dialog.page()?.url() ?? 'unknown page';
-    logger.info(
-      `Browser dialog [${type}] auto-${accepting ? 'accepted' : 'dismissed'} on ${where}` +
-        (dialog.message() ? `: ${dialog.message()}` : ''),
-    );
-    // The `.catch` is the entire point of this function. A dialog that is
-    // already gone by the time our answer reaches Chromium is an ordinary race,
-    // not a reason to lose every session on the server.
-    const answered = accepting ? dialog.accept() : dialog.dismiss();
-    void answered.catch((err: unknown) => {
-      logger.debug(
-        `Dialog [${type}] could not be ${accepting ? 'accepted' : 'dismissed'} — ` +
-          `it was already gone (${err instanceof Error ? err.message : String(err)})`,
-      );
-    });
-  });
+  context.on('dialog', (dialog: Dialog) => answerDialog(context, dialog));
 }
 
 /**
@@ -1556,6 +1580,7 @@ export async function launchBrowser(
   // Before the first page exists, so no page can ever raise a dialog into the
   // unguarded default (issues/047).
   installDialogGuard(context);
+  if (config.blockAds === true) await blockAdRequests(context);
 
   const page = await context.newPage();
   const pageTracker = new PageTracker(page);

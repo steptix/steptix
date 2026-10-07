@@ -145,6 +145,12 @@ export interface BrowserConfig {
   /** Bypass Content-Security-Policy on the page. Useful when CSP blocks scripts
    *  the site itself needs (cascading failures). Default false. */
   bypassCSP?: boolean;
+  /** Abort requests to well-known ad networks (doubleclick, googlesyndication,
+   *  Amazon and Taboola ads and similar), so ads cannot cover the page or slow
+   *  it down. Off by default, because a site under test could depend on one of
+   *  them (docs/specs/SPEC-web-survey-fixes.md §2.5). Not applied to a CDP
+   *  browser: that browser is the user's own. */
+  blockAds?: boolean;
   /** What a SINGULAR action does when its selector resolves to more than one
    *  candidate element. `'first'` (default, and today's behaviour) acts on the
    *  first of them; `'fail'` refuses to act and returns the count, which flows

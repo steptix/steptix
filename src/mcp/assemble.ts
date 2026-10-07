@@ -31,6 +31,8 @@ import {
   placeholderRoot,
 } from '../parser/parameters.js';
 import { controlLineError, parseControlLine } from '../parser/control-line.js';
+import { referencedVariableNames } from '../skills/expander.js';
+import { inlineStoreAsNames } from '../runner/placeholder-substitution.js';
 import { parseTestContent, resolveDataSourcePath } from '../parser/markdown.js';
 import type { ParsedSection, ParsedTest } from '../parser/types.js';
 import {
@@ -296,7 +298,18 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
     }
   }
   const sectionSteps = Object.values(parsed.sections).flatMap((section) => section.steps);
-  const unresolvedParams = missingParameters([...parsed.steps, ...sectionSteps], parameters);
+  // A section's table columns are bound for each row its body runs, so they
+  // have values exactly where they are used (stories/data-driven-rows.md).
+  const sectionColumns = Object.fromEntries(
+    Object.values(parsed.sections)
+      .flatMap((section) => section.rows ?? [])
+      .flatMap((row) => Object.keys(row))
+      .map((name) => [name, '']),
+  );
+  const unresolvedParams = missingParameters(
+    [...parsed.steps, ...sectionSteps],
+    { ...sectionColumns, ...parameters },
+  );
   if (unresolvedParams.length > 0) {
     warnings.push(
       `These placeholders have no value and will reach the AI literally: ` +
@@ -856,6 +869,12 @@ function missingParameters(
   for (const [index, step] of steps.entries()) {
     const setStep = parseSetStep(step);
     if (setStep) assigned.add(setStep.name);
+    // A capture (`[as: x]`, `[store as: x]`, `[output: x]`, `store as {{x}}`)
+    // gives `x` a value too. Without this, every run that read a value and
+    // used it warned that the value "will reach the AI literally", and it
+    // never did (docs/specs/SPEC-web-survey-fixes.md §2.12).
+    for (const name of referencedVariableNames(step).captures) assigned.add(name);
+    for (const name of inlineStoreAsNames(step)) assigned.add(name);
     const useAi = parseUseAiStep(step);
     if (useAi) {
       // An explicit name is authoritative, and so is a definition: its own

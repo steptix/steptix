@@ -36,6 +36,7 @@ import {
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
+import { disarmDialog } from '../browser/dialogs.js';
 import type {
   ActionExecutionResult,
   ExecuteActionOptions,
@@ -2532,6 +2533,14 @@ async function executeStepAttempt(
   // `[input: …]` answers grow the parameter map as the step runs.
   const secretsNow = (): string[] => secretsFor(opts);
   let page = pageTracker ? pageTracker.getActive() : opts.page;
+  // A `dialog` answer belongs to the step that set it
+  // (docs/specs/SPEC-web-survey-fixes.md §2.1): one a previous step armed and
+  // never used must not answer a dialog this step did not ask about.
+  try {
+    disarmDialog(page.context());
+  } catch {
+    // A page without a context (a test double) has no dialogs to disarm.
+  }
   const maxTurns = config.execution.maxTurns;
 
   // Accumulated across all turns

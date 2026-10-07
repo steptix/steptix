@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Frame, Page } from 'playwright';
+import { describeDialogs, takeUnshownDialogs } from './dialogs.js';
 
 /** Default maximum character length for DOM snapshots (prevents token blowup).
  *  Overridable per-call via CaptureDomOptions.domSnapshotCharLimit. */
@@ -462,7 +463,29 @@ export async function captureDomSnapshot(page: Page, opts: CaptureDomOptions = {
       + DOM_SNAPSHOT_TRUNCATION_MARKER;
   }
 
-  return snapshot;
+  return snapshot + dialogNote(page);
+}
+
+/**
+ * The browser dialogs answered since the last snapshot, as a comment after
+ * the markup (docs/specs/SPEC-web-survey-fixes.md §2.1). A dialog opens and
+ * closes between two snapshots, so without this the model never learns that
+ * one appeared or what it said. Empty when there were none, which keeps every
+ * dialog-free snapshot exactly as it was. A page without a context (a test
+ * double) has no dialogs to report.
+ */
+function dialogNote(page: Page): string {
+  let records;
+  try {
+    records = takeUnshownDialogs(page.context());
+  } catch {
+    return '';
+  }
+  if (records.length === 0) return '';
+  return '\n<!-- Browser dialogs answered since the last snapshot. Each is also readable in the '
+    + 'page as window.__steptixDialogs (type, message, answer, text). A dialog is answered the '
+    + 'moment it opens: to choose the answer, send a "dialog" action BEFORE the click that opens it.\n'
+    + `${describeDialogs(records)}\n-->`;
 }
 
 /** Options for captureVisibleText. */

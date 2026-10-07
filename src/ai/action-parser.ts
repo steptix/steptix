@@ -28,6 +28,9 @@ export const VALID_ACTION_TYPES: ReadonlySet<ActionType> = new Set<ActionType>([
   // both recordable by Record Steps, so both must run
   // (docs/specs/SPEC-record-steps.md §4).
   'reload', 'drag',
+  // docs/specs/SPEC-web-survey-fixes.md §2.1 — how the next browser dialog
+  // is answered.
+  'dialog',
   'hover', 'wait', 'scroll', 'switchFrame', 'switchPage', 'closePage', 'openPage',
   'openBrowser', 'switchBrowser', 'closeBrowser',
   'dismiss',
@@ -173,6 +176,28 @@ export const ACTION_TYPE_ALIASES: Readonly<Record<string, ActionType>> = {
   dragDrop: 'drag',
   drag_drop: 'drag',
   dragAndDropTo: 'drag',
+  // docs/specs/SPEC-web-survey-fixes.md §2.2. Every one of these was sent by
+  // gpt-6-luna in the web survey and refused; {@link ALIAS_DEFAULTS} adds the
+  // field that makes each one mean what its name says.
+  doubleClick: 'click',
+  dblclick: 'click',
+  dblClick: 'click',
+  rightClick: 'click',
+  contextClick: 'click',
+  contextMenu: 'click',
+  // §2.1. The six spellings the survey's runs sent for "answer the dialog".
+  acceptDialog: 'dialog',
+  acceptAlert: 'dialog',
+  acceptConfirm: 'dialog',
+  acceptPrompt: 'dialog',
+  confirmDialog: 'dialog',
+  handleDialog: 'dialog',
+  handleAlert: 'dialog',
+  dismissDialog: 'dialog',
+  dismissAlert: 'dialog',
+  dismissConfirm: 'dialog',
+  cancelDialog: 'dialog',
+  alert: 'dialog',
   'api': 'api_call',
   'http': 'api_call',
   'request': 'api_call',
@@ -233,6 +258,49 @@ const FOLDED_ACTION_TYPES: ReadonlyMap<string, ActionType> = new Map<string, Act
   ),
   ...[...VALID_ACTION_TYPES].map((type) => [foldActionName(type), type] as [string, ActionType]),
 ]);
+
+/**
+ * The field an alias implies, keyed by FOLDED alias. `doubleClick` is a
+ * `click`, but a single click would be the wrong action: the alias has to say
+ * how many. A field the model sent itself wins over the default.
+ */
+const ALIAS_DEFAULTS: ReadonlyMap<string, Partial<AIAction>> = new Map<string, Partial<AIAction>>([
+  ['doubleclick', { clickCount: 2 }],
+  ['dblclick', { clickCount: 2 }],
+  ['rightclick', { button: 'right' }],
+  ['contextclick', { button: 'right' }],
+  ['contextmenu', { button: 'right' }],
+  ['acceptdialog', { value: 'accept' }],
+  ['acceptalert', { value: 'accept' }],
+  ['acceptconfirm', { value: 'accept' }],
+  ['acceptprompt', { value: 'accept' }],
+  ['confirmdialog', { value: 'accept' }],
+  ['dismissdialog', { value: 'dismiss' }],
+  ['dismissalert', { value: 'dismiss' }],
+  ['dismissconfirm', { value: 'dismiss' }],
+  ['canceldialog', { value: 'dismiss' }],
+]);
+
+/**
+ * Apply {@link ALIAS_DEFAULTS} for the name the model actually sent, then put
+ * a `dialog` action's answer in one spelling: `value` is `accept` or
+ * `dismiss`, whatever word or flag the model used for it.
+ */
+function applyAliasDefaults(action: AIAction, rawActionType: string): void {
+  const defaults = ALIAS_DEFAULTS.get(foldActionName(rawActionType));
+  if (defaults !== undefined) {
+    for (const [key, value] of Object.entries(defaults)) {
+      const field = key as keyof AIAction;
+      if (action[field] === undefined) (action as unknown as Record<string, unknown>)[field] = value;
+    }
+  }
+  if (action.action === 'dialog') {
+    const answer = (action.value ?? '').trim().toLowerCase();
+    action.value = ['dismiss', 'cancel', 'no', 'reject', 'decline', 'false'].includes(answer)
+      ? 'dismiss'
+      : 'accept';
+  }
+}
 
 /**
  * The canonical type the model meant by `raw` — itself, an alias, or either
@@ -860,6 +928,26 @@ function parseAction(raw: unknown, index: number): AIAction {
   }
   if (typeof obj['value'] === 'string') action.value = obj['value'];
   if (typeof obj['url'] === 'string') action.url = obj['url'];
+  // docs/specs/SPEC-web-survey-fixes.md §2.2, §2.4, §2.8, §2.1. Each is read
+  // only on the action that uses it: `button` and `text` are common words a
+  // model could put on any action, and a stray one must not change a type.
+  if (actionType === 'click') {
+    const count = Number(obj['clickCount']);
+    if (count === 2) action.clickCount = 2;
+    const button = obj['button'];
+    if (button === 'right' || button === 'middle') action.button = button;
+  }
+  if (actionType === 'select' && Array.isArray(obj['values'])) {
+    const values = obj['values'].filter((v): v is string => typeof v === 'string' && v !== '');
+    if (values.length > 0) action.values = values;
+  }
+  if (actionType === 'count' && obj['includeHidden'] === true) action.includeHidden = true;
+  if (actionType === 'dialog') {
+    const text = [obj['text'], obj['promptText'], obj['input']]
+      .find((v): v is string => typeof v === 'string');
+    if (text !== undefined) action.text = text;
+  }
+  applyAliasDefaults(action, rawActionType);
   // Upload paths (stories/upload-action.md §2). Normalised here so the cached
   // action and the compiled code-behind carry a relative, forward-slashed path
   // whatever spelling the model used. Normalisation ALSO runs at the point of
