@@ -1140,6 +1140,8 @@ export type TranscriptAction = AIAction & {
   /** The page's URL changed while the action ran
    *  (docs/specs/SPEC-codebehind-robustness.md §6.7). */
   navigated?: { from: string; to: string };
+  /** The first-party requests the action started, observed on this run (§6.9). */
+  requests?: Array<{ method: string; path: string; status?: number; ms?: number }>;
 };
 
 /**
@@ -1636,6 +1638,22 @@ function navigationLegend(actions: TranscriptAction[]): string {
   );
 }
 
+/**
+ * What `requests` means, said once above the transcript — only when an action
+ * carries it (docs/specs/SPEC-codebehind-robustness.md §6.9). Evidence, never a
+ * requirement (D5): what one run's server did is not a contract the entry may
+ * wait on by name.
+ */
+function requestsLegend(actions: TranscriptAction[]): string {
+  if (!actions.some((a) => (a.requests?.length ?? 0) > 0)) return '';
+  return (
+    'An action with `requests` started those requests to the page\'s own site on this run — method, path, ' +
+    'status, and how many milliseconds each took. They were observed on this run: evidence of what the action ' +
+    'does and how long the page takes to answer it, not something the entry must wait for by name. ' +
+    '`await step.settle()` already waits for whatever requests an action starts.\n\n'
+  );
+}
+
 /** The transcript with each `navigated` URL masked: a URL can carry a secret.
  *  The same array when there is nothing to mask. */
 function maskNavigation(actions: TranscriptAction[], secrets: readonly string[]): TranscriptAction[] {
@@ -2082,7 +2100,7 @@ ${wholeTestBlock}${formatLoopBlock(input.loop, 'step')}
 ${paramBlock}
 
 ## The actions the AI performed (this run's transcript)
-${targetingLegend(input.actions)}${navigationLegend(input.actions)}${actionBlock}${assertionBlock}${captureBlock}${domBlock(input.domBefore, input.urlBefore, 'before')}${domBlock(input.domAfter, input.urlAfter, 'after')}${candidateBlock}${retryBlock}
+${targetingLegend(input.actions)}${navigationLegend(input.actions)}${requestsLegend(input.actions)}${actionBlock}${assertionBlock}${captureBlock}${domBlock(input.domBefore, input.urlBefore, 'before')}${domBlock(input.domAfter, input.urlAfter, 'after')}${candidateBlock}${retryBlock}
 
 ## What to return
 

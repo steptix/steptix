@@ -22,7 +22,7 @@ import {
 } from '../ai/prompts.js';
 import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome, ScrollPositionInfo, GridStructureSketch } from '../ai/prompts.js';
 import { diagnosePageState, waitForPageStability, waitForPostActionSettle, capturePageSignal, PageActivityTracker, armActionWatcher } from '../browser/page-state.js';
-import type { ActionWatcher, PageStateDiagnosis } from '../browser/page-state.js';
+import type { ActionWatcher, ObservedRequest, PageStateDiagnosis } from '../browser/page-state.js';
 import { actingCalls, entryFunctionActs } from '../codebehind/entry-actions.js';
 import type { ChatMessage } from '../ai/types.js';
 import {
@@ -1422,6 +1422,25 @@ async function runCodeBehindStep(
  */
 function actionSettleBudgetMs(config: Config): number {
   return Math.min(10_000, config.execution.timeout * 1000);
+}
+
+/**
+ * The wait after an action, armed for an AI action on a compile run (§6.9) —
+ * or undefined when the page has no context to listen on.
+ */
+function armCompileWatcher(page: Page, config: Config): (ActionWatcher & { ready: Promise<void> }) | undefined {
+  let context: BrowserContext | undefined;
+  try {
+    context = page.context();
+  } catch {
+    return undefined;
+  }
+  if (!context) return undefined;
+  return armActionWatcher(context, page, {
+    budgetMs: actionSettleBudgetMs(config),
+    quietMs: 600,
+    quickExitMs: 250,
+  });
 }
 
 /** The active page right now — after a switch the entry made — or undefined
@@ -3710,54 +3729,79 @@ async function executeStepAttempt(
       };
       /** Set when a readTable's error quotes the model's structure answer. */
       let errorQuotesModel = false;
-      const result = await traceOp(`action.${action.action}: ${action.description}`, async () => {
-        if (action.action !== 'readTable') {
-          return executeAction(page, action, baseUrl, opts.signal, execOptions);
-        }
-        // Structured table reads carry a structure question of their own
-        // (SPEC-structured-table-reads.md §7.10) — at most one model call,
-        // and only on a SHAPE refusal. `secretsNow()` is the same set the DOM snapshot is
-        // redacted with, so a secret column is masked in the sketch before it
-        // reaches the model, exactly as it is masked in the page the model is
-        // shown one message earlier (§7.6).
-        const outcome = await runReadTableAction({
-          page,
-          action,
-          baseUrl,
-          execOptions,
-          config,
-          aiClient,
-          signal: opts.signal,
-          maskValues: secretsNow(),
-          stepText: promptAuthored,
-          memo: opts.structureMemo,
-          stepIndex,
-          onAiInteraction: (interaction) => {
-            turnAiInteractions.push({ ...interaction, attemptNumber });
-          },
+      // During a compile run, the wait after a compiled action is armed for an
+      // AI action that changes the page too (docs/specs/SPEC-codebehind-robustness.md
+      // §6.9) — on top of the post-action settle below, not instead of it, and
+      // waited on only for a request still in flight once that settle is done.
+      // So the page after the step shows what a slow request produced, and the
+      // generator is shown the requests each action started. An ordinary run
+      // keeps today's wait.
+      const watcher = opts.captureStepContext === true && preSignal !== undefined
+        ? armCompileWatcher(page, config)
+        : undefined;
+      /** What the watcher saw this action start (§6.9). */
+      let observedRequests: ObservedRequest[] | undefined;
+      let result: ActionExecutionResult;
+      let subDuration = 0;
+      try {
+        await watcher?.ready;
+        result = await traceOp(`action.${action.action}: ${action.description}`, async () => {
+          if (action.action !== 'readTable') {
+            return executeAction(page, action, baseUrl, opts.signal, execOptions);
+          }
+          // Structured table reads carry a structure question of their own
+          // (SPEC-structured-table-reads.md §7.10) — at most one model call,
+          // and only on a SHAPE refusal. `secretsNow()` is the same set the DOM snapshot is
+          // redacted with, so a secret column is masked in the sketch before it
+          // reaches the model, exactly as it is masked in the page the model is
+          // shown one message earlier (§7.6).
+          const outcome = await runReadTableAction({
+            page,
+            action,
+            baseUrl,
+            execOptions,
+            config,
+            aiClient,
+            signal: opts.signal,
+            maskValues: secretsNow(),
+            stepText: promptAuthored,
+            memo: opts.structureMemo,
+            stepIndex,
+            onAiInteraction: (interaction) => {
+              turnAiInteractions.push({ ...interaction, attemptNumber });
+            },
+          });
+          if (outcome.mapping !== undefined) {
+            // Record site 1: the turn's action list. Replacing the SLOT rather
+            // than writing through the object keeps `emitted` as the model
+            // wrote it.
+            recordedEmitted = { ...emitted, mapping: outcome.mapping };
+            aiResponse.actions[emittedIndex] = recordedEmitted;
+          }
+          if (outcome.quotesModel) errorQuotesModel = true;
+          return outcome.result;
         });
-        if (outcome.mapping !== undefined) {
-          // Record site 1: the turn's action list. Replacing the SLOT rather
-          // than writing through the object keeps `emitted` as the model
-          // wrote it.
-          recordedEmitted = { ...emitted, mapping: outcome.mapping };
-          aiResponse.actions[emittedIndex] = recordedEmitted;
-        }
-        if (outcome.quotesModel) errorQuotesModel = true;
-        return outcome.result;
-      });
-      const subDuration = Date.now() - subStartTime;
+        subDuration = Date.now() - subStartTime;
 
-      // Post-action settle: waits for the page to reflect the action's effect
-      // (SPA route swap, redirect chain, toast render, etc.) before we capture
-      // the next snapshot. Exits early on "no change at all" (no-op) or once
-      // the signal has been stable for settleMs. See waitForPostActionSettle.
-      if (preSignal && result.success) {
-        await traceOp(`settle.post-action (${action.action})`, () =>
-          waitForPostActionSettle(page, { preSignal }),
-        ).catch(() => {
-          /* settle errors are non-fatal — proceed to capture post-state */
-        });
+        // Post-action settle: waits for the page to reflect the action's effect
+        // (SPA route swap, redirect chain, toast render, etc.) before we capture
+        // the next snapshot. Exits early on "no change at all" (no-op) or once
+        // the signal has been stable for settleMs. See waitForPostActionSettle.
+        if (preSignal && result.success) {
+          await traceOp(`settle.post-action (${action.action})`, () =>
+            waitForPostActionSettle(page, { preSignal }),
+          ).catch(() => {
+            /* settle errors are non-fatal — proceed to capture post-state */
+          });
+        }
+        if (watcher && result.success) {
+          const report = await traceOp(`settle.compile-requests (${action.action})`, () =>
+            watcher.settle(opts.signal, { onlyIfPending: true }),
+          ).catch(() => undefined);
+          if (report && (report.requests ?? []).length > 0) observedRequests = report.requests;
+        }
+      } finally {
+        watcher?.dispose();
       }
 
       // Store captured value from "read" / "count" / "readTable" actions into
@@ -3806,6 +3850,10 @@ async function executeStepAttempt(
         // `targeting` exists, so an upload carrying only a route would read as
         // measured and take the wrong selector rules.
         ...(result.upload !== undefined && { upload: result.upload }),
+        // The first-party requests the action started, observed on a compile
+        // run (§6.9). `actionsOf` merges them onto the action, before the
+        // recording's redaction, for the generator to read as evidence.
+        ...(observedRequests !== undefined && { requests: observedRequests }),
         durationMs: subDuration,
         ...(result.error !== undefined && { error: result.error }),
         // The one site whose error is the browser action layer's own —

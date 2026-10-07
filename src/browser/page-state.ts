@@ -1,4 +1,4 @@
-import type { BrowserContext, Page, Request } from 'playwright';
+import type { BrowserContext, Page, Request, Response } from 'playwright';
 
 /**
  * Tracks in-flight network requests for a Page so callers can cheaply ask
@@ -449,6 +449,22 @@ function pageClosed(page: Page): boolean {
 
 // ── The wait after a compiled action (docs/specs/SPEC-codebehind-robustness.md §6.4) ──
 
+/**
+ * One first-party request that began while the watcher was armed, as it saw
+ * it (docs/specs/SPEC-codebehind-robustness.md §6.9) — what a compile run
+ * shows the generator an action did on the network.
+ */
+export interface ObservedRequest {
+  method: string;
+  /** The URL's path; the query is left off, since it can carry a token. */
+  path: string;
+  /** The response's status — absent when the request failed, or had not
+   *  answered when the settle ended. */
+  status?: number;
+  /** From the request to its end — absent while it was still in flight. */
+  ms?: number;
+}
+
 /** What one {@link ActionWatcher.settle} waited for, and what it left behind. */
 export interface SettleReport {
   /** How long the settle took. */
@@ -459,6 +475,9 @@ export interface SettleReport {
   /** `METHOD /path` of each tracked request still in flight when the budget
    *  ran out — empty unless it did. */
   stillPending: string[];
+  /** The first-party requests that began in the same window, in the order
+   *  they began (§6.9). */
+  requests: ObservedRequest[];
 }
 
 export interface ActionWatcherOptions {
@@ -485,8 +504,12 @@ export interface ActionWatcher {
    * settle ended — is over: every tracked request finished, then the page
    * quiet for `quietMs`. Never throws and never fails; at the budget it stops
    * and reports what is still pending.
+   *
+   * `onlyIfPending`: with no tracked request in flight, report at once rather
+   * than wait — for a caller that has already waited for the page to hold
+   * still, and needs this wait only for a request that outlived it (§6.9).
    */
-  settle(signal?: AbortSignal): Promise<SettleReport>;
+  settle(signal?: AbortSignal, options?: { onlyIfPending?: boolean }): Promise<SettleReport>;
   dispose(): void;
 }
 
@@ -606,6 +629,8 @@ export function armActionWatcher(
   const inFlight = new Map<unknown, string>();
   /** Requests begun since arming, or since the previous settle ended. */
   let begunSince = 0;
+  /** The first-party ones among them, as observed (§6.9). */
+  let observed: Array<ObservedRequest & { key: unknown; startedAt: number }> = [];
   let current: SettleTracker | undefined;
   let disposed = false;
 
@@ -615,17 +640,46 @@ export function armActionWatcher(
     inFlight.set(req, label);
     begunSince++;
     current?.requestBegan(req, label, now());
+    if (firstParty(req, origin) && observed.length < MAX_OBSERVED_REQUESTS) {
+      observed.push({ key: req, method: methodOf(req), path: pathOf(req), startedAt: now() });
+    }
+  };
+  const onResponse = (res: Response): void => {
+    let req: Request;
+    try {
+      req = res.request();
+    } catch {
+      return;
+    }
+    const seen = observed.find((o) => o.key === req);
+    if (seen === undefined) return;
+    try {
+      seen.status = res.status();
+    } catch {
+      /* no status to report */
+    }
   };
   const onDone = (req: Request): void => {
+    const seen = observed.find((o) => o.key === req);
+    if (seen !== undefined && seen.ms === undefined) seen.ms = now() - seen.startedAt;
     if (!inFlight.delete(req)) return;
     current?.requestEnded(req, now());
   };
   const listening = typeof (context as { on?: unknown } | undefined)?.on === 'function';
   if (listening) {
     context.on('request', onRequest);
+    context.on('response', onResponse);
     context.on('requestfinished', onDone);
     context.on('requestfailed', onDone);
   }
+  /** What was observed, in the report's shape. */
+  const requestsSoFar = (): ObservedRequest[] =>
+    observed.map(({ method, path, status, ms }) => ({
+      method,
+      path,
+      ...(status !== undefined && { status }),
+      ...(ms !== undefined && { ms }),
+    }));
   /** The page when armed: the baseline a change is measured against, and the
    *  proof there is a DOM signal at all. */
   const armed = samplePage(page);
@@ -636,10 +690,13 @@ export function armActionWatcher(
 
   return {
     ready,
-    async settle(signal?: AbortSignal): Promise<SettleReport> {
+    async settle(signal?: AbortSignal, settleOptions?: { onlyIfPending?: boolean }): Promise<SettleReport> {
       await ready;
       if (baseline === undefined || disposed || signal?.aborted) {
-        return { waitedMs: 0, tracked: 0, stillPending: [] };
+        return { waitedMs: 0, tracked: 0, stillPending: [], requests: requestsSoFar() };
+      }
+      if (settleOptions?.onlyIfPending === true && inFlight.size === 0) {
+        return { waitedMs: 0, tracked: begunSince, stillPending: [], requests: requestsSoFar() };
       }
       const startedAt = now();
       let last = (await samplePage(activePage())) ?? UNREADABLE;
@@ -659,13 +716,17 @@ export function armActionWatcher(
       } finally {
         current = undefined;
       }
+      const requests = requestsSoFar();
       // The next settle waits only for what happens after this one.
+      // Each request is reported once, by the settle whose window it began in.
       begunSince = 0;
+      observed = [];
       baseline = last;
       return {
         waitedMs: now() - startedAt,
         tracked: tracker.tracked,
         stillPending: decision === 'budget' ? tracker.stillPending() : [],
+        requests,
       };
     },
     dispose(): void {
@@ -673,6 +734,7 @@ export function armActionWatcher(
       disposed = true;
       if (!listening) return;
       context.off('request', onRequest);
+      context.off('response', onResponse);
       context.off('requestfinished', onDone);
       context.off('requestfailed', onDone);
     },
@@ -681,6 +743,11 @@ export function armActionWatcher(
 
 /** The request types an action's answer arrives as. */
 const TRACKED_TYPES = new Set(['document', 'fetch', 'xhr']);
+
+/** How many requests one settle's report lists: enough for what one action
+ *  starts, and a bound on a page that polls (§6.9). Every one is still waited
+ *  for. */
+const MAX_OBSERVED_REQUESTS = 20;
 
 /** Is `req` network work the wait after an action waits for? */
 function trackable(req: Request, origin: string | undefined): boolean {
@@ -710,13 +777,41 @@ function isMainFrameNavigation(req: Request): boolean {
 
 /** `METHOD /path` — the query left off, since it can carry a token. */
 function requestLabel(req: Request): string {
-  let path = req.url();
+  return `${methodOf(req)} ${pathOf(req)}`;
+}
+
+function methodOf(req: Request): string {
   try {
-    path = new URL(path).pathname;
+    return req.method();
   } catch {
-    /* keep the raw url */
+    return 'GET';
   }
-  return `${req.method()} ${path}`;
+}
+
+/** The request URL's path — the query left off, since it can carry a token. */
+function pathOf(req: Request): string {
+  let path: string;
+  try {
+    path = req.url();
+  } catch {
+    return '';
+  }
+  try {
+    return new URL(path).pathname;
+  } catch {
+    return path.split('?')[0] ?? path;
+  }
+}
+
+/** Same origin as the page when the watcher was armed. A main-frame
+ *  navigation elsewhere is waited for, but is not the app's own request. */
+function firstParty(req: Request, origin: string | undefined): boolean {
+  if (origin === undefined) return false;
+  try {
+    return originOf(req.url()) === origin;
+  } catch {
+    return false;
+  }
 }
 
 /** An http(s) origin, or undefined — `about:blank` has none worth comparing. */

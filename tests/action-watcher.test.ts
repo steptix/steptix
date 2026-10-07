@@ -80,6 +80,7 @@ function world(start = 0) {
     at,
     begin: (r: FakeRequest) => emit('request', r),
     finish: (r: FakeRequest) => emit('requestfinished', r),
+    respond: (r: FakeRequest, status: number) => emit('response', { request: () => r, status: () => status }),
     fail: (r: FakeRequest) => emit('requestfailed', r),
     setFingerprint: (fp: string | undefined) => {
       fingerprint = fp;
@@ -229,7 +230,8 @@ describe('armActionWatcher — what it waits for', () => {
     const watcher = arm(w);
     w.begin(request(`${ORIGIN}/api/x`));
     const report = await watcher.settle();
-    expect(report).toEqual({ waitedMs: 0, tracked: 0, stillPending: [] });
+    // It waited for nothing — and still says what it saw begin (§6.9).
+    expect(report).toEqual({ waitedMs: 0, tracked: 0, stillPending: [], requests: [{ method: 'GET', path: '/api/x' }] });
     expect(w.now()).toBe(0);
     watcher.dispose();
   });
@@ -263,7 +265,8 @@ describe('armActionWatcher — what it waits for', () => {
   it('removes its listeners on dispose', () => {
     const w = world();
     const watcher = arm(w);
-    expect(w.listenerCount()).toBe(3);
+    // request, response, requestfinished, requestfailed
+    expect(w.listenerCount()).toBe(4);
     watcher.dispose();
     expect(w.listenerCount()).toBe(0);
   });
@@ -305,5 +308,104 @@ describe('SettleTracker — the rules, with no clock at all', () => {
     const t = tracker();
     t.requestEnded('stranger', 30);
     expect(t.decide(50)).toBe('quick-exit');
+  });
+});
+
+describe('armActionWatcher — what it saw (§6.9)', () => {
+  it('lists each first-party request: method, path without its query, status and time', async () => {
+    const w = world();
+    const watcher = arm(w);
+    const login = request(`${ORIGIN}/api/login?next=%2Fdashboard&token=abc`, { method: 'POST' });
+    const pixel = request('https://analytics.example.net/collect', { method: 'POST' });
+    w.at(10, () => {
+      w.begin(login);
+      w.begin(pixel);
+    });
+    w.at(1510, () => {
+      w.respond(login, 200);
+      w.finish(login);
+      w.finish(pixel);
+    });
+    const report = await watcher.settle();
+    expect(report.requests).toEqual([{ method: 'POST', path: '/api/login', status: 200, ms: 1500 }]);
+    watcher.dispose();
+  });
+
+  it('gives a failed request its time but no status, and one still in flight neither', async () => {
+    const w = world();
+    const watcher = arm(w, { budgetMs: 2000 });
+    const broken = request(`${ORIGIN}/api/broken`);
+    const slow = request(`${ORIGIN}/api/slow`);
+    w.at(10, () => {
+      w.begin(broken);
+      w.begin(slow);
+    });
+    w.at(110, () => w.fail(broken));
+    const report = await watcher.settle();
+    expect(report.requests).toEqual([
+      { method: 'GET', path: '/api/broken', ms: 100 },
+      { method: 'GET', path: '/api/slow' },
+    ]);
+    expect(report.stillPending).toEqual(['GET /api/slow']);
+    watcher.dispose();
+  });
+
+  it('onlyIfPending: reports at once when nothing is in flight', async () => {
+    const w = world();
+    const watcher = arm(w);
+    const api = request(`${ORIGIN}/api/fast`);
+    w.begin(api);
+    w.respond(api, 204);
+    w.finish(api);
+    const report = await watcher.settle(undefined, { onlyIfPending: true });
+    expect(report.waitedMs).toBe(0);
+    expect(w.now()).toBe(0);
+    expect(report.requests).toEqual([{ method: 'GET', path: '/api/fast', status: 204, ms: 0 }]);
+    watcher.dispose();
+  });
+
+  it('onlyIfPending: waits as settle does when a request outlived the caller\'s own wait', async () => {
+    const w = world();
+    const watcher = arm(w);
+    const api = request(`${ORIGIN}/api/slow`);
+    w.begin(api);
+    w.at(2000, () => {
+      w.respond(api, 200);
+      w.finish(api);
+      w.setFingerprint('300:120:30');
+    });
+    const report = await watcher.settle(undefined, { onlyIfPending: true });
+    expect(w.now()).toBeGreaterThanOrEqual(2600);
+    expect(report.requests).toEqual([{ method: 'GET', path: '/api/slow', status: 200, ms: 2000 }]);
+    watcher.dispose();
+  });
+
+  it('reports each request once, in the settle whose window it began in', async () => {
+    const w = world();
+    const watcher = arm(w);
+    const first = request(`${ORIGIN}/api/first`);
+    w.begin(first);
+    w.at(100, () => w.finish(first));
+    expect((await watcher.settle()).requests.map((r) => r.path)).toEqual(['/api/first']);
+    const second = request(`${ORIGIN}/api/second`);
+    w.begin(second);
+    w.at(w.now() + 100, () => w.finish(second));
+    expect((await watcher.settle()).requests.map((r) => r.path)).toEqual(['/api/second']);
+    watcher.dispose();
+  });
+
+  it('lists at most 20, and still waits for every one', async () => {
+    const w = world();
+    const watcher = arm(w);
+    const polls = Array.from({ length: 25 }, (_, i) => request(`${ORIGIN}/api/poll/${i}`));
+    for (const poll of polls) w.begin(poll);
+    w.at(500, () => {
+      for (const poll of polls) w.finish(poll);
+    });
+    const report = await watcher.settle();
+    expect(report.requests).toHaveLength(20);
+    expect(report.tracked).toBe(25);
+    expect(w.now()).toBeGreaterThanOrEqual(1100);
+    watcher.dispose();
   });
 });

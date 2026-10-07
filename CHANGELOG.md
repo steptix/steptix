@@ -91,6 +91,13 @@ from the one the AI run read with. See
   from … to … while this entry ran. The previous step may not wait for its
   navigation." Before, the ⚠ pointed at the step that ran into another step's
   navigation, with nothing to say so.
+- **A compile run waits for a slow request an AI action started.** During
+  Run & Compile and `steptix compile`'s recording, an AI action that changes
+  the page is followed, after the usual settle, by a wait for any request to
+  the page's own site still in flight — so the page the generator is shown
+  after the step is the one the request produced. Each action's requests
+  (method, path, status, time) go into the recording and are shown to the
+  generator as what was observed on that run. Ordinary runs are unchanged.
 
 ### Changed — a run shows the Test Runner, and its error banner follows the latest run
 

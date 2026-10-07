@@ -1,5 +1,6 @@
 import type { AIAction, AssertionEvaluation } from '../ai/types.js';
 import type { ActionTargeting } from '../browser/actions.js';
+import type { ObservedRequest } from '../browser/page-state.js';
 
 export type StepStatus = 'passed' | 'failed' | 'skipped';
 
@@ -90,6 +91,13 @@ export interface SubActionResult {
    *  action was not measured", so a route stored in there would misclassify
    *  every upload (stories/upload-action.md, decision 14). */
   upload?: { via: 'input' | 'chooser' };
+  /**
+   * The first-party requests the action started, as a compile run's wait
+   * observed them (docs/specs/SPEC-codebehind-robustness.md §6.9) — evidence
+   * for the generator of what the action does on the network. Absent on an
+   * ordinary run, and when the action started none.
+   */
+  requests?: ObservedRequest[];
   /** Page URL at the time the screenshot was captured */
   pageUrl?: string;
   /**

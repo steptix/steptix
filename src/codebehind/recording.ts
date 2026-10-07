@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AIAction } from '../ai/types.js';
 import type { ActionTargeting } from '../browser/actions.js';
+import type { ObservedRequest } from '../browser/page-state.js';
 import type { AssertionResult, StepResult, StepStatus, SubActionResult } from '../report/types.js';
 import { logger } from '../utils/logger.js';
 import {
@@ -56,6 +57,13 @@ export type RecordedAction = AIAction & {
    * before anything after this action — a sign-in's click, a submit.
    */
   navigated?: { from: string; to: string };
+  /**
+   * The first-party requests the action started, observed on the compile run
+   * (docs/specs/SPEC-codebehind-robustness.md §6.9): method, path, status, and
+   * how long each took. Evidence of what the action does — never something an
+   * entry must wait for by name.
+   */
+  requests?: ObservedRequest[];
 };
 
 export interface RecordingManifest {
@@ -807,12 +815,16 @@ export function actionsOf(result: StepResult | undefined): RecordedAction[] {
       // Here and not later, for `targeting`'s reason: a URL can carry a
       // secret, and the recording redacts what this returns.
       const navigated = navigationOf(sa);
-      if (sa.targeting === undefined && sa.upload === undefined && navigated === undefined) return sa.action;
+      const requests = sa.requests !== undefined && sa.requests.length > 0 ? sa.requests : undefined;
+      if (sa.targeting === undefined && sa.upload === undefined && navigated === undefined && requests === undefined) {
+        return sa.action;
+      }
       return {
         ...sa.action,
         ...(sa.targeting !== undefined && { targeting: sa.targeting }),
         ...(sa.upload !== undefined && { upload: sa.upload }),
         ...(navigated !== undefined && { navigated }),
+        ...(requests !== undefined && { requests }),
       };
     });
 }
