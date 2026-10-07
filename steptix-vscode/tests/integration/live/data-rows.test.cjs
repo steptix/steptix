@@ -486,11 +486,11 @@ describe('Steptix live — a run-level data table', function () {
 // ===========================================================================
 //
 // Lines of templates/init/tests/securebank-upload-rows.md:
-//   29-34 the six main-flow steps (32 = `4. Upload each statement`)
-//   36 `### Upload each statement`, 37 header, 38 delimiter, 39-41 the rows
-//   42-43 the two body steps
-const UPLOAD_STEPS = [29, 30, 31, 32, 33, 34];
-const SECTION_ROWS = [39, 40, 41];
+//   39-44 the six main-flow steps (42 = `4. Upload each statement`)
+//   46 `### Upload each statement`, 47 header, 48 delimiter, 49-51 the rows
+//   52-54 the three body steps
+const UPLOAD_STEPS = [39, 40, 41, 42, 43, 44];
+const SECTION_ROWS = [49, 50, 51];
 
 describe('Steptix live — a section-level data table', function () {
   this.timeout(600_000);
@@ -581,7 +581,7 @@ describe('Steptix live — a section-level data table', function () {
     );
 
     const tap = startOutputTap(hooks);
-    say('Run This Row on the section table\'s 2nd row (statement.pdf, line 40)');
+    say(`Run This Row on the section table's 2nd row (statement.pdf, line ${SECTION_ROWS[1]})`);
     void vscode.commands.executeCommand('steptix.runRow', {
       lineNumber: SECTION_ROWS[1],
     });
@@ -607,8 +607,19 @@ describe('Steptix live — a section-level data table', function () {
     );
 
     // Row 2 ran; rows 1 and 3 are untouched — not skipped, they were never in
-    // this run's plan.
-    assert.deepEqual(marks, ['pass', 'pass', 'pass'], 'rows 1 and 3 keep their prior marks');
+    // this run's plan. Asserted apart, because they fail for different
+    // reasons: row 2 when the narrowed run died before the loop reached it,
+    // rows 1 and 3 when the matrix lost the marks it should have carried.
+    assert.equal(
+      marks[1],
+      'pass',
+      `row 2 is the iteration that ran; section row marks ${JSON.stringify(marks)}, step marks ${JSON.stringify(stepMarks)}`,
+    );
+    assert.deepEqual(
+      [marks[0], marks[2]],
+      ['pass', 'pass'],
+      `rows 1 and 3 keep their prior marks; section row marks ${JSON.stringify(marks)}`,
+    );
 
     // THE downstream assertion: one file uploaded, so `{{document_count}}`
     // is 1 and step 6 fails. Narrowing a section changes what the steps after
