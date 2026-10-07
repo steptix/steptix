@@ -28,7 +28,8 @@ from the one the AI run read with. See
   the requests the action began on the page's own site — a login request and
   the navigation it triggers included — and then for the page to hold still,
   up to 10 s. A read-only entry does not wait; one that starts no request
-  waits at most 250 ms. Polls, WebSockets, analytics and third-party requests
+  waits only until the page has held still for 250 ms, and an entry that
+  ends with its own `step.settle()` is not waited for twice. Polls, WebSockets, analytics and third-party requests
   are not waited for; a wait that reaches its limit says in the log what was
   still pending and the run carries on. Before, a compiled sign-in passed
   57 ms after its click, and the next step judged a page that had not

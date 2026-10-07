@@ -235,6 +235,20 @@ export function entryActs(code: string): boolean {
 }
 
 /**
+ * True when the entry waits with `step.settle()` after its LAST acting call —
+ * so the runtime's own wait after it (§6.4) has nothing left to cover unless
+ * something happens after that settle. False for an entry that takes no
+ * action at all.
+ */
+export function settlesAfterLastAction(code: string): boolean {
+  const calls = actingCalls(code);
+  const last = calls[calls.length - 1];
+  if (last === undefined) return false;
+  const text = codeText(code);
+  return [...text.matchAll(/\bstep\s*\.\s*settle\s*\(/g)].some((m) => m.index! > last.index);
+}
+
+/**
  * {@link entryActs} for an entry's function, read once per function: the
  * runtime asks it of the same entry on every run of a loop body.
  */

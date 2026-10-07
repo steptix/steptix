@@ -39,8 +39,8 @@ vi.mock('../src/browser/page-state.js', async (importOriginal) => {
       timeline.events.push('arm');
       return {
         ready: Promise.resolve(),
-        settle: async () => {
-          timeline.events.push('settle');
+        settle: async (_signal?: AbortSignal, options?: { ifActive?: boolean }) => {
+          timeline.events.push(options?.ifActive ? 'settle:if-active' : 'settle');
           if (timeline.urlOnSettle !== undefined) timeline.url = timeline.urlOnSettle;
           return { waitedMs: 0, tracked: 0, stillPending: [] };
         },
@@ -219,7 +219,9 @@ describe('the wait after a compiled action (§6.4)', () => {
       "await page.click('#sign-in-btn'); await step.settle(); step.expect((await page.title()) !== '', 'a title');",
     );
     expect(result.status).toBe('passed');
-    expect(events).toEqual(['arm', 'entry:click', 'settle', 'entry:title', 'settle', 'screenshot', 'dispose']);
+    // The entry settled after its last action, so the runtime's own wait
+    // asks only whether anything happened since.
+    expect(events).toEqual(['arm', 'entry:click', 'settle', 'entry:title', 'settle:if-active', 'screenshot', 'dispose']);
   });
 });
 
@@ -261,5 +263,17 @@ describe('a failed entry names a navigation it ran into (§6.8)', () => {
     );
     expect(result.status).toBe('failed');
     expect(result.error).toBe(`#cookie-reject never appeared. ${NOTE}`);
+  });
+});
+
+describe('the wait after an entry that settled itself (§6.4, as built)', () => {
+  it('gives an entry that acts after its last settle the ordinary wait', async () => {
+    const { events } = await run("await page.click('#a'); await step.settle(); await page.click('#sign-in-btn');");
+    expect(events).toEqual(['arm', 'entry:click', 'settle', 'entry:click', 'settle', 'screenshot', 'dispose']);
+  });
+
+  it('asks only whether anything happened since, when the entry ends by settling', async () => {
+    const { events } = await run("await page.click('#sign-in-btn'); await step.settle();");
+    expect(events).toEqual(['arm', 'entry:click', 'settle', 'settle:if-active', 'screenshot', 'dispose']);
   });
 });

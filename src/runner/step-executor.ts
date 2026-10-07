@@ -23,7 +23,7 @@ import {
 import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome, ScrollPositionInfo, GridStructureSketch } from '../ai/prompts.js';
 import { diagnosePageState, waitForPageStability, waitForPostActionSettle, capturePageSignal, PageActivityTracker, armActionWatcher } from '../browser/page-state.js';
 import type { ActionWatcher, ObservedRequest, PageStateDiagnosis } from '../browser/page-state.js';
-import { actingCalls, entryFunctionActs } from '../codebehind/entry-actions.js';
+import { actingCalls, entryFunctionActs, settlesAfterLastAction } from '../codebehind/entry-actions.js';
 import type { ChatMessage } from '../ai/types.js';
 import {
   parseAIResponse,
@@ -1465,10 +1465,13 @@ async function settleAfterAction(
   watcher: ActionWatcher,
   stepIndex: number,
   opts: StepExecutorOptions,
+  /** The entry's code ends by settling after its last action: wait again
+   *  only if something happened since (`ifActive`). */
+  settledItself = false,
 ): Promise<void> {
-  const report = await traceOp('settle.codebehind-action', () => watcher.settle(opts.signal)).catch(
-    () => undefined,
-  );
+  const report = await traceOp('settle.codebehind-action', () =>
+    watcher.settle(opts.signal, settledItself ? { ifActive: true } : undefined),
+  ).catch(() => undefined);
   if (report && report.stillPending.length > 0) {
     logger.info(
       `The wait after step ${stepIndex} stopped at ${Math.round(actionSettleBudgetMs(opts.config) / 1000)} s; ` +
@@ -1570,7 +1573,7 @@ async function runCodeBehindStepArmed(
   // After an entry that ACTS — passed, threw or failed — wait for what its
   // actions started (§6.4). A read-only entry started nothing and skips it.
   if (watcher && typeof armed.entry.run === 'function' && entryFunctionActs(armed.entry.run)) {
-    await settleAfterAction(watcher, stepIndex, opts);
+    await settleAfterAction(watcher, stepIndex, opts, settlesAfterLastAction(code));
   }
 
   // A `step.filePath` that could not resolve is not broken code: the entry is

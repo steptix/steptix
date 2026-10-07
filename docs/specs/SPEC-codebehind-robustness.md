@@ -855,6 +855,18 @@ starts no request, and otherwise by the time its requests actually take. A
 click that starts first-party polling pays the budget every time; the log
 names the request.
 
+> **As built (2026-10-08).** Measured live, the design as written cost a
+> compiled click about 0.9 s (median 61 ms → 974 ms over 41 steps; compiled
+> replays 59–239 % slower): 600 ms of quiet after any change to the page,
+> then a second quick-exit window after an entry that had already settled
+> itself. Two changes keep the waits for network work as designed and bring
+> the rest within the bound above. With no request tracked, a settle ends
+> once the page has held still for `quickExitMs` (250 ms), not `quietMs`.
+> And the runner's wait after an entry whose code ends with `step.settle()`
+> after its last action (`settlesAfterLastAction`) returns at once unless a
+> request began or the page changed since (`settle(signal, { ifActive: true
+> })`).
+
 ### 6.5 `step.check`: a failed self-check in a read-only entry heals
 
 **Fixes:** B's outcome. A wrong generated read becomes a ⚠ and a repair,

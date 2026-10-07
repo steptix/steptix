@@ -508,8 +508,14 @@ export interface ActionWatcher {
    * `onlyIfPending`: with no tracked request in flight, report at once rather
    * than wait — for a caller that has already waited for the page to hold
    * still, and needs this wait only for a request that outlived it (§6.9).
+   *
+   * `ifActive`: when an earlier settle has finished and nothing has happened
+   * since — no request begun or in flight, and the page as that settle left
+   * it — report at once rather than give the page another quick-exit window.
+   * For the wait after an entry whose code ends by settling itself: a second
+   * window there only stacks one wait on another.
    */
-  settle(signal?: AbortSignal, options?: { onlyIfPending?: boolean }): Promise<SettleReport>;
+  settle(signal?: AbortSignal, options?: { onlyIfPending?: boolean; ifActive?: boolean }): Promise<SettleReport>;
   dispose(): void;
 }
 
@@ -568,14 +574,25 @@ export class SettleTracker {
     this.lastActivityAt = at;
   }
 
-  /** Whether to keep waiting, or why to stop. */
+  /**
+   * Whether to keep waiting, or why to stop.
+   *
+   * The quiet a settle ends on depends on what happened. After a request, the
+   * page is given `quietMs` (600 ms) to render what it answered. With no
+   * request at all — the page changed by itself, or did not change — it is
+   * given `quickExitMs` (250 ms) after the last change: long enough to see a
+   * request a handler starts on a short timer, and no longer. Measured live,
+   * 600 ms after every DOM-only change cost a compiled click about 0.6 s it
+   * had no use for (docs/specs/SPEC-codebehind-robustness.md §6.4, as built).
+   */
   decide(at: number): 'wait' | 'settled' | 'quick-exit' | 'budget' {
     if (at - this.startedAt >= this.options.budgetMs) return 'budget';
     if (this.pending.size > 0) return 'wait';
     if (this.begun === 0 && !this.changed) {
       return at - this.startedAt >= this.options.quickExitMs ? 'quick-exit' : 'wait';
     }
-    return at - this.lastActivityAt >= this.options.quietMs ? 'settled' : 'wait';
+    const quiet = this.begun > 0 ? this.options.quietMs : this.options.quickExitMs;
+    return at - this.lastActivityAt >= quiet ? 'settled' : 'wait';
   }
 
   get tracked(): number {
@@ -633,6 +650,8 @@ export function armActionWatcher(
   let observed: Array<ObservedRequest & { key: unknown; startedAt: number }> = [];
   let current: SettleTracker | undefined;
   let disposed = false;
+  /** A settle has finished, and `baseline` is the page it left. */
+  let settledOnce = false;
 
   const onRequest = (req: Request): void => {
     if (!trackable(req, origin)) return;
@@ -690,7 +709,10 @@ export function armActionWatcher(
 
   return {
     ready,
-    async settle(signal?: AbortSignal, settleOptions?: { onlyIfPending?: boolean }): Promise<SettleReport> {
+    async settle(
+      signal?: AbortSignal,
+      settleOptions?: { onlyIfPending?: boolean; ifActive?: boolean },
+    ): Promise<SettleReport> {
       await ready;
       if (baseline === undefined || disposed || signal?.aborted) {
         return { waitedMs: 0, tracked: 0, stillPending: [], requests: requestsSoFar() };
@@ -700,6 +722,17 @@ export function armActionWatcher(
       }
       const startedAt = now();
       let last = (await samplePage(activePage())) ?? UNREADABLE;
+      // Nothing since the last settle finished: no request, and the page as
+      // that settle left it. Another quick-exit window would only stack.
+      if (
+        settleOptions?.ifActive === true &&
+        settledOnce &&
+        inFlight.size === 0 &&
+        begunSince === 0 &&
+        last === baseline
+      ) {
+        return { waitedMs: now() - startedAt, tracked: 0, stillPending: [], requests: requestsSoFar() };
+      }
       const tracker = new SettleTracker(startedAt, last, options, inFlight, {
         begun: begunSince,
         changed: last !== baseline,
@@ -722,6 +755,7 @@ export function armActionWatcher(
       begunSince = 0;
       observed = [];
       baseline = last;
+      settledOnce = true;
       return {
         waitedMs: now() - startedAt,
         tracked: tracker.tracked,

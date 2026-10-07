@@ -213,15 +213,39 @@ describe('armActionWatcher — what it waits for', () => {
     watcher.dispose();
   });
 
-  it('waits out a DOM that keeps changing with no request, until it holds still', async () => {
+  it('waits out a DOM that keeps changing with no request, until it holds still for the quick-exit window', async () => {
     const w = world();
     const watcher = arm(w);
     w.setFingerprint('101:50:10'); // the entry's own click changed the page
-    w.at(400, () => w.setFingerprint('102:50:10'));
+    w.at(200, () => w.setFingerprint('102:50:10'));
+    w.at(400, () => w.setFingerprint('103:50:10'));
     const report = await watcher.settle();
     expect(report.tracked).toBe(0);
-    expect(w.now()).toBeGreaterThanOrEqual(400 + 600);
+    expect(w.now()).toBeGreaterThanOrEqual(400 + 250);
+    expect(w.now()).toBeLessThan(400 + 600);
     watcher.dispose();
+  });
+
+  it('gives a change with no request the quick-exit window, and a request the full quiet after it', async () => {
+    const domOnly = world();
+    const first = arm(domOnly);
+    domOnly.setFingerprint('101:50:10');
+    const dom = await first.settle();
+    expect(dom.waitedMs).toBeGreaterThanOrEqual(250);
+    expect(dom.waitedMs).toBeLessThan(600);
+    first.dispose();
+
+    const network = world();
+    const second = arm(network);
+    const api = request(`${ORIGIN}/api/save`, { method: 'POST' });
+    network.begin(api);
+    network.at(100, () => {
+      network.finish(api);
+      network.setFingerprint('101:50:10');
+    });
+    await second.settle();
+    expect(network.now()).toBeGreaterThanOrEqual(100 + 600);
+    second.dispose();
   });
 
   it('skips entirely when there was no DOM signal when it was armed', async () => {
@@ -406,6 +430,51 @@ describe('armActionWatcher — what it saw (§6.9)', () => {
     expect(report.requests).toHaveLength(20);
     expect(report.tracked).toBe(25);
     expect(w.now()).toBeGreaterThanOrEqual(1100);
+    watcher.dispose();
+  });
+});
+
+describe('armActionWatcher — ifActive: no second window after an entry settled itself', () => {
+  it('returns at once when nothing happened since the last settle', async () => {
+    const w = world();
+    const watcher = arm(w);
+    w.setFingerprint('101:50:10');
+    await watcher.settle();
+    const settledAt = w.now();
+    const report = await watcher.settle(undefined, { ifActive: true });
+    expect(w.now()).toBe(settledAt);
+    expect(report.waitedMs).toBe(0);
+    watcher.dispose();
+  });
+
+  it('waits as settle does when a request began since', async () => {
+    const w = world();
+    const watcher = arm(w);
+    await watcher.settle();
+    const api = request(`${ORIGIN}/api/late`);
+    w.begin(api);
+    w.at(w.now() + 800, () => w.finish(api));
+    const report = await watcher.settle(undefined, { ifActive: true });
+    expect(report.tracked).toBe(1);
+    expect(report.waitedMs).toBeGreaterThanOrEqual(800);
+    watcher.dispose();
+  });
+
+  it('waits as settle does when the page changed since', async () => {
+    const w = world();
+    const watcher = arm(w);
+    await watcher.settle();
+    w.setFingerprint('150:60:12');
+    const report = await watcher.settle(undefined, { ifActive: true });
+    expect(report.waitedMs).toBeGreaterThanOrEqual(250);
+    watcher.dispose();
+  });
+
+  it('is an ordinary settle when no settle has finished yet', async () => {
+    const w = world();
+    const watcher = arm(w);
+    const report = await watcher.settle(undefined, { ifActive: true });
+    expect(report.waitedMs).toBeGreaterThanOrEqual(250);
     watcher.dispose();
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { actingCalls, entryActs, entryFunctionActs } from '../src/codebehind/entry-actions.js';
+import { actingCalls, entryActs, entryFunctionActs, settlesAfterLastAction } from '../src/codebehind/entry-actions.js';
 
 /**
  * `entryActs` — does a code-behind entry act on the page, or only read it?
@@ -188,5 +188,31 @@ describe('entryActs — entries that only read', () => {
     expect(entryFunctionActs(readOnly)).toBe(false);
     expect(entryFunctionActs(clicks)).toBe(true);
     expect(entryFunctionActs(clicks)).toBe(true);
+  });
+});
+
+describe('settlesAfterLastAction — the entry waits for its own last action', () => {
+  it('is true when step.settle() follows the last action', () => {
+    expect(settlesAfterLastAction(`async run({ page, step }) { await page.click('#go'); await step.settle(); }`)).toBe(true);
+    expect(
+      settlesAfterLastAction(
+        `async run({ page, step }) { await page.fill('#a', 'x'); await page.click('#go'); await step.settle(); ` +
+          `step.expect((await page.title()) !== '', 'a title'); }`,
+      ),
+    ).toBe(true);
+  });
+
+  it('is false when an action follows the last settle, when there is no settle, and for an entry that does not act', () => {
+    expect(
+      settlesAfterLastAction(`async run({ page, step }) { await page.click('#go'); await step.settle(); await page.click('#next'); }`),
+    ).toBe(false);
+    expect(settlesAfterLastAction(`async run({ page }) { await page.click('#go'); }`)).toBe(false);
+    expect(settlesAfterLastAction(`async run({ page, step }) { step.setVar('t', await page.title()); await step.settle(); }`)).toBe(false);
+  });
+
+  it('does not count a settle in a comment or a string', () => {
+    expect(
+      settlesAfterLastAction(`async run({ page, log }) { await page.click('#go'); // await step.settle()\n log.info('step.settle()'); }`),
+    ).toBe(false);
   });
 });
