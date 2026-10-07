@@ -191,11 +191,11 @@ describe('recordedReadMismatch — the check', () => {
   });
 
   it('masks a secret in what it quotes', () => {
-    const found = check('x', [{ action: 'read', selector: '[data-token="tok_live_12345"]', as: 't' }], {
-      secrets: ['tok_live_12345'],
+    const found = check('x', [{ action: 'read', selector: '[data-token="read-selector-test-secret"]', as: 't' }], {
+      secrets: ['read-selector-test-secret'],
     });
-    expect(found?.selector).not.toContain('tok_live_12345');
-    expect(found?.complaint).not.toContain('tok_live_12345');
+    expect(found?.selector).not.toContain('read-selector-test-secret');
+    expect(found?.complaint).not.toContain('read-selector-test-secret');
   });
 });
 
