@@ -107,6 +107,18 @@ from the one the AI run read with. See
   had sometimes written `step.getVar('baseUrl')`, which is always undefined.
   The base URL is the context's `baseUrl`, so such a step fell back to AI on
   every replay. Compile now asks once more, and so does Review.
+- **Compiled code that chains a matcher onto an assertion is caught.** An entry
+  had written `step.expect(page.url()).toBe(…)`, Jest's style; `step.expect`
+  takes the condition and returns nothing, so every replay threw. Compile now
+  asks once more for the comparison as the condition, and Review rejects a
+  revision that brings the chain in. A bare `expect(…).toBe(…)` is caught the
+  same way.
+- **Compiled code closes or switches to a tab by the name the run used.** An
+  entry had closed "Account Summary", the new tab's heading, where the run
+  closed `page:2`; `tabs.close` finds a tab by its label, URL or title, so
+  every replay found nothing. Compile is now told to use the run's identifier,
+  asks once more when an entry names a tab the run did not, and Review rejects
+  a revision that renames one.
 
 ### Added — copy a variable, or export them all as CSV, from the Variables view and panel
 

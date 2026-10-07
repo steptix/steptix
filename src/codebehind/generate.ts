@@ -28,7 +28,7 @@ import type { AssertionResult } from '../report/types.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import { logger } from '../utils/logger.js';
 import { EMPTY, MASK, inheritLoopBindings, redact, runSecrets, secretValues } from '../utils/secrets.js';
-import { actingCalls, codeText } from './entry-actions.js';
+import { actingCalls, codeText, matchClose } from './entry-actions.js';
 import type { CodeBehindBinding } from './loader.js';
 import type { RecordedAction } from './recording.js';
 import { CODE, COMMENT, TEMPLATE, matchForward, scan, type StringToken } from './tokenizer.js';
@@ -553,7 +553,9 @@ async function askChecked(
     unwaitedReadComplaint(code) ??
     selfCheckInActingEntryComplaint(code) ??
     unwaitedNavigationComplaint(code, checks.actions, checks.secrets) ??
-    contextValueAsVariableComplaint(code, checks.variables);
+    contextValueAsVariableComplaint(code, checks.variables) ??
+    chainedAssertionComplaint(code) ??
+    tabIdentifierComplaint(code, checks.actions, checks.secrets);
 
   const firstRead = readFault(first.code);
   const firstOther = otherFault(first.code);
@@ -684,6 +686,17 @@ function warnRemainingFaults(code: string, label: string, checks: EntryCheckCont
         `replay. ${stillContextVariable}`,
     );
   }
+  const stillChained = chainedAssertionComplaint(code);
+  if (stillChained !== undefined) {
+    logger.warn(`Code-behind for "${label}" still chains a matcher onto an assertion; it throws on replay. ${stillChained}`);
+  }
+  const stillTabIdentifier = tabIdentifierComplaint(code, checks.actions, checks.secrets);
+  if (stillTabIdentifier !== undefined) {
+    logger.warn(
+      `Code-behind for "${label}" still names a tab differently from the run; it may find no tab on replay. ` +
+        stillTabIdentifier,
+    );
+  }
   const stillUnwaitedNavigation = unwaitedNavigationComplaint(code, checks.actions, checks.secrets);
   if (stillUnwaitedNavigation !== undefined) {
     logger.warn(
@@ -704,7 +717,9 @@ export interface EntryFault {
     | 'unwaited-read'
     | 'self-check-in-acting-entry'
     | 'unwaited-navigation'
-    | 'context-value-as-variable';
+    | 'context-value-as-variable'
+    | 'chained-assertion'
+    | 'tab-identifier';
   complaint: string;
   /** The recorded selector, for a `read` fault. */
   selector?: string;
@@ -746,6 +761,8 @@ export function entryFaults(
     ['self-check-in-acting-entry', selfCheckInActingEntryComplaint(code)],
     ['unwaited-navigation', unwaitedNavigationComplaint(code, actions, ctx.secrets)],
     ['context-value-as-variable', contextValueAsVariableComplaint(code, ctx.variables)],
+    ['chained-assertion', chainedAssertionComplaint(code)],
+    ['tab-identifier', tabIdentifierComplaint(code, actions, ctx.secrets)],
   ];
   for (const [check, complaint] of found) {
     if (complaint !== undefined) out.push({ check, complaint });
@@ -1390,6 +1407,111 @@ export function contextValueAsVariableComplaint(
     `answers undefined. \`${name}\` is part of the context: take it in the parameter list ` +
     `(\`async run({ page, step, ${name} })\`) and use it directly.`
   );
+}
+
+/** `step.expect(` / `step.check(` (the method in group 1), or a bare
+ *  `expect(` — searched for in {@link codeText}, so never inside a string. */
+const ASSERTION_CALL = /(?:\bstep\s*\.\s*(expect|check)|(?:^|[^\w$.])expect)\s*\(/g;
+
+/** An `expect` of the entry's own, which may well return a matcher. */
+const OWN_EXPECT = /(?:function|const|let|var)\s+expect\b/;
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * a matcher chained onto an assertion, in Jest's and Playwright Test's style:
+ * `step.expect(page.url()).toBe(baseUrl)`.
+ *
+ * `step.expect` and `step.check` take the condition itself and return nothing,
+ * so the chained `.toBe` reads a property of undefined and throws on every
+ * replay — after the step's action has run, so the step heals under AI each
+ * time. Measured live: compile-skill-subfolder's entry for "Navigate to the
+ * baseUrl", as Review revised it, threw `Cannot read properties of undefined
+ * (reading 'toBe')`. A bare `expect(…).toBe(…)` is the same idiom, and no
+ * `expect` exists in an entry (rule 6: no imports).
+ */
+export function chainedAssertionComplaint(code: string): string | undefined {
+  const text = codeText(code);
+  for (const m of text.matchAll(ASSERTION_CALL)) {
+    const method = m[1];
+    if (method === undefined && OWN_EXPECT.test(text)) continue;
+    const close = matchClose(text, m.index! + m[0].length - 1);
+    if (close === -1) continue;
+    const chained = /^\s*\??\.\s*([A-Za-z_$][\w$]*)/.exec(text.slice(close + 1));
+    if (!chained) continue;
+    const member = chained[1]!;
+    const assertion = method === undefined ? 'step.expect' : `step.${method}`;
+    return (
+      `The entry chains \`.${member}\` onto \`${method === undefined ? 'expect' : assertion}(…)\`, Jest's and ` +
+      'Playwright Test\'s matcher style. ' +
+      (method === undefined
+        ? 'No `expect` exists in an entry — rule 6, no imports — so on replay this throws. '
+        : `\`${assertion}\` takes the condition itself and returns nothing, so on replay this throws ` +
+          `\`Cannot read properties of undefined (reading '${member}')\`. `) +
+      `Write the comparison as the condition: \`${assertion}(page.url() === expected, 'The page is the ` +
+      `one the step names')\`.`
+    );
+  }
+  return undefined;
+}
+
+/** The tab calls that take an identifier, by the recorded action each stands
+ *  for. */
+const TAB_IDENTIFIER_ACTION = { close: 'closePage', switchTo: 'switchPage' } as const;
+
+/** The plain string literal `rest` starts with, unescaped — undefined for
+ *  anything else: a variable, a call, a template literal with `${…}`. */
+function leadingStringLiteral(rest: string): string | undefined {
+  const m = /^\s*(['"`])((?:\\.|(?!\1)[^\\\n])*)\1/.exec(rest);
+  if (!m || (m[1] === '`' && m[2]!.includes('${'))) return undefined;
+  return m[2]!.replace(/\\(.)/g, '$1');
+}
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * `tabs.close` or `tabs.switchTo` given an identifier the run did not use.
+ *
+ * Both find a tab by its label, a URL substring or a title substring
+ * (`PageTracker.closePage`), and the identifier the run's `closePage` or
+ * `switchPage` action named is the one known to find it. Measured live:
+ * compile-tabs' "Close the tab showing "Account Summary"" ran `closePage
+ * page:2`, and the entry wrote `tabs.close("Account Summary")` — the new tab's
+ * heading, which is neither its title ("SecureBank — New Tab") nor its URL —
+ * so every replay threw `no page matching` and healed the step under AI.
+ * A literal the run never used is refused even when it would have matched
+ * too: the run is the only reference compile has, and the cost of refusing
+ * one that works is one re-ask.
+ */
+export function tabIdentifierComplaint(
+  code: string,
+  actions: readonly RecordedAction[],
+  secrets: readonly string[] = [],
+): string | undefined {
+  const used: Record<keyof typeof TAB_IDENTIFIER_ACTION, Set<string>> = { close: new Set(), switchTo: new Set() };
+  for (const action of actions) {
+    const call = action.action === 'closePage' ? 'close' : action.action === 'switchPage' ? 'switchTo' : undefined;
+    if (call === undefined || typeof action.page !== 'string' || action.page.trim() === '') continue;
+    used[call].add(action.page);
+  }
+  if (used.close.size === 0 && used.switchTo.size === 0) return undefined;
+
+  const text = codeText(code);
+  const tabs = [...contextAliases(text, 'tabs')].map((n) => n.replace(/\$/g, '\\$')).join('|');
+  for (const m of text.matchAll(new RegExp(String.raw`(?:^|[^\w$])(?:${tabs})\s*\.\s*(close|switchTo)\s*\(`, 'g'))) {
+    const call = m[1] as keyof typeof TAB_IDENTIFIER_ACTION;
+    const ran = [...used[call]];
+    // A recorded identifier built from a parameter is the placeholder rule's.
+    if (ran.length === 0 || ran.some((id) => ANY_PLACEHOLDER_RE.test(id))) continue;
+    const written = leadingStringLiteral(code.slice(m.index! + m[0].length));
+    if (written === undefined || ran.includes(written)) continue;
+    const quote = (id: string): string => JSON.stringify(redact(id, [...secrets]));
+    return (
+      `The entry ${call === 'close' ? 'closes' : 'switches to'} the tab ${quote(written)}, but the run's ` +
+      `\`${TAB_IDENTIFIER_ACTION[call]}\` named it ${ran.map(quote).join(' or ')}. \`tabs.${call}\` finds a tab ` +
+      'by its label (`\'main\'`, `\'page:2\'`), a URL substring or a title substring — not by what the page ' +
+      `shows — so write the identifier the run used: \`tabs.${call}(${quote(ran[0]!)})\`.`
+    );
+  }
+  return undefined;
 }
 
 /** `page.locator(` / `await frame.click(` — a strict-mode call on the raw page.

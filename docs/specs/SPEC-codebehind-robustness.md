@@ -1301,6 +1301,30 @@ Compile uses the session's model (`live-compile.ts:128-132`) with the
   `settle()` after it, in place of `waitForPostActionSettle`. The two slow
   rows should then show the loaded page.
 
+> **As built (2026-10-08): three more static checks, from the live runs.**
+> Each live run's server logs were searched for `Code-behind failed for step`,
+> which a passing test can still hold: the replay healed the step under AI.
+> Three faults showed up that §6.1–§6.9 do not cover. Each one is now
+> a static check with generation's one re-ask (§6.2), so Review rejects a
+> revision that brings it in:
+>
+> - **`step.getVar('baseUrl')`** (`contextValueAsVariableComplaint`). The
+>   base URL is the context's `baseUrl`, not a variable. It went stale in
+>   about 2 of 5 `compile-codebehind` replays.
+> - **A matcher chained onto an assertion**, `step.expect(page.url()).toBe(…)`
+>   (`chainedAssertionComplaint`). `step.expect` returns nothing, so the
+>   replay threw. This was the entry Review revised in `compile-skill-subfolder`.
+> - **A tab named differently from the run**, `tabs.close("Account Summary")`
+>   where the run's `closePage` named `page:2` (`tabIdentifierComplaint`, which
+>   checks `tabs.switchTo` against `switchPage` the same way). A tab is found by
+>   label, URL or title, and "Account Summary" was the new tab's heading. The
+>   prompt now tells `tabs.close` to use the transcript's identifier, as it
+>   already told `tabs.switchTo`.
+>
+> The final full run at `29e45f51` (77 tests, 4 skipped) failed only
+> `cdp-tab-focus`, which §7 lists as an unrelated baseline. It had one stale
+> heal for each of the last two faults, with both tests green.
+
 ## 9. Open questions
 
 Each has a default. Build the default unless the project owner decides

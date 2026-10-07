@@ -2138,7 +2138,7 @@ The "entry" string holds one TypeScript object literal with exactly this shape:
   - \`await tabs.open(url, { as })\` — open a new tab at \`url\` and make it active. \`as\` is optional and names it.
   - \`await tabs.openedBy(() => ...)\` — run the callback and adopt the tab the PAGE opened (a \`window.open\`, or a click on \`target="_blank"\`). Use this whenever the transcript is a \`click\` followed by a \`switchPage\`: the wait is armed before the click, so there is no race.
   - \`await tabs.switchTo(id)\` — make an already-open tab active. \`id\` is a label (\`'main'\`, \`'page:2'\`, or an \`as\` name), a URL substring, or a title substring — the same identifier the \`switchPage\` action in the transcript used.
-  - \`await tabs.close(id)\` — close a tab. The main tab cannot be closed.
+  - \`await tabs.close(id)\` — close a tab, by the same identifier the \`closePage\` action in the transcript used — text on the page is not one. The main tab cannot be closed.
   - \`tabs.list()\` — \`{ label, url, isActive }[]\`. \`tabs.active()\` — the active page.
 - \`browsers\` — browser control, the code equivalent of \`openBrowser\` / \`switchBrowser\` / \`closeBrowser\`:
   - \`await browsers.open(label, { engine, channel, headed })\` — launch an isolated browser under \`label\` and make it active. Options are all optional; without them it matches the run's own browser.

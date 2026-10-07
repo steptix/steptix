@@ -15,15 +15,18 @@ import { readFileSync } from 'node:fs';
 import {
   aiEntryFor,
   ambiguousSelectorComplaint,
+  chainedAssertionComplaint,
   contextValueAsVariableComplaint,
   entryFaults,
   generateStepEntry,
   refuseReason,
   stepParameters,
   staleHandleComplaint,
+  tabIdentifierComplaint,
   unwaitedReadComplaint,
   undeclaredContextComplaint,
 } from '../src/codebehind/generate.js';
+import type { RecordedAction } from '../src/codebehind/recording.js';
 import { buildRepairPrompt } from '../src/codebehind/repair.js';
 import { buildFileReviewPrompt, parseFileRevision } from '../src/codebehind/review.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
@@ -725,6 +728,147 @@ describe('contextValueAsVariableComplaint', () => {
     expect(prompts).toHaveLength(2);
     expect(prompts[0]).toContain("never `step.getVar('baseUrl')`, which answers undefined");
     expect(prompts[1]).toContain("The entry reads `step.getVar('baseUrl')`, but no test variable is called `baseUrl`");
+  });
+});
+
+describe('chainedAssertionComplaint', () => {
+  // The shape measured live (compile-skill-subfolder.test.cjs): a Jest-style
+  // matcher on `step.expect`, which returns nothing, so every replay threw
+  // `Cannot read properties of undefined (reading 'toBe')` and healed.
+  const CHAINS_A_MATCHER = `{
+  source: 'Navigate to the baseUrl',
+  async run({ page, step, baseUrl }) {
+    await page.goto(baseUrl);
+    await step.settle();
+    const destination = new URL(baseUrl).href;
+    await page.waitForURL(destination);
+    step.expect(page.url()).toBe(destination);
+  },
+}`;
+  const COMPARES_IN_THE_CONDITION = CHAINS_A_MATCHER.replace(
+    'step.expect(page.url()).toBe(destination);',
+    "step.expect(page.url() === destination, 'The page URL matches the base URL');",
+  );
+
+  it('catches a matcher chained onto step.expect or step.check', () => {
+    expect(chainedAssertionComplaint(CHAINS_A_MATCHER)).toBe(
+      "The entry chains `.toBe` onto `step.expect(…)`, Jest's and Playwright Test's matcher style. " +
+        '`step.expect` takes the condition itself and returns nothing, so on replay this throws ' +
+        "`Cannot read properties of undefined (reading 'toBe')`. Write the comparison as the condition: " +
+        "`step.expect(page.url() === expected, 'The page is the one the step names')`.",
+    );
+    expect(chainedAssertionComplaint('step.check(names.length > 0)\n      .toEqual(true);')).toMatch(
+      /chains `\.toEqual` onto `step\.check\(…\)`.*`step\.check\(page\.url\(\) === expected/,
+    );
+    expect(chainedAssertionComplaint("step.expect(await heading.textContent())?.toContain('Accounts');")).toMatch(
+      /`\.toContain`/,
+    );
+  });
+
+  it("catches Jest's and Playwright Test's bare expect, which no entry has", () => {
+    expect(chainedAssertionComplaint('await expect(page).toHaveURL(baseUrl);')).toMatch(
+      /chains `\.toHaveURL` onto `expect\(…\)`.*No `expect` exists in an entry/,
+    );
+    expect(chainedAssertionComplaint('expect(count).not.toBe(0);')).toMatch(/`\.not`/);
+  });
+
+  it('stays quiet for the comparison written as the condition, and for the same words in a string', () => {
+    expect(chainedAssertionComplaint(COMPARES_IN_THE_CONDITION)).toBeUndefined();
+    expect(chainedAssertionComplaint("step.expect(ok, 'step.expect(x).toBe(y)');")).toBeUndefined();
+    expect(chainedAssertionComplaint("log.info('expect(page).toHaveURL(x)');")).toBeUndefined();
+    expect(chainedAssertionComplaint('// step.expect(x).toBe(y)\nstep.expect(ok);')).toBeUndefined();
+  });
+
+  it('leaves an entry the expect it defines itself', () => {
+    expect(
+      chainedAssertionComplaint(
+        "function expect(v) { return { toBe: (w) => v === w }; }\nstep.expect(expect(1).toBe(1), 'one');",
+      ),
+    ).toBeUndefined();
+  });
+
+  it('is one of the faults Review holds a revision to', () => {
+    const source = 'Navigate to the baseUrl';
+    expect(entryFaults(CHAINS_A_MATCHER, { source }).map((f) => f.check)).toContain('chained-assertion');
+    expect(entryFaults(COMPARES_IN_THE_CONDITION, { source }).map((f) => f.check)).not.toContain('chained-assertion');
+  });
+
+  it('makes generation re-ask once, and keeps the answer that compares in the condition', async () => {
+    const prompts: string[] = [];
+    const answers = [CHAINS_A_MATCHER, COMPARES_IN_THE_CONDITION];
+    const client = {
+      complete: async (messages: ChatMessage[]) => {
+        const last = messages[messages.length - 1]!;
+        prompts.push(typeof last.content === 'string' ? last.content : contentBlocksToText(last.content));
+        return { text: JSON.stringify({ entry: answers[Math.min(prompts.length - 1, 1)] }), model: 'stub' };
+      },
+    } as unknown as AiClient;
+    const result = await generateStepEntry({
+      binding: {
+        file: path.resolve(path.sep, 'nowhere', 'x.steps.ts'),
+        source: 'Navigate to the baseUrl',
+        occurrence: 0,
+        scope: { renames: {}, inputs: {} },
+      },
+      actions: [{ action: 'navigate', url: 'http://localhost:8787', description: 'Navigate to the base URL' }],
+      resolvedParameters: {},
+      aiClient: client,
+      contextContent: '',
+      testName: 'compile-skill-subfolder.md',
+      baseUrl: 'http://localhost:8787',
+    });
+    expect(result).toMatchObject({ kind: 'entry', code: COMPARES_IN_THE_CONDITION });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("The entry chains `.toBe` onto `step.expect(…)`, Jest's and Playwright Test's");
+  });
+});
+
+describe('tabIdentifierComplaint', () => {
+  // Measured live (compile-tabs.test.cjs): the run closed the new tab as
+  // `page:2`, and the entry closed "Account Summary" — the tab's heading,
+  // which is neither its title nor its URL — so every replay threw
+  // `no page matching` and healed under AI.
+  const CLOSED_PAGE_2: RecordedAction[] = [
+    { action: 'closePage', page: 'page:2', description: 'Close the tab showing Account Summary' },
+  ];
+  const source = 'Close the tab showing "Account Summary"';
+  const entryClosing = (id: string) =>
+    `{\n  source: ${JSON.stringify(source)},\n  async run({ step, tabs }) {\n` +
+    `    const main = await tabs.close(${id});\n` +
+    `    step.expect(main === tabs.active(), 'The main tab is active again');\n  },\n}`;
+
+  it("catches a tab named otherwise than the run's closePage named it", () => {
+    expect(tabIdentifierComplaint(entryClosing('"Account Summary"'), CLOSED_PAGE_2)).toBe(
+      'The entry closes the tab "Account Summary", but the run\'s `closePage` named it "page:2". `tabs.close` ' +
+        "finds a tab by its label (`'main'`, `'page:2'`), a URL substring or a title substring — not by what " +
+        'the page shows — so write the identifier the run used: `tabs.close("page:2")`.',
+    );
+  });
+
+  it("holds switchTo to the run's switchPage the same way", () => {
+    const switched: RecordedAction[] = [{ action: 'switchPage', page: 'main', description: 'Switch back' }];
+    expect(tabIdentifierComplaint("const main = await tabs.switchTo('Window & Tab Test');", switched)).toMatch(
+      /switches to the tab "Window & Tab Test", but the run's `switchPage` named it "main"/,
+    );
+    expect(tabIdentifierComplaint("const main = await tabs.switchTo('main');", switched)).toBeUndefined();
+  });
+
+  it("stays quiet for the run's identifier, a computed one, or a call the run did not make", () => {
+    expect(tabIdentifierComplaint(entryClosing("'page:2'"), CLOSED_PAGE_2)).toBeUndefined();
+    expect(tabIdentifierComplaint(entryClosing('`page:2`'), CLOSED_PAGE_2)).toBeUndefined();
+    expect(tabIdentifierComplaint(entryClosing('label'), CLOSED_PAGE_2)).toBeUndefined();
+    expect(tabIdentifierComplaint(entryClosing('`page:${n}`'), CLOSED_PAGE_2)).toBeUndefined();
+    expect(tabIdentifierComplaint(entryClosing('"Account Summary"'), [])).toBeUndefined();
+    // A switch the run made says nothing about a close it did not make.
+    const switchedOnly: RecordedAction[] = [{ action: 'switchPage', page: 'page:2', description: 'Switch' }];
+    expect(tabIdentifierComplaint(entryClosing('"Account Summary"'), switchedOnly)).toBeUndefined();
+  });
+
+  it('is one of the faults Review holds a revision to, given the recording', () => {
+    expect(entryFaults(entryClosing('"Account Summary"'), { source, actions: CLOSED_PAGE_2 }).map((f) => f.check))
+      .toContain('tab-identifier');
+    expect(entryFaults(entryClosing('"Account Summary"'), { source }).map((f) => f.check))
+      .not.toContain('tab-identifier');
   });
 });
 

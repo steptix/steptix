@@ -337,8 +337,9 @@ function isDefinition(text: string, paren: number, name: string): boolean {
   return text[k] === ':' && ENTRY_KEYS.has(name);
 }
 
-/** The index of the `)` closing the `(` at `open`, or -1. */
-function matchClose(text: string, open: number): number {
+/** The index of the `)` closing the `(` at `open`, or -1. Run it on
+ *  {@link codeText}, where no string can hold a parenthesis. */
+export function matchClose(text: string, open: number): number {
   let depth = 0;
   for (let k = open; k < text.length; k++) {
     const c = text[k];
