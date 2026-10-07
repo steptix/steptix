@@ -743,11 +743,94 @@ describe('unwaitedReadComplaint', () => {
     expect(
       unwaitedReadComplaint(
         entryWith(
+          `    await page.locator('#statement-upload').click();\n` +
           `    await page.locator('#upload-status').waitFor({ state: 'visible' });\n` +
           `    step.expect((await page.locator('#upload-status').textContent()) === 'ok', 'status');`,
         ),
       ),
     ).toBeDefined();
+  });
+
+  // …and its read-only twin: with no action before the read there is nothing
+  // the read could race (docs/specs/SPEC-codebehind-robustness.md §6.3).
+  it('says nothing about the same read in an entry that takes no action', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    await page.locator('#upload-status').waitFor({ state: 'visible' });\n` +
+          `    step.expect((await page.locator('#upload-status').textContent()) === 'ok', 'status');`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  // Failure A of the robustness spec (§3.1), verbatim: the sign-in click's
+  // entry read the title and a visibility 57 ms after the click, while the
+  // login request was in flight, and passed on the page it was leaving.
+  it("complains about failure A's sign-in entry: title() and isVisible() read straight after a click", () => {
+    const complaint = unwaitedReadComplaint(
+      entryWith(
+        `    await page.locator('#sign-in-btn').click();\n` +
+        `    const dashboard = (await page.title()).includes('Dashboard');\n` +
+        `    const signInFormVisible = await page.locator('#email').isVisible();\n` +
+        `    step.expect(\n` +
+        `      dashboard || signInFormVisible,\n` +
+        `      'Sign-in attempt reached the dashboard or left the sign-in form available',\n` +
+        `    );`,
+      ),
+    );
+    expect(complaint).toBeDefined();
+    // It names the action, and says how to wait for a page the action leads to
+    // without freezing one data row's URL into the code.
+    expect(complaint).toContain('`.click(`');
+    expect(complaint).toContain("page.waitForFunction(() => document.title.includes('Dashboard'))");
+    expect(complaint).toMatch(/never with a URL taken from one data row/);
+  });
+
+  // Failure B (§3.2): a capture that only reads. The check fired on it, the
+  // re-ask rewrote it, and the selector the recording read with was lost.
+  it("says nothing about failure B's read-only capture entry", () => {
+    expect(
+      unwaitedReadComplaint(
+        `{\n  source: 'Read the name of every account in the Your accounts panel [store as: accounts]',\n` +
+        `  async run({ page, step, log }) {\n` +
+        `    const accountRows = page.locator('#account-list [data-testid="account-row"]');\n` +
+        `    const accountNames = page\n` +
+        `      .locator('#account-list [data-testid="account-row"] > span > span')\n` +
+        `      .filter({ hasNotText: '$' });\n` +
+        `    const accounts = (await accountNames.allTextContents()).map((name) => name.trim());\n` +
+        `    const rowCount = await accountRows.count();\n` +
+        `    step.setVar('accounts', JSON.stringify(accounts));\n` +
+        `    step.expect(\n` +
+        `      accounts.length === rowCount && accounts.every((name) => name.length > 0),\n` +
+        `      'Read all populated account names from the Your accounts panel',\n` +
+        `    );\n` +
+        `  },\n}`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('says nothing about a read made BEFORE the action, with nothing read after it', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    const before = (await page.locator('#total').textContent())?.trim();\n` +
+          `    await page.locator('#recalculate').click();\n` +
+          `    step.expect(before !== '', 'a total was shown before recalculating');`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('counts a helper call as the action — it may click', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    await signIn(page, step.getVar('username'));\n` +
+          `    step.expect((await page.title()).includes('Dashboard'), 'signed in');`,
+        ),
+      ),
+    ).toMatch(/`signIn\(`/);
   });
 
   it('accepts a text-filtered wait before the read', () => {
@@ -837,10 +920,20 @@ describe('unwaitedReadComplaint', () => {
   it('is reported after the faults that throw on replay', () => {
     const bothFaults =
       `{\n  source: 'x',\n  async run({ step }) {\n` +
+      `    await page.locator('#statement-upload').click();\n` +
       `    const message = (await page.locator('#upload-status').textContent());\n` +
       `    step.expect(message === 'ok', 'status');\n  },\n}`;
     expect(undeclaredContextComplaint(bothFaults)).toMatch(/`page`/);
     expect(unwaitedReadComplaint(bothFaults)).toBeDefined();
+  });
+
+  it('leaves the read-only twin to the fault that throws', () => {
+    const readOnly =
+      `{\n  source: 'x',\n  async run({ step }) {\n` +
+      `    const message = (await page.locator('#upload-status').textContent());\n` +
+      `    step.expect(message === 'ok', 'status');\n  },\n}`;
+    expect(undeclaredContextComplaint(readOnly)).toMatch(/`page`/);
+    expect(unwaitedReadComplaint(readOnly)).toBeUndefined();
   });
 });
 
@@ -1274,11 +1367,13 @@ describe('generateStepEntry — the static backstop', () => {
   // `securebank-upload.md`, and it needs no `targeting` to fire.
   it('re-asks about a read that never waited, and takes the waiting answer', async () => {
     const racy =
-      `{ source: 'Assert the status', async run({ page, step }) { ` +
+      `{ source: 'Upload and check the status', async run({ page, step }) { ` +
+      `await page.locator('#upload-btn').click(); ` +
       `const m = await page.locator('#upload-status').textContent(); ` +
       `step.expect(m === 'Uploaded logo.png', 'status'); } }`;
     const waiting =
-      `{ source: 'Assert the status', async run({ page, step }) { ` +
+      `{ source: 'Upload and check the status', async run({ page, step }) { ` +
+      `await page.locator('#upload-btn').click(); ` +
       `const s = page.locator('#upload-status', { hasText: 'Uploaded logo.png' }); ` +
       `await s.waitFor(); step.expect((await s.textContent()) !== null, 'status'); } }`;
     const { client, calls } = stubSequence(
@@ -1286,8 +1381,11 @@ describe('generateStepEntry — the static backstop', () => {
       JSON.stringify({ entry: waiting }),
     );
     const result = await generateStepEntry({
-      binding: bindingFor('Assert the status'),
-      actions: [{ action: 'read', selector: '#upload-status' }],
+      binding: bindingFor('Upload and check the status'),
+      actions: [
+        { action: 'click', selector: '#upload-btn' },
+        { action: 'read', selector: '#upload-status' },
+      ],
       resolvedParameters: {},
       aiClient: client,
       contextContent: '',
@@ -1296,6 +1394,27 @@ describe('generateStepEntry — the static backstop', () => {
     expect(calls).toHaveLength(2);
     expect(contentBlocksToText(calls[1]![1]!.content)).toContain('without ever waiting');
     expect(result).toEqual({ kind: 'entry', code: waiting });
+  });
+
+  // The same read with no action before it is not re-asked
+  // (docs/specs/SPEC-codebehind-robustness.md §6.3): it raced nothing, and the
+  // re-ask is what rewrote failure B's selector.
+  it('does not re-ask a read-only entry about waiting', async () => {
+    const readOnly =
+      `{ source: 'Assert the status', async run({ page, step }) { ` +
+      `const m = await page.locator('#upload-status').textContent(); ` +
+      `step.expect(m === 'Uploaded logo.png', 'status'); } }`;
+    const { client, calls } = stubSequence(JSON.stringify({ entry: readOnly }));
+    const result = await generateStepEntry({
+      binding: bindingFor('Assert the status'),
+      actions: [{ action: 'read', selector: '#upload-status' }],
+      resolvedParameters: {},
+      aiClient: client,
+      contextContent: '',
+      testName: 'demo',
+    });
+    expect(calls).toHaveLength(1);
+    expect(result).toEqual({ kind: 'entry', code: readOnly });
   });
 });
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Page, BrowserContext, Browser } from 'playwright';
@@ -26,6 +26,39 @@ import {
   type CompileRunner,
 } from '../src/codebehind/compile.js';
 import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
+
+/**
+ * Every page-stability wait, recorded and then run for real
+ * (docs/specs/SPEC-codebehind-robustness.md §6.1). The settle is the thing under
+ * test in section 2b below, so it is counted rather than stubbed away — and the
+ * real wait still runs, against fakes that reject every `evaluate`, so the
+ * rest of this file sees exactly the timing it always had. `order` interleaves
+ * with what a test's fake page records, to say the settle came FIRST.
+ */
+const settles = vi.hoisted(() => ({
+  calls: [] as Array<Record<string, unknown>>,
+  order: [] as string[],
+  /** True while a wait runs — its own closing diagnosis reads the title too,
+   *  and that read is the settle's, not the entry's. */
+  settling: false,
+}));
+
+vi.mock('../src/browser/page-state.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/browser/page-state.js')>();
+  return {
+    ...actual,
+    waitForPageStability: async (page: Page, opts?: Record<string, unknown>) => {
+      settles.calls.push(opts ?? {});
+      settles.order.push('settle');
+      settles.settling = true;
+      try {
+        return await actual.waitForPageStability(page, opts);
+      } finally {
+        settles.settling = false;
+      }
+    },
+  };
+});
 
 /**
  * Code-behind for the `If … then return` step form
@@ -63,6 +96,8 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   clearSkillCache();
+  settles.calls.length = 0;
+  settles.order.length = 0;
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });
@@ -430,6 +465,170 @@ export default defineSteps([
     expect(result.aiExplanation).toContain('The file this step names could not be resolved');
     expect(result.aiExplanation).not.toContain('step.exit()');
     expect(binding.entry).toBeDefined();
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// 2b. The wait before a compiled conditional flow-control line
+//     (docs/specs/SPEC-codebehind-robustness.md §6.1, D1)
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * {@link fakePage}, saying in `settles.order` when the entry read the title,
+ * and counting the quiet waits and load waits it was asked for. Every
+ * `evaluate` still rejects, as the fakes above do.
+ */
+function recordingPage(title: string): { page: Page; quietWaits: () => number; loadWaits: () => number } {
+  let quiet = 0;
+  let loads = 0;
+  const page = {
+    ...(fakePage(title) as unknown as Record<string, unknown>),
+    title: async () => {
+      if (!settles.settling) settles.order.push('entry');
+      return title;
+    },
+    evaluate: async (script: unknown) => {
+      if (String(script).includes('MutationObserver')) quiet++;
+      throw new Error('no DOM in this test');
+    },
+    waitForLoadState: async () => {
+      loads++;
+    },
+  } as unknown as Page;
+  return { page, quietWaits: () => quiet, loadWaits: () => loads };
+}
+
+describe('the wait before a compiled conditional flow-control line', () => {
+  const STEPS_FILE = `import { defineSteps } from 'steptix/codebehind';
+export default defineSteps([
+  {
+    source: 'Enter the booking code',
+    async run({ page }) {
+      await page.title();
+    },
+  },
+  {
+    source: ${JSON.stringify(RETURN_STEP)},
+    async run({ page, step }) {
+      if ((await page.title()).includes('Dashboard')) step.exit();
+    },
+  },
+]);
+`;
+
+  it('settles first — the AI judgement\'s own wait, carried across a navigation — then runs the entry', async () => {
+    // Failure A: the compiled return read the title tens of milliseconds after
+    // the sign-in click, while the login request was in flight, and missed.
+    const md = await write('booking.md', FLOW_TEST_MD);
+    await write('booking.steps.ts', STEPS_FILE);
+    const { steps, bindingFor } = await registryFor(md);
+
+    const result = await executeStep(2, steps.length, steps[1]!, {
+      page: recordingPage('Dashboard — Acme').page,
+      config: CONFIG,
+      aiClient: forbiddenClient(),
+      contextContent: '',
+      testName: 'booking',
+      conversationHistory: [],
+      csrfTokens: {},
+      resolvedParameters: {},
+      codeBehind: bindingFor(1),
+      flowControlClaim: claimFor(steps[1]!),
+    });
+
+    expect(result.status).toBe('passed');
+    expect(result.flowControl).toEqual({ kind: 'return', verb: 'return' });
+    expect(settles.order).toEqual(['settle', 'entry']);
+    expect(settles.calls).toEqual([{ timeoutMs: 10_000, quiesceMs: 1000, followNavigation: true }]);
+  });
+
+  it('does not settle an entry whose step claims no flow control', async () => {
+    const md = await write('booking.md', FLOW_TEST_MD);
+    await write('booking.steps.ts', STEPS_FILE);
+    const { steps, bindingFor } = await registryFor(md);
+
+    const result = await executeStep(1, steps.length, steps[0]!, {
+      page: recordingPage('Booking — Acme').page,
+      config: CONFIG,
+      aiClient: forbiddenClient(),
+      contextContent: '',
+      testName: 'booking',
+      conversationHistory: [],
+      csrfTokens: {},
+      resolvedParameters: {},
+      codeBehind: bindingFor(0),
+    });
+
+    expect(result.status).toBe('passed');
+    expect(settles.calls).toEqual([]);
+    expect(settles.order).toEqual(['entry']);
+  });
+
+  it('does not settle a line its values already decide', async () => {
+    // A condition the run's values answer is not a question about the page —
+    // the AI path asks no page for it either (`decideFlowControlLocally`).
+    const VALUE_STEP = 'If {{status}} is "Overdue" then return';
+    const md = await write(
+      'booking.md',
+      ['# Booking', '', '## Steps', '1. Enter the booking code', `2. ${VALUE_STEP}`].join('\n'),
+    );
+    await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
+export default defineSteps([
+  {
+    source: ${JSON.stringify(VALUE_STEP)},
+    async run({ step }) {
+      if (step.getVar('status') === 'Overdue') step.exit();
+    },
+  },
+]);
+`);
+    const { steps, bindingFor } = await registryFor(md);
+
+    const result = await executeStep(2, steps.length, steps[1]!, {
+      page: recordingPage('Booking — Acme').page,
+      config: CONFIG,
+      aiClient: forbiddenClient(),
+      contextContent: '',
+      testName: 'booking',
+      conversationHistory: [],
+      csrfTokens: {},
+      resolvedParameters: { status: 'Paid' },
+      codeBehind: bindingFor(1),
+      flowControlClaim: claimFor(VALUE_STEP),
+    });
+
+    expect(result.status).toBe('passed');
+    expect(result.fromCodeBehind).toBe(true);
+    expect(result.flowControl).toBeUndefined();
+    expect(settles.calls).toEqual([]);
+  });
+
+  it('returns at once, as before, from a page whose evaluate fails with its URL unchanged', async () => {
+    // The fakes in this file reject every `evaluate` with a generic error. That
+    // is not a navigation, so the settle tries its quiet wait once, follows
+    // nothing, and the entry runs — exactly the timing these tests had before
+    // the settle existed.
+    const md = await write('booking.md', FLOW_TEST_MD);
+    await write('booking.steps.ts', STEPS_FILE);
+    const { steps, bindingFor } = await registryFor(md);
+    const fake = recordingPage('Dashboard — Acme');
+
+    const result = await executeStep(2, steps.length, steps[1]!, {
+      page: fake.page,
+      config: CONFIG,
+      aiClient: forbiddenClient(),
+      contextContent: '',
+      testName: 'booking',
+      conversationHistory: [],
+      csrfTokens: {},
+      resolvedParameters: {},
+      codeBehind: bindingFor(1),
+      flowControlClaim: claimFor(steps[1]!),
+    });
+
+    expect(result.flowControl).toEqual({ kind: 'return', verb: 'return' });
+    expect(fake.quietWaits()).toBe(1);
+    expect(fake.loadWaits()).toBe(0);
   });
 });
 

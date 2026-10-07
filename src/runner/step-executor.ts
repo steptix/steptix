@@ -62,7 +62,7 @@ import {
   type PlaceholderValues,
 } from './placeholder-substitution.js';
 import { bindVariable } from '../parser/parameters.js';
-import { decideConditionLocally } from './literal-decision.js';
+import { decideConditionLocally, type LocalDecision } from './literal-decision.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import {
   isReturnClaim,
@@ -852,6 +852,11 @@ async function executeStepUnrecorded(
         'a step that is not a condition line — the step runs under AI',
     );
   } else if (binding?.entry && binding.entry.ai !== true) {
+    // A compiled `If … then return / stop / fail` reads the page once, so it
+    // waits for it exactly as the AI judgement would (§6.1 of
+    // docs/specs/SPEC-codebehind-robustness.md). Before the entry, and only
+    // for an entry that will run as the step's code.
+    if (isStepCode(binding.entry)) await settleBeforeCompiledFlowControl(opts);
     const codeResult = await runCodeBehindStep(stepIndex, instruction, binding, opts, startTime);
     // The tail applies to a replay failure exactly as to an AI one (decision 5).
     // Applied at the CALL rather than inside, so all six of that function's
@@ -1102,13 +1107,9 @@ async function decideFlowControlLocally(
   // already.
   if (!claim || claim.body === undefined) return undefined;
 
-  const values: PlaceholderValues = {
-    parameters: opts.resolvedParameters ?? {},
-    ...(opts.envData !== undefined && { envData: opts.envData }),
-  };
-  const secrets = secretsFor(opts);
-  const local = decideConditionLocally(claim.body, values, (text) => redact(text, secrets));
+  const local = localFlowControlDecision(opts);
   if (!local) return undefined;
+  const secrets = secretsFor(opts);
 
   // No settle, no DOM snapshot, no model call — so no `turns`, and the row's
   // own absence of turns is the visible record that nothing was asked.
@@ -1155,6 +1156,24 @@ async function decideFlowControlLocally(
     ...(screenshotBase64 !== undefined && { screenshotBase64 }),
     aiExplanation: `The step's condition held (${local.reasoning}) and the step says to fail the test.`,
   };
+}
+
+/**
+ * The step's conditional flow-control line, decided from this run's values —
+ * or null when there is no such claim or the values cannot answer it. One
+ * reading for both of its askers: {@link decideFlowControlLocally}, and the
+ * compiled line's settle ({@link settleBeforeCompiledFlowControl}), which must
+ * agree on which lines are questions about the page.
+ */
+function localFlowControlDecision(opts: StepExecutorOptions): LocalDecision | null {
+  const claim = opts.flowControlClaim;
+  if (!claim || claim.body === undefined) return null;
+  const values: PlaceholderValues = {
+    parameters: opts.resolvedParameters ?? {},
+    ...(opts.envData !== undefined && { envData: opts.envData }),
+  };
+  const secrets = secretsFor(opts);
+  return decideConditionLocally(claim.body, values, (text) => redact(text, secrets));
 }
 
 /**
@@ -1287,18 +1306,56 @@ export async function runConditionCode(
  * `While` asked straight after `Click Next` would otherwise read page 1's
  * button. No-op on the computer surface (there is no DOM signal for a native
  * window) and when there is no page.
+ *
+ * `followNavigation` carries the wait across a navigation that lands during it
+ * (`waitForPageStability`, docs/specs/SPEC-codebehind-robustness.md §6.1).
+ * CODE passes it — a compiled condition, and a compiled conditional
+ * flow-control line — because code reads the page the instant the wait
+ * returns, with no model think time behind it. The model's own gates keep
+ * today's timing.
  */
-export async function settleBeforeConditions(opts: StepExecutorOptions): Promise<void> {
+export async function settleBeforeConditions(
+  opts: StepExecutorOptions,
+  settle: { followNavigation?: boolean } = {},
+): Promise<void> {
   if (opts.computer) return;
   const page = opts.pageTracker ? opts.pageTracker.getActive() : opts.page;
   if (!page) return;
-  await settleConditionPage(page, opts.config);
+  await settleConditionPage(page, opts.config, settle.followNavigation === true);
 }
 
-async function settleConditionPage(page: Page, config: Config): Promise<void> {
+async function settleConditionPage(page: Page, config: Config, followNavigation = false): Promise<void> {
   await waitForPageStability(page, {
     timeoutMs: Math.min(10_000, config.execution.timeout * 1000),
     quiesceMs: 1000,
+    ...(followNavigation && { followNavigation: true }),
+  });
+}
+
+/**
+ * The wait a compiled conditional flow-control line gets before its entry
+ * reads the page (docs/specs/SPEC-codebehind-robustness.md §6.1, D1).
+ *
+ * `If the page title contains "Dashboard" then return` — and its `stop` and
+ * `fail` siblings — decides by reading the page ONCE. Under AI the step waits
+ * at the flow-control gate first (stories/step-flow-control.md, decision 6);
+ * a compiled condition waits at the same gate (`settleBeforeConditions`). The
+ * compiled line did not, so its entry read the title tens of milliseconds
+ * after the previous step's sign-in click, while the login request was still
+ * in flight, and the return missed.
+ *
+ * Only for a line whose run values do NOT already decide it: a condition the
+ * values answer is not a question about the page, and the AI path asks no
+ * page either (`decideFlowControlLocally`). Never a failure: a settle that
+ * cannot complete leaves the entry to read the page as it is, as before.
+ */
+async function settleBeforeCompiledFlowControl(opts: StepExecutorOptions): Promise<void> {
+  if (opts.flowControlClaim?.body === undefined) return;
+  if (localFlowControlDecision(opts)) return;
+  await traceOp('settle.codebehind-flow-control', () =>
+    settleBeforeConditions(opts, { followNavigation: true }),
+  ).catch(() => {
+    // As at the AI gate: the entry then reads whatever the page is.
   });
 }
 

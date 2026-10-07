@@ -878,8 +878,11 @@ async function runCodePlan(
 
     if (!ranCode) {
       // The same gate the model gets. A condition is a question about the page
-      // once it has finished moving, and code cannot know when that is.
-      await settleBeforeConditions(executorOptions);
+      // once it has finished moving, and code cannot know when that is. Carried
+      // across a navigation that lands mid-wait, because code reads the page
+      // the instant the wait returns (docs/specs/SPEC-codebehind-robustness.md
+      // §6.1).
+      await settleBeforeConditions(executorOptions, { followNavigation: true });
       if (executorOptions.signal?.aborted) {
         throw new DOMException('Run aborted by client', 'AbortError');
       }

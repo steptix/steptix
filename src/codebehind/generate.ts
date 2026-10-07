@@ -28,6 +28,7 @@ import type { AssertionResult } from '../report/types.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import { logger } from '../utils/logger.js';
 import { EMPTY, MASK, inheritLoopBindings, redact, runSecrets, secretValues } from '../utils/secrets.js';
+import { actingCalls, codeText } from './entry-actions.js';
 import type { CodeBehindBinding } from './loader.js';
 import type { RecordedAction } from './recording.js';
 import { CODE, COMMENT, matchForward, scan, type StringToken } from './tokenizer.js';
@@ -684,9 +685,12 @@ export function staleHandleComplaint(code: string): string | undefined {
 }
 
 /** Reads that take whatever the DOM holds at that instant. None of them
- *  retries, so each is only as correct as the wait in front of it. */
+ *  retries, so each is only as correct as the wait in front of it. `title()`
+ *  and `isVisible()` joined after failure A of
+ *  docs/specs/SPEC-codebehind-robustness.md §3.1: a sign-in click's entry read
+ *  both 57 ms after the click and passed on the page it was leaving. */
 const INSTANT_READ =
-  /\.\s*(?:textContent|innerText|inputValue|allTextContents|allInnerTexts|getAttribute)\s*\(/;
+  /\.\s*(?:textContent|innerText|innerHTML|inputValue|allTextContents|allInnerTexts|getAttribute|title|url|isVisible|isHidden|isEnabled|isDisabled|isChecked|isEditable|count)\s*\(/g;
 
 /**
  * Constructs that block until the page reaches a NAMED state.
@@ -740,19 +744,33 @@ const WAITS_FOR_STATE = new RegExp(
  * read AND no state wait anywhere in the entry, so an entry that waits on some
  * unrelated line is left alone — and, like its siblings, absence of the
  * pattern means the check did not run, never that the entry is proven safe.
+ *
+ * And it fires only on a read that comes AFTER an action (`actingCalls`,
+ * docs/specs/SPEC-codebehind-robustness.md §6.3). The fault is a read racing
+ * what the entry's own action caused; an entry that takes no action caused
+ * nothing, and the runner has already settled the page before it. Firing on
+ * one anyway is what started failure B of that spec: a read-only capture was
+ * re-asked, rewritten, and lost the selector the recording read with.
  */
 export function unwaitedReadComplaint(code: string): string | undefined {
   if (!/\bstep\s*\.\s*expect\s*\(/.test(code)) return undefined;
-  if (!INSTANT_READ.test(code)) return undefined;
   if (WAITS_FOR_STATE.test(code)) return undefined;
+  const action = actingCalls(code)[0];
+  if (action === undefined) return undefined;
+  const text = codeText(code);
+  const readAfter = [...text.matchAll(INSTANT_READ)].some((m) => m.index! > action.index);
+  if (!readAfter) return undefined;
   return (
-    'The entry reads a value out of the page and asserts on it without ever waiting for the '
-    + 'state it asserts. `step.expect` does not retry and the read does not either, so on replay '
-    + 'this compares whatever the page held a millisecond after the action — which, when a '
-    + 'request is still in flight, is the value from BEFORE the step. Wait for the NEW state '
-    + "first: `await page.locator('#upload-status', { hasText: 'Uploaded logo.png' }).waitFor()` "
-    + '(or `.filter({ hasText: ... })` on a locator you already have) does not resolve until that '
-    + 'text is present, and `page.waitForFunction` covers what a text filter cannot. Read the '
+    `The entry acts on the page (\`${action.call}\`) and then reads a value out of it and asserts on `
+    + 'it, without ever waiting for the state it asserts. `step.expect` does not retry and the read '
+    + 'does not either, so on replay this compares whatever the page held a millisecond after the '
+    + 'action — which, when a request is still in flight, is the value from BEFORE the step. Wait '
+    + "for the NEW state first: `await page.locator('#upload-status', { hasText: 'Uploaded logo.png' })"
+    + ".waitFor()` (or `.filter({ hasText: ... })` on a locator you already have) does not resolve "
+    + 'until that text is present, and `page.waitForFunction` covers what a text filter cannot. '
+    + 'When the action leads to another page, wait for THAT page before reading anything — '
+    + "`await page.waitForFunction(() => document.title.includes('Dashboard'))` — and never with a "
+    + 'URL taken from one data row: other rows of the same test may stay on this page. Read the '
     + 'value into `step.expect` after that, not instead of it.'
   );
 }

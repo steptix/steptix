@@ -198,6 +198,27 @@ export interface PageStabilityOptions {
    * DOM quiescence is the primary settle signal.
    */
   networkIdle?: boolean;
+  /**
+   * Keep waiting across ONE navigation (docs/specs/SPEC-codebehind-robustness.md
+   * §6.1). Off by default, so every caller that does not ask keeps today's
+   * timing exactly.
+   *
+   * Without it, a navigation that lands during the quiet wait destroys the
+   * script doing the waiting, and the wait returns at that instant — the very
+   * moment a reader needs it to carry on. A compiled `If the page title
+   * contains "Dashboard" then return` asked right after a sign-in click read
+   * the title of a page still loading, and missed the return.
+   *
+   * With it: when the quiet wait rejects and the page navigated — its URL
+   * changed since the wait began, or the error says the execution context was
+   * destroyed — and the page is still open, wait for the new document's
+   * `domcontentloaded` and then for quiet once more, all within what is left
+   * of `timeoutMs`. At most one such re-wait; any other rejection returns at
+   * once, as without the option.
+   */
+  followNavigation?: boolean;
+  /** The clock, injected by tests. Defaults to `Date.now`. */
+  now?: () => number;
 }
 
 /**
@@ -316,8 +337,13 @@ export async function waitForPageStability(
   // Default to false: networkidle is a poor signal on SPAs (websockets, long-polls,
   // analytics beacons keep it busy even when the page is visually stable).
   const networkIdle = options?.networkIdle ?? false;
+  const followNavigation = options?.followNavigation ?? false;
+  const now = options?.now ?? Date.now;
 
-  const deadline = Date.now() + timeoutMs;
+  const deadline = now() + timeoutMs;
+  // Only read when it is used: a page that has gone away answers `url()` from
+  // its last state, but a test's hand-built page may not answer at all.
+  const startUrl = followNavigation ? urlOf(page) : undefined;
 
   // Wait for network idle first (if enabled) — use a shorter timeout so we
   // still have time for the DOM quiescence check.
@@ -333,17 +359,46 @@ export async function waitForPageStability(
   }
 
   // Now wait for DOM quiescence: no mutations for `quiesceMs` milliseconds.
-  // Uses a string expression (like DIAGNOSE_SCRIPT) to avoid TypeScript DOM type issues.
-  const remaining = deadline - Date.now();
-  if (remaining > quiesceMs) {
-    const qMs = quiesceMs;
-    const rMs = Math.min(remaining, timeoutMs);
-    const domQuiesceScript = `new Promise((resolve) => {
+  let followed = false;
+  for (;;) {
+    const remaining = deadline - now();
+    if (remaining <= quiesceMs) break;
+    try {
+      await page.evaluate(domQuiesceScript(quiesceMs, Math.min(remaining, timeoutMs)));
+      break;
+    } catch (err) {
+      // The page navigated or closed under the script. Without
+      // `followNavigation` that ends the wait — we diagnose whatever state the
+      // page is in. With it, a navigation gets one re-wait in the new document.
+      if (!followNavigation || followed) break;
+      if (!navigatedSince(page, startUrl, err)) break;
+      if (pageClosed(page)) break;
+      followed = true;
+      const left = deadline - now();
+      if (left <= 0) break;
+      await page
+        .waitForLoadState('domcontentloaded', { timeout: left })
+        .catch(() => {
+          /* the new document did not get that far in time — quiet-wait what is there */
+        });
+    }
+  }
+
+  return diagnosePageState(page);
+}
+
+/**
+ * The DOM quiet wait: resolves once nothing has mutated for `quietMs`, or at
+ * `budgetMs` whatever the page is doing. A string expression (like
+ * DIAGNOSE_SCRIPT) to avoid TypeScript DOM type issues.
+ */
+function domQuiesceScript(quietMs: number, budgetMs: number): string {
+  return `new Promise((resolve) => {
       let timer = null;
       const overallTimer = setTimeout(() => {
         observer.disconnect();
         resolve();
-      }, ${rMs});
+      }, ${budgetMs});
 
       const resetQuiesce = () => {
         if (timer) clearTimeout(timer);
@@ -351,7 +406,7 @@ export async function waitForPageStability(
           observer.disconnect();
           clearTimeout(overallTimer);
           resolve();
-        }, ${qMs});
+        }, ${quietMs});
       };
 
       const observer = new MutationObserver(() => resetQuiesce());
@@ -363,13 +418,31 @@ export async function waitForPageStability(
 
       resetQuiesce();
     })`;
+}
 
-    await page
-      .evaluate(domQuiesceScript)
-      .catch(() => {
-        /* page navigated or closed — fine, we'll diagnose whatever state we're in */
-      });
+/** The page's URL, or undefined when it cannot say. */
+function urlOf(page: Page): string | undefined {
+  try {
+    return page.url();
+  } catch {
+    return undefined;
   }
+}
 
-  return diagnosePageState(page);
+/** Did the page navigate since a wait that began at `startUrl` — its URL
+ *  moved, or `err` is Playwright's "the document went away under the script"? */
+function navigatedSince(page: Page, startUrl: string | undefined, err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/execution context was destroyed/i.test(message)) return true;
+  const current = urlOf(page);
+  return current !== undefined && startUrl !== undefined && current !== startUrl;
+}
+
+/** `page.isClosed()`, read defensively: a closed page is never waited on. */
+function pageClosed(page: Page): boolean {
+  try {
+    return typeof page.isClosed === 'function' && page.isClosed();
+  } catch {
+    return true;
+  }
 }

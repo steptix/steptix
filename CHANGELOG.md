@@ -9,6 +9,26 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — compiled code-behind holds up on replay
+
+Run & Compile's code could pass under AI and fail only on a later replay: an
+entry raced what its own click had started, or read with a different selector
+from the one the AI run read with. See
+[docs/specs/SPEC-codebehind-robustness.md](docs/specs/SPEC-codebehind-robustness.md).
+
+- **A compiled `If … then return` (or `then stop`, `then fail`) waits for the
+  page before it reads it**, as the AI judgement and compiled conditions
+  already did: up to 10 s for 1 s of quiet. A line the run's values already
+  decide does not wait. The wait now also follows a navigation that lands
+  during it, for compiled lines and compiled conditions, instead of ending
+  the moment the old page goes away. A compiled sign-in followed by such a
+  line used to read the title of a page that was still loading.
+- **Compile's wait check fires only on a read after an action.** An entry that
+  only reads is no longer re-asked to wait, which had led to captures losing
+  the selector the run read with. The check now also knows `title()`,
+  `url()`, `isVisible()`, `count()` and the other one-shot reads, and its
+  advice covers an action that leads to another page.
+
 ### Changed — a run shows the Test Runner, and its error banner follows the latest run
 
 A run's errors land in the Steptix **Test Runner** view, which was easy to
