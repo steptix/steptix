@@ -81,6 +81,7 @@ const HOST_MSG_TYPES = new Set([
   "recording",
   // The Add step box's answer — handled by the block itself (RecordingPanel).
   "recordAddStepResult",
+  "variableCopied",
 ]);
 function isHostMsg(value) {
   if (!value || typeof value !== "object") return false;
@@ -695,23 +696,16 @@ function Spinner() {
 }
 
 /**
- * Per-step right-click menu. Opened from a step row's onContextMenu and
- * positioned at the cursor (clamped into the viewport). The transparent
- * backdrop catches outside clicks; Escape also closes. Menu items either
- * dispatch through `hostBridge` or stay disabled when not applicable
- * (e.g. "Clear status here" when the row has no status to clear).
+ * The shell every right-click menu in the panel shares: a box at `x, y` (the
+ * opener clamps those into the viewport) over a transparent backdrop that
+ * catches outside clicks. Escape also closes.
  */
-function StepContextMenu({ menu, onClose }) {
+function ContextMenu({ x, y, onClose, children }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
-
-  const run = () => { onClose(); hostBridge.postRun([menu.line]); };
-  const reveal = () => { onClose(); hostBridge.postRevealLine(menu.line); };
-  const toggleBp = () => { onClose(); hostBridge.postToggleBreakpoint(menu.line); };
-  const clearSt = () => { onClose(); hostBridge.postClearStatus(menu.line); };
 
   return (
     <div
@@ -724,8 +718,8 @@ function StepContextMenu({ menu, onClose }) {
         onContextMenu={(e) => e.preventDefault()}
         style={{
           position: "fixed",
-          left: menu.x,
-          top: menu.y,
+          left: x,
+          top: y,
           minWidth: 180,
           background: "var(--vscode-menu-background, #252526)",
           color: "var(--vscode-menu-foreground, #cccccc)",
@@ -737,82 +731,162 @@ function StepContextMenu({ menu, onClose }) {
           fontSize: "var(--vscode-font-size, 13px)",
         }}
       >
-        <button className="tb-menu-item" onClick={run}>Run this step</button>
-        <button className="tb-menu-item" onClick={reveal}>Reveal in editor</button>
-        <button className="tb-menu-item" onClick={toggleBp}>
-          {menu.hasBreakpoint ? "Remove breakpoint" : "Add breakpoint"}
-        </button>
-        <button
-          className="tb-menu-item"
-          disabled={!menu.hasStatus}
-          onClick={menu.hasStatus ? clearSt : undefined}
-        >
-          Clear status here
-        </button>
+        {children}
       </div>
     </div>
   );
 }
 
 /**
+ * Per-step right-click menu. Opened from a step row's onContextMenu and
+ * positioned at the cursor. Menu items either dispatch through `hostBridge`
+ * or stay disabled when not applicable (e.g. "Clear status here" when the
+ * row has no status to clear).
+ */
+function StepContextMenu({ menu, onClose }) {
+  const run = () => { onClose(); hostBridge.postRun([menu.line]); };
+  const reveal = () => { onClose(); hostBridge.postRevealLine(menu.line); };
+  const toggleBp = () => { onClose(); hostBridge.postToggleBreakpoint(menu.line); };
+  const clearSt = () => { onClose(); hostBridge.postClearStatus(menu.line); };
+
+  return (
+    <ContextMenu x={menu.x} y={menu.y} onClose={onClose}>
+      <button className="tb-menu-item" onClick={run}>Run this step</button>
+      <button className="tb-menu-item" onClick={reveal}>Reveal in editor</button>
+      <button className="tb-menu-item" onClick={toggleBp}>
+        {menu.hasBreakpoint ? "Remove breakpoint" : "Add breakpoint"}
+      </button>
+      <button
+        className="tb-menu-item"
+        disabled={!menu.hasStatus}
+        onClick={menu.hasStatus ? clearSt : undefined}
+      >
+        Clear status here
+      </button>
+    </ContextMenu>
+  );
+}
+
+/**
  * Per-row right-click menu (stories/data-row-progress-and-selection.md
- * §"How you run one row, or some"). Same shell as `StepContextMenu` — the
- * transparent backdrop catches outside clicks, Escape closes — with the two
- * gestures a row has: run the row you pointed at, and, when a multi-row
- * selection is in play, run all of it.
+ * §"How you run one row, or some"), with the two gestures a row has: run the
+ * row you pointed at, and, when a multi-row selection is in play, run all of
+ * it.
  *
  * Both send whole rows (no `lines`): "run this row" has always meant the flow
  * for that row, not a slice of it.
  */
 function RowContextMenu({ menu, onClose }) {
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   const runThis = () => { onClose(); hostBridge.postRunRows(menu.thisRowPayload); };
   const runSelected = () => { onClose(); hostBridge.postRunRows(menu.selectedPayload); };
   const reveal = () => { onClose(); hostBridge.postRevealLine(menu.line); };
 
   return (
-    <div
-      onMouseDown={onClose}
-      onContextMenu={(e) => { e.preventDefault(); onClose(); }}
-      style={{ position: "fixed", inset: 0, zIndex: 1000 }}
-    >
-      <div
-        onMouseDown={(e) => e.stopPropagation()}
-        onContextMenu={(e) => e.preventDefault()}
-        style={{
-          position: "fixed",
-          left: menu.x,
-          top: menu.y,
-          minWidth: 180,
-          background: "var(--vscode-menu-background, #252526)",
-          color: "var(--vscode-menu-foreground, #cccccc)",
-          border: "1px solid var(--vscode-menu-border, var(--vscode-contrastBorder, #454545))",
-          boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
-          padding: "4px 0",
-          borderRadius: 2,
-          fontFamily: "var(--vscode-font-family)",
-          fontSize: "var(--vscode-font-size, 13px)",
-        }}
-      >
-        {/* Disabled while a run is in flight or parked at a breakpoint, like
-            the group header's ▷ Run all — a second run cannot start, and an
-            item that does nothing when clicked is worse than a greyed one. */}
-        <button className="tb-menu-item" onClick={runThis} disabled={menu.runDisabled}>
-          Run this row
+    <ContextMenu x={menu.x} y={menu.y} onClose={onClose}>
+      {/* Disabled while a run is in flight or parked at a breakpoint, like
+          the group header's ▷ Run all — a second run cannot start, and an
+          item that does nothing when clicked is worse than a greyed one. */}
+      <button className="tb-menu-item" onClick={runThis} disabled={menu.runDisabled}>
+        Run this row
+      </button>
+      {menu.selectedCount > 1 && (
+        <button className="tb-menu-item" onClick={runSelected} disabled={menu.runDisabled}>
+          Run selected rows ({menu.selectedCount})
         </button>
-        {menu.selectedCount > 1 && (
-          <button className="tb-menu-item" onClick={runSelected} disabled={menu.runDisabled}>
-            Run selected rows ({menu.selectedCount})
-          </button>
-        )}
-        <button className="tb-menu-item" onClick={reveal}>Reveal in editor</button>
-      </div>
-    </div>
+      )}
+      <button className="tb-menu-item" onClick={reveal}>Reveal in editor</button>
+    </ContextMenu>
+  );
+}
+
+/**
+ * Per-variable right-click menu in the Variables section. The host does the
+ * copying (`copyVariable`), so this menu and the Variables view's say the same
+ * thing and put the same text on the clipboard.
+ *
+ * A masked row offers "Copy unmasked value": the real value is what gets
+ * copied, and the menu says so before it happens. A row with no value yet — an
+ * `[output:]` nothing has captured — greys the item rather than copy nothing.
+ */
+function VariableContextMenu({ menu, onClose, onExport }) {
+  const copy = (kind) => {
+    onClose();
+    hostBridge.postCopyVariable(kind, menu.name, menu.value, menu.masked);
+  };
+
+  return (
+    <ContextMenu x={menu.x} y={menu.y} onClose={onClose}>
+      <button className="tb-menu-item" onClick={() => copy("value")} disabled={menu.value === undefined}>
+        {menu.masked ? "Copy unmasked value" : "Copy value"}
+      </button>
+      <button className="tb-menu-item" onClick={() => copy("name")}>Copy name</button>
+      <button className="tb-menu-item" onClick={() => copy("placeholder")}>
+        Copy as {"{{placeholder}}"}
+      </button>
+      <div className="tb-menu-separator" role="separator" />
+      <button className="tb-menu-item" onClick={() => { onClose(); onExport(); }}>
+        {EXPORT_VARIABLES_LABEL}
+      </button>
+    </ContextMenu>
+  );
+}
+
+/** The Variables view's title-bar button says the same: package.json
+ *  `steptix.exportVariablesCsv`. */
+const EXPORT_VARIABLES_LABEL = "Export variables as CSV…";
+
+/** How long a copied row shows its tick and wash — the Variables view's
+ *  tick lasts as long (variables-view.ts COPIED_MS). */
+const COPIED_MS = 1500;
+
+/**
+ * The Variables buttons' icons, drawn here to read as the Variables view's
+ * `$(download)` and `$(copy)`: 16px, one-pixel strokes, `currentColor`. A
+ * webview cannot reach VS Code's icon font, and these are our own drawings
+ * rather than copies of it.
+ */
+function PanelIcon({ children, strokeWidth = 1 }) {
+  return (
+    <svg
+      className="tb-icon"
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {children}
+    </svg>
+  );
+}
+
+/** An arrow down onto a line: save to a file. */
+function DownloadIcon() {
+  return (
+    <PanelIcon>
+      <path d="M8 2v9M4.5 7.5 8 11l3.5-3.5M3.5 13.5h9" />
+    </PanelIcon>
+  );
+}
+
+/** A tick — what the copy button turns into once the copy has happened. */
+function CheckIcon() {
+  return (
+    <PanelIcon strokeWidth={1.5}>
+      <path d="M3.5 8.5 6.5 11.5 12.5 4.5" />
+    </PanelIcon>
+  );
+}
+
+/** Two sheets, the front one whole. */
+function CopyIcon() {
+  return (
+    <PanelIcon>
+      <rect x="5.5" y="4.5" width="7" height="9" rx="1.5" />
+      <path d="M3.5 11.5v-7a2 2 0 0 1 2-2h4.5" />
+    </PanelIcon>
   );
 }
 
@@ -882,6 +956,87 @@ const PANEL_CSS = `
           color: var(--vscode-menu-selectionForeground, #ffffff);
         }
         .tb-menu-item:disabled { opacity: 0.4; cursor: default; }
+        /* A Variables row. Its copy button sits at the end and shows on hover
+           (or keyboard focus), like the inline actions on a tree row. */
+        .tb-var-row { border-radius: 2px; }
+        .tb-var-row:hover { background: var(--vscode-list-hoverBackground); }
+        /* A Variables button icon, at the size VS Code draws its own. */
+        .tb-icon { width: 16px; height: 16px; display: block; }
+        /* 2px round a 16px icon: 20px, the height of the value's copied wash
+           (a 16px line plus its 2px box-shadow), with the same corners. */
+        .tb-var-copy {
+          flex-shrink: 0;
+          display: inline-flex;
+          padding: 2px;
+          border: none;
+          border-radius: 3px;
+          background: transparent;
+          color: var(--vscode-icon-foreground, var(--vscode-foreground));
+          cursor: pointer;
+          visibility: hidden;
+        }
+        .tb-var-row:hover .tb-var-copy,
+        .tb-var-copy:focus-visible { visibility: visible; }
+        .tb-var-copy:hover { background: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, 0.31)); }
+        /* Copied: the copy icon shrinks and fades as a green tick grows in with
+           a slight overshoot, and the button stays up while it shows, hovered
+           or not. Then it eases back the same way. */
+        .tb-sr {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          overflow: hidden;
+          clip-path: inset(50%);
+          white-space: nowrap;
+        }
+        .tb-swap { display: grid; }
+        .tb-swap > * {
+          grid-area: 1 / 1;
+          transition: opacity 160ms ease, transform 220ms cubic-bezier(0.2, 0.8, 0.3, 1.35);
+        }
+        .tb-swap > :last-child { opacity: 0; transform: scale(0.4); }
+        .tb-var-copy--done { visibility: visible; color: var(--vscode-testing-iconPassed, #73c991); }
+        .tb-var-copy--done .tb-swap > :first-child { opacity: 0; transform: scale(0.4); }
+        .tb-var-copy--done .tb-swap > :last-child { opacity: 1; transform: scale(1); }
+        /* …and the part that went to the clipboard — the value, or the name —
+           glows the same green behind its text, then fades. Never the whole
+           row: only one part is ever copied. The box-shadow pads the wash
+           without moving the text. */
+        .tb-copied {
+          --tb-copied: color-mix(in srgb, var(--vscode-testing-iconPassed, #73c991) 24%, transparent);
+          border-radius: 3px;
+          animation: tb-copied 1200ms ease-out forwards;
+        }
+        @keyframes tb-copied {
+          0%, 25% { background-color: var(--tb-copied); box-shadow: 0 0 0 2px var(--tb-copied); }
+          100% { background-color: transparent; box-shadow: 0 0 0 2px transparent; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .tb-swap > * { transition: none; }
+          .tb-copied { animation: none; background-color: var(--tb-copied); box-shadow: 0 0 0 2px var(--tb-copied); }
+        }
+        /* Export as CSV, at the right end of the Variables header — an icon
+           button shown while the section is hovered or focused, as VS Code
+           shows the same button in the Variables view's title bar. */
+        .tb-var-export {
+          margin-left: auto;
+          display: inline-flex;
+          padding: 3px;
+          border: none;
+          border-radius: 5px;
+          background: transparent;
+          color: var(--vscode-icon-foreground, var(--vscode-foreground));
+          cursor: pointer;
+          visibility: hidden;
+        }
+        .tb-var-section:hover .tb-var-export,
+        .tb-var-section:focus-within .tb-var-export { visibility: visible; }
+        .tb-var-export:hover { background: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, 0.31)); }
+        .tb-menu-separator {
+          height: 1px;
+          margin: 4px 0;
+          background: var(--vscode-menu-separatorBackground, rgba(255, 255, 255, 0.15));
+        }
         .tb-step--selected { background: var(--vscode-list-inactiveSelectionBackground); }
         .tb-step--pass { color: var(--vscode-testing-iconPassed, #22c55e); }
         .tb-step--fail { color: var(--vscode-testing-iconFailed, #f87171); }
@@ -1011,6 +1166,20 @@ function SteptixRunner() {
    * correctly and disable "Clear status here" when nothing is set.
    */
   const [stepMenu, setStepMenu] = useState(null);
+  /** Per-variable right-click menu: cursor coords + the row as rendered
+   *  (name, raw value, whether it showed masked). */
+  const [variableMenu, setVariableMenu] = useState(null);
+  /**
+   * What was just copied — `{ name, kind, seq }` — from the host's
+   * `variableCopied` answer, so only a copy that happened shows it. The part
+   * that went to the clipboard (value, or name) gets a fading wash for
+   * COPIED_MS, and a copied value also turns the copy button into a tick;
+   * `seq` restarts both when the same thing is copied again.
+   */
+  const [copiedRow, setCopiedRow] = useState(null);
+  const copiedSeqRef = useRef(0);
+  const copiedTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(copiedTimerRef.current), []);
   /**
    * Webview-local multi-selection of step rows. Plain click replaces, Ctrl/⌘
    * click toggles, Shift+click extends a range from the last anchor. When
@@ -1147,6 +1316,17 @@ function SteptixRunner() {
         case "dismissRunError":
           setHostError(null);
           break;
+        case "variableCopied": {
+          if (!msg.ok) break;
+          const seq = ++copiedSeqRef.current;
+          setCopiedRow({ name: msg.name, kind: msg.kind, seq });
+          clearTimeout(copiedTimerRef.current);
+          copiedTimerRef.current = setTimeout(
+            () => setCopiedRow((c) => (c && c.seq === seq ? null : c)),
+            COPIED_MS,
+          );
+          break;
+        }
         case "prompt":
           setPendingPrompt({ mode: msg.mode, message: msg.message, varName: msg.varName });
           setComposerText("");
@@ -1642,6 +1822,41 @@ function SteptixRunner() {
   const closeStepMenu = () => setStepMenu(null);
 
   /**
+   * Right-click on a Variables row. Carries the row as it rendered — the raw
+   * value and whether it showed masked — so what gets copied is what the user
+   * pointed at, even if a `frame:scope` moves the row on while the menu is
+   * open.
+   */
+  const handleVariableContextMenu = (e, name, value, masked) => {
+    // Text selected inside this row: let VS Code's own menu through. Its Copy
+    // copies exactly the part you selected, which none of ours do.
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && e.currentTarget.contains(selection.anchorNode)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const MENU_W = 200;
+    const MENU_H = 125;
+    const x = Math.max(0, Math.min(e.clientX, window.innerWidth - MENU_W - 4));
+    const y = Math.max(0, Math.min(e.clientY, window.innerHeight - MENU_H - 4));
+    setVariableMenu({ x, y, name, value, masked });
+  };
+  const closeVariableMenu = () => setVariableMenu(null);
+
+  /**
+   * Export as CSV — the Variables header's button and the row menu's last
+   * item. Every row the section lists, each value as the row SHOWS it: the
+   * CSV is a file, and what reaches a file is masked. A row with no value yet
+   * exports an empty field.
+   */
+  const exportVariablesCsv = () => {
+    const rows = variableRows.map((row) => ({
+      name: row.name,
+      value: row.value === undefined ? "" : maskIfSecretInline(row.name, row.value, runtimeMasking),
+    }));
+    hostBridge.postExportVariables(rows, snapshot?.uri ?? undefined);
+  };
+
+  /**
    * Vertical sash for the Output panel. Mousedown captures the starting
    * cursor Y and current height; subsequent mousemove updates the height
    * by the inverse delta (dragging up grows the panel). Listeners live
@@ -1984,7 +2199,17 @@ function SteptixRunner() {
         )}
 
         {variableRows.length > 0 && (
-          <div style={{ flexShrink: 0, borderBottom: "1px solid var(--vscode-sideBarSectionHeader-border, transparent)" }}>
+          <div className="tb-var-section" style={{ flexShrink: 0, borderBottom: "1px solid var(--vscode-sideBarSectionHeader-border, transparent)" }}>
+            {/* Says the copy out loud — the tick is only for eyes. */}
+            <span className="tb-sr" role="status" aria-live="polite">
+              {copiedRow
+                ? copiedRow.kind === "name"
+                  ? `Copied the name ${copiedRow.name}`
+                  : copiedRow.kind === "placeholder"
+                    ? `Copied the placeholder for ${copiedRow.name}`
+                    : `Copied the value of ${copiedRow.name}`
+                : ""}
+            </span>
             <div className="tb-section-header" onClick={() => setVariablesCollapsed((v) => !v)}>
               <ChevronIcon open={!variablesCollapsed} />
               <span>Variables</span>
@@ -1994,6 +2219,18 @@ function SteptixRunner() {
               {varsSuffix && (
                 <span style={{ opacity: 0.7, textTransform: "none", letterSpacing: 0 }}>{varsSuffix}</span>
               )}
+              <button
+                className="tb-var-export"
+                title={EXPORT_VARIABLES_LABEL}
+                aria-label={EXPORT_VARIABLES_LABEL}
+                onClick={(e) => {
+                  // The header toggles the section; this button must not.
+                  e.stopPropagation();
+                  exportVariablesCsv();
+                }}
+              >
+                <DownloadIcon />
+              </button>
             </div>
             {!variablesCollapsed && (
               <div className="tb-section-body" style={{ maxHeight: 180, overflowY: "auto" }}>
@@ -2011,10 +2248,35 @@ function SteptixRunner() {
                   // from — and by the capture event's `source` after one.
                   const isGenerated =
                     row.captureSource === "generated" || row.source === "generated";
+                  const display = maskIfSecretInline(row.name, row.value, runtimeMasking);
+                  // Masked = the row shows something other than its value: a
+                  // secret name, or a record with a secret column. Copying
+                  // still copies the value; this only changes the wording.
+                  const hasValue = row.value !== undefined;
+                  const masked = hasValue && display !== String(row.value);
+                  // Which part of this row was just copied, if any — the value,
+                  // or the name (Copy name and Copy as {{placeholder}} both
+                  // come from the name).
+                  const copiedHere = copiedRow?.name === row.name ? copiedRow : null;
+                  const valueCopied = copiedHere?.kind === "value";
+                  const nameCopied = copiedHere !== null && !valueCopied;
                   return (
-                    <div key={row.name} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6, padding: "2px 4px", fontSize: "0.92em" }}>
-                      <span style={{ display: "flex", alignItems: "baseline", gap: 4, minWidth: 0 }}>
-                        <span style={{ opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.name}</span>
+                    <div
+                      key={row.name}
+                      className="tb-var-row"
+                      onContextMenu={(e) => handleVariableContextMenu(e, row.name, row.value, masked)}
+                      style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6, padding: "2px 4px", fontSize: "0.92em" }}
+                    >
+                      {/* The name keeps up to half the row, so a long value
+                          cannot squeeze it out of sight. */}
+                      <span style={{ display: "flex", alignItems: "baseline", gap: 4, minWidth: 0, flexShrink: 0, maxWidth: "50%" }}>
+                        <span
+                          key={nameCopied ? `copied-${copiedHere.seq}` : "name"}
+                          className={nameCopied ? "tb-copied" : undefined}
+                          style={{ opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                        >
+                          {row.name}
+                        </span>
                         {isToolOutput && (
                           <span
                             title="Returned by a [tool:] / [skill:] invocation"
@@ -2048,8 +2310,46 @@ function SteptixRunner() {
                           >ai</span>
                         )}
                       </span>
-                      <span style={{ fontFamily: "var(--vscode-editor-font-family, monospace)", color: "var(--vscode-textPreformat-foreground, inherit)" }}>
-                        {maskIfSecretInline(row.name, row.value, runtimeMasking)}
+                      {/* Centred, not baseline-aligned: the copy button and the value's copied
+                          wash are both 20px tall, so their edges line up. */}
+                      <span style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 4, flex: 1, minWidth: 0 }}>
+                        {/* One line, cut with an ellipsis, like the Variables
+                            view: a whole JSON table would otherwise fill the
+                            section. The hover shows more of it, and Copy
+                            value copies all of it. */}
+                        <span
+                          key={valueCopied ? `copied-${copiedHere.seq}` : "value"}
+                          className={valueCopied ? "tb-copied" : undefined}
+                          title={display}
+                          style={{
+                            fontFamily: "var(--vscode-editor-font-family, monospace)",
+                            color: "var(--vscode-textPreformat-foreground, inherit)",
+                            lineHeight: "16px",
+                            minWidth: 0,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {display}
+                        </span>
+                        {hasValue ? (
+                          <button
+                            className={`tb-var-copy${valueCopied ? " tb-var-copy--done" : ""}`}
+                            title={valueCopied ? "Copied" : masked ? "Copy unmasked value" : "Copy value"}
+                            aria-label={`${masked ? "Copy unmasked value of" : "Copy value of"} ${row.name}`}
+                            onClick={() => hostBridge.postCopyVariable("value", row.name, row.value, masked)}
+                          >
+                            <span className="tb-swap">
+                              <CopyIcon />
+                              <CheckIcon />
+                            </span>
+                          </button>
+                        ) : (
+                          // Keeps the values in one column whether or not a
+                          // row has anything to copy yet.
+                          <span aria-hidden="true" style={{ width: 20, flexShrink: 0 }} />
+                        )}
                       </span>
                     </div>
                   );
@@ -2328,6 +2628,9 @@ function SteptixRunner() {
 
       {stepMenu && <StepContextMenu menu={stepMenu} onClose={closeStepMenu} />}
       {rowMenu && <RowContextMenu menu={rowMenu} onClose={closeRowMenu} />}
+      {variableMenu && (
+        <VariableContextMenu menu={variableMenu} onClose={closeVariableMenu} onExport={exportVariablesCsv} />
+      )}
     </div>
   );
 }

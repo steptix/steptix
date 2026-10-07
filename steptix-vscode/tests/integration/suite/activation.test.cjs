@@ -94,6 +94,12 @@ describe('Steptix extension — structural smoke', function () {
       'steptix.stopRecording',
       'steptix.recordAddCheck',
       'steptix.cancelRecording',
+      // The Variables view's row menu and Ctrl+C.
+      'steptix.copyVariableValue',
+      'steptix.copyVariableUnmaskedValue',
+      'steptix.copyVariableName',
+      'steptix.copyVariablePlaceholder',
+      'steptix.exportVariablesCsv',
     ];
     const missing = expected.filter((c) => !commands.includes(c));
     assert.deepEqual(missing, [], `missing commands: ${missing.join(', ')}`);

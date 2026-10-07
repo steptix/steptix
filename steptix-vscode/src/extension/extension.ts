@@ -45,7 +45,13 @@ import {
 import { EnvDataCompletionProvider } from './env-data-completion.js';
 import { EnvDataDefinitionProvider } from './env-data-definition.js';
 import { CallStackTreeProvider } from './call-stack-view.js';
-import { VariablesTreeProvider } from './variables-view.js';
+import {
+  VariablesTreeProvider,
+  copyVariable,
+  exportVariables,
+  setVariablesExportPickerForTests,
+  type VariableNode,
+} from './variables-view.js';
 import {
   resolveInspectorTarget,
   shouldReuseDebugSession,
@@ -108,6 +114,10 @@ class RunControllerRegistry implements vscode.Disposable {
    *  bridging pattern as `onAnyFrameStackChange`. */
   private readonly anyScopeEmitter = new vscode.EventEmitter<void>();
   readonly onAnyScopeChange = this.anyScopeEmitter.event;
+  /** Fires when a run starts or ends (`notifyRunning`) — including the end
+   *  of the request a breakpoint parks, which changes no scope or frame. */
+  private readonly runningEmitter = new vscode.EventEmitter<void>();
+  readonly onRunningChange = this.runningEmitter.event;
   /** Per-controller subscription handle so we don't leak listeners when a
    *  controller is removed. */
   private readonly frameSubs = new Map<string, vscode.Disposable>();
@@ -586,6 +596,26 @@ class RunControllerRegistry implements vscode.Disposable {
       if (c.isRunning) return c;
     }
     return undefined;
+  }
+
+  /**
+   * The controller whose variables the Variables view shows: the running one,
+   * else one parked at a breakpoint — the active editor's first.
+   *
+   * A breakpoint splits a run into two requests, and between them nothing is
+   * running, so `runningController()` alone left the view on "No active run"
+   * at exactly the moment an author stops to look at the variables. The
+   * controller still holds the scope the first request ended with; the next
+   * run's `resetFrameState` is what clears it.
+   */
+  inspectedController(): RunController | undefined {
+    const running = this.runningController();
+    if (running) return running;
+    const parked = [...this.controllers.values()].filter(
+      (c) => this.tracker.breakpointStopFor(c.document.uri) !== null,
+    );
+    const active = this.tracker.activeEditor?.document.uri.toString();
+    return parked.find((c) => c.document.uri.toString() === active) ?? parked[0];
   }
 
   /** Phase 3.1.b — true when this controller has an outstanding
@@ -1698,10 +1728,17 @@ class RunControllerRegistry implements vscode.Disposable {
     // A run just started or ended — both change what /health reports, and a
     // 30s poll would leave the item stale for most of that window (§6).
     void this.serverStatusBar?.refresh();
+    this.runningEmitter.fire();
   }
 
   dismissRunError(): void {
     this.view.post({ type: 'dismissRunError' });
+  }
+
+  /** Answer the panel's `copyVariable`, so it shows "copied" only on a copy
+   *  that happened. */
+  notifyVariableCopied(name: string, kind: 'value' | 'name' | 'placeholder', ok: boolean): void {
+    this.view.post({ type: 'variableCopied', name, kind, ok });
   }
 
   private setRunningContext(value: boolean): void {
@@ -1769,6 +1806,7 @@ class RunControllerRegistry implements vscode.Disposable {
     this.scopeSubs.clear();
     this.anyFrameStackEmitter.dispose();
     this.anyScopeEmitter.dispose();
+    this.runningEmitter.dispose();
   }
 }
 
@@ -1926,8 +1964,25 @@ export interface SteptixTestHooks {
    *  `maskIfSecret`. Used by Phase 4.1 tests to assert the view's
    *  render path actually applies masking (the integration tests at
    *  the `runningScope` layer alone wouldn't catch a render-side
-   *  regression that bypassed maskIfSecret). */
-  variablesViewItems: () => Array<{ name: string; description: string }>;
+   *  regression that bypassed maskIfSecret). `contextValue` picks the
+   *  row's copy commands, and `node` is what VS Code hands those commands
+   *  when the row's menu runs them. */
+  variablesViewItems: () => Array<{
+    name: string;
+    description: string;
+    contextValue: string;
+    /** The row's icon id — `check` for a moment after it is copied. */
+    icon: string;
+    node: VariableNode;
+  }>;
+  /** Answer the Export as CSV save dialog with `pick` (`null` restores the
+   *  real dialog). Returning undefined is the user pressing Cancel. */
+  setVariablesExportPicker: (
+    pick: ((suggested: vscode.Uri | undefined) => Thenable<vscode.Uri | undefined>) | null,
+  ) => void;
+  /** Select a Variables row by name, as a click does — through
+   *  `TreeView.reveal`, which needs no keyboard focus. */
+  selectVariable: (name: string) => Promise<void>;
   /** Test-only: is the running controller's run currently parked on a
    *  step:awaiting (Phase 3 step-paused state)? */
   isStepPaused: () => boolean;
@@ -2156,25 +2211,25 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
     onChange: registry.onAnyFrameStackChange,
   });
 
-  // Phase 4 Variables view — flat scope of the currently-running
-  // controller's top frame. Both the frame-stack and scope emitters
+  // Phase 4 Variables view — flat scope of the inspected controller's top
+  // frame: the running one, or one parked at a breakpoint. Both the frame-stack and scope emitters
   // need to feed the view: scope events when the server pushes a new
   // scope, frame-stack events to flip which frame's scope is
   // "current" when the user steps in/out. Phase 4 ships a single
   // current-scope renderer; per-frame click-to-select is Phase 4.B.
   const variablesProvider = new VariablesTreeProvider({
-    currentScope: () => registry.runningController()?.currentScope() ?? {},
+    currentScope: () => registry.inspectedController()?.currentScope() ?? {},
     // How to read that scope — the `bindings` / `unmask` that arrived on the
     // same event. Read through the controller so it always describes the
     // frame `currentScope` just returned.
-    currentMasking: () => registry.runningController()?.currentScopeMasking() ?? {},
+    currentMasking: () => registry.inspectedController()?.currentScopeMasking() ?? {},
     // The "current frame" the view is rendering is the controller's top
     // frame, or the test (root) frame when no skill is active. Used by
     // the view to (a) update its title to "Variables (skill: name)" /
     // "Variables (test)" and (b) decide whether to hide
     // skill-internal `__skillN_x` names from the rendered list.
     currentFrame: () => {
-      const controller = registry.runningController();
+      const controller = registry.inspectedController();
       if (!controller) return null;
       const top = controller.frameStack[controller.frameStack.length - 1];
       if (!top) return { id: '' };
@@ -2191,6 +2246,23 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
   const variablesFrameSub = registry.onAnyFrameStackChange(() =>
     variablesProvider.refresh(),
   );
+  // A run ending, parking at a breakpoint, resuming, or being stopped there
+  // changes which controller the view reads without a scope or frame event of
+  // its own — and a tree that is not told keeps showing what it last drew, so
+  // a finished run's rows stayed up over an export that found none. The
+  // registry announces runs starting and ending, the tracker each breakpoint
+  // stop; re-render only when the answer actually moved, since the tracker
+  // also fires on every cursor move.
+  let inspectedKey = '';
+  const refreshIfInspectedMoved = (): void => {
+    const c = registry.inspectedController();
+    const key = c ? `${c.document.uri}|${c.isRunning}|${tracker.breakpointStopFor(c.document.uri)}` : '';
+    if (key === inspectedKey) return;
+    inspectedKey = key;
+    variablesProvider.refresh();
+  };
+  const variablesPauseSub = tracker.onChange(refreshIfInspectedMoved);
+  const variablesRunSub = registry.onRunningChange(refreshIfInspectedMoved);
   // Use createTreeView (not registerTreeDataProvider) so we can drive
   // the title/description from the active frame. The provider keeps a
   // handle so refresh() can update it.
@@ -2199,6 +2271,30 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
     { treeDataProvider: variablesProvider },
   );
   variablesProvider.attachView(variablesView);
+  // A Variables row's menu and its inline copy button pass the row; Ctrl+C
+  // runs Copy Value with none, and the view's selection stands in. "Copy
+  // Unmasked Value" is Copy Value under the name a masked row's menu shows.
+  const variablesCopyCommands = [
+    vscode.commands.registerCommand('steptix.copyVariableValue', (node?: VariableNode) =>
+      variablesProvider.copy('value', node),
+    ),
+    vscode.commands.registerCommand('steptix.copyVariableUnmaskedValue', (node?: VariableNode) =>
+      variablesProvider.copy('value', node),
+    ),
+    vscode.commands.registerCommand('steptix.copyVariableName', (node?: VariableNode) =>
+      variablesProvider.copy('name', node),
+    ),
+    vscode.commands.registerCommand('steptix.copyVariablePlaceholder', (node?: VariableNode) =>
+      variablesProvider.copy('placeholder', node),
+    ),
+    // The view's title bar: every row it lists, as it shows them.
+    vscode.commands.registerCommand('steptix.exportVariablesCsv', () =>
+      exportVariables(
+        variablesProvider.exportRows(),
+        registry.inspectedController()?.document.uri ?? null,
+      ),
+    ),
+  ];
 
   // "Detach to editor" command. Spawns a webview panel in the editor area
   // wired to the same broadcaster as the sidebar — once the panel is a
@@ -2271,8 +2367,11 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
     // TreeView itself is disposable so it goes into subscriptions too.
     variablesView,
     variablesProvider,
+    ...variablesCopyCommands,
     variablesScopeSub,
     variablesFrameSub,
+    variablesPauseSub,
+    variablesRunSub,
     new EnvSelector(),
     // Editing the auto-start settings is the user saying "I fixed it" — drop
     // the backoff so the very next run retries instead of repeating a stale
@@ -2517,9 +2616,14 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
           return {
             name: typeof item.label === 'string' ? item.label : node.name,
             description: typeof item.description === 'string' ? item.description : '',
+            contextValue: item.contextValue ?? '',
+            icon: item.iconPath instanceof vscode.ThemeIcon ? item.iconPath.id : '',
+            node,
           };
         });
       },
+      setVariablesExportPicker: (pick) => setVariablesExportPickerForTests(pick),
+      selectVariable: (name) => variablesProvider.selectForTests(name),
       lastReportPath: () => registry.active()?.lastReportPath ?? null,
       lastRunTokens: () => registry.active()?.lastRunTokens ?? null,
       /** What the panel was TOLD since `mark`, most recent last. The webview's
@@ -2796,6 +2900,20 @@ async function handleWebviewMessage(
     case 'focusTestResults': {
       // Triggered by the batch-run banner's "Open Test Results" link.
       void vscode.commands.executeCommand('workbench.panel.testResults.focus');
+      return;
+    }
+    case 'copyVariable': {
+      // The panel's Variables menu. It sends the row as it rendered it, raw
+      // value included, and the host does the copying — the same clipboard
+      // write and status-bar line as the Variables view's commands.
+      const ok = await copyVariable(msg.kind, { name: msg.name, value: msg.value, masked: msg.masked });
+      registry.notifyVariableCopied(msg.name, msg.kind, ok);
+      return;
+    }
+    case 'exportVariables': {
+      // The panel's Export as CSV: its rows as it shows them, masked, and the
+      // file they belong to, for the save dialog's suggestion.
+      await exportVariables(msg.rows, msg.uri ? vscode.Uri.parse(msg.uri) : null);
       return;
     }
     case 'webviewState': {

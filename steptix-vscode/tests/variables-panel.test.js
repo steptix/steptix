@@ -43,6 +43,41 @@ test("collectVariables: surfaces [output: var] from steps with no value yet", ()
   ]);
 });
 
+test("collectVariables: surfaces [store as: var] and [as: var] captures, filled by the capture event", () => {
+  // The handbook's capture marker. A table read into one variable is the case
+  // that mattered: the panel held the JSON and listed no row for it.
+  const text = [
+    "## Steps",
+    "1. Read the 1st column as payee from every row in the Payments table [store as: payments]",
+    "2. Get a list of the transaction descriptions [as: transactions]",
+    "3. Read the first and last name [store as: first, last]",
+  ].join("\n");
+  const got = collectVariables(
+    text,
+    {},
+    { payments: '[{"payee":"Origin Energy"}]', first: "Ada" },
+    { payments: "capture" },
+  );
+  assert.deepEqual(got, [
+    { name: "payments", source: "output", line: 2, value: '[{"payee":"Origin Energy"}]', captureSource: "capture" },
+    { name: "transactions", source: "output", line: 3, value: undefined },
+    { name: "first", source: "output", line: 4, value: "Ada" },
+    { name: "last", source: "output", line: 4, value: undefined },
+  ]);
+});
+
+test("collectVariables: a [store as:] name already declared keeps its first row", () => {
+  const text = ["## Steps", "1. [output: total] Read the total [store as: total]"].join("\n");
+  assert.deepEqual(collectVariables(text, {}, {}), [
+    { name: "total", source: "output", line: 2, value: undefined },
+  ]);
+});
+
+test("collectVariables: a [use ai] step's [store as:] stays a generated row", () => {
+  const text = ["## Steps", "1. [use ai] Make up a customer name [store as: customer]"].join("\n");
+  assert.deepEqual(collectVariables(text, {}, {}).map((r) => [r.name, r.source]), [["customer", "generated"]]);
+});
+
 test("collectVariables: runtime values fill in for outputs/inputs after a run", () => {
   const text = ["## Steps", "1. [input: pin] PIN", "2. [output: orderId] grab"].join("\n");
   const got = collectVariables(text, {}, { pin: "1234", orderId: "ORD-9" });
