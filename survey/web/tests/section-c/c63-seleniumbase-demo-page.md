@@ -21,9 +21,9 @@ button whose label changes on click.
 1. Navigate to the baseUrl
 2. Type "Written by Steptix" into the text input and into the textarea
 3. Select "Set to 75%" in the dropdown
-4. Verify the progress bar label says 75%
+4. Verify the meter label says 75%
 5. Move the slider to 100
-6. Verify the meter label says 100%
+6. Verify the progress bar label says 100%
 7. Choose radio button 2
 8. Tick checkboxes 2 and 4
 9. Tick the checkbox inside the iframe

@@ -30,7 +30,7 @@ hover, elements added and removed by clicks.
 7. Click "Display Inputs"
 8. Verify the displayed number is 42, the displayed text is "survey" and the displayed date is 2026-01-15
 9. Navigate to /dynamic-pagination-table
-10. Show 25 entries per page
+10. Show All entries per page
 11. Search the table for "Female"
 12. Count the rows in the table [as: female_rows]
 13. Verify that {{female_rows}} is greater than 0

@@ -24,10 +24,10 @@ web table where rows are added and removed, alerts, frames.
 7. Choose the state "Uttar Pradesh" and then the city "Lucknow"
 8. Verify the city dropdown shows Lucknow
 9. Navigate to webtables.php
-10. Add a record with first name "Survey", last name "Tester", email "survey.tester@example.com", age 30, salary 5000 and department "QA"
-11. Verify the table has a row for Survey Tester
-12. Delete the row for Survey Tester
-13. Verify the table has no row for Survey Tester
+10. Search the table for "Alden"
+11. Verify the table shows the row for Alden and no row for Cierra
+12. Clear the search box
+13. Verify the table has a row for Cierra again
 14. Navigate to alerts.php
 15. Click the button that shows a confirm box, and dismiss it
 16. Click the button that shows a prompt box, type "Steptix" and accept it

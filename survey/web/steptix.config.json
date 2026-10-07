@@ -1,6 +1,7 @@
 {
   "browser": {
-    "headed": true
+    "headed": true,
+    "blockAds": true
   },
   "tests": {
     "dir": "./tests",

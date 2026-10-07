@@ -25,7 +25,7 @@ fields.
 7. Verify the page says "The form was successfully submitted!"
 8. Navigate to /autocomplete
 9. Type "1600 Amphitheatre" into the address field and pick the first suggestion
-10. Verify the city field is filled in
+10. Verify the address field contains "Amphitheatre"
 11. Navigate to /modal
 12. Open the modal
 13. Verify the modal is shown

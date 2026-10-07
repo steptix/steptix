@@ -26,7 +26,7 @@ result, ads covering content, login.
 
 ## Steps
 1. Navigate to /checkbox
-2. Expand the whole tree
+2. Expand Home, then Desktop and Documents, then WorkSpace inside Documents, using the toggle arrow next to each name
 3. Tick "Notes" and "Angular"
 4. Verify the result says "You have selected" and lists notes and angular
 5. Navigate to /radio-button

@@ -21,7 +21,7 @@ jQuery date pickers, select2-style dropdowns, knowing when to stop.
 2. Choose the dummy ticket for visa application option
 3. Enter first name "Survey" and last name "Tester"
 4. Set the date of birth to 15 March 1990 and choose Female
-5. Choose to add 1 more passenger
+5. Tick "Add more passengers", then choose "add 1 more passenger" in the number of additional passengers dropdown
 6. Verify the second passenger details section is shown
 7. Enter the second passenger's first name "Second" and choose Adult as their type
 8. Choose Round trip

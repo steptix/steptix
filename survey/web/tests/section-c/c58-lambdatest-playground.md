@@ -34,8 +34,8 @@ sliders set to exact values, drag and drop.
 16. Start the download and wait until it completes
 17. Verify the page says the download is complete
 18. Navigate to table-search-filter-demo
-19. Search the tasks table for "jQuery"
-20. Verify every row shown mentions jQuery
+19. Search the tasks table for "Testing"
+20. Verify the tasks table shows exactly one row, and it mentions Testing
 21. Navigate to drag-drop-range-sliders-demo
 22. Set the first slider to 95
 23. Verify the first slider's output shows 95
