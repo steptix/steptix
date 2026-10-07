@@ -8,6 +8,12 @@ Run columns:
 
 - **A: main**: the server built from `main` at `2e929624`, before PR #19.
   Run on 2026-10-07 (server clock), report times 14:41 to 15:57.
+- **B: PR #19**: this branch rebased onto PR #19's head (`cc339da5`), served
+  from this worktree at `244b8279`. The same files, unchanged. Report times
+  16:01 to 17:12.
+
+The detailed table below describes run A. The comparison of A and B is in
+[A against B](#a-against-b) at the end.
 
 Failure categories follow the rubric in
 [docs/web-survey-sites.md](../../../docs/web-survey-sites.md). In the cause
@@ -64,3 +70,51 @@ and 26 failed.
 - **"Assertion code response missing code field".** It appeared in 51, 54 and
   68, and the retry always recovered, at the cost of an extra model call each
   time.
+
+## A against B
+
+PR #19 changes compiled code-behind: how a compiled step waits and which
+selector a compiled read uses. None of these runs compile. Every step ran under
+AI, so the PR had nothing to act on, and any difference between A and B comes
+from the model choosing a different route on a second attempt.
+
+| # | Test | A: main | B: PR #19 | Difference |
+|---|------|---------|-----------|------------|
+| 39 | The Internet | blocked 1/39 | blocked 1/39 | none: the site does not load |
+| 40 | Expand Testing | fail 10/27 | fail 10/27 | none; the slow verify took 135 s in B and 368 s in A |
+| 41 | DemoQA | fail 2/29 | fail 2/29 | none |
+| 42 | UI Testing Playground | fail 18/31 | fail 18/31 | none. In B the model tried a `wait` for `aria-valuenow=75` first, which timed out because the bar never sits on exactly 75 |
+| 43 | WebdriverUniversity | fail 9/28 | fail 9/28 | none |
+| 44 | LetCode | fail 2/8 | fail 2/8 | none |
+| 45 | Test Pages | fail 5/26 | fail 5/26 | none |
+| 46 | Selenium web form | fail 9/14 | fail 9/14 | none |
+| 47 | Formy | fail 10/24 | fail 10/24 | none |
+| 48 | Rahul Shetty practice | fail 8/22 | fail 8/22 | none; in B the assertion said outright "browser alert dialog text is not accessible from the page DOM" |
+| 49 | QA Practice | fail 13/29 | fail 13/29 | none |
+| 50 | Test Automation Practice blog | fail 4/23 | fail 11/23 | B got further: the multi-select passed when the model picked the colours one at a time, then B failed on the next missing dialog action |
+| 51 | Ultimate QA | **pass** | **pass** | none |
+| 52 | GlobalSQA | fail 3/16 | fail 3/16 | none |
+| 53 | Automation Bookstore | fail 5/12 | fail 5/12 | none |
+| 54 | omayo | fail 7/16 | fail 7/16 | none |
+| 55 | Tutorialspoint | fail 11/19 | fail 10/19 | B failed one step earlier: "add a record" hit the 15-turn limit instead of passing half done. Same modal |
+| 56 | QAVBox | **pass** | **pass** | none; B's multi-select hit "did not find some options" first, then recovered |
+| 57 | Practice Automation | fail 7/23 | fail 7/23 | none |
+| 58 | LambdaTest playground | fail 20/26 | fail 20/26 | none |
+| 59 | H Y R Tutorials | fail 3/19 | fail 3/19 | none |
+| 60 | Try Testing This | fail 2/14 | fail 3/14 | B got further: the alert step passed, then B failed on the missing double-click action |
+| 61 | automationtesting.co.uk | fail 10/19 | fail 10/19 | none |
+| 62 | Leafground | fail 11/23 | fail 11/23 | none |
+| 63 | SeleniumBase demo page | fail 4/14 | fail 4/14 | none |
+| 64 | SeleniumBase MFA | fail 9/10 | fail 9/10 | none. In B the captured credentials included the page's whole `<script>` source |
+| 65 | Techlistic form | **pass** | **pass** | none |
+| 66 | Basic Calculator | fail (expected) | fail (expected) | none |
+| 67 | Quotes to Scrape | **pass** | **pass** | none |
+| 68 | Scrape This Site | **pass** | **pass** | none |
+| 69 | httpbin form | **pass** | **pass** | none |
+| 70 | DummyTicket | fail 6/14 | fail 6/14 | none |
+| 71 | W3Schools Tryit | fail 3/7 | **pass** | B passed: the model replaced the editor text without sending the `CTRL` key name that broke A. The If step and the step after it are reported as `unknown`, though the run passed |
+| 72 | jQuery UI | fail 7/19 | fail 7/19 | none |
+
+**Totals.** A: 6 passed. B: 7 passed. Of the four rows that differ, none
+comes from PR #19, and the extra pass (71) is the model choosing a different
+key on a second attempt.
