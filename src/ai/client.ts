@@ -43,7 +43,7 @@ function textFromV2(content: V2ContentBlock[]): string {
  * known statically — the hot path wants a fast answer, authoring wants a
  * considered one — so there is no runtime difficulty heuristic to tune.
  */
-export type CompleteProfile = 'routine' | 'retry' | 'authoring';
+export type CompleteProfile = 'routine' | 'retry' | 'authoring' | 'compile';
 
 /**
  * Effort and its output cap come from ONE record so they cannot drift apart.
@@ -62,6 +62,12 @@ const PROFILES: Record<CompleteProfile, { effort?: Effort; maxTokens: number }> 
   routine: { maxTokens: 4096 },
   retry: { effort: 'medium', maxTokens: 8192 },
   authoring: { effort: 'high', maxTokens: 16384 },
+  // Compile writing, repairing and reviewing code-behind: `authoring`'s effort
+  // and cap, under its own name so `AI_AUTHORING_MODEL` can route compile's
+  // calls alone (docs/specs/SPEC-codebehind-robustness.md §6.10) — not a run's
+  // assertion code, failure diagnosis or Record Steps, which are `authoring`
+  // too and stay on the run's model.
+  compile: { effort: 'high', maxTokens: 16384 },
 };
 
 /**
@@ -255,19 +261,19 @@ function usageFromV2(usage: { input_tokens: number; output_tokens: number; cache
 }
 
 /**
- * One line per AUTHORING call — compile writing, repairing and reviewing
- * code-behind — with what it cost in tokens (docs/specs/SPEC-codebehind-robustness.md
- * §6.10). Authoring runs at high effort, and can go to its own model
+ * One line per COMPILE call — writing, repairing and reviewing code-behind —
+ * with what it cost in tokens (docs/specs/SPEC-codebehind-robustness.md §6.10).
+ * Compile runs at high effort, and can go to its own model
  * (`AI_AUTHORING_MODEL`), so its spend is worth seeing apart from the run's.
- * Nothing for a call that reported no usage.
+ * Nothing for a run's own calls, and nothing for a call that reported no usage.
  */
-function logAuthoringUsage(profile: CompleteProfile | undefined, model: string, usage: CompleteUsage | undefined): void {
-  if (profile !== 'authoring' || usage === undefined) return;
+function logCompileUsage(profile: CompleteProfile | undefined, model: string, usage: CompleteUsage | undefined): void {
+  if (profile !== 'compile' || usage === undefined) return;
   const cached = usage.cachedInputTokens !== undefined && usage.cachedInputTokens > 0
     ? ` (${usage.cachedInputTokens} cached)`
     : '';
   logger.info(
-    `Authoring call to ${model}: ${usage.inputTokens} input tokens${cached}, ${usage.outputTokens} output tokens` +
+    `Compile call to ${model}: ${usage.inputTokens} input tokens${cached}, ${usage.outputTokens} output tokens` +
       (usage.estimated ? ' (estimated)' : ''),
   );
 }
@@ -384,12 +390,14 @@ export class AiClient {
    * (stories/keyless-replay-and-gateway-env.md §Part B).
    */
   /**
-   * The model a call with this profile goes to: `authoringModel` for an
-   * `authoring` call when one is set (§6.10), `model` for everything else.
+   * The model a call with this profile goes to: `authoringModel` for a
+   * `compile` call when one is set (§6.10), `model` for everything else — a
+   * run's own `authoring` calls (assertion code, diagnosis) included, so the
+   * setting never reaches a run.
    */
   private modelFor(profile: CompleteProfile | undefined): string {
     const authoring = this.config.authoringModel;
-    return profile === 'authoring' && authoring !== undefined && authoring.trim() !== ''
+    return profile === 'compile' && authoring !== undefined && authoring.trim() !== ''
       ? authoring
       : this.config.model;
   }
@@ -617,7 +625,7 @@ export class AiClient {
     }
 
     const usage = v2.usage ? usageFromV2(v2.usage) : undefined;
-    logAuthoringUsage(options?.profile, model, usage);
+    logCompileUsage(options?.profile, model, usage);
     return { text, model, ...(usage && { usage }) };
   }
 
@@ -698,7 +706,7 @@ export class AiClient {
       throw new Error('AI stream produced no content');
     }
 
-    logAuthoringUsage(options?.profile, model, usage);
+    logCompileUsage(options?.profile, model, usage);
     return { text, model, usage };
   }
 

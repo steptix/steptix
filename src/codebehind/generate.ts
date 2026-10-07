@@ -1404,7 +1404,7 @@ export async function askForEntry(
     const completion = await aiClient.complete(
       [{ role: 'system', content: buildSystemPrompt(contextContent) }, prompt],
       signal,
-      { profile: 'authoring' },
+      { profile: 'compile' },
     );
     answer = parseStepCodeOrDecline(completion.text, expect);
   } catch (err) {

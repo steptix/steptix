@@ -121,6 +121,15 @@ describe('AiClient — reasoning effort profiles', () => {
       expect(lastChatOptions()).toMatchObject({ effort: 'high', maxTokens: 16384 });
     });
 
+    // Compile's own name for the same pair (SPEC-codebehind-robustness.md
+    // §6.10): what `AI_AUTHORING_MODEL` routes, and nothing else changes.
+    it('compile sends the same high effort and 16384 cap', async () => {
+      const client = new AiClient(baseConfig, tokenTracker as any);
+      await client.complete(HI, undefined, { profile: 'compile' });
+
+      expect(lastChatOptions()).toMatchObject({ effort: 'high', maxTokens: 16384 });
+    });
+
     it('retry sends medium effort and an 8192 cap', async () => {
       const client = new AiClient(baseConfig, tokenTracker as any);
       await client.complete(HI, undefined, { profile: 'retry' });

@@ -84,10 +84,10 @@ describe('AiClient — the authoring model', () => {
 
   const client = () => new AiClient(config, tokenTracker as never);
 
-  it('sends an authoring call to the authoring model, and every other call to the model', async () => {
+  it("sends compile's calls to the authoring model, and every other call to the model", async () => {
     config.authoringModel = AUTHORING_MODEL;
     const ai = client();
-    const authored = await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'authoring' });
+    const authored = await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'compile' });
     const routine = await ai.complete([{ role: 'user', content: 'run it' }]);
     const retry = await ai.complete([{ role: 'user', content: 'again' }], undefined, { profile: 'retry' });
     expect(chatMock.mock.calls.map((c) => c[0])).toEqual([AUTHORING_MODEL, RUN_MODEL, RUN_MODEL]);
@@ -96,11 +96,23 @@ describe('AiClient — the authoring model', () => {
     expect(retry.model).toBe(RUN_MODEL);
   });
 
+  // Measured live: with the setting on every `authoring` call, a RUN's own
+  // assertion code went to the authoring model too, which answered it without
+  // the `code` field four times, and the step and its compile stopped. The
+  // setting is compile's alone.
+  it("leaves a run's own authoring calls — assertion code, diagnosis, Record Steps — on the model", async () => {
+    config.authoringModel = AUTHORING_MODEL;
+    const ai = client();
+    const assertion = await ai.complete([{ role: 'user', content: 'check it' }], undefined, { profile: 'authoring' });
+    expect(chatMock.mock.calls.map((c) => c[0])).toEqual([RUN_MODEL]);
+    expect(assertion.model).toBe(RUN_MODEL);
+  });
+
   it('does the same when streaming', async () => {
     config.authoringModel = AUTHORING_MODEL;
     config.streamResponses = true;
     const ai = client();
-    const authored = await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'authoring' });
+    const authored = await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'compile' });
     await ai.complete([{ role: 'user', content: 'run it' }]);
     expect(streamMock.mock.calls.map((c) => c[0])).toEqual([AUTHORING_MODEL, RUN_MODEL]);
     expect(authored.model).toBe(AUTHORING_MODEL);
@@ -108,7 +120,7 @@ describe('AiClient — the authoring model', () => {
 
   it('falls back to the model when none is set', async () => {
     const ai = client();
-    await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'authoring' });
+    await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'compile' });
     expect(chatMock.mock.calls[0]![0]).toBe(RUN_MODEL);
     expect(constructorMock).toHaveBeenCalledTimes(1);
   });
@@ -117,7 +129,7 @@ describe('AiClient — the authoring model', () => {
     config.authoringModel = AUTHORING_MODEL;
     const ai = client();
     for (let i = 0; i < 2; i++) {
-      await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'authoring' });
+      await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'compile' });
       await ai.complete([{ role: 'user', content: 'run it' }]);
     }
     expect(constructorMock.mock.calls.map((c) => [c[0], c[1]])).toEqual([
@@ -126,25 +138,26 @@ describe('AiClient — the authoring model', () => {
     ]);
   });
 
-  it("logs what each authoring call cost in tokens, and nothing for the run's own calls", async () => {
+  it("logs what each compile call cost in tokens, and nothing for the run's own calls", async () => {
     config.authoringModel = AUTHORING_MODEL;
     const ai = client();
     await ai.complete([{ role: 'user', content: 'run it' }]);
+    await ai.complete([{ role: 'user', content: 'check it' }], undefined, { profile: 'authoring' });
     expect(vi.mocked(logger.info)).not.toHaveBeenCalled();
-    await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'authoring' });
+    await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'compile' });
     expect(vi.mocked(logger.info).mock.calls.map((c) => c[0])).toEqual([
-      `Authoring call to ${AUTHORING_MODEL}: 1 input tokens, 1 output tokens`,
+      `Compile call to ${AUTHORING_MODEL}: 1 input tokens, 1 output tokens`,
     ]);
   });
 
   describe('syncAuth', () => {
     it('sets it, says so, and rebuilds the gateway it uses', async () => {
       const ai = client();
-      await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'authoring' });
+      await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'compile' });
       expect(ai.syncAuth(RUN_MODEL, config.apiKey, undefined, AUTHORING_MODEL)).toBe(
         `AI authoring model (the model) → ${AUTHORING_MODEL}`,
       );
-      await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'authoring' });
+      await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'compile' });
       expect(chatMock.mock.calls.map((c) => c[0])).toEqual([RUN_MODEL, AUTHORING_MODEL]);
     });
 
@@ -155,16 +168,16 @@ describe('AiClient — the authoring model', () => {
       expect(ai.syncAuth(RUN_MODEL, config.apiKey, undefined, null)).toBe(
         `AI authoring model ${AUTHORING_MODEL} → (the model)`,
       );
-      await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'authoring' });
+      await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'compile' });
       expect(chatMock.mock.calls[0]![0]).toBe(RUN_MODEL);
     });
 
     it('drops the authoring gateway when the key changes', async () => {
       config.authoringModel = AUTHORING_MODEL;
       const ai = client();
-      await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'authoring' });
+      await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'compile' });
       ai.syncAuth(RUN_MODEL, 'authoring-model-test-key-2', undefined, AUTHORING_MODEL);
-      await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'authoring' });
+      await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'compile' });
       expect(constructorMock.mock.calls.map((c) => c[1])).toEqual([
         'authoring-model-test-key',
         'authoring-model-test-key-2',

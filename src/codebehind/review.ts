@@ -347,7 +347,7 @@ export async function reviewCandidate(
           }),
         ],
         input.signal,
-        { profile: 'authoring' },
+        { profile: 'compile' },
       );
       revised = parseFileRevision(completion.text);
     } catch (err) {
