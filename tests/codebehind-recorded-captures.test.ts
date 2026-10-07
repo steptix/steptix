@@ -63,8 +63,10 @@ function stubSequence(...texts: string[]): { client: AiClient; prompts: string[]
 const entry = (body: string, source = READ): string =>
   JSON.stringify({ entry: `{ source: ${JSON.stringify(source)}, async run({ page, step }) { ${body} } }` });
 
+// Reads with the recorded selector, as compile requires of a read
+// (docs/specs/SPEC-codebehind-robustness.md §6.2).
 const CLEAN = entry(
-  "const names = page.locator('#account-list > li > span > span:first-child'); " +
+  `const names = page.locator('${READ_ACTION.selector!}'); ` +
     "await names.first().waitFor(); step.setVar('accounts', JSON.stringify(await names.allTextContents()));",
 );
 
@@ -255,10 +257,15 @@ describe('capturedValueGuards', () => {
 });
 
 describe('generation refuses an entry that writes the recorded value in', () => {
-  const generate = (client: AiClient, source = READ, recorded: Record<string, string> = { accounts: RECORDED }) =>
+  const generate = (
+    client: AiClient,
+    source = READ,
+    recorded: Record<string, string> = { accounts: RECORDED },
+    actions: RecordedAction[] = [READ_ACTION],
+  ) =>
     generateStepEntry({
       binding: bindingFor(source),
-      actions: [READ_ACTION],
+      actions,
       resolvedParameters: {},
       aiClient: client,
       contextContent: '',
@@ -306,9 +313,11 @@ describe('generation refuses an entry that writes the recorded value in', () => 
   it('asks once when the answer only echoes what the author wrote', async () => {
     const source = 'Read the text of the "Everyday" row\'s name [store as: first]';
     const { client, prompts } = stubSequence(
-      entry("step.setVar('first', await page.getByText('Everyday').innerText());", source),
+      entry("step.setVar('first', await page.locator('text=Everyday').innerText());", source),
     );
-    const result = await generate(client, source, { first: 'Everyday' });
+    const result = await generate(client, source, { first: 'Everyday' }, [
+      { action: 'read', selector: 'text=Everyday', as: 'first' },
+    ]);
     expect(prompts).toHaveLength(1);
     expect(result.kind).toBe('entry');
   });
@@ -318,7 +327,7 @@ describe('generation refuses an entry that writes the recorded value in', () => 
     const { client, prompts } = stubSequence(
       entry("await page.waitForTimeout(1000); step.setVar('size', await page.locator('#size').innerText());", source),
     );
-    const result = await generate(client, source, { size: '100' });
+    const result = await generate(client, source, { size: '100' }, [{ action: 'read', selector: '#size', as: 'size' }]);
     expect(prompts).toHaveLength(1);
     expect(result.kind).toBe('entry');
   });

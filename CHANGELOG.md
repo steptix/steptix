@@ -28,6 +28,16 @@ from the one the AI run read with. See
   the selector the run read with. The check now also knows `title()`,
   `url()`, `isVisible()`, `count()` and the other one-shot reads, and its
   advice covers an action that leads to another page.
+- **A compiled read keeps the selector the AI run read with.** Compile checks
+  every generated, repaired and reviewed entry against the run's recorded
+  reads and counts. An entry that reads with a different selector is asked
+  once to fix it; if it still differs, **the step is left without code**: it
+  runs on AI, which reads what the run read, and the next compile tries again.
+  Run & Compile counts it among the steps that "could not be generated; they
+  stay AI", and `steptix compile` lists it as not compiled instead of failing.
+  A Review revision that changes such a selector is rejected, and the log
+  names any selector Review changes. Before, one rewrite dropped a
+  `:first-child`, and a replay read six values where the run had read three.
 
 ### Changed — a run shows the Test Runner, and its error banner follows the latest run
 

@@ -8,8 +8,18 @@ import {
 } from '../ai/action-parser.js';
 import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseFailureTail } from '../parser/failure-tail.js';
+import { matchText } from '../parser/section-match.js';
+import { logger } from '../utils/logger.js';
 import type { Candidate } from './candidate.js';
-import { conditionEntryComplaint, describeGuardedName, entryDefinesCondition } from './generate.js';
+import {
+  conditionEntryComplaint,
+  describeGuardedName,
+  entryDefinesCondition,
+  entryFaults,
+  type EntryFault,
+} from './generate.js';
+import type { RecordedAction } from './recording.js';
+import { scan } from './tokenizer.js';
 import { listEntries, validateCodeBehindSource } from './writer.js';
 
 /**
@@ -143,7 +153,11 @@ ${input.file}
 4. **Captures are written**: a step with \`[as: x]\` must call
    \`step.setVar('x', ...)\`.
 5. **Stable selectors** (ids, \`data-testid\`, roles, labels) over positional
-   or index-based ones.
+   or index-based ones — for a selector you write new. A selector an entry
+   READS with (a read, a count, \`allTextContents\`, \`textContent\`, …) is part of
+   what was read: the recorded run read the page with it, so keep it exactly as
+   written, \`:first-child\` and \`:nth-of-type\` included. Swapping it for a
+   "more stable" one changes what the step reads.
 6. **No imports** beyond the file's existing \`defineSteps\` import, and no
    \`page.waitForTimeout\` unless it is genuinely unavoidable.
 7. Leave \`source\` strings and \`section\` fields **exactly** as they are —
@@ -218,8 +232,60 @@ export interface ReviewCandidateInput {
    * can move a literal into any entry, so the check has to cover them all.
    */
   guarded: Array<{ name: string; value: string }>;
+  /**
+   * What each entry was generated from — the recorded actions and the values
+   * of the pass that generated it — by file and entry identity
+   * (docs/specs/SPEC-codebehind-robustness.md §6.2). A revised entry is held
+   * to generation's static checks against it, and a revision that brings in a
+   * fault the generated entry did not have — a read with a different selector
+   * from the recording's above all — is rejected. For an entry used more than
+   * once (a section called twice, a loop body), the FIRST pass to reach it:
+   * the one whose transcript it was generated from. Absent, or answering
+   * undefined for an entry, only the checks that need no recording run.
+   */
+  evidence?: ((file: string, entry: EntryIdentity) => EntryEvidence | undefined) | undefined;
   aiClient: AiClient;
   signal?: AbortSignal | undefined;
+}
+
+/** An entry as a file identifies it: its `source`, its `section` scope as
+ *  `matchText` normalises it ('' for none), and its place among entries
+ *  carrying the same two. */
+export interface EntryIdentity {
+  source: string;
+  section: string;
+  occurrence: number;
+}
+
+/** What one entry was generated from (§6.2). */
+export interface EntryEvidence {
+  /** 1-based expanded step of the pass it was generated from, for the
+   *  rejection line. */
+  step: number;
+  actions: RecordedAction[];
+  /** `stepSubstitution` for that pass. */
+  substitute?: ((text: string) => string) | undefined;
+  recordedCaptures?: Record<string, string> | undefined;
+}
+
+/** The key an {@link EntryEvidence} is stored and found under. */
+export function evidenceKey(file: string, entry: EntryIdentity): string {
+  const sep = String.fromCharCode(0);
+  return [file, entry.section, entry.source, entry.occurrence].join(sep);
+}
+
+/** {@link evidenceKey} for a binding, whose section is the authored name. */
+export function evidenceKeyOf(binding: {
+  file: string;
+  source: string;
+  section?: string | undefined;
+  occurrence: number;
+}): string {
+  return evidenceKey(binding.file, {
+    source: binding.source.trim(),
+    section: binding.section ? matchText(binding.section) : '',
+    occurrence: binding.occurrence,
+  });
 }
 
 /**
@@ -299,6 +365,19 @@ export async function reviewCandidate(
       emit(`rejected: the revision ${brokenCondition} — the generated file stands`);
       continue;
     }
+    // Generation's static checks, on every entry the revision changed
+    // (docs/specs/SPEC-codebehind-robustness.md §6.2). Review's own checklist
+    // invites "stable selectors", and a read whose `:first-child` was dropped
+    // that way reads six values where the run read three — and passes every
+    // rejection above. Only a fault the generated entry did NOT have rejects:
+    // the reviewer is held to the entry it was given, not to perfection.
+    const changed = changedEntries(entriesBefore, entriesAfter);
+    for (const pair of changed) logSelectorChanges(file, pair);
+    const newFault = newlyFaulted(file, changed, input.evidence);
+    if (newFault) {
+      emit(`rejected: the revision ${newFault} — the generated file stands`);
+      continue;
+    }
     const invalid = await validateCodeBehindSource(file, revised);
     if (invalid) {
       emit(`rejected: the revision does not compile (${invalid}) — the generated file stands`);
@@ -376,4 +455,112 @@ function describeEntryChange(
   if (added.length > 0) return `adds an entry for ${quote(added)}`;
   if (removed.length > 0) return `removes the entry for ${quote(removed)}`;
   return null;
+}
+
+/** One entry the revision changed, paired with its pre-revision self. */
+interface ChangedEntry {
+  identity: EntryIdentity;
+  before: string;
+  after: string;
+}
+
+/**
+ * Every entry whose code the revision changed (whitespace aside), paired by
+ * identity — section + source, and order among identically-identified ones,
+ * the pairing `describeEntryChange` has already confirmed is one-to-one.
+ */
+function changedEntries(
+  before: Array<{ source: string; section: string; code: string }>,
+  after: Array<{ source: string; section: string; code: string }>,
+): ChangedEntry[] {
+  const sep = String.fromCharCode(0);
+  const key = (e: { source: string; section: string }): string => `${e.section}${sep}${e.source}`;
+  const same = (a: string, b: string): boolean => a.replace(/\s+/g, '') === b.replace(/\s+/g, '');
+  const pending = new Map<string, Array<{ code: string }>>();
+  for (const e of after) {
+    const list = pending.get(key(e)) ?? [];
+    list.push(e);
+    pending.set(key(e), list);
+  }
+  const seen = new Map<string, number>();
+  const out: ChangedEntry[] = [];
+  for (const e of before) {
+    const occurrence = seen.get(key(e)) ?? 0;
+    seen.set(key(e), occurrence + 1);
+    const revised = pending.get(key(e))?.shift();
+    if (!revised || same(e.code, revised.code)) continue;
+    out.push({ identity: { source: e.source, section: e.section, occurrence }, before: e.code, after: revised.code });
+  }
+  return out;
+}
+
+/**
+ * The first changed entry that now fails a static check it passed before the
+ * revision, described for the rejection line; null when none does.
+ */
+function newlyFaulted(
+  file: string,
+  changed: readonly ChangedEntry[],
+  evidence: ReviewCandidateInput['evidence'],
+): string | null {
+  for (const pair of changed) {
+    const known = evidence?.(file, pair.identity);
+    const ctx = {
+      source: pair.identity.source,
+      ...(known && {
+        actions: known.actions,
+        ...(known.substitute && { substitute: known.substitute }),
+        ...(known.recordedCaptures && { recordedCaptures: known.recordedCaptures }),
+      }),
+    };
+    const had = new Set(entryFaults(pair.before, ctx).map((f) => f.check));
+    const fresh = entryFaults(pair.after, ctx).find((f) => !had.has(f.check));
+    if (fresh) return describeFault(fresh, pair, known);
+  }
+  return null;
+}
+
+function describeFault(fault: EntryFault, pair: ChangedEntry, known: EntryEvidence | undefined): string {
+  if (fault.check === 'read') {
+    const where = known ? `step ${known.step}` : JSON.stringify(pair.identity.source);
+    return `changes the selector ${where} read with (${fault.selector ?? 'the recorded selector'})`;
+  }
+  return `brings a fault into the entry for ${JSON.stringify(pair.identity.source)}: ${fault.complaint}`;
+}
+
+/**
+ * The calls whose first string argument is a selector, and the property an
+ * entry hands one over in (`step.read({ selector })`).
+ */
+const SELECTOR_CALL = /(?:^|[^\w$])(?:locator|frameLocator|waitForSelector|\$\$?|\$\$?eval|querySelector(?:All)?|click|dblclick|fill|type|press|check|uncheck|hover|focus|tap|selectOption|setInputFiles|textContent|innerText|innerHTML|inputValue|getAttribute|isVisible|isHidden|isChecked|isEnabled|isDisabled|isEditable)\s*\(\s*$|(?:^|[^\w$])selector\s*[:=]\s*$/;
+
+/** The selector strings an entry holds, in the positions {@link SELECTOR_CALL} names. */
+function selectorLiterals(code: string): Set<string> {
+  const scanned = scan(code);
+  const out = new Set<string>();
+  for (const token of scanned.strings) {
+    const before = code.slice(Math.max(0, token.start - 40), token.start);
+    if (SELECTOR_CALL.test(before)) out.add(token.value);
+  }
+  return out;
+}
+
+/**
+ * Say in the log when the revision changed a selector an entry uses
+ * (docs/specs/SPEC-codebehind-robustness.md §6.2, §6.8): failure B's
+ * `:first-child` was lost to one of two rewrites, and the log could not say
+ * which. A line per changed entry, whether or not the revision is kept.
+ */
+function logSelectorChanges(file: string, pair: ChangedEntry): void {
+  const was = selectorLiterals(pair.before);
+  const now = selectorLiterals(pair.after);
+  const removed = [...was].filter((s) => !now.has(s));
+  const added = [...now].filter((s) => !was.has(s));
+  if (removed.length === 0 && added.length === 0) return;
+  const list = (items: string[]): string => items.map((s) => JSON.stringify(s)).join(', ');
+  logger.info(
+    `Review of ${basename(file)} changed a selector in the entry for ${JSON.stringify(pair.identity.source)}` +
+      (removed.length > 0 ? `: removed ${list(removed)}` : '') +
+      (added.length > 0 ? `${removed.length > 0 ? ';' : ':'} added ${list(added)}` : ''),
+  );
 }

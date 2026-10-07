@@ -1,6 +1,8 @@
 import { formatCaptureLines, formatLoopBlock, formatParameterBlock, type LoopContext } from '../ai/prompts.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import type { ChatMessage, MessageContentBlock } from '../ai/types.js';
+import { redact } from '../utils/secrets.js';
+import type { RecordedAction } from './recording.js';
 
 /**
  * The compiler's repair prompt (stories/codebehind-compile.md, "Replay").
@@ -53,11 +55,40 @@ export interface RepairPromptInput {
    */
   recordedCaptures?: Record<string, string> | undefined;
   /**
-   * The one re-ask a refused answer buys (`askWithCaptureRetry`, generate.ts):
-   * the answer that wrote a recorded value into the code, masked, and why it
-   * was refused. Present only on that second call.
+   * The recorded actions of the pass the entry is repaired from — the AI pass
+   * that healed it, or the recording's evidence pass
+   * (docs/specs/SPEC-codebehind-robustness.md §6.2). The repair answer is
+   * checked against them as a generated one is, and the prompt lists the
+   * selectors their reads and counts used, which the answer must keep.
+   */
+  actions?: RecordedAction[] | undefined;
+  /**
+   * The one re-ask a refused answer buys: the answer that wrote a recorded
+   * value into the code (`askWithCaptureRetry`), or one a static check refused
+   * (`askCheckedRepair`), and why. Present only on that second call.
    */
   retry?: { previousEntry: string; complaint: string } | undefined;
+}
+
+/**
+ * The selectors the pass's reads and counts used, as the repair must keep
+ * them — or '' when it made none, which leaves the prompt as it was.
+ */
+function recordedReadsBlock(actions: readonly RecordedAction[] | undefined, secrets: readonly string[]): string {
+  const reads = (actions ?? []).filter(
+    (a) => (a.action === 'read' || a.action === 'count') && typeof a.selector === 'string' && a.selector.trim() !== '',
+  );
+  if (reads.length === 0) return '';
+  const lines = reads.map((a) => {
+    const kind = a.action === 'count' ? 'count' : a.multiple ? 'read (every match)' : 'read';
+    const into = typeof a.as === 'string' ? ` → ${a.as}` : '';
+    return `- ${kind} \`${redact(a.selector!, [...secrets])}\`${into}`;
+  });
+  return (
+    `\n\n## What the run read with\nThe run this entry is repaired from read the page with these ` +
+    `selectors. A read with any other selector does not throw — it returns different data — so the ` +
+    `entry must read with them as written, \`:first-child\` and all:\n${lines.join('\n')}`
+  );
 }
 
 export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
@@ -113,7 +144,7 @@ export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
 ${input.rawStepText}
 
 ## Parameters in scope
-${paramBlock}${formatLoopBlock(input.loop, 'step')}${captureBlock}
+${paramBlock}${formatLoopBlock(input.loop, 'step')}${captureBlock}${recordedReadsBlock(input.actions, input.secrets ?? [])}
 
 ## The entry that failed (step ${input.stepIndex})
 \`\`\`ts

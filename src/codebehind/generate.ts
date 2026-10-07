@@ -31,7 +31,7 @@ import { EMPTY, MASK, inheritLoopBindings, redact, runSecrets, secretValues } fr
 import { actingCalls, codeText } from './entry-actions.js';
 import type { CodeBehindBinding } from './loader.js';
 import type { RecordedAction } from './recording.js';
-import { CODE, COMMENT, matchForward, scan, type StringToken } from './tokenizer.js';
+import { CODE, COMMENT, TEMPLATE, matchForward, scan, type StringToken } from './tokenizer.js';
 
 /**
  * Turning one recorded step into its code-behind entry
@@ -319,8 +319,20 @@ export type GeneratedEntry =
    * refused the answer for writing in a value the RECORDING captured — the
    * one refusal {@link askWithCaptureRetry} re-asks over. It never leaves that
    * helper: the code it holds is the refused answer.
+   *
+   * `withheld` marks an answer that came back but must not be kept, and must
+   * not be replaced by an `ai: true` entry either
+   * (docs/specs/SPEC-codebehind-robustness.md §6.2): its code still read with
+   * a different selector from the one the run read with after its one
+   * re-ask. The step gets NO entry — it runs on AI, which reads what the run
+   * read, and the next compile tries it again. Not fatal to any compile.
    */
-  | { kind: 'error'; message: string; refusedCapture?: { name: string; code: string } };
+  | {
+      kind: 'error';
+      message: string;
+      refusedCapture?: { name: string; code: string };
+      withheld?: true;
+    };
 
 /**
  * One value the leak guard refuses to see in generated code.
@@ -425,107 +437,488 @@ export async function generateStepEntry(
     ...guardedValues(parameters, envRefs.resolved, binding.source),
     ...capturedValueGuards(recordedCaptures, binding.source),
   ];
-  // Every value this step's references resolved to, keyed by the name the
-  // MODEL would have written in an action: the authored name, the run-time
-  // name a skill rename gave it, and each `${…}` reference. Used to read a
-  // placeholder-bearing selector the way the runtime read it — see
-  // `ambiguousSelectorComplaint`.
-  const substitute = (text: string): string =>
-    applyKnownValues(
-      text,
-      { ...options.resolvedParameters, ...Object.fromEntries(parameters.map((p) => [p.name, p.value])) },
-      envRefs.resolved,
-    );
-
-  // A recorded value written into the answer costs one re-ask here, before
-  // anything else looks at it (`askWithCaptureRetry`).
-  const asked = await askWithCaptureRetry(
-    options.aiClient,
-    options.contextContent,
-    (retry) => buildStepCodePrompt({ ...promptInput, ...(retry && { retry }) }),
-    guarded,
-    options.signal,
+  return reported(
+    await askChecked(
+      options.aiClient,
+      options.contextContent,
+      (retry) => buildStepCodePrompt({ ...promptInput, ...(retry && { retry }) }),
+      guarded,
+      {
+        binding,
+        actions: options.actions,
+        substitute: stepSubstitution(binding, options.resolvedParameters, options.envData),
+        ...(recordedCaptures && { recordedCaptures }),
+        ...(options.secrets && { secrets: options.secrets }),
+      },
+      options.signal,
+    ),
   );
+}
+
+/**
+ * Every value a step's references resolved to, keyed by the name the MODEL
+ * would have written in an action: the authored name, the run-time name a
+ * skill rename gave it, and each `${…}` reference. Reads a placeholder-bearing
+ * selector the way the runtime read it — see `ambiguousSelectorComplaint` and
+ * `recordedReadMismatch`. Exported for the review pass, which checks a
+ * revision against the values of the pass each entry was generated from.
+ */
+export function stepSubstitution(
+  binding: CodeBehindBinding,
+  resolvedParameters: Record<string, string>,
+  envData?: EnvDataContext | undefined,
+): (text: string) => string {
+  const parameters = stepParameters(binding, resolvedParameters, envData);
+  const envRefs = stepEnvRefs(binding, envData).resolved;
+  const values = { ...resolvedParameters, ...Object.fromEntries(parameters.map((p) => [p.name, p.value])) };
+  return (text: string): string => applyKnownValues(text, values, envRefs);
+}
+
+/** What one entry answer is checked against before it is kept. */
+export interface EntryCheckContext {
+  binding: CodeBehindBinding;
+  /** The recorded run's actions for the step — the pass the answer is for. */
+  actions: RecordedAction[];
+  /** {@link stepSubstitution} for that pass. */
+  substitute?: ((text: string) => string) | undefined;
+  /** What the pass captured, by authored name — for the read check's words. */
+  recordedCaptures?: Record<string, string> | undefined;
+  /** The run's mask set, applied to anything the checks quote. */
+  secrets?: readonly string[] | undefined;
+}
+
+/**
+ * The static backstops an entry answer goes through, one re-ask shared between
+ * them, and which answer wins (docs/specs/SPEC-codebehind-robustness.md §6.2).
+ * Generation and both compilers' repairs come through here, so a repaired
+ * entry is held to what a generated one is.
+ *
+ * All of the checks are for the case the prompt cannot cover: the model was
+ * told the thing and wrote it the other way anyway. Two grades:
+ *
+ *  - **The read check** ({@link recordedReadMismatch}). A read with a
+ *    different selector does not throw; it returns different data, and no
+ *    later step can tell. An answer that still fails it after the one re-ask
+ *    is WITHHELD: the step gets no entry at all. Keeping it would replay a
+ *    wrong read; an `ai: true` entry would keep the step on AI for good.
+ *  - **The others** — selector ambiguity (it throws on replay, so it is
+ *    self-announcing), a literal upload path, an undeclared context property,
+ *    a stale tab handle (it drives the wrong tab and PASSES), a read that
+ *    races its own action. One re-ask, then take what we get, warned about.
+ *
+ * Which answer is kept:
+ *
+ * | First answer              | Re-ask                               | Kept                     |
+ * |---------------------------|--------------------------------------|--------------------------|
+ * | passes every check        | (not asked)                          | first                    |
+ * | fails the read check      | fixes it                             | re-ask (warned)          |
+ * | fails the read check      | still fails it, or no entry          | neither: withheld        |
+ * | fails another check only  | keeps the read                       | re-ask (warned)          |
+ * | fails another check only  | breaks the read, or no entry         | first (warned)           |
+ *
+ * A recorded value written into the answer costs the one re-ask first, before
+ * anything else looks at it (`askWithCaptureRetry`). If that one was spent,
+ * the static faults are said rather than asked about — except a failed read,
+ * which is withheld.
+ */
+async function askChecked(
+  aiClient: AiClient,
+  contextContent: string,
+  prompt: (retry?: EntryRetry) => ChatMessage,
+  guarded: readonly GuardedValue[],
+  checks: EntryCheckContext,
+  signal?: AbortSignal | undefined,
+): Promise<GeneratedEntry> {
+  const label = checks.binding.source;
+  const asked = await askWithCaptureRetry(aiClient, contextContent, prompt, guarded, signal);
   const first = asked.result;
   if (first.kind !== 'entry') return first;
 
-  // ── The static backstops ──────────────────────────────────────────────────
-  // All of them are for the case the prompt cannot cover: the model was told
-  // the thing and wrote it the other way anyway.
-  //
-  // Selector ambiguity first (stories/codebehind-selector-ambiguity.md) — it
-  // throws on replay, so it is self-announcing, where a stale handle
-  // (stories/codebehind-framework-actions.md) drives the wrong tab and PASSES.
-  // One re-ask is shared between them all: more would multiply a compile's
-  // model calls for a handful of heuristics, and the complaint text carries
-  // whichever fault fired.
-  const complaint =
-    staticEntryComplaint(first.code, options.actions, substitute) ??
-    undeclaredContextComplaint(first.code) ??
-    staleHandleComplaint(first.code) ??
-    unwaitedReadComplaint(first.code);
-  if (complaint === undefined) return reported(first);
-  // …shared with the recorded-value re-ask too. If that one was spent, this
-  // answer is the re-ask's, and the fault is said rather than asked about.
+  const readFault = (code: string): ReadMismatch | undefined =>
+    recordedReadMismatch(code, checks.actions, {
+      source: checks.binding.source,
+      ...(checks.substitute && { substitute: checks.substitute }),
+      ...(checks.recordedCaptures && { recordedCaptures: checks.recordedCaptures }),
+      ...(checks.secrets && { secrets: checks.secrets }),
+    });
+  const otherFault = (code: string): string | undefined =>
+    staticEntryComplaint(code, checks.actions, checks.substitute) ??
+    undeclaredContextComplaint(code) ??
+    staleHandleComplaint(code) ??
+    unwaitedReadComplaint(code);
+
+  const firstRead = readFault(first.code);
+  const firstOther = otherFault(first.code);
+  if (firstRead === undefined && firstOther === undefined) return first;
+
   if (asked.reasked) {
+    if (firstRead !== undefined) return withheldForRead(label, firstRead, 'its one re-ask went to a recorded value it had written in');
     logger.warn(
-      `Code-behind for "${binding.source}" has a fault the static check can see, and its one ` +
-        `re-ask went to a recorded value it had written in. ${complaint}`,
+      `Code-behind for "${label}" has a fault the static check can see, and its one ` +
+        `re-ask went to a recorded value it had written in. ${firstOther}`,
     );
-    return reported(first);
+    return first;
   }
 
-  logger.debug(`Code-behind re-asking for "${binding.source}": ${complaint}`);
+  const complaint = [firstRead?.complaint, firstOther].filter((c) => c !== undefined).join('\n\n');
+  logger.debug(`Code-behind re-asking for "${label}": ${complaint}`);
   const second = await askForEntry(
-    options.aiClient,
-    options.contextContent,
-    buildStepCodePrompt({ ...promptInput, retry: { previousEntry: first.code, complaint } }),
+    aiClient,
+    contextContent,
+    prompt({ previousEntry: first.code, complaint }),
     guarded,
-    options.signal,
+    signal,
   );
 
-  // ONE re-ask, then take what we get. The second answer is never re-checked
-  // for the same fault, so this cannot spin — and it is never allowed to be
-  // worse than the first: a re-ask that errors (the call failed, or the new
-  // code tripped the leak guard) or declines falls back to the answer that
-  // already passed every guard, rather than turning a heuristic into a failed
-  // compile. `compileTest` treats a generation error as fatal for the whole
-  // run, which is not a power a textual check over generated code should have.
+  // ONE re-ask, then decide. The second answer is never re-asked about, so
+  // this cannot spin. A re-ask that errors (the call failed, or the new code
+  // tripped the leak guard) or declines falls back to the first answer — unless
+  // that one read with the wrong selector, which no fallback can keep.
   if (second.kind !== 'entry') {
-    logger.debug(
-      `The re-ask for "${binding.source}" produced no entry ` +
-        `(${second.kind === 'error' ? second.message : second.reason}); keeping the first answer`,
-    );
-    return reported(first);
+    const why = second.kind === 'error' ? second.message : second.reason;
+    if (firstRead !== undefined) return withheldForRead(label, firstRead, `the re-ask produced no entry (${why})`);
+    logger.debug(`The re-ask for "${label}" produced no entry (${why}); keeping the first answer`);
+    return first;
   }
-  const stillWrong = staticEntryComplaint(second.code, options.actions, substitute);
+  const secondRead = readFault(second.code);
+  if (secondRead !== undefined) {
+    if (firstRead !== undefined) return withheldForRead(label, secondRead, 'the re-ask still did');
+    // The re-ask broke the read the first answer had right: the first answer
+    // stands, with the fault it was re-asked about said out loud.
+    logger.warn(
+      `Code-behind for "${label}": the re-ask changed the selector the run read with, so the first ` +
+        `answer is kept. ${firstOther ?? ''}`.trimEnd(),
+    );
+    return first;
+  }
+  warnRemainingFaults(second.code, label, checks);
+  return second;
+}
+
+/** The withheld outcome for a read that did not keep the run's selector. */
+function withheldForRead(
+  label: string,
+  mismatch: ReadMismatch,
+  why: string,
+): GeneratedEntry {
+  logger.warn(
+    `Code-behind for "${label}" was not written: ${READ_SELECTOR_WITHHELD} ` +
+      `(${mismatch.selector}), and ${why}. The step stays AI; the next compile tries again.`,
+  );
+  return {
+    kind: 'error',
+    message: `${READ_SELECTOR_WITHHELD} (${mismatch.selector})`,
+    withheld: true,
+  };
+}
+
+/**
+ * Why a step is left without code when its read did not keep the run's
+ * selector — the words both compilers' summaries and notes carry
+ * (docs/specs/SPEC-codebehind-robustness.md §6.2).
+ */
+export const READ_SELECTOR_WITHHELD = 'its code did not read with the selector the run used';
+
+/** Today's warnings for faults an answer kept after its re-ask still has. */
+function warnRemainingFaults(code: string, label: string, checks: EntryCheckContext): void {
+  const stillWrong = staticEntryComplaint(code, checks.actions, checks.substitute);
   if (stillWrong !== undefined) {
     logger.warn(
-      `Code-behind for "${binding.source}" still has a fault the static check can see; ` +
+      `Code-behind for "${label}" still has a fault the static check can see; ` +
         `it may throw or hard-code a path on replay. ${stillWrong}`,
     );
   }
-  const stillUndeclared = undeclaredContextComplaint(second.code);
+  const stillUndeclared = undeclaredContextComplaint(code);
   if (stillUndeclared !== undefined) {
     logger.warn(
-      `Code-behind for "${binding.source}" still uses a context property it does not ` +
+      `Code-behind for "${label}" still uses a context property it does not ` +
         `destructure; it will throw on replay. ${stillUndeclared}`,
     );
   }
-  if (staleHandleComplaint(second.code) !== undefined) {
+  const stillStale = staleHandleComplaint(code);
+  if (stillStale !== undefined) {
     logger.warn(
-      `Code-behind for "${binding.source}" still uses \`page\` after switching tab or browser; ` +
-        `it may drive the tab the step left. ${complaint}`,
+      `Code-behind for "${label}" still uses \`page\` after switching tab or browser; ` +
+        `it may drive the tab the step left. ${stillStale}`,
     );
   }
-  const stillUnwaited = unwaitedReadComplaint(second.code);
+  const stillUnwaited = unwaitedReadComplaint(code);
   if (stillUnwaited !== undefined) {
     logger.warn(
-      `Code-behind for "${binding.source}" still asserts on a page value it never waited for; ` +
+      `Code-behind for "${label}" still asserts on a page value it never waited for; ` +
         `it may read the state from before the step. ${stillUnwaited}`,
     );
   }
-  return reported(second);
+}
+
+/** One static check's finding about one entry. */
+export interface EntryFault {
+  check: 'read' | 'ambiguous-selector' | 'upload-path' | 'undeclared-context' | 'stale-handle' | 'unwaited-read';
+  complaint: string;
+  /** The recorded selector, for a `read` fault. */
+  selector?: string;
+}
+
+/**
+ * Every static fault of one entry, by check — what the review pass compares
+ * before and after a revision (docs/specs/SPEC-codebehind-robustness.md §6.2):
+ * a revision may not bring into an entry a fault the generated entry did not
+ * have. The checks that need the recording — the read check, selector
+ * ambiguity, a literal upload path — run only when `actions` are given.
+ */
+export function entryFaults(
+  code: string,
+  ctx: {
+    source: string;
+    actions?: readonly RecordedAction[] | undefined;
+    substitute?: ((text: string) => string) | undefined;
+    recordedCaptures?: Record<string, string> | undefined;
+    secrets?: readonly string[] | undefined;
+  },
+): EntryFault[] {
+  const actions = [...(ctx.actions ?? [])];
+  const out: EntryFault[] = [];
+  const read = recordedReadMismatch(code, actions, {
+    source: ctx.source,
+    ...(ctx.substitute && { substitute: ctx.substitute }),
+    ...(ctx.recordedCaptures && { recordedCaptures: ctx.recordedCaptures }),
+    ...(ctx.secrets && { secrets: ctx.secrets }),
+  });
+  if (read) out.push({ check: 'read', complaint: read.complaint, selector: read.selector });
+  const found: Array<[EntryFault['check'], string | undefined]> = [
+    ['ambiguous-selector', ambiguousSelectorComplaint(code, actions, ctx.substitute)],
+    ['upload-path', literalUploadPathComplaint(code, actions)],
+    ['undeclared-context', undeclaredContextComplaint(code)],
+    ['stale-handle', staleHandleComplaint(code)],
+    ['unwaited-read', unwaitedReadComplaint(code)],
+  ];
+  for (const [check, complaint] of found) {
+    if (complaint !== undefined) out.push({ check, complaint });
+  }
+  return out;
+}
+
+/**
+ * A REPAIR answer, held to what a generated one is
+ * (docs/specs/SPEC-codebehind-robustness.md §6.2): the leak guard and its
+ * recorded-value re-ask as before, then generation's static checks — the read
+ * check included — with the same one re-ask, the same precedence and the same
+ * withheld outcome. Under §6.5 this is the path a wrong read is regenerated
+ * through, so it cannot be the one path that never looks at the read.
+ *
+ * `prompt` builds the repair prompt; its `retry` block carries the complaint.
+ */
+export async function askCheckedRepair(
+  aiClient: AiClient,
+  contextContent: string,
+  prompt: (retry?: EntryRetry) => ChatMessage,
+  guarded: readonly GuardedValue[],
+  checks: EntryCheckContext,
+  signal?: AbortSignal | undefined,
+): Promise<GeneratedEntry> {
+  return askChecked(aiClient, contextContent, prompt, guarded, checks, signal);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// The read check (docs/specs/SPEC-codebehind-robustness.md §6.2)
+// ───────────────────────────────────────────────────────────────────────────
+
+/** A recorded read the entry does not read with, and the re-ask's words. */
+export interface ReadMismatch {
+  /** The recorded selector, masked. */
+  selector: string;
+  complaint: string;
+}
+
+/**
+ * The first recorded `read` or `count` whose selector the entry does not
+ * contain, or undefined when it reads with every one of them.
+ *
+ * Reads are the one action where a wrong selector fails silently: a click on
+ * the wrong element throws or visibly does the wrong thing, while a read that
+ * matches more elements, or fewer, just returns different data. Failure B of
+ * the robustness spec read each account row's name AND its masked number —
+ * six values for three rows — because a rewrite dropped one `:first-child`.
+ *
+ * "Contains" is textual, and compares what the run read with against what the
+ * code holds as a string — single- or double-quoted, or a template literal —
+ * after normalising whitespace and quote style. Accepted spellings: the
+ * selector as recorded, after parameter substitution, or the action's verified
+ * `targeting.resolvedSelector`; a selector split across a chain
+ * (`frameLocator(a).locator(b)`, `locator(a).locator(b)`) counts when every
+ * part is there. A template literal whose only expressions are
+ * `step.getVar('name')` is read as `{{name}}` and substituted, so a locator
+ * built from a parameter matches a recording that holds the parameter's value.
+ *
+ * What it cannot tell: whether a DIFFERENT selector would have read the same
+ * elements. `#account-list .account-name` would have; it is refused all the
+ * same — the run is the only reference compile has, and the cost of refusing
+ * an equivalent is one re-ask.
+ *
+ * Two exemptions:
+ *  - a selector holding a `{{placeholder}}` or `${…}`: the entry builds it from
+ *    `step.getVar`, and the placeholder rule judges that;
+ *  - the selector story's carve-out: a read whose `resolvedBy` is `positional`
+ *    while the step names what distinguishes its target — a parameter, or a
+ *    quoted value — where the entry must build a data-driven locator
+ *    instead (stories/codebehind-selector-ambiguity.md, "What generation does
+ *    with it").
+ */
+export function recordedReadMismatch(
+  code: string,
+  actions: readonly RecordedAction[],
+  ctx: {
+    /** The step's authored line, for the positional carve-out. */
+    source: string;
+    substitute?: (text: string) => string;
+    recordedCaptures?: Record<string, string>;
+    secrets?: readonly string[];
+  },
+): ReadMismatch | undefined {
+  let held: Set<string> | undefined;
+  const asked = new Set<string>();
+  for (const action of actions) {
+    if (action.action !== 'read' && action.action !== 'count') continue;
+    const selector = action.selector;
+    if (typeof selector !== 'string' || selector.trim() === '') continue;
+    if (ANY_PLACEHOLDER_RE.test(selector) || envDataRefsIn(selector).length > 0) continue;
+    if (action.targeting?.resolvedBy === 'positional' && namesItsTarget(ctx.source)) continue;
+    if (asked.has(selector)) continue;
+    asked.add(selector);
+
+    held ??= selectorStringsIn(code, ctx.substitute);
+    const spellings = [selector, ctx.substitute?.(selector), action.targeting?.resolvedSelector]
+      .filter((s): s is string => typeof s === 'string' && s.trim() !== '')
+      .map(normaliseSelector);
+    if (spellings.some((s) => coveredBy(s, held!))) continue;
+
+    const masked = redact(selector, [...(ctx.secrets ?? [])]);
+    return { selector: masked, complaint: readMismatchComplaint(action, masked, ctx) };
+  }
+  return undefined;
+}
+
+/** Does the step name what distinguishes its target — a parameter, an
+ *  environment reference, or a value the author quoted? */
+function namesItsTarget(source: string): boolean {
+  return (
+    placeholderNamesIn(source).length > 0 ||
+    envDataRefsIn(source).length > 0 ||
+    authorQuotedLiterals(source).size > 0
+  );
+}
+
+/** The re-ask's words for one read the entry does not keep. */
+function readMismatchComplaint(
+  action: RecordedAction,
+  selector: string,
+  ctx: { recordedCaptures?: Record<string, string>; secrets?: readonly string[] },
+): string {
+  const counts = action.action === 'count';
+  const matched = action.targeting?.matchCount;
+  const captured = counts ? undefined : capturedCount(action, ctx.recordedCaptures);
+  const facts = [
+    matched !== undefined ? `matched ${matched} element${matched === 1 ? '' : 's'}` : '',
+    captured !== undefined ? `captured ${captured === 1 ? 'one value' : `${captured} values`}` : '',
+  ].filter(Boolean).join(' and ');
+  const resolved = action.targeting?.resolvedSelector;
+  return (
+    `The recorded run ${counts ? 'counted' : 'read'} with \`${selector}\`${facts ? `, which ${facts}` : ''}. ` +
+    `Your entry ${counts ? 'counts' : 'reads'} with a different selector. A ${counts ? 'count' : 'read'} ` +
+    'that matches more or fewer elements does not throw; it returns different data. Use the recorded ' +
+    `selector as written${resolved !== undefined ? ` (or its verified resolvedSelector \`${redact(resolved, [...(ctx.secrets ?? [])])}\`)` : ''} — ` +
+    'every part of it, `:first-child` and `:nth-of-type` included. Narrow or wait around it if you need ' +
+    'to, but read with it.'
+  );
+}
+
+/** How many values the run captured for this read, when the step captured it. */
+function capturedCount(
+  action: RecordedAction,
+  recorded: Record<string, string> | undefined,
+): number | undefined {
+  if (recorded === undefined || typeof action.as !== 'string') return undefined;
+  const names = [action.as, action.as.replace(/^__skill\d+_/, '')];
+  const name = names.find((n) => Object.hasOwn(recorded, n));
+  if (name === undefined) return undefined;
+  const value = recorded[name]!;
+  const items = jsonStringItems(value);
+  if (items.length > 0 || /^\s*\[\s*\]\s*$/.test(value)) return items.length;
+  return 1;
+}
+
+/** A selector in the one spelling two equal selectors share: whitespace runs
+ *  collapsed, none around a combinator, single quotes as double. */
+function normaliseSelector(selector: string): string {
+  return selector
+    .trim()
+    .replace(/'/g, '"')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*(>>|[>+~,])\s*/g, '$1');
+}
+
+/**
+ * Is `selector` (normalised) one of `held`, or a chain of them — a head that is
+ * held, then a descendant combinator or a `>>`, then a tail that is covered in
+ * turn? What `page.locator(a).locator(b)` and a frame's `frameLocator(a)
+ * .locator(b)` read with, where the run wrote `a b`.
+ */
+function coveredBy(selector: string, held: ReadonlySet<string>): boolean {
+  if (held.has(selector)) return true;
+  let depth = 0;
+  let quote: string | undefined;
+  for (let i = 0; i < selector.length; i++) {
+    const c = selector[i]!;
+    if (quote !== undefined) {
+      if (c === '\\') i++;
+      else if (c === quote) quote = undefined;
+      continue;
+    }
+    if (c === '"') {
+      quote = c;
+      continue;
+    }
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    if (depth !== 0) continue;
+    const split =
+      c === ' ' ? { head: i, tail: i + 1 } : selector.startsWith('>>', i) ? { head: i, tail: i + 2 } : undefined;
+    if (split === undefined) continue;
+    const head = selector.slice(0, split.head);
+    if (head !== '' && held.has(head) && coveredBy(selector.slice(split.tail), held)) return true;
+  }
+  return false;
+}
+
+/**
+ * Every string the entry holds that could be a selector, normalised: each
+ * single- or double-quoted literal, and each template literal that is plain
+ * text or whose only expressions are `step.getVar('name')` — read as
+ * `{{name}}`, then substituted the way the recording's selector is.
+ */
+function selectorStringsIn(
+  code: string,
+  substitute: ((text: string) => string) | undefined,
+): Set<string> {
+  const s = scan(code);
+  const out = new Set<string>();
+  for (const token of s.strings) out.add(normaliseSelector(token.value));
+  for (let i = 0; i < code.length; i++) {
+    if (s.mask[i] !== TEMPLATE || code[i] !== '`' || (i > 0 && s.mask[i - 1] === TEMPLATE)) continue;
+    let end = i + 1;
+    while (end < code.length && s.mask[end] === TEMPLATE) end++;
+    const body = code
+      .slice(i + 1, end - 1)
+      .replace(
+        /\$\{\s*(?:await\s+)?step\s*\.\s*getVar\s*\(\s*(['"])([^'"]+)\1\s*\)\s*!?\s*(?:\?\?\s*(?:''|""))?\s*\}/g,
+        (_m, _q: string, name: string) => `{{${name}}}`,
+      );
+    if (body.includes('${')) continue;
+    out.add(normaliseSelector(body));
+    if (substitute) out.add(normaliseSelector(substitute(body)));
+    i = end - 1;
+  }
+  return out;
 }
 
 /**

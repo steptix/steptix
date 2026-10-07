@@ -1516,8 +1516,42 @@ function jsonArrayLength(value: string): number | undefined {
  * must read as normal rather than as an error
  * (stories/codebehind-selector-ambiguity.md, "What generation does with it").
  */
+/**
+ * Does the transcript READ with a selector — a `read` or a `count`?
+ * (docs/specs/SPEC-codebehind-robustness.md §6.2.) The clauses that say to
+ * keep such a selector are emitted only then, so a prompt for a step that
+ * reads nothing stays byte-identical.
+ */
+function readsWithSelector(actions: TranscriptAction[]): boolean {
+  return actions.some(
+    (a) => (a.action === 'read' || a.action === 'count') && typeof a.selector === 'string' && a.selector.trim() !== '',
+  );
+}
+
+/** Rule 7's half of the read-selector rule (§6.2). */
+function readSelectorRule7(actions: TranscriptAction[]): string {
+  if (!readsWithSelector(actions)) return '';
+  return (
+    ' That preference is for a selector you write new. A selector a `read` or `count` above used is part of ' +
+    'what was read: keep it exactly as written, `:first-child` and `:nth-of-type` included — a read with a ' +
+    'different selector does not throw, it returns different data, and compile refuses an entry that reads ' +
+    'with anything else.'
+  );
+}
+
 const SELECTOR_RULE_INFERRED =
   `8. **A transcript selector is not evidence that it matches one element.** The recorded actions ran through a visible-only filter and took the first match, so a selector that worked there may match several — while the same selector in generated code is strict and throws on the second one ("resolved to N elements"). Use a handle the DOM above shows to be unique: a role with its accessible name, an \`id\`, a \`data-testid\`. Where the DOM cannot settle it, reproduce the runtime's own tolerance rather than guessing — \`page.locator(sel).locator('visible=true').first()\`.`;
+
+/** {@link SELECTOR_RULE_INFERRED}, with the read-selector exception when the
+ *  transcript reads (§6.2) — a read or a count takes every match by design, so
+ *  "use a unique handle" is not advice for one. */
+function selectorRuleInferred(actions: TranscriptAction[]): string {
+  if (!readsWithSelector(actions)) return SELECTOR_RULE_INFERRED;
+  return (
+    SELECTOR_RULE_INFERRED +
+    ' A selector a `read` or `count` above used is the exception: it is part of what was read, so keep it as written, `:first-child` included.'
+  );
+}
 
 /**
  * What `targeting` is, said once, above the transcript that carries it.
@@ -1580,7 +1614,11 @@ function measuredSelectorRules(actions: TranscriptAction[]): string | undefined 
       ? `   - On a \`read\` with \`multiple\` or a \`count\`, \`matchCount\` is context for the loop you are writing, not a problem: many matches is what those actions are for.`
       : '',
     unmeasured
-      ? `   - An action with no \`targeting\` was not measured: prefer a stable handle (a role with its accessible name, an \`id\`, a \`data-testid\`), and where you cannot tell, reproduce the runtime's tolerance rather than guessing.`
+      ? `   - An action with no \`targeting\` was not measured: prefer a stable handle (a role with its accessible name, an \`id\`, a \`data-testid\`), and where you cannot tell, reproduce the runtime's tolerance rather than guessing.${
+          readsWithSelector(actions)
+            ? ' Not for a \`read\` or \`count\`: its selector is part of what was read, and is kept as written, \`:first-child\` included.'
+            : ''
+        }`
       : '',
   ].filter(Boolean).join('\n');
 
@@ -1925,7 +1963,7 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
   // today's inference when there is not, so a transcript with no `targeting`
   // builds byte-for-byte the prompt it built before the measurement existed.
   const selectorRules =
-    (measuredSelectorRules(input.actions) ?? SELECTOR_RULE_INFERRED) +
+    (measuredSelectorRules(input.actions) ?? selectorRuleInferred(input.actions)) +
     placeholderSelectorRule(input.actions);
   // The post-condition rule follows whatever the selector rules ended on —
   // one numbered rule when nothing was measured or nothing resolved, two when
@@ -2026,7 +2064,7 @@ Rules — all of them are enforced:
 4. **Turn assertions into \`step.expect(condition, message)\`**, with a message that names what was compared.
 5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake.
 6. **No imports.** Everything you need arrives via the context object — and everything you use must be in \`run\`'s destructured parameter list. The shape above shows \`{ page, step, log }\` because that is the common case, not because it is the whole context: an entry that calls \`tabs.open(...)\` must be written \`async run({ page, step, log, tabs })\`. A name you use but do not destructure is a \`ReferenceError\` on the first replay.
-7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones. A \`role=…[name="…"]\` selector from the transcript matches the WHOLE name: keep it as written in \`page.locator(…)\`, or pass \`exact: true\` if you rewrite it as \`getByRole\` — without it \`getByRole\` matches any name that contains the text, in any capitalisation.${historyRule(input.actions)}${dragRule(input.actions)}${tabHandleRule(input.actions)}
+7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.${readSelectorRule7(input.actions)} A \`role=…[name="…"]\` selector from the transcript matches the WHOLE name: keep it as written in \`page.locator(…)\`, or pass \`exact: true\` if you rewrite it as \`getByRole\` — without it \`getByRole\` matches any name that contains the text, in any capitalisation.${historyRule(input.actions)}${dragRule(input.actions)}${tabHandleRule(input.actions)}
 7b. **Files come through \`step.filePath\`.** An \`upload\` action's \`filePath\` / \`filePaths\` in the transcript are relative to the test file, so pass each through \`step.filePath('…')\` — the verbatim string — and give the result to Playwright. When the action's \`upload.via\` is \`"input"\`, that is \`await page.locator('#statement-file').setInputFiles(step.filePath('attachments/logo.png'))\`. When it is \`"chooser"\`, the action clicked a control that opened a picker, so write:
 \`\`\`
 const chooser = page.waitForEvent('filechooser');

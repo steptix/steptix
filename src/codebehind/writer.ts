@@ -365,6 +365,44 @@ export function findEntrySpans(
 }
 
 /**
+ * `src` with one entry's `{ ... }` span — and the separator beside it — taken
+ * out, or undefined when there is no such entry or taking it out is unsafe.
+ *
+ * For a compile RETRACTING an entry it put into its own in-memory candidate
+ * (docs/specs/SPEC-codebehind-robustness.md §6.2: a step whose code is
+ * withheld gets no entry). Invariant 2 above is about the author's code, and
+ * this never touches it: the caller only uses it when the file on disk had no
+ * entry for the step, so what comes out is the compile's own proposal.
+ *
+ * Unsafe — undefined — when a later entry carries the same (source, section):
+ * the runtime binds by position within the scope, so the next one would slide
+ * into this slot and serve a step it was never generated from.
+ */
+export function withoutEntry(
+  src: string,
+  source: string,
+  section: string | undefined,
+  occurrence = 0,
+): string | undefined {
+  const spans = findEntrySpans(scan(src), source, section);
+  const span = spans[occurrence];
+  if (!span || occurrence !== spans.length - 1) return undefined;
+  let start = span.start;
+  let end = span.end;
+  let after = end;
+  while (after < src.length && /\s/.test(src[after]!)) after++;
+  if (src[after] === ',') {
+    end = after + 1;
+  } else {
+    // The array's last item: the separator to take is the one before it.
+    let before = start - 1;
+    while (before >= 0 && /\s/.test(src[before]!)) before--;
+    if (src[before] === ',') start = before;
+  }
+  return src.slice(0, start) + src.slice(end);
+}
+
+/**
  * The `source` of every entry in a file, in file order, each paired with its
  * `section` scope — the identity an entry binds by. What the review guard
  * compares before and after a revision: a reviewer may edit an entry's code,
