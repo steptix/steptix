@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AiClient } from '../src/ai/client.js';
 import type { AiConfig } from '../src/config/types.js';
 import { applyEnvToAiConfig } from '../src/server/run-helpers.js';
+import { logger } from '../src/utils/logger.js';
 
 /**
  * A compile-only model (docs/specs/SPEC-codebehind-robustness.md §6.10):
@@ -122,6 +123,17 @@ describe('AiClient — the authoring model', () => {
     expect(constructorMock.mock.calls.map((c) => [c[0], c[1]])).toEqual([
       [AUTHORING_MODEL, 'authoring-model-test-key'],
       [RUN_MODEL, 'authoring-model-test-key'],
+    ]);
+  });
+
+  it("logs what each authoring call cost in tokens, and nothing for the run's own calls", async () => {
+    config.authoringModel = AUTHORING_MODEL;
+    const ai = client();
+    await ai.complete([{ role: 'user', content: 'run it' }]);
+    expect(vi.mocked(logger.info)).not.toHaveBeenCalled();
+    await ai.complete([{ role: 'user', content: 'write it' }], undefined, { profile: 'authoring' });
+    expect(vi.mocked(logger.info).mock.calls.map((c) => c[0])).toEqual([
+      `Authoring call to ${AUTHORING_MODEL}: 1 input tokens, 1 output tokens`,
     ]);
   });
 

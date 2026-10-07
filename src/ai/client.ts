@@ -254,6 +254,24 @@ function usageFromV2(usage: { input_tokens: number; output_tokens: number; cache
   };
 }
 
+/**
+ * One line per AUTHORING call — compile writing, repairing and reviewing
+ * code-behind — with what it cost in tokens (docs/specs/SPEC-codebehind-robustness.md
+ * §6.10). Authoring runs at high effort, and can go to its own model
+ * (`AI_AUTHORING_MODEL`), so its spend is worth seeing apart from the run's.
+ * Nothing for a call that reported no usage.
+ */
+function logAuthoringUsage(profile: CompleteProfile | undefined, model: string, usage: CompleteUsage | undefined): void {
+  if (profile !== 'authoring' || usage === undefined) return;
+  const cached = usage.cachedInputTokens !== undefined && usage.cachedInputTokens > 0
+    ? ` (${usage.cachedInputTokens} cached)`
+    : '';
+  logger.info(
+    `Authoring call to ${model}: ${usage.inputTokens} input tokens${cached}, ${usage.outputTokens} output tokens` +
+      (usage.estimated ? ' (estimated)' : ''),
+  );
+}
+
 export class AiClient {
   private config: AiConfig;
   private tokenTracker: TokenTracker;
@@ -598,7 +616,9 @@ export class AiClient {
       throw new Error('AI response contained no content');
     }
 
-    return { text, model, ...(v2.usage && { usage: usageFromV2(v2.usage) }) };
+    const usage = v2.usage ? usageFromV2(v2.usage) : undefined;
+    logAuthoringUsage(options?.profile, model, usage);
+    return { text, model, ...(usage && { usage }) };
   }
 
   /** Streaming chat completion, accumulated into a single response. */
@@ -678,6 +698,7 @@ export class AiClient {
       throw new Error('AI stream produced no content');
     }
 
+    logAuthoringUsage(options?.profile, model, usage);
     return { text, model, usage };
   }
 
