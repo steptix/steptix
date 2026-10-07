@@ -3818,7 +3818,18 @@ async function executeStepAttempt(
         // (SPA route swap, redirect chain, toast render, etc.) before we capture
         // the next snapshot. Exits early on "no change at all" (no-op) or once
         // the signal has been stable for settleMs. See waitForPostActionSettle.
-        if (preSignal && result.success) {
+        //
+        // NOT inside a chain the model wrote to be immediate
+        // (docs/specs/SPEC-web-survey-fixes.md §2.17): a trigger followed by
+        // a `wait` (the wait IS the settle, on the condition the model named),
+        // and a `wait` followed by another action (the condition holds; act on
+        // it now). On a page that never stops moving — a progress bar that
+        // changes every 100 ms — each settle ran its full 3.5 s, so "click Stop
+        // when it reaches 75%" clicked Stop at 100%.
+        const nextInTurn = aiResponse.actions[emittedIndex + 1];
+        const chainedImmediately = nextInTurn !== undefined
+          && (nextInTurn.action === 'wait' || action.action === 'wait');
+        if (preSignal && result.success && !chainedImmediately) {
           await traceOp(`settle.post-action (${action.action})`, () =>
             waitForPostActionSettle(page, { preSignal }),
           ).catch(() => {

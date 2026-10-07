@@ -44,6 +44,8 @@ const ALLOWED_DOM_ATTRIBUTES: readonly string[] = [
   // Upload fields: `multiple` decides whether one step can send two files,
   // and `accept` tells the model which field wants which kind of file.
   'accept', 'multiple',
+  // Which elements a drag can pick up (docs/specs/SPEC-web-survey-fixes.md §2.18).
+  'draggable',
   // The row numbering `readTable` leaves on a table it has read
   // (SPEC-structured-table-reads §7.4): `data-steptix-row="7"` IS the framework's
   // answer to "row 7 of the Orders table", and the allowlist would otherwise

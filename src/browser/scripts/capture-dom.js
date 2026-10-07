@@ -362,7 +362,39 @@
         out += ' ' + name + '="' + escapeAttr(live[name]) + '"';
       }
     }
+    if (USE_ATTR_ALLOWLIST) out += identityClass(el, out);
     return out;
+  }
+
+  // An element with no text and nothing in the allowlist to name it is,
+  // in an allowlisted snapshot, indistinguishable from its siblings: three
+  // empty <div>s that are the red, green and blue circles of a drag page, or
+  // the empty <span> that is a tree's expand toggle. Its class is then the
+  // only identity it has (docs/specs/SPEC-web-survey-fixes.md §2.18), so keep
+  // a few READABLE class names — never a hashed or generated one, which would
+  // only invite a selector that breaks on the next build.
+  var NAMING_ATTRS = ['id', 'data-testid', 'name', 'aria-label', 'title', 'alt', 'placeholder', 'href', 'for', 'value'];
+  function identityClass(el, emitted) {
+    var raw = el.getAttribute && el.getAttribute('class');
+    if (!raw) return '';
+    for (var i = 0; i < NAMING_ATTRS.length; i++) {
+      if (emitted.indexOf(' ' + NAMING_ATTRS[i] + '="') !== -1) return '';
+    }
+    if ((el.textContent || '').trim() !== '') return '';
+    var kept = [];
+    var tokens = raw.split(/\s+/);
+    for (var t = 0; t < tokens.length && kept.length < 4; t++) {
+      var tok = tokens[t];
+      if (!/^[A-Za-z][A-Za-z0-9_-]{1,40}$/.test(tok)) continue;
+      if (/\d{3,}/.test(tok)) continue;
+      if (/^(css|sc|jsx|emotion|svelte|chakra|mantine|tw)-/i.test(tok)) continue;
+      // A styled-components / CSS-modules hash: a short prefix, then a run of
+      // mixed-case letters and digits ("sc-bdVaJa", "Button_root__x8Kf2").
+      if (/[a-z][A-Z]/.test(tok) && /\d/.test(tok)) continue;
+      if (/__[A-Za-z0-9]{4,}$/.test(tok)) continue;
+      kept.push(tok);
+    }
+    return kept.length > 0 ? ' class="' + escapeAttr(kept.join(' ')) + '"' : '';
   }
 
   // The one hidden element that IS a legitimate target.

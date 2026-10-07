@@ -29,6 +29,8 @@ in the test files, not here.
 | 2.13 | Waits cannot compare numbers | 42 | A `wait` on an attribute matches one exact value, so `aria-valuenow=75` misses a bar that steps past 75 | Accept `>=`, `<=`, `>` and `<` in attribute waits |
 | 2.14 | Assertion replies in the wrong shape | 53, 54 in the first run with the fixes; 51, 68 recovered earlier | The assertion prompt asks for `{ "code": … }` but goes out beside the action system prompt, so the model sometimes replies `{ "actions": [ … ] }`. The retry sent the same prompt and got the same reply | Take the code from inside an `actions` reply or a ```` ```js ```` fence, and tell the model what was wrong before asking again |
 | 2.16 | Passed checks are forgotten | 46 in the first run with the fixes | Passed assertions are left out of the "completed actions" the next turn is shown. A step that verifies two things checked the first, asked to continue, and checked it again, 15 times | List each passed assertion in the next turn's completed actions, with the value it read |
+| 2.17 | Settling inside an immediate chain | 42 | After each page-changing action the step loop waits up to 3.5 s for the page to stop changing. On a progress bar that changes every 100 ms, it waited the full 3.5 s after "click Start" and again after the wait, so "click Stop at 75%" clicked Stop at 100% | Skip the settle after a trigger with a `wait` right behind it, and after a `wait` with an action right behind it |
+| 2.18 | Textless elements have no identity in the snapshot | 40, 41 | The snapshot keeps only allow-listed attributes, so `class` is always dropped. Three empty circle divs and a tree's empty expand toggle came out as bare `<div>` and `<span>`, and the model could only guess by position | When an element has no text and no naming attribute, keep up to four readable class names (never hashed or generated ones), and allow `draggable` |
 | 2.15 | Range values outside the slider | 46 in the first run with the fixes | "Set the slider to its maximum" was typed as `100` into a slider that stops at 10, which Playwright refuses as malformed | Clamp a range value to the input's own `min` and `max`, and read `max` and `min` as the two ends |
 
 ## 2. Fixes
@@ -205,6 +207,27 @@ are 0 and 100) and clamps a numeric value to them. `max`, `maximum`, `min` and
 next turn's "completed actions" as `Verified, and it PASSED: <description>
 (read "<value>"). Do not check this again`. A failed assertion still ends the
 turn as before.
+
+### 2.17 No settle inside an immediate chain
+
+**Fix.** Before the post-action settle, the step loop looks at the next action
+in the same turn. It skips the settle when that next action is a `wait` (the
+wait is the settle, on the condition the model named), or when the current
+action is a `wait` and another action follows it (the condition holds, so act
+now). The last action of a turn still settles, so the next snapshot is taken
+on a page that has caught up.
+
+### 2.18 A readable class for textless elements
+
+**Fix.** In allow-list mode, `getAttributes` (capture-dom.js) adds a `class`
+attribute when the element has no text content and none of `id`,
+`data-testid`, `name`, `aria-label`, `title`, `alt`, `placeholder`, `href`,
+`for` or `value`. It keeps at most four class tokens, each a plain name
+(letters, digits, `-`, `_`). It skips tokens with three or more digits in a
+row, framework prefixes (`css-`, `sc-`, `jsx-`, `emotion-` and similar), and
+mixed-case-plus-digit or `__hash` tokens, which are generated. `draggable` joins
+the allow-list. An element with text, or with a naming attribute, is captured
+exactly as before.
 
 ## 3. Failures caused by the test files or the sites
 

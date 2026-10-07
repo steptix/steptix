@@ -398,3 +398,19 @@ describe('§2.14 assertion replies in the wrong shape', () => {
     expect(() => parseAssertionCode('no json and no fence')).toThrow('Assertion code response is not valid JSON');
   });
 });
+
+describe('§2.18 textless elements keep a readable class', () => {
+  it('names empty draggables and an empty toggle by class, and drops hashed classes', async () => {
+    const page = await pageWith(`
+      <div id="source"><div draggable="true" class="red"></div><div draggable="true" class="green sc-bdVaJa2"></div></div>
+      <div role="treeitem"><span class="rc-tree-switcher rc-tree-switcher_close"></span><span>Home</span></div>
+      <p class="lead">Has text, so no class is needed</p>`);
+    const snapshot = await captureDomSnapshot(page);
+    expect(snapshot).toContain('<div draggable="true" class="red">');
+    expect(snapshot).toContain('<div draggable="true" class="green">');
+    expect(snapshot).not.toContain('sc-bdVaJa2');
+    expect(snapshot).toContain('class="rc-tree-switcher rc-tree-switcher_close"');
+    expect(snapshot).not.toContain('class="lead"');
+    await page.close();
+  });
+});
