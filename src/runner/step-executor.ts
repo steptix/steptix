@@ -28,6 +28,7 @@ import type { ChatMessage } from '../ai/types.js';
 import {
   parseAIResponse,
   parseAssertionCode,
+  ASSERTION_CODE_REMINDER,
   parseBranchedResponse,
   extractJson,
   isKnownActionType,
@@ -4239,6 +4240,8 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
   const superseded: AiInteraction[] = [];
   let evalResult: { pass: boolean; actual: string } | null = null;
   let lastErr: string | undefined;
+  /** The previous reply, when it held no usable code. */
+  let unreadableReply: string | undefined;
 
   for (let attempt = 1; attempt <= MAX_ASSERTION_CODE_ATTEMPTS; attempt++) {
     // 1. Generate code (or regenerate it after a failure)
@@ -4288,7 +4291,16 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
       const codeCompletion = await p.aiClient.complete([
         { role: 'system', content: assertSystemPrompt },
         codeMsg,
+        // After an unreadable reply, the same prompt again tends to get the
+        // same reply. Say what was wrong (SPEC-web-survey-fixes.md §2.14).
+        ...(unreadableReply !== undefined
+          ? [
+              { role: 'assistant' as const, content: unreadableReply },
+              { role: 'user' as const, content: ASSERTION_CODE_REMINDER },
+            ]
+          : []),
       ], p.signal, { profile: 'authoring' });
+      unreadableReply = undefined;
 
       if (aiInteraction !== undefined) superseded.push(aiInteraction);
       aiInteraction = {
@@ -4311,6 +4323,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
         assertionCode = parseAssertionCode(codeCompletion.text);
       } catch (parseErr) {
         lastErr = `Could not parse assertion code: ${String(parseErr)}`;
+        unreadableReply = codeCompletion.text;
         continue;
       }
     }

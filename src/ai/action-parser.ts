@@ -622,12 +622,13 @@ export function parseAIResponse(rawResponse: string): AIResponse {
  * Extracts the `code` field — a self-executing JS function string.
  */
 export function parseAssertionCode(rawResponse: string): string {
-  const jsonString = extractJson(rawResponse);
-
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonString);
+    parsed = JSON.parse(extractJson(rawResponse));
   } catch (err) {
+    // A reply that is not JSON at all may still be the code, fenced.
+    const fenced = fencedCode(rawResponse);
+    if (fenced !== undefined) return fenced;
     throw new Error(`Assertion code response is not valid JSON: ${String(err)}`);
   }
 
@@ -636,12 +637,40 @@ export function parseAssertionCode(rawResponse: string): string {
   }
 
   const obj = parsed as Record<string, unknown>;
-  if (typeof obj['code'] !== 'string' || !obj['code'].trim()) {
-    throw new Error('Assertion code response missing "code" field');
-  }
+  if (typeof obj['code'] === 'string' && obj['code'].trim()) return obj['code'];
 
-  return obj['code'];
+  // The assertion prompt is sent beside the ACTION system prompt, which
+  // teaches `{ "actions": [...] }`, and the model sometimes answers in that
+  // shape with the code inside the action. Measured in the web survey: two
+  // predicate checks ("is a number", "equals") failed on both attempts this way
+  // (docs/specs/SPEC-web-survey-fixes.md §2.14).
+  const actions = obj['actions'];
+  if (Array.isArray(actions)) {
+    for (const action of actions) {
+      const code = (action as Record<string, unknown> | null)?.['code'];
+      if (typeof code === 'string' && code.trim()) return code;
+    }
+  }
+  const fenced = fencedCode(rawResponse);
+  if (fenced !== undefined) return fenced;
+  throw new Error('Assertion code response missing "code" field');
 }
+
+/** The body of the first ```js / ```javascript fence that holds a function. */
+function fencedCode(raw: string): string | undefined {
+  const match = /```(?:js|javascript)\s*\n([\s\S]*?)```/i.exec(raw);
+  const body = match?.[1]?.trim();
+  return body && /=>|function\b/.test(body) ? body : undefined;
+}
+
+/**
+ * What to tell the model when its assertion reply could not be read, so the
+ * second attempt is not the first one asked again (§2.14).
+ */
+export const ASSERTION_CODE_REMINDER =
+  'Your previous reply could not be used: it was not a JSON object with a "code" field. '
+  + 'Do not reply with "actions". Reply with ONLY this JSON object: '
+  + '{ "code": "(() => { ... return { pass, actual }; })()" }';
 
 /**
  * Parse the AI response for a branched (conditional) step.

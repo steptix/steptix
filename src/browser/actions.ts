@@ -937,6 +937,7 @@ async function executeType(
   }
   const kind = await inputKindOf(locator);
   if (kind === 'color') value = normaliseColour(value);
+  if (kind === 'range') value = await clampToRange(locator, value);
   await locator.fill(value, { timeout: TYPE_FILL_TIMEOUT_MS });
   // `fill` fires `input` and nothing else. A filter or autocomplete that
   // listens for `keyup` never sees the change, which is how two of the
@@ -964,6 +965,34 @@ async function inputKindOf(locator: Locator): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * A range input refuses a value outside its own min and max as malformed, and
+ * "set the slider to its maximum" was typed as 100 into a slider that stops at
+ * 10. Clamp a number to the range, and read "max"/"min" as the ends.
+ */
+async function clampToRange(locator: Locator, value: string): Promise<string> {
+  let bounds: { min: number; max: number };
+  try {
+    bounds = await locator.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any) => ({
+        min: el.min === '' ? 0 : Number(el.min),
+        max: el.max === '' ? 100 : Number(el.max),
+      }),
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    return value;
+  }
+  const word = value.trim().toLowerCase();
+  if (/^max(imum)?$/.test(word)) return String(bounds.max);
+  if (/^min(imum)?$/.test(word)) return String(bounds.min);
+  const n = Number(word.replace(/%$/, ''));
+  if (!Number.isFinite(n)) return value;
+  return String(Math.min(bounds.max, Math.max(bounds.min, n)));
 }
 
 /**

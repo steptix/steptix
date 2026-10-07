@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { executeAction, normaliseColour, normaliseKeyName } from '../src/browser/actions.js';
-import { parseAIResponse } from '../src/ai/action-parser.js';
+import { parseAIResponse, parseAssertionCode } from '../src/ai/action-parser.js';
 import { installDialogGuard, isAdRequest } from '../src/browser/manager.js';
 import { dialogRecords, disarmDialog } from '../src/browser/dialogs.js';
 import { captureDomSnapshot } from '../src/browser/dom-cleaner.js';
@@ -196,6 +196,17 @@ describe('§2.7 inputs that cannot be cleared', () => {
     expect(await page.inputValue('#r')).toBe('10');
     await page.close();
   });
+
+  it('clamps a range value to the slider\'s own ends, and reads max and min as words', async () => {
+    const page = await pageWith(`<input id="r" type="range" min="0" max="10" value="5">`);
+    expect((await executeAction(page, act({ action: 'type', selector: '#r', value: '100' }))).success).toBe(true);
+    expect(await page.inputValue('#r')).toBe('10');
+    expect((await executeAction(page, act({ action: 'type', selector: '#r', value: 'minimum' }))).success).toBe(true);
+    expect(await page.inputValue('#r')).toBe('0');
+    expect((await executeAction(page, act({ action: 'type', selector: '#r', value: 'max' }))).success).toBe(true);
+    expect(await page.inputValue('#r')).toBe('10');
+    await page.close();
+  });
 });
 
 describe('§2.8 multi-selects', () => {
@@ -370,5 +381,20 @@ describe('§2.1 browser dialogs', () => {
     const second = await captureDomSnapshot(page);
     expect(second).not.toContain('Browser dialogs');
     await page.close();
+  });
+});
+
+describe('§2.14 assertion replies in the wrong shape', () => {
+  it('takes the code from a {"code"} reply, from inside an actions reply, or from a js fence', () => {
+    const code = '(() => ({ pass: true, actual: "22" }))()';
+    expect(parseAssertionCode(JSON.stringify({ code }))).toBe(code);
+    expect(parseAssertionCode(JSON.stringify({ actions: [{ action: 'assert', code }], reasoning: 'x' }))).toBe(code);
+    expect(parseAssertionCode('Here it is:\n```js\n' + code + '\n```')).toBe(code);
+  });
+
+  it('still refuses a reply with no code anywhere', () => {
+    expect(() => parseAssertionCode(JSON.stringify({ actions: [{ action: 'assert', condition: 'x' }] })))
+      .toThrow('missing "code" field');
+    expect(() => parseAssertionCode('no json and no fence')).toThrow('Assertion code response is not valid JSON');
   });
 });

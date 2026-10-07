@@ -27,6 +27,8 @@ in the test files, not here.
 | 2.11 | Text reads include script source | 64 | `read` takes `textContent`, so reading a container also captured its `<script>` | Drop `<script>`, `<style>` and `<template>` text from element reads |
 | 2.12 | Wrong "no value" warnings | every run that captures a value | The MCP run result warns that `{{x}}` "will reach the AI literally" when an earlier `[as: x]` step fills it | Treat names captured by earlier steps as defined |
 | 2.13 | Waits cannot compare numbers | 42 | A `wait` on an attribute matches one exact value, so `aria-valuenow=75` misses a bar that steps past 75 | Accept `>=`, `<=`, `>` and `<` in attribute waits |
+| 2.14 | Assertion replies in the wrong shape | 53, 54 in the first run with the fixes; 51, 68 recovered earlier | The assertion prompt asks for `{ "code": … }` but goes out beside the action system prompt, so the model sometimes replies `{ "actions": [ … ] }`. The retry sent the same prompt and got the same reply | Take the code from inside an `actions` reply or a ```` ```js ```` fence, and tell the model what was wrong before asking again |
+| 2.15 | Range values outside the slider | 46 in the first run with the fixes | "Set the slider to its maximum" was typed as `100` into a slider that stops at 10, which Playwright refuses as malformed | Clamp a range value to the input's own `min` and `max`, and read `max` and `min` as the two ends |
 
 ## 2. Fixes
 
@@ -182,6 +184,20 @@ to the defined set before it reports undefined placeholders.
 `attr>75` or `attr<75` compares the attribute as a number. `attr=75` keeps its
 exact meaning. The prompt shows the form for progress bars and sliders.
 
+### 2.14 Assertion replies in the wrong shape
+
+**Fix.** `parseAssertionCode` takes `code` from the top level, then from any
+action in an `actions` array, then from the first ```` ```js ```` fence holding
+a function. When none has it, the next attempt sends the unusable reply back
+as the assistant's turn with one line saying what was wrong and the exact shape
+to send, instead of the first prompt again.
+
+### 2.15 Range values
+
+**Fix.** `executeType` reads a range input's `min` and `max` (HTML's defaults
+are 0 and 100) and clamps a numeric value to them. `max`, `maximum`, `min` and
+`minimum` are taken as the two ends.
+
 ## 3. Failures caused by the test files or the sites
 
 These are fixed in the test files.
@@ -207,5 +223,3 @@ These are fixed in the test files.
 - **Test 45, the assertion that read "Password:" instead of the value.**
   Generated assertion code picked the wrong element. It needs a separate look
   at how assertion code locates values.
-- **Assertion responses "missing code field".** They recovered on retry in
-  every run, at the cost of an extra model call. Left for a separate change.
