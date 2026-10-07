@@ -297,7 +297,13 @@ export class CodeBehindCompiler {
       // files ride back on `compile:result` and Steptix applies them through
       // a diff so the write is undoable and shows up in Source Control.
       dryRun: true,
-      onEvent: (event) => emit(toWireEvent(event)),
+      onEvent: (event) => {
+        // Review's verdicts in the server's log too, as Run & Compile writes
+        // them — the client shows the event and drops it
+        // (docs/specs/SPEC-codebehind-robustness.md §6.10).
+        if (event.kind === 'phase' && event.phase === 'review') logger.info(`Review: ${event.message}`);
+        emit(toWireEvent(event));
+      },
       ...(signal && { signal }),
       runner: this.sessionRunner(test, bundle, envName, emit, request.sessionId),
     });
