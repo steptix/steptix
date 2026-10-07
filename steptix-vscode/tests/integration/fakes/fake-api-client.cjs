@@ -229,6 +229,7 @@ class FakeApiClient {
       waiters: [],
       ended: false,
       aborted: false,
+      dropped: null,
     };
     this.activeStream = stream;
     const idx = this.streamCallCount;
@@ -265,6 +266,9 @@ class FakeApiClient {
       while (true) {
         if (stream.aborted) {
           throw new ApiClientError('aborted', 'aborted');
+        }
+        if (stream.queue.length === 0 && stream.dropped) {
+          throw stream.dropped;
         }
         if (stream.queue.length > 0) {
           yield stream.queue.shift();
@@ -382,6 +386,16 @@ class FakeApiClient {
     if (w) w.resolve();
   }
 
+  /** Fail the active stream once the events already pushed are consumed —
+   *  the connection dropping mid-run, after some steps reported. */
+  drop(kind = 'stream-dropped', message = 'fake stream dropped') {
+    const stream = this.activeStream;
+    if (!stream) throw new Error('FakeApiClient: drop() called with no active stream');
+    stream.dropped = new ApiClientError(kind, message);
+    const w = stream.waiters.shift();
+    if (w) w.resolve();
+  }
+
   /** Mark the stream as complete — consumer's for-await loop ends cleanly. */
   end() {
     const stream = this.activeStream;
@@ -428,6 +442,7 @@ class FakeApiClient {
  * @property {Array<{ resolve: () => void }>} waiters
  * @property {boolean} ended
  * @property {boolean} aborted
+ * @property {Error | null} dropped
  */
 
 module.exports = { FakeApiClient };

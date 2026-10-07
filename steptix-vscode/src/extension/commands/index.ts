@@ -47,6 +47,8 @@ interface Registry {
   runningController(): RunController | undefined;
   refreshRunningContext(): void;
   notifyRunning(running: boolean): void;
+  /** Close the Test Runner's run-error banner on every runner surface. */
+  dismissRunError(): void;
   /** Phase 3.1 — drop step-paused yellow ▶ markers across every URI
    *  they live on (test file AND any skill file the run descended into). */
   clearAllStepPausedMarkers(): void;
@@ -1480,7 +1482,8 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand('steptix.dismissError', () => {
-      // No-op host side — the webview owns the banner state.
+      // The webview owns the banner state; this does what its ✕ does.
+      registry.dismissRunError();
     }),
 
     vscode.commands.registerCommand('steptix.focusRunner', async () => {

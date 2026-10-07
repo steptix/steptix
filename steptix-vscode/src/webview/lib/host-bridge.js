@@ -91,9 +91,10 @@ export const hostBridge = {
   postResume() { post({ type: 'resume' }); },
   postPause() { post({ type: 'pause' }); },
   postFocusTestResults() { post({ type: 'focusTestResults' }); },
+  postDismissRunError() { post({ type: 'dismissRunError' }); },
   postClearStatus(line) { post({ type: 'clearStatus', line }); },
-  postWebviewState(runtimeVariables) {
-    post({ type: 'webviewState', runtimeVariables });
+  postWebviewState({ runtimeVariables, hostError, hasFocus, running }) {
+    post({ type: 'webviewState', runtimeVariables, hostError, hasFocus, running });
   },
   /** Re-run the failed skill step (identified by its test URI) with the user's
    *  edited captured vars. */

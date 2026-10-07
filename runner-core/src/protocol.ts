@@ -1376,6 +1376,17 @@ export interface HostRunErrorMsg {
 }
 
 /**
+ * Close the `runError` banner on every runner surface — sent for the
+ * `steptix.dismissError` command and for the banner's own ✕ (in whichever
+ * surface it was clicked). A new run closes it by itself (the webview clears
+ * it on `running`), so this is only for the author who wants it gone before
+ * then.
+ */
+export interface HostDismissRunErrorMsg {
+  type: 'dismissRunError';
+}
+
+/**
  * Ask the user to type something. `mode: 'input'` is one-shot (filling a
  * `[input: var]` slot) and is now handled host-side via showInputBox. The
  * webview only sees `mode: 'interactive'` for the multi-turn REPL composer.
@@ -1650,6 +1661,7 @@ export type HostToWebviewMsg =
   | HostActiveFileMsg
   | HostRunEventMsg
   | HostRunErrorMsg
+  | HostDismissRunErrorMsg
   | HostPromptMsg
   | HostPromptDoneMsg
   | HostParametersResolvedMsg
@@ -1738,6 +1750,15 @@ export interface WebviewFocusTestResultsMsg {
 }
 
 /**
+ * The user clicked the run-error banner's ✕. The host closes it on every
+ * runner surface (`dismissRunError`), so a detached panel and the sidebar
+ * agree, and a surface that attaches later is not handed it again.
+ */
+export interface WebviewDismissRunErrorMsg {
+  type: 'dismissRunError';
+}
+
+/**
  * User picked "Clear status here" on a step's context menu. Drops the
  * pass/fail status and any error attached to that single line — the
  * file-wide `steptix.clearStatuses` command remains for clearing all.
@@ -1749,8 +1770,10 @@ export interface WebviewClearStatusMsg {
 
 /**
  * Diagnostic readback from the webview to the host. The webview posts
- * this whenever its internal `runtimeVariables` map changes (i.e. when
- * a `frame:scope` / `capture` / `parametersResolved` event updates it).
+ * this whenever its internal `runtimeVariables` map, its error banner or
+ * its focus changes (i.e. when a `frame:scope` / `capture` /
+ * `parametersResolved` event updates the map, a `runError` lands or is
+ * cleared, or the panel gains or loses keyboard focus).
  * Used only by the test hooks — production code reads the same state
  * from the controller's per-frame scope map. Posted unconditionally so
  * a test harness doesn't have to drive the webview's request/response
@@ -1759,6 +1782,14 @@ export interface WebviewClearStatusMsg {
 export interface WebviewStateMsg {
   type: 'webviewState';
   runtimeVariables: Record<string, string>;
+  /** The `runError` banner the panel is showing, or null when none is. */
+  hostError: { code: string; diagnosis: string } | null;
+  /** Whether the panel holds keyboard focus. Revealing the panel for a run
+   *  must leave focus in the editor, where F5 means Pause. */
+  hasFocus: boolean;
+  /** Whether the panel believes a run is in flight — what decides Run
+   *  versus Stop and Pause on its toolbar. */
+  running: boolean;
 }
 
 /**
@@ -1909,6 +1940,7 @@ export type WebviewToHostMsg =
   | WebviewResumeMsg
   | WebviewPauseMsg
   | WebviewFocusTestResultsMsg
+  | WebviewDismissRunErrorMsg
   | WebviewClearStatusMsg
   | WebviewStateMsg
   | WebviewRerunSkillStepMsg;
@@ -1935,6 +1967,7 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'resume' ||
     t === 'pause' ||
     t === 'focusTestResults' ||
+    t === 'dismissRunError' ||
     t === 'clearStatus' ||
     t === 'webviewState' ||
     t === 'rerunSkillStep' ||
