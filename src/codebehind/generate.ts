@@ -564,6 +564,11 @@ async function askChecked(
   }
 
   const complaint = [firstRead?.complaint, firstOther].filter((c) => c !== undefined).join('\n\n');
+  // Said at info, in a line: a re-ask is a second model call, and how often
+  // a compile needs one is what decides which model it should use
+  // (docs/specs/SPEC-codebehind-robustness.md §6.10). The whole complaint stays
+  // at debug.
+  logger.info(`Code-behind for "${label}" was asked once more: ${firstSentence(complaint)}`);
   logger.debug(`Code-behind re-asking for "${label}": ${complaint}`);
   const second = await askForEntry(
     aiClient,
@@ -596,6 +601,14 @@ async function askChecked(
   }
   warnRemainingFaults(second.code, label, checks);
   return second;
+}
+
+/** A complaint's first sentence, for a one-line log. */
+function firstSentence(text: string): string {
+  const line = text.split('\n')[0]!.trim();
+  const end = /\.(?:\s|$)/.exec(line);
+  const sentence = end ? line.slice(0, end.index + 1) : line;
+  return sentence.length > 240 ? `${sentence.slice(0, 239)}…` : sentence;
 }
 
 /** The withheld outcome for a read that did not keep the run's selector. */
@@ -3347,6 +3360,7 @@ export async function generateConditionEntry(
   const complaint = firstHard ?? undeclaredContextComplaint(first.code);
   if (complaint === undefined) return first;
 
+  logger.info(`Code-behind for condition "${binding.source}" was asked once more: ${firstSentence(complaint)}`);
   logger.debug(`Code-behind re-asking for condition "${binding.source}": ${complaint}`);
   const second = await askForEntry(
     options.aiClient,

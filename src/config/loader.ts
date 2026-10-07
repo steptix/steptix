@@ -85,6 +85,14 @@ function withEnvDefaults(config: Config): Config {
     result = { ...result, ai: { ...result.ai, model: model.trim() } };
   }
 
+  // The model for authoring calls only — compile's generation, repair and
+  // review (docs/specs/SPEC-codebehind-robustness.md §6.10). `AI_MODEL`'s
+  // precedence, for `AI_MODEL`'s reason.
+  const authoringModel = process.env['AI_AUTHORING_MODEL'];
+  if (authoringModel !== undefined && authoringModel.trim().length > 0) {
+    result = { ...result, ai: { ...result.ai, authoringModel: authoringModel.trim() } };
+  }
+
   // The org's own OpenAI-compatible endpoint, for `aibroker/` models
   // (stories/keyless-replay-and-gateway-env.md). It takes `model`'s
   // precedence — overriding the config file — rather than `apiKey`'s fill-only
@@ -182,6 +190,21 @@ function withMachineAiFloor(config: Config, fileAi: UserConfig['ai'] | null): Co
     machineModel.trim() !== ''
   ) {
     result = { ...result, ai: { ...result.ai, model: machineModel.trim() } };
+  }
+
+  // The authoring model's floor, the model's shape (§6.10).
+  const envAuthoring = process.env['AI_AUTHORING_MODEL'];
+  const envSetAuthoring = envAuthoring !== undefined && envAuthoring.trim() !== '';
+  const fileAuthoring = fileAi?.authoringModel;
+  const fileSetAuthoring = typeof fileAuthoring === 'string' && fileAuthoring.trim() !== '';
+  const machineAuthoring = userRoot['AI_AUTHORING_MODEL'];
+  if (
+    !envSetAuthoring &&
+    !fileSetAuthoring &&
+    machineAuthoring !== undefined &&
+    machineAuthoring.trim() !== ''
+  ) {
+    result = { ...result, ai: { ...result.ai, authoringModel: machineAuthoring.trim() } };
   }
 
   // Same floor, same shape: the machine-wide gateway fills in only when neither

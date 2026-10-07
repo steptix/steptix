@@ -7,6 +7,13 @@ export interface AiConfig {
   apiKey?: string;
   /** Model identifier */
   model: string;
+  /**
+   * The model for AUTHORING calls only — writing, repairing and reviewing
+   * compiled code-behind (`AI_AUTHORING_MODEL`). Unset, they use `model`
+   * (docs/specs/SPEC-codebehind-robustness.md §6.10): a compile can then use a
+   * stronger model than the runs it compiles.
+   */
+  authoringModel?: string;
   /** Maximum input tokens per request */
   maxInputTokens: number;
   /**

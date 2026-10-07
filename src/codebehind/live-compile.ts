@@ -1834,6 +1834,10 @@ export class LiveCompiler {
           ...(this.signal && { signal: this.signal }),
         },
         (message) => {
+          // In the server's log too: a client shows the event and drops it,
+          // and whether Review revised or was rejected is part of what decides
+          // the compile's model (docs/specs/SPEC-codebehind-robustness.md §6.10).
+          logger.info(`Review: ${message}`);
           this.emit({
             type: 'compile:step',
             phase: 'review',
