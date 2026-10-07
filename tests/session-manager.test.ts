@@ -135,15 +135,13 @@ vi.mock('../src/ai/client.js', () => ({
     config: any;
     chat = vi.fn(async () => '{}');
     setAiPolicy = vi.fn();
-    syncAuth = vi.fn((model: string, apiKey: string | undefined, gatewayUrl?: string, authoringModel?: string | null) => {
+    syncAuth = vi.fn((model: string, apiKey: string | undefined, gatewayUrl?: string) => {
       const changed =
         model !== this.config.model ||
         apiKey !== this.config.apiKey ||
-        (gatewayUrl !== undefined && gatewayUrl !== this.config.gatewayUrl) ||
-        (authoringModel !== undefined && (authoringModel ?? undefined) !== this.config.authoringModel);
+        (gatewayUrl !== undefined && gatewayUrl !== this.config.gatewayUrl);
       this.config = { ...this.config, model, apiKey };
       if (gatewayUrl !== undefined) this.config.gatewayUrl = gatewayUrl;
-      if (authoringModel !== undefined) this.config.authoringModel = authoringModel ?? undefined;
       return changed ? `AI model → ${model}` : null;
     });
     constructor(config: any) {
@@ -303,15 +301,12 @@ describe('SessionManager', () => {
   });
 
   describe('re-applies .env AI overrides per batch on a reused session (issue 019)', () => {
-    it('picks up a changed AI_MODEL/AI_API_KEY/AI_GATEWAY_URL/AI_AUTHORING_MODEL on the next run and reverts removed keys to the server base', async () => {
+    it('picks up a changed AI_MODEL/AI_API_KEY/AI_GATEWAY_URL on the next run and reverts removed keys to the server base', async () => {
       const sessionId = 'reuse-1';
 
       // Three runs on the SAME session — the reuse path that froze the model
       // before this fix. Each ships the .env-derived env map.
-      await manager.executeSteps(sessionId, {
-        steps: ['s1'],
-        env: { AI_MODEL: 'model-A', AI_API_KEY: 'key-1', AI_AUTHORING_MODEL: 'model-W' },
-      });
+      await manager.executeSteps(sessionId, { steps: ['s1'], env: { AI_MODEL: 'model-A', AI_API_KEY: 'key-1' } });
       await manager.executeSteps(sessionId, {
         steps: ['s2'],
         env: { AI_MODEL: 'model-B', AI_GATEWAY_URL: 'https://llm.corp.example' },
@@ -330,18 +325,15 @@ describe('SessionManager', () => {
       // every call: it is baked into the client's baseURL at build time, so
       // "the value was resolved correctly" is not the same as "the session is
       // talking to it" (stories/keyless-replay-and-gateway-env.md).
-      // The authoring model (SPEC-codebehind-robustness.md §6.10) rides along
-      // the same way, and clears to null when nothing sets it.
       expect(ai.syncAuth.mock.calls).toEqual([
-        ['model-A', 'key-1', 'https://ai.test', 'model-W'],            // batch 1: model+key+authoring from env
-        ['model-B', undefined, 'https://llm.corp.example', null],      // batch 2: gateway from env; key and authoring revert
-        ['test-model', undefined, 'https://ai.test', null],            // batch 3: empty env → all revert to base
+        ['model-A', 'key-1', 'https://ai.test'],                 // batch 1: model+key from env
+        ['model-B', undefined, 'https://llm.corp.example'],      // batch 2: gateway from env; key reverts to base
+        ['test-model', undefined, 'https://ai.test'],            // batch 3: empty env → all revert to base
       ]);
       // And the live client reflects the final state.
       expect(ai.config.model).toBe('test-model');
       expect(ai.config.apiKey).toBeUndefined();
       expect(ai.config.gatewayUrl).toBe('https://ai.test');
-      expect(ai.config.authoringModel).toBeUndefined();
     });
   });
 

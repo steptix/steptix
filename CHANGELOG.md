@@ -99,6 +99,14 @@ from the one the AI run read with. See
   after the step is the one the request produced. Each action's requests
   (method, path, status, time) go into the recording and are shown to the
   generator as what was observed on that run. Ordinary runs are unchanged.
+- **The server log says what a compile did and what it cost.** One line per
+  compile model call gives the model and its input (cached) and output
+  tokens. Further lines say when compile asked a model again about an entry,
+  and what Review did to a file. A run's own model calls get no such line.
+- **Compiled code that reads the base URL as a variable is caught.** Compile
+  had sometimes written `step.getVar('baseUrl')`, which is always undefined.
+  The base URL is the context's `baseUrl`, so such a step fell back to AI on
+  every replay. Compile now asks once more, and so does Review.
 
 ### Added — copy a variable, or export them all as CSV, from the Variables view and panel
 

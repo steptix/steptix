@@ -63,10 +63,8 @@ const PROFILES: Record<CompleteProfile, { effort?: Effort; maxTokens: number }> 
   retry: { effort: 'medium', maxTokens: 8192 },
   authoring: { effort: 'high', maxTokens: 16384 },
   // Compile writing, repairing and reviewing code-behind: `authoring`'s effort
-  // and cap, under its own name so `AI_AUTHORING_MODEL` can route compile's
-  // calls alone (docs/specs/SPEC-codebehind-robustness.md §6.10) — not a run's
-  // assertion code, failure diagnosis or Record Steps, which are `authoring`
-  // too and stay on the run's model.
+  // and cap, under its own name so a compile's spend can be told from a run's
+  // (`logCompileUsage`; docs/specs/SPEC-codebehind-robustness.md §6.10).
   compile: { effort: 'high', maxTokens: 16384 },
 };
 
@@ -263,9 +261,9 @@ function usageFromV2(usage: { input_tokens: number; output_tokens: number; cache
 /**
  * One line per COMPILE call — writing, repairing and reviewing code-behind —
  * with what it cost in tokens (docs/specs/SPEC-codebehind-robustness.md §6.10).
- * Compile runs at high effort, and can go to its own model
- * (`AI_AUTHORING_MODEL`), so its spend is worth seeing apart from the run's.
- * Nothing for a run's own calls, and nothing for a call that reported no usage.
+ * Compile runs at high effort, so its spend is worth seeing apart from the
+ * run's. Nothing for a run's own calls, and nothing for a call that reported no
+ * usage.
  */
 function logCompileUsage(profile: CompleteProfile | undefined, model: string, usage: CompleteUsage | undefined): void {
   if (profile !== 'compile' || usage === undefined) return;
@@ -288,12 +286,6 @@ export class AiClient {
    * fail at request time" behavior and lets {@link syncAuth} just null this out.
    */
   private gateway: AIGateway | null = null;
-  /**
-   * The same, bound to `authoringModel` — built only when an `authoring` call
-   * asks for a model other than `model` (docs/specs/SPEC-codebehind-robustness.md
-   * §6.10), and dropped with the other on any change.
-   */
-  private authoringGateway: AIGateway | null = null;
   /**
    * The run's policy veil (stories/run-settings.md §9): while it is up, every
    * request is refused whatever the key says.
@@ -325,8 +317,8 @@ export class AiClient {
    * set. The library strips whichever first segment it was given and forwards
    * the rest, so the model string goes across verbatim either way.
    */
-  private buildGateway(model: string): AIGateway {
-    const viaGateway = gatewayRoutePrefix(model) !== null;
+  private buildGateway(): AIGateway {
+    const viaGateway = gatewayRoutePrefix(this.config.model) !== null;
     const gatewayUrl = this.config.gatewayUrl;
     // Refused before anything is built or sent: with no URL there is nowhere
     // the caller chose to send the key and the DOM payload.
@@ -351,7 +343,7 @@ export class AiClient {
       // (stories/bedrock-provider.md §"Notes for the builder").
       logger.warn(
         `AI_GATEWAY_URL is set to ${gatewayUrl}, but the model ` +
-          `"${model}" is not a gateway-routed model — the gateway URL ` +
+          `"${this.config.model}" is not a gateway-routed model — the gateway URL ` +
           'applies only to gateway-routed models (gateway/… and aibroker/…), so this ' +
           'request goes wherever the model prefix points instead: for openai/…, ' +
           'anthropic/… and the like, straight out to that provider. ' +
@@ -362,7 +354,7 @@ export class AiClient {
       );
     }
     const opts = viaGateway && hasGatewayUrl(gatewayUrl) ? { baseURL: gatewayV1(gatewayUrl) } : {};
-    return new AIGateway(model, this.config.apiKey ?? '', opts);
+    return new AIGateway(this.config.model, this.config.apiKey ?? '', opts);
   }
 
   /**
@@ -370,12 +362,12 @@ export class AiClient {
    * gateway-routed model, or the provider's own for a direct one. The provider
    * SDK owns that URL, so a direct model is named by its provider instead.
    */
-  private requestTarget(model: string): string {
+  private requestTarget(): string {
     const gatewayUrl = this.config.gatewayUrl;
-    if (gatewayRoutePrefix(model) !== null && hasGatewayUrl(gatewayUrl)) {
+    if (gatewayRoutePrefix(this.config.model) !== null && hasGatewayUrl(gatewayUrl)) {
       return `${gatewayV1(gatewayUrl)}/chat/completions`;
     }
-    return `${model.split('/')[0]} (direct)`;
+    return `${this.config.model.split('/')[0]} (direct)`;
   }
 
   /**
@@ -389,30 +381,12 @@ export class AiClient {
    * compiled test and never come near this line
    * (stories/keyless-replay-and-gateway-env.md §Part B).
    */
-  /**
-   * The model a call with this profile goes to: `authoringModel` for a
-   * `compile` call when one is set (§6.10), `model` for everything else — a
-   * run's own `authoring` calls (assertion code, diagnosis) included, so the
-   * setting never reaches a run.
-   */
-  private modelFor(profile: CompleteProfile | undefined): string {
-    const authoring = this.config.authoringModel;
-    return profile === 'compile' && authoring !== undefined && authoring.trim() !== ''
-      ? authoring
-      : this.config.model;
-  }
-
-  private getGateway(model: string): AIGateway {
+  private getGateway(): AIGateway {
     // Policy before the key check: on a policy-off run a key is present, so
     // "AI is not configured" would be a false statement about a correct config.
     if (this.aiForbidden) throw new AiForbiddenByPolicyError();
     if (!aiConfigured(this.config)) throw new AiNotConfiguredError();
-    if (model !== this.config.model) {
-      // The authoring model (§6.10): its own gateway, bound to it, built and
-      // memoized the same way.
-      return (this.authoringGateway ??= this.buildGateway(model));
-    }
-    return (this.gateway ??= this.buildGateway(model));
+    return (this.gateway ??= this.buildGateway());
   }
 
   /**
@@ -468,8 +442,7 @@ export class AiClient {
    * `gatewayUrl` has three states: a URL re-points the client, `null` clears
    * it (the project's `.env` stopped setting one and nothing else does), and
    * `undefined` — the argument left out — leaves today's URL alone, for a
-   * caller that does not manage it. `authoringModel` (§6.10) has the same
-   * three.
+   * caller that does not manage it.
    *
    * Returns a short, key-safe description of what changed (for logging), or
    * `null` when nothing changed. The returned string NEVER contains the key
@@ -479,19 +452,11 @@ export class AiClient {
     model: string,
     apiKey: string | undefined,
     gatewayUrl?: string | null,
-    authoringModel?: string | null,
   ): string | null {
     const changes: string[] = [];
     if (model !== this.config.model) {
       changes.push(`AI model ${this.config.model} → ${model}`);
       this.config.model = model;
-    }
-    if (authoringModel !== undefined && (authoringModel ?? undefined) !== this.config.authoringModel) {
-      changes.push(
-        `AI authoring model ${this.config.authoringModel ?? '(the model)'} → ${authoringModel ?? '(the model)'}`,
-      );
-      if (authoringModel === null) delete this.config.authoringModel;
-      else this.config.authoringModel = authoringModel;
     }
     if (apiKey !== this.config.apiKey) {
       changes.push('AI API key changed');
@@ -512,12 +477,8 @@ export class AiClient {
     }
     // A model, key or gateway change invalidates the cached gateway (the model
     // is bound at construction, and the baseURL — both whether there is one and
-    // what it points at — is fixed there too). Both of them: the authoring one
-    // shares the key and the gateway URL.
-    if (changes.length > 0) {
-      this.gateway = null;
-      this.authoringGateway = null;
-    }
+    // what it points at — is fixed there too).
+    if (changes.length > 0) this.gateway = null;
     return changes.length > 0 ? changes.join('; ') : null;
   }
 
@@ -573,16 +534,15 @@ export class AiClient {
     // through the log the user is reading to work out what happened. Nothing
     // about the keyed path changes — same lines, same request ids, one
     // statement earlier.
-    const callModel = this.modelFor(options?.profile);
-    const gateway = this.getGateway(callModel);
+    const gateway = this.getGateway();
     const requestId = nextRequestId++;
-    const url = this.requestTarget(callModel);
+    const url = this.requestTarget();
 
     logger.debug(`POST ${url} (${messages.length} messages) [req#${requestId}]`);
     logger.trace(`ai.request#${requestId}`, {
       url,
       method: 'POST',
-      model: callModel,
+      model: this.config.model,
       messageCount: messages.length,
       streaming: false,
       messages: summarizeMessagesForTrace(messages),
@@ -612,7 +572,7 @@ export class AiClient {
       this.tokenTracker.checkStepBudget(this.config.maxInputTokens);
     }
 
-    const model = v2.model ?? callModel;
+    const model = v2.model ?? this.config.model;
     logger.trace(`ai.response#${requestId}`, {
       ok: true,
       model,
@@ -637,23 +597,22 @@ export class AiClient {
   ): Promise<CompleteResult> {
     // Same reason as `completeOnce`: the keyless throw happens before the log
     // claims a request went out.
-    const callModel = this.modelFor(options?.profile);
-    const gateway = this.getGateway(callModel);
+    const gateway = this.getGateway();
     const requestId = nextRequestId++;
-    const url = this.requestTarget(callModel);
+    const url = this.requestTarget();
 
     logger.debug(`POST ${url} (streaming, ${messages.length} messages) [req#${requestId}]`);
     logger.trace(`ai.request#${requestId}`, {
       url,
       method: 'POST',
-      model: callModel,
+      model: this.config.model,
       messageCount: messages.length,
       streaming: true,
       messages: summarizeMessagesForTrace(messages),
     });
 
     let text = '';
-    let model = callModel;
+    let model = this.config.model;
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedInputTokens: number | undefined;
@@ -669,7 +628,7 @@ export class AiClient {
       for await (const delta of stream) text += delta.text;
 
       const final = await stream.final;
-      model = final.model ?? callModel;
+      model = final.model ?? this.config.model;
       if (final.usage && (final.usage.input_tokens || final.usage.output_tokens)) {
         inputTokens = final.usage.input_tokens;
         outputTokens = final.usage.output_tokens;

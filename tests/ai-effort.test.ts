@@ -122,7 +122,8 @@ describe('AiClient — reasoning effort profiles', () => {
     });
 
     // Compile's own name for the same pair (SPEC-codebehind-robustness.md
-    // §6.10): what `AI_AUTHORING_MODEL` routes, and nothing else changes.
+    // §6.10), so a compile's spend can be told from a run's; nothing else
+    // about the call changes.
     it('compile sends the same high effort and 16384 cap', async () => {
       const client = new AiClient(baseConfig, tokenTracker as any);
       await client.complete(HI, undefined, { profile: 'compile' });

@@ -136,12 +136,6 @@ export function applyEnvToAiConfig(
   if (typeof model === 'string' && model.trim().length > 0) {
     next.model = model.trim();
   }
-  // The model for authoring calls only (docs/specs/SPEC-codebehind-robustness.md
-  // §6.10) — blank means "not set here", as for `AI_MODEL`.
-  const authoringModel = envOverrides['AI_AUTHORING_MODEL'];
-  if (typeof authoringModel === 'string' && authoringModel.trim().length > 0) {
-    next.authoringModel = authoringModel.trim();
-  }
   // `aibroker/` models route through whatever endpoint this names
   // (stories/keyless-replay-and-gateway-env.md). A corporate project points at
   // its org's internal gateway from its own `.env`, so the value has to travel

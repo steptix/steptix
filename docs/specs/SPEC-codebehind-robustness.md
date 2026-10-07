@@ -866,6 +866,15 @@ names the request.
 > after its last action (`settlesAfterLastAction`) returns at once unless a
 > request began or the page changed since (`settle(signal, { ifActive: true
 > })`).
+>
+> Re-measured against `ba80b365` with those changes: compiled steps that act
+> went from a median 73 ms to about 385 ms, and compiled replays of the
+> fixture tests were 28–169 % slower. The runner's own wait after an entry is
+> now a median 2 ms; what remains is the 250 ms quick-exit window inside each
+> entry's own `step.settle()`. On the local fixture app, where an acting step
+> took 60–70 ms, the 20 % acceptance above cannot be met with that window.
+> The project owner kept 250 ms (§9 Q2) on 2026-10-08: robustness over
+> replay speed, at about 0.3 s per compiled step that acts.
 
 ### 6.5 `step.check`: a failed self-check in a read-only entry heals
 
@@ -1200,6 +1209,22 @@ Compile uses the session's model (`live-compile.ts:128-132`) with the
   model, counting re-asks, Review rejections and replay results. Keep the
   setting only if the stronger model's compiles need fewer re-asks and Review
   rejections, and its replays pass at least as often. Otherwise remove it.
+
+> **As built (2026-10-08): measured, and removed.** The project owner
+> approved two rounds instead of five, `openai/gpt-6-luna` against
+> `openai/gpt-6-sol`.
+>
+> - **Round 1 found a leak.** Routing every `authoring`-profile call also
+>   sent a run's own assertion code to Sol, and one assertion step failed on
+>   Sol's replies. Compile's calls then moved to a `compile` profile of their
+>   own, with `authoring`'s effort and cap.
+> - **Round 2, with that fixed:** 8/8 tests in both arms, 0 re-asks, 0 Review
+>   rejections and 0 replay heals in both. Sol cost $0.81 against Luna's $0.04
+>   for the same 50 compile calls (round 1: $0.83 against $0.05).
+> - **The keep-rule above was not met, so the setting was removed.** What
+>   stays: the `compile` profile, an info line per compile call giving its
+>   model and tokens (`logCompileUsage`), and info lines for re-asks and
+>   Review verdicts.
 
 ## 7. How to work on this
 
