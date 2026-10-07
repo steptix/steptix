@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AIAction } from '../ai/types.js';
 import type { ActionTargeting } from '../browser/actions.js';
-import type { AssertionResult, StepResult, StepStatus } from '../report/types.js';
+import type { AssertionResult, StepResult, StepStatus, SubActionResult } from '../report/types.js';
 import { logger } from '../utils/logger.js';
 import {
   isSecretName,
@@ -49,6 +49,13 @@ export type RecordedAction = AIAction & {
    *  worked: `setInputFiles` for `'input'`, the file-chooser pattern for
    *  `'chooser'`. */
   upload?: { via: 'input' | 'chooser' };
+  /**
+   * The page's URL changed while this action ran: from the page it ran on to
+   * the one the run was on after it (docs/specs/SPEC-codebehind-robustness.md
+   * §6.7). What tells the generator that the entry must wait for another page
+   * before anything after this action — a sign-in's click, a submit.
+   */
+  navigated?: { from: string; to: string };
 };
 
 export interface RecordingManifest {
@@ -797,12 +804,31 @@ export function actionsOf(result: StepResult | undefined): RecordedAction[] {
     .flatMap((t) => t.subActions)
     .filter((sa) => !sa.error || (keepFail && sa.action.action === 'fail'))
     .map((sa) => {
-      if (sa.targeting === undefined && sa.upload === undefined) return sa.action;
+      // Here and not later, for `targeting`'s reason: a URL can carry a
+      // secret, and the recording redacts what this returns.
+      const navigated = navigationOf(sa);
+      if (sa.targeting === undefined && sa.upload === undefined && navigated === undefined) return sa.action;
       return {
         ...sa.action,
         ...(sa.targeting !== undefined && { targeting: sa.targeting }),
         ...(sa.upload !== undefined && { upload: sa.upload }),
+        ...(navigated !== undefined && { navigated }),
       };
     });
+}
+
+/**
+ * Where an action moved the page, or undefined when it stayed put
+ * (docs/specs/SPEC-codebehind-robustness.md §6.7). The runtime records the URL
+ * an action RAN on (`actionPageUrl`) only when it differs from the page's URL
+ * after it (`pageUrl`), so the pair is the navigation.
+ *
+ * `pageUrl` is read after the post-action wait, which gives up at 3.5 s: a
+ * navigation slower than that is not seen here.
+ */
+function navigationOf(sa: SubActionResult): { from: string; to: string } | undefined {
+  if (sa.actionPageUrl === undefined || sa.pageUrl === undefined) return undefined;
+  if (sa.actionPageUrl === sa.pageUrl) return undefined;
+  return { from: sa.actionPageUrl, to: sa.pageUrl };
 }
 

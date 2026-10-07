@@ -547,7 +547,8 @@ async function askChecked(
     undeclaredContextComplaint(code) ??
     staleHandleComplaint(code) ??
     unwaitedReadComplaint(code) ??
-    selfCheckInActingEntryComplaint(code);
+    selfCheckInActingEntryComplaint(code) ??
+    unwaitedNavigationComplaint(code, checks.actions, checks.secrets);
 
   const firstRead = readFault(first.code);
   const firstOther = otherFault(first.code);
@@ -658,6 +659,13 @@ function warnRemainingFaults(code: string, label: string, checks: EntryCheckCont
         `check as an assertion. ${stillSelfCheck}`,
     );
   }
+  const stillUnwaitedNavigation = unwaitedNavigationComplaint(code, checks.actions, checks.secrets);
+  if (stillUnwaitedNavigation !== undefined) {
+    logger.warn(
+      `Code-behind for "${label}" still does not wait after an action that leads to another page; ` +
+        `the runtime's own wait after the entry is all that covers it. ${stillUnwaitedNavigation}`,
+    );
+  }
 }
 
 /** One static check's finding about one entry. */
@@ -669,7 +677,8 @@ export interface EntryFault {
     | 'undeclared-context'
     | 'stale-handle'
     | 'unwaited-read'
-    | 'self-check-in-acting-entry';
+    | 'self-check-in-acting-entry'
+    | 'unwaited-navigation';
   complaint: string;
   /** The recorded selector, for a `read` fault. */
   selector?: string;
@@ -708,6 +717,7 @@ export function entryFaults(
     ['stale-handle', staleHandleComplaint(code)],
     ['unwaited-read', unwaitedReadComplaint(code)],
     ['self-check-in-acting-entry', selfCheckInActingEntryComplaint(code)],
+    ['unwaited-navigation', unwaitedNavigationComplaint(code, actions, ctx.secrets)],
   ];
   for (const [check, complaint] of found) {
     if (complaint !== undefined) out.push({ check, complaint });
@@ -1211,6 +1221,48 @@ export function selfCheckInActingEntryComplaint(code: string): string | undefine
     `The entry calls \`step.check\` and also acts on the page (\`${action.call}\`). \`step.check\` is ` +
     'the self-check of an entry that only reads: when it fails the step re-runs under AI, and after an ' +
     'action that would do the action twice. In an entry that acts, assert with `step.expect(…)`.'
+  );
+}
+
+/** What a navigation counts as waited for: every state wait, plus the
+ *  web-first assertions on a URL or a title, and Playwright's own navigation
+ *  wait. */
+const WAITS_FOR_NAVIGATION = new RegExp(`${WAITS_FOR_STATE.source}|waitForNavigation|toHaveURL|toHaveTitle`);
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * an action NAVIGATED on the recorded run, and the entry does not wait after
+ * its last action (docs/specs/SPEC-codebehind-robustness.md §6.7).
+ *
+ * Compiled code is fast enough to read the page it is leaving: failure A's
+ * sign-in entry read the title 57 ms after its click, while the login request
+ * that would move the page was still in flight. The prompt's legend says to
+ * wait with `step.settle()`; this is the backstop for an answer that did not.
+ *
+ * "After its last action" because the transcript cannot say which call in the
+ * code is the one that navigated, and a step's navigation is its last action
+ * far more often than not. A `goto` (or `reload`, `goBack`, `goForward`) as the
+ * last action waits for its page by itself.
+ */
+export function unwaitedNavigationComplaint(
+  code: string,
+  actions: readonly RecordedAction[],
+  secrets: readonly string[] = [],
+): string | undefined {
+  const moved = actions.find((a) => a.navigated !== undefined);
+  if (moved?.navigated === undefined) return undefined;
+  const calls = actingCalls(code);
+  const last = calls[calls.length - 1];
+  if (last === undefined || last.kind === 'navigation') return undefined;
+  if (WAITS_FOR_NAVIGATION.test(code.slice(last.index))) return undefined;
+  const mask = (url: string): string => redact(url, [...secrets]);
+  return (
+    `On the recorded run, the \`${moved.action}\` action changed the page's URL, from ${mask(moved.navigated.from)} ` +
+    `to ${mask(moved.navigated.to)}, and this entry does not wait after its last action (\`${last.call}\`). ` +
+    'Compiled code runs in milliseconds, so without a wait whatever comes next reads or acts on the page being ' +
+    'left. Put `await step.settle()` straight after the action that leads to another page: it waits for every ' +
+    'request the action started and the navigation they begin, then for the page to hold still. Do not wait ' +
+    'for that URL by name: other rows of a data table may not navigate.'
   );
 }
 

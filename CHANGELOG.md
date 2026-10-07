@@ -81,6 +81,11 @@ from the one the AI run read with. See
   recording alone. One that fails a `steptix compile` replay is left without
   code rather than marked `ai: true`, so the next compile writes it again from
   a fresh run.
+- **Compile is told which actions led to another page.** The recording now
+  keeps, per action, where the page's URL went (`navigated: { from, to }`,
+  secrets masked), the generator is told to wait for that page with
+  `step.settle()` rather than a URL a data row may not reach, and an entry
+  that does not wait after its last action is asked once to fix it.
 
 ### Changed — a run shows the Test Runner, and its error banner follows the latest run
 

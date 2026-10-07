@@ -1135,7 +1135,12 @@ export function formatStepHistoryEntry(
  * and its absence is first-class: a transcript without it builds exactly the
  * prompt it built before the measurement existed.
  */
-export type TranscriptAction = AIAction & { targeting?: ActionTargeting };
+export type TranscriptAction = AIAction & {
+  targeting?: ActionTargeting;
+  /** The page's URL changed while the action ran
+   *  (docs/specs/SPEC-codebehind-robustness.md §6.7). */
+  navigated?: { from: string; to: string };
+};
 
 /**
  * Actions whose runtime target is ONE element, so a `matchCount` above 1 is a
@@ -1618,6 +1623,31 @@ function targetingLegend(actions: TranscriptAction[]): string {
 }
 
 /**
+ * What `navigated` means, said once above the transcript — only when an action
+ * carries it, so every other prompt stays byte-identical
+ * (docs/specs/SPEC-codebehind-robustness.md §6.7).
+ */
+function navigationLegend(actions: TranscriptAction[]): string {
+  if (!actions.some((a) => a.navigated !== undefined)) return '';
+  return (
+    'An action with `navigated` changed the page\'s URL on this run. The entry must wait for the page it leads to ' +
+    'before anything after it, with `await step.settle()`, and must not hard-code the URL: other rows of a data ' +
+    'table may not navigate.\n\n'
+  );
+}
+
+/** The transcript with each `navigated` URL masked: a URL can carry a secret.
+ *  The same array when there is nothing to mask. */
+function maskNavigation(actions: TranscriptAction[], secrets: readonly string[]): TranscriptAction[] {
+  if (secrets.length === 0 || !actions.some((a) => a.navigated !== undefined)) return actions;
+  return actions.map((a) =>
+    a.navigated === undefined
+      ? a
+      : { ...a, navigated: { from: redact(a.navigated.from, [...secrets]), to: redact(a.navigated.to, [...secrets]) } },
+  );
+}
+
+/**
  * Rules 8 and 9 for a transcript that WAS measured — the inference replaced by
  * the number, and the data-driven carve-out keyed on `resolvedBy`.
  *
@@ -1947,7 +1977,7 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
 
   const actionBlock = input.actions.length === 0
     ? '(no actions recorded)'
-    : `\`\`\`json\n${JSON.stringify(input.actions, null, 2)}\n\`\`\``;
+    : `\`\`\`json\n${JSON.stringify(maskNavigation(input.actions, input.secrets ?? []), null, 2)}\n\`\`\``;
 
   const assertionBlock = (input.assertions ?? []).length === 0
     ? ''
@@ -2052,7 +2082,7 @@ ${wholeTestBlock}${formatLoopBlock(input.loop, 'step')}
 ${paramBlock}
 
 ## The actions the AI performed (this run's transcript)
-${targetingLegend(input.actions)}${actionBlock}${assertionBlock}${captureBlock}${domBlock(input.domBefore, input.urlBefore, 'before')}${domBlock(input.domAfter, input.urlAfter, 'after')}${candidateBlock}${retryBlock}
+${targetingLegend(input.actions)}${navigationLegend(input.actions)}${actionBlock}${assertionBlock}${captureBlock}${domBlock(input.domBefore, input.urlBefore, 'before')}${domBlock(input.domAfter, input.urlAfter, 'after')}${candidateBlock}${retryBlock}
 
 ## What to return
 
