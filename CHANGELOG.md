@@ -20,13 +20,18 @@ miss with the view closed. See
   Continue. It opens wherever you put the view, and keyboard focus stays in the
   editor, so F5 still pauses. A visible detached runner (*Open in Editor*)
   counts as visible. Test Explorer batch runs still point at Test Results.
+- **A runner that opens late is told what it missed.** A Test Runner opened
+  by a run, or by you mid-run, used to start blank: no error banner when the
+  server was down, and Run on its toolbar while a run was going. It now gets
+  the run state and the last run's error when it opens.
 - **A new run closes the previous run's error banner** as it starts. Before, the
   banner stayed up through the next run, even one that passed. A run that fails
   shows its own.
-- **Steptix: Dismiss Error** now closes the banner, as its ✕ does. It used to
-  do nothing.
+- **Dismissing the banner closes it everywhere.** Its ✕ and **Steptix: Dismiss
+  Error** (which used to do nothing) close it in the sidebar and in a detached
+  runner alike, and a runner opened later does not bring it back.
 
-Steptix extension 0.5.176.
+Steptix extension 0.5.177.
 
 ### Changed — one default server per machine: `serve`, MCP and the CLI agree
 

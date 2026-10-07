@@ -95,9 +95,48 @@ export class SteptixRunnerView implements vscode.WebviewViewProvider {
     return this.sent.slice(Math.max(0, mark - dropped));
   }
 
+  /**
+   * The run state a surface must be told when it becomes ready, because it
+   * missed the messages that set it: whether a run is in flight, and the
+   * banner the last run left. A run that reveals a runner with no view
+   * creates one — and the run's `running`, and a refusal's `runError`, are
+   * posted before that view exists, so without this it would open empty and
+   * offer Run in the middle of a run.
+   */
+  private replayRunning = false;
+  private replayRunError: HostToWebviewMsg | null = null;
+
+  /** Test-only: what a surface attaching now would be handed. */
+  replayState(): { running: boolean; runError: string | null } {
+    const err = this.replayRunError;
+    return {
+      running: this.replayRunning,
+      runError: err && err.type === 'runError' ? err.payload.code : null,
+    };
+  }
+
+  /** Track {@link replayRunning} and {@link replayRunError} the way the
+   *  webview tracks its own copy of them. */
+  private remember(msg: HostToWebviewMsg): void {
+    switch (msg.type) {
+      case 'running':
+        // The webview closes the banner on the same edge.
+        if (msg.running && !this.replayRunning && !msg.sync) this.replayRunError = null;
+        this.replayRunning = msg.running;
+        return;
+      case 'runError':
+        this.replayRunError = msg;
+        return;
+      case 'dismissRunError':
+        this.replayRunError = null;
+        return;
+    }
+  }
+
   /** Forward a host→webview message to every attached surface. Posts to a
    *  not-yet-ready webview are still safe — VS Code queues them. */
   post(msg: HostToWebviewMsg): void {
+    this.remember(msg);
     if (this.recording) {
       this.sent.push(msg);
       this.sentTotal += 1;
@@ -259,6 +298,14 @@ export class SteptixRunnerView implements vscode.WebviewViewProvider {
             snapshot: this.tracker.snapshot(),
           });
         }
+        // `sync`: this is the state the surface missed, not a run starting,
+        // so it must not reset what a run start resets.
+        void attachment.webview.postMessage({
+          type: 'running',
+          running: this.replayRunning,
+          sync: true,
+        });
+        if (this.replayRunError) void attachment.webview.postMessage(this.replayRunError);
       }
       void this.messageHandler?.(raw);
     });

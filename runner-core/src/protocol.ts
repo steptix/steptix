@@ -1376,10 +1376,11 @@ export interface HostRunErrorMsg {
 }
 
 /**
- * Close the `runError` banner — what its ✕ does, sent from the host for the
- * `steptix.dismissError` command. A new run closes it by itself (the webview
- * clears it on `running`), so this is only for the author who wants it gone
- * before then.
+ * Close the `runError` banner on every runner surface — sent for the
+ * `steptix.dismissError` command and for the banner's own ✕ (in whichever
+ * surface it was clicked). A new run closes it by itself (the webview clears
+ * it on `running`), so this is only for the author who wants it gone before
+ * then.
  */
 export interface HostDismissRunErrorMsg {
   type: 'dismissRunError';
@@ -1749,6 +1750,15 @@ export interface WebviewFocusTestResultsMsg {
 }
 
 /**
+ * The user clicked the run-error banner's ✕. The host closes it on every
+ * runner surface (`dismissRunError`), so a detached panel and the sidebar
+ * agree, and a surface that attaches later is not handed it again.
+ */
+export interface WebviewDismissRunErrorMsg {
+  type: 'dismissRunError';
+}
+
+/**
  * User picked "Clear status here" on a step's context menu. Drops the
  * pass/fail status and any error attached to that single line — the
  * file-wide `steptix.clearStatuses` command remains for clearing all.
@@ -1777,6 +1787,9 @@ export interface WebviewStateMsg {
   /** Whether the panel holds keyboard focus. Revealing the panel for a run
    *  must leave focus in the editor, where F5 means Pause. */
   hasFocus: boolean;
+  /** Whether the panel believes a run is in flight — what decides Run
+   *  versus Stop and Pause on its toolbar. */
+  running: boolean;
 }
 
 /**
@@ -1927,6 +1940,7 @@ export type WebviewToHostMsg =
   | WebviewResumeMsg
   | WebviewPauseMsg
   | WebviewFocusTestResultsMsg
+  | WebviewDismissRunErrorMsg
   | WebviewClearStatusMsg
   | WebviewStateMsg
   | WebviewRerunSkillStepMsg;
@@ -1953,6 +1967,7 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'resume' ||
     t === 'pause' ||
     t === 'focusTestResults' ||
+    t === 'dismissRunError' ||
     t === 'clearStatus' ||
     t === 'webviewState' ||
     t === 'rerunSkillStep' ||

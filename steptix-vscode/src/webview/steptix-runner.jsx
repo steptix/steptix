@@ -1079,8 +1079,9 @@ function SteptixRunner() {
       runtimeVariables,
       hostError: hostError && { code: hostError.code, diagnosis: hostError.diagnosis },
       hasFocus,
+      running,
     });
-  }, [runtimeVariables, hostError, hasFocus]);
+  }, [runtimeVariables, hostError, hasFocus, running]);
 
   useEffect(() => {
     const onFocus = () => setHasFocus(true);
@@ -1823,7 +1824,13 @@ function SteptixRunner() {
 
       {hostError && (
         <div style={{ padding: 10 }}>
-          <ErrorPanel error={hostError} onDismiss={() => setHostError(null)} />
+          <ErrorPanel
+            error={hostError}
+            onDismiss={() => {
+              setHostError(null);
+              hostBridge.postDismissRunError();
+            }}
+          />
         </div>
       )}
 

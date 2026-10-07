@@ -612,11 +612,12 @@ class RunControllerRegistry implements vscode.Disposable {
    *  the host except via this readback channel). */
   private lastWebviewRuntimeVariables: Record<string, string> = {};
   private webviewStateUpdateCount = 0;
-  /** The rest of the last `webviewState`: the error banner and focus. With a
-   *  detached panel open as well, whichever surface posted last. */
-  private lastWebviewBanner: Pick<WebviewStateMsg, 'hostError' | 'hasFocus'> = {
+  /** The rest of the last `webviewState`: the error banner, focus and run
+   *  state. With a detached panel open as well, whichever surface posted last. */
+  private lastWebviewBanner: Pick<WebviewStateMsg, 'hostError' | 'hasFocus' | 'running'> = {
     hostError: null,
     hasFocus: false,
+    running: false,
   };
   /** The banner's code each time the reported banner changed, null for
    *  "no banner", oldest first. Only the sequence can tell the same error
@@ -631,7 +632,7 @@ class RunControllerRegistry implements vscode.Disposable {
       // A real window posts this too; keep the readback from growing with it.
       if (this.webviewBannerHistory.length > 200) this.webviewBannerHistory.shift();
     }
-    this.lastWebviewBanner = { hostError: msg.hostError, hasFocus: msg.hasFocus };
+    this.lastWebviewBanner = { hostError: msg.hostError, hasFocus: msg.hasFocus, running: msg.running };
     this.webviewStateUpdateCount += 1;
   }
 
@@ -639,7 +640,7 @@ class RunControllerRegistry implements vscode.Disposable {
     return { ...this.lastWebviewRuntimeVariables };
   }
 
-  getWebviewBanner(): Pick<WebviewStateMsg, 'hostError' | 'hasFocus'> {
+  getWebviewBanner(): Pick<WebviewStateMsg, 'hostError' | 'hasFocus' | 'running'> {
     return { ...this.lastWebviewBanner };
   }
 
@@ -1940,10 +1941,10 @@ export interface SteptixTestHooks {
    *  has received since activation. Zero means the webview never
    *  mounted (e.g. sidebar never opened); positive means it's posting. */
   webviewStateUpdateCount: () => number;
-  /** The Test Runner webview's error banner and whether the panel holds
-   *  keyboard focus, as the webview last reported them. Its DOM is not
-   *  readable from the extension host. */
-  webviewBanner: () => Pick<WebviewStateMsg, 'hostError' | 'hasFocus'>;
+  /** The Test Runner webview's error banner, whether the panel holds
+   *  keyboard focus, and whether it thinks a run is going, as the webview
+   *  last reported them. Its DOM is not readable from the extension host. */
+  webviewBanner: () => Pick<WebviewStateMsg, 'hostError' | 'hasFocus' | 'running'>;
   /** The banner's code each time it changed (null = closed), oldest first. */
   webviewBannerHistory: () => Array<string | null>;
   /** Whether any Test Runner surface is on screen. */
@@ -1954,6 +1955,9 @@ export interface SteptixTestHooks {
   runnerRevealHistory: () => import('./runner-view.js').RevealAction[];
   /** Settles when every reveal started so far has finished. */
   runnerRevealSettled: () => Promise<void>;
+  /** What a runner surface attaching now would be handed: whether a run is
+   *  in flight, and the code of the banner the last run left, or null. */
+  runnerReplay: () => { running: boolean; runError: string | null };
   /** Active controller's `lastReportPath` — the absolute HTML report
    *  path from the most recently completed run, or null if none.
    *  Backs the integration test that verifies the protocol's
@@ -2498,6 +2502,7 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
       runnerResolved: () => view.isResolved(),
       runnerRevealHistory: () => [...view.revealHistory],
       runnerRevealSettled: () => view.revealSettled(),
+      runnerReplay: () => view.replayState(),
       runningScope: () => {
         const controller = registry.runningController();
         return controller ? { ...controller.currentScope() } : {};
@@ -2781,6 +2786,11 @@ async function handleWebviewMessage(
       const editor = tracker.activeEditor;
       if (!editor || !tracker.isActiveTestFile) return;
       tracker.clearStatus(editor.document.uri, msg.line);
+      return;
+    }
+    case 'dismissRunError': {
+      // The banner's ✕, in whichever surface it was clicked.
+      registry.dismissRunError();
       return;
     }
     case 'focusTestResults': {
