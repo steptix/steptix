@@ -305,6 +305,9 @@ export interface ActionExecutionResult {
   /** What the runtime found at the instant it acted. Absent unless the caller
    *  asked to measure, and absent whenever measurement was impossible. */
   targeting?: ActionTargeting;
+  /** `navigate` only: the HTTP status of the document it landed on
+   *  (SPEC-web-survey-fixes.md §2.35). */
+  httpStatus?: number;
   /** The kinds of element a `read` or `count` matched, when the caller asked
    *  for them ({@link ExecuteActionOptions.kinds}). */
   kinds?: string[];
@@ -452,6 +455,8 @@ export async function executeAction(
   let remainingMs: number | undefined;
   /** Which route an `upload` took, for the transcript a compile reads. */
   let uploadRoute: UploadRoute | undefined;
+  /** The HTTP status a `navigate` landed on (§2.35). */
+  let httpStatus: number | undefined;
 
   try {
     // ── Measurement (stories/codebehind-selector-ambiguity.md) ──────────────
@@ -555,7 +560,7 @@ export async function executeAction(
 
       case 'navigate':
         // Navigation always operates at the page level — iframes don't navigate independently
-        await executeNavigate(page, eff, baseUrl);
+        httpStatus = await executeNavigate(page, eff, baseUrl);
         break;
 
       case 'back':
@@ -729,6 +734,7 @@ export async function executeAction(
       success: true,
       ...(targeting !== undefined && { targeting }),
       ...(uploadRoute !== undefined && { upload: { via: uploadRoute } }),
+      ...(httpStatus !== undefined && { httpStatus }),
     };
   } catch (err) {
     // A run abort (issue 022) must propagate as a throw, not be swallowed into a
@@ -1233,7 +1239,7 @@ function executeDialog(page: Page, action: AIAction): string | undefined {
   );
 }
 
-async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): Promise<void> {
+async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): Promise<number | undefined> {
   let url = action.url ?? action.value ?? '';
 
   if (!url) {
@@ -1257,7 +1263,10 @@ async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): 
     }
   }
 
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  // The main document's status, so the step loop can tell a 404 from the page
+  // the step asked for (§2.35). Null for a same-document or about: navigation.
+  return response?.status();
 }
 
 /**

@@ -857,3 +857,32 @@ describe('§2.34 role names with an icon glyph', () => {
     }
   });
 });
+
+describe('§2.35 a navigation that lands on an error page', () => {
+  it('reports the HTTP status of the page it reached', async () => {
+    const page = await context.newPage();
+    try {
+      await page.route('http://survey.test/**', (route) => route.fulfill({
+        status: route.request().url().endsWith('/missing') ? 404 : 200,
+        contentType: 'text/html',
+        body: '<p>page</p>',
+      }));
+      const missing = await executeAction(page, act({ action: 'navigate', url: 'http://survey.test/missing' }));
+      expect(missing.success).toBe(true);
+      expect(missing.httpStatus).toBe(404);
+      const found = await executeAction(page, act({ action: 'navigate', url: 'http://survey.test/input' }));
+      expect(found.httpStatus).toBe(200);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('treats an error page as the goal only when the step is about one', async () => {
+    const { expectsErrorPage } = await import('../src/runner/step-executor.js');
+    expect(expectsErrorPage('Navigate to input.xhtml')).toBe(false);
+    expect(expectsErrorPage('Navigate to /status_codes/404')).toBe(true);
+    expect(expectsErrorPage('Open the page and verify the Not Found message')).toBe(true);
+    expect(expectsErrorPage('Go to the admin page and check it is forbidden')).toBe(true);
+    expect(expectsErrorPage('Navigate to the 2024 report')).toBe(false);
+  });
+});

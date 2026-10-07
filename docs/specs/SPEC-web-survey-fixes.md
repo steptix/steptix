@@ -48,6 +48,7 @@ in the test files, not here.
 | 2.32 | The hidden-toggle stand-in clicked a 1 px wrapper | 62 | §2.10 clicks the nearest visible ancestor of a hidden checkbox input. PrimeFaces wraps the input in a 1×1 px `ui-helper-hidden-accessible` div, which Playwright counts as visible and the real checkbox box covers, so the click timed out on "intercepts pointer events" | A stand-in must also have a box of at least 4×4 px |
 | 2.33 | Notifications close before they are checked | 62 | A PrimeFaces growl closes after six seconds and a model turn takes several, so "Verify a message confirms the Ajax checkbox was checked" read a page whose message had gone | The page records toast-like notifications as they appear; the snapshot lists the ones that have closed, and assertion code can read `window.__steptixNotices` |
 | 2.34 | Exact role names miss icon buttons | 62 | An icon font draws its glyph with CSS `::before` content, and that counts in the accessible name. PrimeFaces' Dismiss button is named "<glyph> Dismiss", so `role=button[name="Dismiss"]` matched nothing on an open dialog, twice | When an exact `role=…[name="…"]` matches nothing, retry it as `name=/^W*…W*$/i` and keep that only if it finds something |
+| 2.35 | A navigation to a 404 passed | 62 | "Navigate to input.xhtml" was sent to `/pages/input.xhtml`, which answered 404 Not Found; the navigate succeeded because a page loaded, and the next step had no field to type into and asked for clarification | A navigate reports the document's HTTP status; a 4xx or 5xx fails it (retryably) unless the step mentions an error or a status code |
 
 ## 2. Fixes
 
@@ -449,6 +450,17 @@ rewrite is used only when it matches. It still anchors the whole name, so
 touched, and one the rewrite cannot help is kept as written, so the failure
 quotes what the model sent.
 
+### 2.35 Error pages are not where the step was going
+
+**Fix.** `executeNavigate` returns the main document's status from
+`page.goto`, and `executeAction` puts it on the result as `httpStatus`. When a
+navigate succeeds with a status of 400 or more, and `expectsErrorPage` finds
+nothing in the step text (a 4xx/5xx number, "error", "not found",
+"forbidden", "unauthorized", "status code", "server error"), the step loop
+turns it into a retryable failure: `Navigation answered HTTP 404: <url> is an
+error page, not the page the step asked for. Check the URL against the
+step`. The retry sees that message and the URL it went to.
+
 ## 3. Failures caused by the test files or the sites
 
 These are fixed in the test files.
@@ -462,6 +474,7 @@ These are fixed in the test files.
 | 55 | The web table's Add form posts to `#` and reloads, so no record is ever added. Its "Type to Search" box filters nothing either: typing changes no rows, and Enter submits the form to `?` | Read a cell and count the rows instead |
 | 44 | LetCode's Button page no longer has a double-click button, and its "new tab" button opens the workspace URL itself | Drop the double-click (covered by 41, 43, 49, 50), and check the new tab's address starts with the site |
 | 57 | `/sliders/` is now a 404; the page moved to `/slider/` | Navigate to `/slider/` |
+| 63 | "Drag the logo into the drop box": the logo already sits in one drop box (A), so "the drop box" named neither | Name the boxes as the page labels them, A and B |
 | 63 | The drag-and-drop row is `display: none` until the FIRST checkbox is ticked, and the test ticks 2 and 4 | Tick checkbox 1 first |
 | 59 | The first frame's dropdowns are now a course list (Java, Dot Net, Python, Javascript) and an IDE list; "Baby Cat" is gone | Select Python |
 | 60 | The sample table lists Friends characters now; there is no Clark | Read Joey's occupation |

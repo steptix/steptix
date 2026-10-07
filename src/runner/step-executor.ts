@@ -3943,6 +3943,24 @@ async function executeStepAttempt(
         }
       }
 
+      // A navigation that landed on an HTTP error page did not reach what the
+      // step asked for, unless the step is about that error: "Navigate to
+      // input.xhtml" sent to /pages/input.xhtml passed on a 404, and the next
+      // step had nothing to act on (SPEC-web-survey-fixes.md §2.35).
+      if (
+        result.success
+        && action.action === 'navigate'
+        && result.httpStatus !== undefined
+        && result.httpStatus >= 400
+        && !expectsErrorPage(instruction)
+      ) {
+        result = {
+          ...result,
+          success: false,
+          error: `Navigation answered HTTP ${result.httpStatus}: ${postUrl} is an error page, not the page the step asked for. Check the URL against the step`,
+        };
+      }
+
       if (!result.success) {
         turnFailed = true;
         turnError = result.error;
@@ -5315,3 +5333,12 @@ async function promptUser(question: string): Promise<string> {
 }
 // Suppress unused-export warning — kept intentionally as a deprecated fallback.
 void promptUser;
+
+/**
+ * Does the step expect to land on an error page — "Navigate to /status/404",
+ * "Verify the not-found page" — so an HTTP error status is its success, not a
+ * wrong URL (SPEC-web-survey-fixes.md §2.35)?
+ */
+export function expectsErrorPage(instruction: string): boolean {
+  return /\b[45]\d\d\b|\berror\b|not[ -]found|forbidden|unauthori[sz]ed|status code|server error/i.test(instruction);
+}
