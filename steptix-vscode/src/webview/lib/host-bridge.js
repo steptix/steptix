@@ -93,6 +93,22 @@ export const hostBridge = {
   postFocusTestResults() { post({ type: 'focusTestResults' }); },
   postDismissRunError() { post({ type: 'dismissRunError' }); },
   postClearStatus(line) { post({ type: 'clearStatus', line }); },
+  /**
+   * Copy a Variables row: `kind` is `'value'`, `'name'` or `'placeholder'`.
+   * `value` is the row's RAW value (absent when it has none yet) and `masked`
+   * whether the row showed it masked. The host writes the clipboard.
+   */
+  postCopyVariable(kind, name, value, masked) {
+    post({ type: 'copyVariable', kind, name, ...(value !== undefined && { value: String(value) }), masked });
+  },
+  /**
+   * Export the Variables section as CSV. `rows` are `{ name, value }` with
+   * each value AS SHOWN — masked where the row masks it — and `uri` is the
+   * test they belong to. The host asks where to save and writes the file.
+   */
+  postExportVariables(rows, uri) {
+    post({ type: 'exportVariables', rows, ...(uri && { uri }) });
+  },
   postWebviewState({ runtimeVariables, hostError, hasFocus, running }) {
     post({ type: 'webviewState', runtimeVariables, hostError, hasFocus, running });
   },

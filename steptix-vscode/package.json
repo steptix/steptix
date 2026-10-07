@@ -2,7 +2,7 @@
   "name": "steptix-vscode",
   "displayName": "Steptix (Beta)",
   "publisher": "pkent",
-  "version": "0.5.177",
+  "version": "0.5.185",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -71,7 +71,7 @@
       },
       {
         "view": "steptix.variables",
-        "contents": "No active run.\n\nVariables populate while a test is running and update after each step.\n\n[Run a Test](command:steptix.runSelected)"
+        "contents": "No active run.\n\nVariables populate while a test is running or paused at a breakpoint, and update after each step.\n\n[Run a Test](command:steptix.runSelected)"
       }
     ],
     "configuration": {
@@ -404,6 +404,34 @@
         "command": "steptix.addStepToRecording",
         "title": "Steptix: Add Step to Recording",
         "icon": "$(edit)"
+      },
+      {
+        "command": "steptix.copyVariableValue",
+        "title": "Copy Value",
+        "category": "Steptix",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "steptix.copyVariableUnmaskedValue",
+        "title": "Copy Unmasked Value",
+        "category": "Steptix",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "steptix.copyVariableName",
+        "title": "Copy Name",
+        "category": "Steptix"
+      },
+      {
+        "command": "steptix.copyVariablePlaceholder",
+        "title": "Copy as {{placeholder}}",
+        "category": "Steptix"
+      },
+      {
+        "command": "steptix.exportVariablesCsv",
+        "title": "Export variables as CSV…",
+        "category": "Steptix",
+        "icon": "$(download)"
       }
     ],
     "menus": {
@@ -417,6 +445,43 @@
           "command": "steptix.openInEditor",
           "when": "view == steptix.runner",
           "group": "navigation@2"
+        },
+        {
+          "command": "steptix.exportVariablesCsv",
+          "when": "view == steptix.variables",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "steptix.copyVariableValue",
+          "when": "view == steptix.variables && viewItem == steptixVariable",
+          "group": "inline"
+        },
+        {
+          "command": "steptix.copyVariableUnmaskedValue",
+          "when": "view == steptix.variables && viewItem == steptixVariable.masked",
+          "group": "inline"
+        },
+        {
+          "command": "steptix.copyVariableValue",
+          "when": "view == steptix.variables && viewItem == steptixVariable",
+          "group": "1_copy@1"
+        },
+        {
+          "command": "steptix.copyVariableUnmaskedValue",
+          "when": "view == steptix.variables && viewItem == steptixVariable.masked",
+          "group": "1_copy@1"
+        },
+        {
+          "command": "steptix.copyVariableName",
+          "when": "view == steptix.variables && viewItem =~ /^steptixVariable/",
+          "group": "1_copy@2"
+        },
+        {
+          "command": "steptix.copyVariablePlaceholder",
+          "when": "view == steptix.variables && viewItem =~ /^steptixVariable/",
+          "group": "1_copy@3"
         }
       ],
       "editor/title": [
@@ -623,6 +688,26 @@
         {
           "command": "steptix.addStepToRecording",
           "when": "steptix.recording"
+        },
+        {
+          "command": "steptix.copyVariableValue",
+          "when": "false"
+        },
+        {
+          "command": "steptix.copyVariableUnmaskedValue",
+          "when": "false"
+        },
+        {
+          "command": "steptix.copyVariableName",
+          "when": "false"
+        },
+        {
+          "command": "steptix.copyVariablePlaceholder",
+          "when": "false"
+        },
+        {
+          "command": "steptix.exportVariablesCsv",
+          "when": "false"
         }
       ]
     },
@@ -661,6 +746,12 @@
         "command": "steptix.toggleBreakpoint",
         "key": "f9",
         "when": "editorTextFocus && steptix.activeFile"
+      },
+      {
+        "command": "steptix.copyVariableValue",
+        "key": "ctrl+c",
+        "mac": "cmd+c",
+        "when": "focusedView == steptix.variables && !inputFocus"
       },
       {
         "command": "steptix.stepInto",

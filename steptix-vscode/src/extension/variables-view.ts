@@ -5,6 +5,14 @@ import {
   type FrameInfo,
   type ScopeMasking,
 } from 'steptix-runner-core';
+import {
+  variableCopy,
+  variablesCsv,
+  variablesCsvFileName,
+  type VariableCopyKind,
+  type VariableCopyTarget,
+  type VariableExportRow,
+} from './variable-copy-core.js';
 
 /**
  * Read-only TreeView contributed to the Steptix activity-bar container.
@@ -92,7 +100,89 @@ export interface ScopeSource {
  *  See src/skills/expander.ts `applySkillScope` → `internalRenames`. */
 const SKILL_INTERNAL_PREFIX = /^__skill\d+_/;
 
-interface VariableNode {
+/**
+ * Put one variable's name, value or `{{placeholder}}` on the clipboard and say
+ * so in the status bar. Shared by the Variables view's copy commands and the
+ * Test Runner panel's `copyVariable` message, so both say the same thing.
+ */
+export async function copyVariable(kind: VariableCopyKind, target: VariableCopyTarget): Promise<boolean> {
+  const result = variableCopy(kind, target);
+  if (result.ok) await vscode.env.clipboard.writeText(result.text);
+  vscode.window.setStatusBarMessage(result.status, 3000);
+  return result.ok;
+}
+
+/** How long a copied row shows its tick — the panel's is the same. */
+const COPIED_MS = 1500;
+
+/** Where an export goes: the save dialog, or what a test put in its place. */
+type ExportTargetPicker = (suggested: vscode.Uri | undefined) => Thenable<vscode.Uri | undefined>;
+
+const saveDialogPicker: ExportTargetPicker = (suggested) =>
+  vscode.window.showSaveDialog({
+    title: 'Export Variables as CSV',
+    saveLabel: 'Export',
+    defaultUri: suggested,
+    filters: { CSV: ['csv'] },
+  });
+
+let pickExportTarget: ExportTargetPicker = saveDialogPicker;
+
+/** Test-only: answer the save dialog. `null` restores the real one. */
+export function setVariablesExportPickerForTests(picker: ExportTargetPicker | null): void {
+  pickExportTarget = picker ?? saveDialogPicker;
+}
+
+/**
+ * Write the variables a view lists to a CSV file the user picks — the Variables
+ * view's title-bar action and the Test Runner panel's `exportVariables`
+ * message. `rows` carry the values as the view SHOWS them, masked; the file is
+ * an artefact (variable-copy-core.ts). The dialog suggests
+ * `<test>-variables.csv` beside the test the variables came from.
+ */
+export async function exportVariables(
+  rows: readonly VariableExportRow[],
+  testUri: vscode.Uri | null,
+): Promise<void> {
+  if (rows.length === 0) {
+    vscode.window.setStatusBarMessage('Steptix: no variables to export', 3000);
+    return;
+  }
+  const name = variablesCsvFileName(testUri?.path ?? null);
+  const folder = testUri
+    ? vscode.Uri.joinPath(testUri, '..')
+    : vscode.workspace.workspaceFolders?.[0]?.uri;
+  const target = await pickExportTarget(folder ? vscode.Uri.joinPath(folder, name) : undefined);
+  if (!target) return;
+  const fileName = target.path.split('/').pop() ?? name;
+  try {
+    await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(variablesCsv(rows)));
+  } catch (err) {
+    // Said here, not thrown: from the panel's button nothing above this would
+    // show it, and the commonest cause — the CSV still open in Excel, which
+    // locks it on Windows — is one the user can fix.
+    const reason = err instanceof Error ? err.message : String(err);
+    void vscode.window.showErrorMessage(
+      `Steptix: couldn't export to ${fileName}. ${reason}. If another program has the file open, close it and export again.`,
+    );
+    return;
+  }
+  const noun = rows.length === 1 ? 'variable' : 'variables';
+  // Not awaited: the notification stays until dismissed, and the export is done.
+  void vscode.window
+    .showInformationMessage(`Steptix: exported ${rows.length} ${noun} to ${fileName}`, 'Open')
+    .then((choice) => {
+      if (choice === 'Open') void vscode.window.showTextDocument(target);
+    });
+}
+
+/** Whether the row renders something other than its raw value — a masked
+ *  name, or a record holding a secret column. */
+function isMasked(node: VariableNode): boolean {
+  return maskIfSecret(node.name, node.rawValue, node.masking) !== node.rawValue;
+}
+
+export interface VariableNode {
   name: string;
   rawValue: string;
   /**
@@ -119,6 +209,16 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
    * exist before VS Code can create the TreeView around it.
    */
   private view: vscode.TreeView<VariableNode> | null = null;
+  /** The row just copied, which shows a tick until the timer clears it. */
+  private copiedName: string | null = null;
+  private copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The last rows `getChildren` built, and what they were built from. */
+  private rows: {
+    scope: Record<string, string>;
+    masking: ScopeMasking;
+    isTestFrame: boolean;
+    nodes: VariableNode[];
+  } | null = null;
 
   constructor(private readonly source: ScopeSource) {}
 
@@ -131,6 +231,7 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
   }
 
   dispose(): void {
+    if (this.copiedTimer) clearTimeout(this.copiedTimer);
     this.emitter.dispose();
   }
 
@@ -146,13 +247,65 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
     const display = maskIfSecret(node.name, node.rawValue, node.masking);
     const item = new vscode.TreeItem(node.name, vscode.TreeItemCollapsibleState.None);
     item.description = display;
-    item.iconPath = new vscode.ThemeIcon('symbol-variable');
+    item.iconPath =
+      node.name === this.copiedName
+        ? new vscode.ThemeIcon('check', new vscode.ThemeColor('testing.iconPassed'))
+        : new vscode.ThemeIcon('symbol-variable');
     // Tooltip shows the unmasked length so users can sanity-check a
     // captured token / cookie without revealing it. The full value is
-    // available via the "copy variable value" command if we ever add
-    // one — out of scope for Phase 4 MVP.
+    // one right-click away: Copy Value, or Copy Unmasked Value on a
+    // masked row.
     item.tooltip = `${node.name} (${node.rawValue.length} chars)`;
+    // Picks the copy commands package.json offers on this row. A masked
+    // row offers "Copy Unmasked Value" in place of "Copy Value", so the
+    // menu says what is about to land on the clipboard.
+    item.contextValue = display !== node.rawValue ? 'steptixVariable.masked' : 'steptixVariable';
     return item;
+  }
+
+  /**
+   * The copy commands' handler. `node` is the row a menu was opened on;
+   * absent from a keybinding (Ctrl+C), where the row is the view's
+   * selection.
+   *
+   * Copies `node.rawValue` — the value the row rendered, snapshotted at
+   * `getChildren` time — not a fresh read of the scope, which a
+   * `frame:scope` landing since the render may have moved on.
+   */
+  async copy(kind: VariableCopyKind, node?: VariableNode): Promise<void> {
+    const target = node ?? this.view?.selection[0];
+    if (!target) return;
+    const ok = await copyVariable(kind, {
+      name: target.name,
+      value: target.rawValue,
+      masked: isMasked(target),
+    });
+    if (ok) this.markCopied(target.name);
+  }
+
+  /**
+   * A tree row cannot animate, so a copied row says so with its icon: a green
+   * tick for {@link COPIED_MS}, then its variable icon again. The panel's rows
+   * do the same with a fade.
+   */
+  private markCopied(name: string): void {
+    if (this.copiedTimer) clearTimeout(this.copiedTimer);
+    this.copiedName = name;
+    this.emitter.fire();
+    this.copiedTimer = setTimeout(() => {
+      this.copiedTimer = undefined;
+      this.copiedName = null;
+      this.emitter.fire();
+    }, COPIED_MS);
+  }
+
+  /** Every row the view lists, valued as it shows them — masked where it
+   *  masks. What the title bar's Export as CSV writes. */
+  exportRows(): VariableExportRow[] {
+    return this.getChildren().map((node) => ({
+      name: node.name,
+      value: maskIfSecret(node.name, node.rawValue, node.masking),
+    }));
   }
 
   getChildren(node?: VariableNode): VariableNode[] {
@@ -168,15 +321,37 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
     // they're shown there. Phase 4.B will replace this with a real
     // per-frame filter that reverse-resolves the renames.
     const isTestFrame = !frame || frame.id === '';
+    // Read once for the whole render, beside the scope it describes.
+    const masking = this.source.currentMasking?.() ?? {};
+    // The same rows while nothing they came from has changed. Each
+    // `frame:scope` stores a fresh scope and masking object, so identity is the
+    // test. Stable rows are what `TreeView.reveal` needs: it finds a row by the
+    // object VS Code was given, not by its name.
+    const cached = this.rows;
+    if (cached && cached.scope === scope && cached.masking === masking && cached.isTestFrame === isTestFrame) {
+      return cached.nodes;
+    }
     // `compareVariableNames`, not a plain `.sort()`: a record's `_row` has to
     // lead its columns (§7.4), and code-unit order puts `_` between the upper
     // and the lower case letters — so an `Amount` alias came out ahead of it.
     const names = Object.keys(scope)
       .filter((name) => !isTestFrame || !SKILL_INTERNAL_PREFIX.test(name))
       .sort(compareVariableNames);
-    // Read once for the whole render, beside the scope it describes.
-    const masking = this.source.currentMasking?.() ?? {};
-    return names.map((name) => ({ name, rawValue: scope[name] ?? '', masking }));
+    const nodes = names.map((name) => ({ name, rawValue: scope[name] ?? '', masking }));
+    this.rows = { scope, masking, isTestFrame, nodes };
+    return nodes;
+  }
+
+  /** Flat list: every row is a root. `TreeView.reveal` requires this. */
+  getParent(): undefined {
+    return undefined;
+  }
+
+  /** Test-only: select the row named `name`, as a click would. */
+  async selectForTests(name: string): Promise<void> {
+    const node = this.getChildren().find((n) => n.name === name);
+    if (!node || !this.view) throw new Error(`no Variables row named ${name}`);
+    await this.view.reveal(node, { select: true, focus: true });
   }
 
   /** Test-only readback of the description the view would show. Keeps the

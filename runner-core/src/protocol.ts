@@ -1657,7 +1657,21 @@ export interface HostRecordAddStepResultMsg {
   reason?: string;
 }
 
+/**
+ * The answer to the panel's `copyVariable`: whether the clipboard now holds
+ * it. The panel shows its "copied" tick only on `ok`, so a copy the host
+ * refused (a name no `{{placeholder}}` can reference, a row with no value)
+ * never looks like it worked.
+ */
+export interface HostVariableCopiedMsg {
+  type: 'variableCopied';
+  name: string;
+  kind: 'value' | 'name' | 'placeholder';
+  ok: boolean;
+}
+
 export type HostToWebviewMsg =
+  | HostVariableCopiedMsg
   | HostActiveFileMsg
   | HostRunEventMsg
   | HostRunErrorMsg
@@ -1766,6 +1780,36 @@ export interface WebviewDismissRunErrorMsg {
 export interface WebviewClearStatusMsg {
   type: 'clearStatus';
   line: number;
+}
+
+/**
+ * User picked a Copy item on a Variables row's context menu, or the row's
+ * hover copy button. The host writes the clipboard, so the panel and the
+ * Variables view share one rule for what lands there and one status-bar line
+ * about it (steptix-vscode/src/extension/variable-copy-core.ts).
+ *
+ * `value` is the RAW value the row holds — unmasked, absent when the row has
+ * no value yet — and `masked` says whether the row was showing it masked,
+ * which changes only the wording.
+ */
+export interface WebviewCopyVariableMsg {
+  type: 'copyVariable';
+  kind: 'value' | 'name' | 'placeholder';
+  name: string;
+  value?: string;
+  masked?: boolean;
+}
+
+/**
+ * User picked Export as CSV in the Variables section. `rows` are the rows the
+ * section lists with their values AS SHOWN — masked where it masks, since the
+ * CSV is a file — and `uri` is the test they belong to, which the host uses to
+ * suggest a file name and folder.
+ */
+export interface WebviewExportVariablesMsg {
+  type: 'exportVariables';
+  rows: Array<{ name: string; value: string }>;
+  uri?: string;
 }
 
 /**
@@ -1942,6 +1986,8 @@ export type WebviewToHostMsg =
   | WebviewFocusTestResultsMsg
   | WebviewDismissRunErrorMsg
   | WebviewClearStatusMsg
+  | WebviewCopyVariableMsg
+  | WebviewExportVariablesMsg
   | WebviewStateMsg
   | WebviewRerunSkillStepMsg;
 
@@ -1969,6 +2015,8 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'focusTestResults' ||
     t === 'dismissRunError' ||
     t === 'clearStatus' ||
+    t === 'copyVariable' ||
+    t === 'exportVariables' ||
     t === 'webviewState' ||
     t === 'rerunSkillStep' ||
     t === 'compile' ||
