@@ -195,6 +195,16 @@ which are about compiled code-behind, had nothing to act on in either run.
 | 60 | Try Testing This | pass | The early submit goes unnoticed (finding 2) |
 | 61–72 | | pass | |
 
+### Reruns
+
+Single files run again after a later change, one row per run. They are not
+part of the A–D comparison: each runs one file through the CLI runner
+(`node dist/index.js run`) on `openai/gpt-6-luna`, at the commit named.
+
+| # | Test | Change | Commit | Result | Notes |
+|---|------|--------|--------|--------|-------|
+| 62 | Leafground | steptix/steptix#30: role names match visible text (issue #26) | `a869e2bc` | **pass** 23/23, 229 s, 0.95 M tokens | Run 2026-10-08 12:29 (log clock). The visible-text fallback resolved three role names that had no exact match. Two were `role=button[name="Show"]` in steps 18 and 19, and one was `[role="dialog"] >> role=button[name="Dismiss"]` in step 19, the PrimeFaces button that prompted §2.34. All three buttons' names start with an icon glyph. Steps 7 (a CSS `select[value=…]` that timed out) and 12 (a check that read a missing element) passed on retry; neither involved a role name |
+
 ### Findings: what the framework does not support, or gets wrong
 
 Fixed during the survey, with a spec section each: §2.1–§2.50. Raised as issues: steptix/steptix#20, #21, #24, #25 and #26. Still open:
