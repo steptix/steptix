@@ -3669,7 +3669,9 @@ export interface RecordingEntryInput {
  * A step qualifies when ALL of these hold:
  *  - it ran on the browser surface, and nothing refuses it (`refuseReason`);
  *  - every recorded action is a `read` or a `count` (`find` and `expand` only
- *    showed the model the page, and are left out), each with a selector;
+ *    showed the model the page, and a `noop` did nothing — it is how the model
+ *    keeps a list read it was shown, src/runner/list-read-review.ts — so all
+ *    three are left out), each with a selector;
  *  - each of them stores into a capture the step's own line declares, and
  *    every capture the line declares is stored by one of them — so the entry
  *    stores exactly what the run stored;
@@ -3692,7 +3694,7 @@ export function entryFromRecording(input: RecordingEntryInput): string | undefin
   if (refuseReason(binding.source, input.actions) !== undefined) return undefined;
   if (parseFlowControlStep(binding.source.trim())) return undefined;
 
-  const reads = input.actions.filter((a) => !EXPLORATION_ACTIONS.has(a.action));
+  const reads = input.actions.filter((a) => !EXPLORATION_ACTIONS.has(a.action) && a.action !== 'noop');
   if (reads.length === 0) return undefined;
   if (!reads.every((a) => a.action === 'read' || a.action === 'count')) return undefined;
 

@@ -1001,7 +1001,8 @@ and goes one step further: a step that only reads needs no model at all.
 **Which steps qualify.** All of these must hold:
 
 - Every recorded action is a `read` or a `count`. `find` and `expand` are
-  ignored: they only showed the model the page.
+  ignored: they only showed the model the page. So is `noop`, which did
+  nothing; it is how the model keeps a list read it was shown (below).
 - Every variable the step captured came straight from one of those actions,
   so the entry stores exactly what the run stored.
 - The step states no expectation: the transcript has no `assert` action.
@@ -1065,7 +1066,15 @@ own. §6.2 checks the selector either way.
   as §6.5 defines it: the entry takes no action, so the step falls back to
   AI and the entry is regenerated. This is the check that would have caught
   B: its selector matched both `span.account-name` and `span.account-number`.
-  An empty result passes, as it does under AI.
+  An empty result passes.
+- **Only a read the AI run stood by is compiled** (issue #28). Under AI, a
+  read of every match or a count that comes back empty, or matches more than
+  one kind of element, is shown to the model before the step can end on it:
+  what the selector matched, kind by kind, with a few values of each
+  (`src/runner/list-read-review.ts`). The model reads again, and the new read
+  replaces the old, or it keeps the read. `actionsOf` drops every read it was
+  shown and did not keep, so a read the model replaced — B's over-broad
+  selector, or one that matched nothing — never reaches the entry.
 - **Review leaves these entries alone.** They carry `fromRecording: true`.
   Review's prompt says not to change them, and a revision that changes one is
   rejected, as the other rejections are (`review.ts:270-306`). The rejection

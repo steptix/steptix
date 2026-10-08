@@ -1256,12 +1256,18 @@ function renderSubAction(
       ? `<div class="sub-action-detail">dragged: ${escapeHtml(sub.action.selector ?? '?')} → onto: `
         + `${escapeHtml(sub.action.target ?? '?')}</div>`
       : '';
+  // A list read that came back empty or mixed, and what the model made of it
+  // (src/runner/list-read-review.ts): without it a read that stored nothing
+  // looks like any other read that worked.
+  const listReviewHtml = sub.listReview !== undefined
+    ? `<div class="sub-action-detail">${escapeHtml(describeListReview(sub.listReview))}</div>`
+    : '';
   const onComputerTurn = opts.turnShot !== undefined;
   const ownShot = onComputerTurn && sub.screenshotBase64 === opts.turnShot
     ? undefined
     : sub.screenshotBase64;
   const hasBody = ownShot || sub.domSnapshot || sub.aiReasoning || sub.error || sub.apiCallData
-    || uploadHtml !== '' || mappingHtml !== '' || dragHtml !== '';
+    || uploadHtml !== '' || mappingHtml !== '' || dragHtml !== '' || listReviewHtml !== '';
 
   const subUrlHtml = sub.pageUrl ? `<div class="screenshot-url">${escapeHtml(sub.pageUrl)}</div>` : '';
   const screenshotHtml = onComputerTurn && !ownShot
@@ -1307,8 +1313,18 @@ function renderSubAction(
     <span class="sub-action-desc">${escapeHtml(description)}</span>
     ${timeLabel}
   </div>
-  ${hasBody ? `<div class="sub-action-body">${uploadHtml}${dragHtml}${mappingHtml}${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
+  ${hasBody ? `<div class="sub-action-body">${uploadHtml}${dragHtml}${mappingHtml}${listReviewHtml}${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
 </div>`;
+}
+
+/** A reviewed list read's line: what happened to it, then what it matched. */
+function describeListReview(review: NonNullable<SubActionResult['listReview']>): string {
+  const how = review.outcome === 'kept'
+    ? 'shown to the model, which kept it'
+    : review.outcome === 'replaced'
+      ? 'shown to the model, which replaced it with a later read'
+      : 'not answered by the model before the step ended';
+  return `list read ${how} — ${review.text}`;
 }
 
 /**

@@ -851,6 +851,7 @@ export function buildContinuationMessage(
   scrollPosition?: ScrollPositionInfo,
   values?: StepValues,
   authoredInstruction?: string,
+  listReads?: string[],
 ): ChatMessage {
   const instructionText = authoredInstruction ?? originalInstruction;
 
@@ -876,6 +877,8 @@ export function buildContinuationMessage(
     ? `## Exploration Results\n${explorationResults.join('\n\n')}\n\n`
     : '';
 
+  const listReadsSection = formatListReadsSection(listReads);
+
   const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
 
   // Sits directly under Current URL — the two together are the whole of "where
@@ -894,7 +897,7 @@ ${valuesSection}
 
 Current URL: ${currentUrl}${scrollLine}
 
-${openPagesSection}${explorationSection}## DOM Snapshot
+${openPagesSection}${explorationSection}${listReadsSection}## DOM Snapshot
 \`\`\`html
 ${domSnapshot}
 \`\`\`${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
@@ -919,6 +922,22 @@ Return ONE action, and always set needs_reeval: true if part of this instruction
     role: 'user',
     content: textContent,
   };
+}
+
+/**
+ * The continuation turn's account of list reads that came back empty or mixed
+ * (src/runner/list-read-review.ts): what each selector matched, and the two
+ * answers the model may give. Empty when there are none, so every other
+ * continuation turn reads as it always did.
+ */
+export function formatListReadsSection(lines: string[] | undefined): string {
+  if (lines === undefined || lines.length === 0) return '';
+  return `## Lists to check
+A read of every match, or a count, in this step came back empty or matched more than one kind of element. Look at what it matched before the step ends:
+${lines.map((line) => `- ${line}`).join('\n')}
+If the selector missed what the step means, or caught other elements beside it, read again with a selector that matches only what the step asks for, and the same "as": the new read replaces this one. If this is the answer (the list really is empty, or every kind belongs in it), answer noop with needs_reeval false.
+
+`;
 }
 
 /**

@@ -787,8 +787,10 @@ const MATCHES_QUIET_MS = 300;
  *
  * Its self-check: given the `kinds` the run's read matched, a match of any
  * other kind fails as `step.check` does — in an entry that only reads, the
- * step falls back to AI and the entry is regenerated. An empty result passes,
- * as it does under AI.
+ * step falls back to AI and the entry is regenerated. An empty result passes:
+ * the entry was compiled from a read the model was shown and kept when it
+ * came back empty or mixed (src/runner/list-read-review.ts), and one it
+ * replaced is never compiled.
  */
 async function recordedRead(
   kind: 'read' | 'count',

@@ -68,6 +68,7 @@ import {
 } from './placeholder-substitution.js';
 import { decideConditionLocally, type LocalDecision } from './literal-decision.js';
 import { storeCapture } from './store-capture.js';
+import { listReadConcern, sameListRead, unseenListReadError, type ListReadConcern } from './list-read-review.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import {
   isReturnClaim,
@@ -2578,6 +2579,15 @@ async function executeStepAttempt(
   // answers bare once tends to answer bare again, and re-evaluating every
   // time would repeat a "Click Next" until the turn cap.
   let inferredReevalUsed = false;
+  // A list read that came back empty or mixed is shown to the model before
+  // the step can end on it (src/runner/list-read-review.ts, issue #28).
+  /** The latest read under review, per stored name, so a later read of the name replaces it. */
+  const reviewedReads = new Map<string, SubActionResult>();
+  /** What the next turn's prompt shows, and the reads it shows. */
+  let listReadLines: string[] = [];
+  let listReadsShown = new Map<string, SubActionResult>();
+  /** The one turn per attempt the step may add only to show them. */
+  let listReviewTurnUsed = false;
   let stallCount = 0;
   const STALL_LIMIT = 2;
 
@@ -2857,8 +2867,10 @@ async function executeStepAttempt(
         // was the widest surface a secret reached (decision 2).
         stepValues ?? { parameters: [] },
         promptAuthored,
+        listReadLines,
       );
     }
+    listReadLines = [];
 
     const messages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -2963,6 +2975,8 @@ async function executeStepAttempt(
     }
 
     // 8. Execute each sub-action
+    /** This turn's list reads that came back empty or mixed, by stored name. */
+    const turnListConcerns = new Map<string, { concern: ListReadConcern; sub: SubActionResult; action: AIAction }>();
     let turnFailed = false;
     /** Set when an action reported a failure no retry could change. */
     let turnNonRetryable = false;
@@ -3929,6 +3943,34 @@ async function executeStepAttempt(
         timestamp: new Date().toISOString(),
       });
 
+      // A list read that came back empty or mixed (src/runner/list-read-review.ts).
+      // A read stored under a name already under review replaces that read,
+      // so only the later one can reach the code-behind. A new concern waits
+      // for the turn's end, which shows it to the model — unless the model was
+      // shown exactly this read and read it the same way again: that keeps it.
+      if (result.success && typeof action.as === 'string') {
+        const sub = turnSubActions[turnSubActions.length - 1]!;
+        const earlier = reviewedReads.get(action.as);
+        if (earlier?.listReview !== undefined) {
+          earlier.listReview.outcome = 'replaced';
+          reviewedReads.delete(action.as);
+          turnListConcerns.delete(action.as);
+        }
+        const concern = listReadConcern(action, result, (text) => redact(text, secretsNow()));
+        if (concern !== undefined) {
+          const shown = listReadsShown.get(action.as);
+          const kept = shown !== undefined && sameListRead(shown.action, emitted);
+          sub.listReview = { text: concern.text, outcome: kept ? 'kept' : 'pending' };
+          reviewedReads.set(action.as, sub);
+          if (kept) {
+            logger.info(`Step ${stepIndex}: the model read ${action.as} the same way again — keeping it: ${concern.text}`);
+          } else {
+            turnListConcerns.set(action.as, { concern, sub, action });
+            logger.warn(`Step ${stepIndex}: ${concern.text}`);
+          }
+        }
+      }
+
       // After a successful "wait" on a CSRF-related selector, automatically extract and
       // cache the token value so a subsequent api_call can inject it without needing an
       // explicit extract_csrf action from the AI.
@@ -4049,10 +4091,20 @@ async function executeStepAttempt(
       );
     }
 
+    // The list reads this turn's prompt showed the model: one it did not read
+    // again, it kept (src/runner/list-read-review.ts).
+    for (const sub of listReadsShown.values()) {
+      if (sub.listReview?.outcome === 'pending') sub.listReview.outcome = 'kept';
+    }
+    listReadsShown = new Map();
+
     // 9. The step returned: it is over whatever `needs_reeval` says. A model
     // that asked for another turn after ending the flow would be asking to act
     // inside a flow that no longer exists.
     if (flowControlSignal) {
+      // Nothing is shown after a return, so this turn's list reads stand as
+      // they did before reads were reviewed at all.
+      for (const { sub } of turnListConcerns.values()) delete sub.listReview;
       break;
     }
 
@@ -4077,7 +4129,40 @@ async function executeStepAttempt(
       );
     }
 
-    // 9b. Check needs_reeval: if false/absent, the step is complete after this turn
+    // 9b. A list read this turn that came back empty or mixed is shown to the
+    // model before the step can end on it (src/runner/list-read-review.ts):
+    // in the next turn when there is one anyway, else in one turn added for
+    // it — once per attempt. With neither, the step fails rather than end on
+    // a list nobody has looked at, and the retry is told what it matched.
+    if (turnListConcerns.size > 0) {
+      const concerns = [...turnListConcerns.values()];
+      const nextTurnAnyway = aiResponse.needs_reeval === true || inferredReeval;
+      if (currentTurn < maxTurns && (nextTurnAnyway || !listReviewTurnUsed)) {
+        if (!nextTurnAnyway) {
+          listReviewTurnUsed = true;
+          aiResponse.needs_reeval = true;
+          logger.info(`Turn ${currentTurn}: showing the model the list read${concerns.length === 1 ? '' : 's'} before the step ends`);
+        }
+        listReadLines = concerns.map((c) => c.concern.text);
+        listReadsShown = new Map(concerns.map((c) => [c.concern.name, c.sub]));
+      } else {
+        const unseen = unseenListReadError(concerns.map((c) => c.concern));
+        logger.error(`Step ${stepIndex}: ${unseen}`);
+        for (const { concern, action } of concerns) {
+          collectedFailures.push({
+            selector: action.selector ?? '',
+            error: concern.text,
+            actionType: action.action,
+            startUrl: attemptStartUrl,
+            failureUrl: page.url(),
+            navigated: page.url() !== attemptStartUrl,
+          });
+        }
+        throw new StepFailureError(unseen, collectedFailures, allTurns);
+      }
+    }
+
+    // 9c. Check needs_reeval: if false/absent, the step is complete after this turn
     if (!aiResponse.needs_reeval && !inferredReeval) {
       break;
     }

@@ -9,6 +9,31 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — a step that reads a list no longer passes on a read that went wrong
+
+"Read the name of every account [store as: accounts]" stored whatever the
+model's selector matched. A selector that matched nothing stored an empty
+list, so the `For each` after it checked nothing. One that also caught the
+card numbers beside the names stored six values, so it checked those too.
+Both runs passed, and since a step that only reads is compiled from the
+run's read, the code-behind kept the wrong list.
+
+- **The model sees a list read that came back empty or mixed before the step
+  ends.** That means a read of every match, or a count, that stored nothing,
+  or that matched more than one kind of element (tag plus class names). The
+  next turn shows what the selector matched, kind by kind, with the first
+  few values of each. The model reads again with a better selector, which
+  replaces the read, or answers `noop` to keep it. An empty list can be the
+  right answer. A read that finds one kind of element costs nothing extra.
+- **At most one turn per attempt is added for this.** If the model changes
+  the read and the new one is still empty or mixed, the attempt fails rather
+  than pass on a list nobody has looked at, and the retry is told what the
+  selector matched.
+- **Only a read the model kept is compiled.** A read it replaced, or one an
+  attempt failed before it answered, is left out of what Run & Compile
+  writes. The report says, under each such read, whether the model kept it
+  or replaced it.
+
 ### Fixed — compiled code-behind holds up on replay
 
 Run & Compile's code could pass under AI and fail only on a later replay: an

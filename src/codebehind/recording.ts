@@ -5,6 +5,7 @@ import type { ActionTargeting } from '../browser/actions.js';
 import type { ObservedRequest } from '../browser/page-state.js';
 import type { AssertionResult, StepResult, StepStatus, SubActionResult } from '../report/types.js';
 import { logger } from '../utils/logger.js';
+import { listReadCompiles } from '../runner/list-read-review.js';
 import {
   isSecretName,
   secretValues,
@@ -801,6 +802,12 @@ export async function readRecording(testFilePath: string): Promise<Recording | n
  * runtime marked `deliberate`, so an UNCLAIMED `fail` the model tried and was
  * refused — which also carries an `error` — stays dropped.
  *
+ * So is a list read the step showed the model because it came back empty or
+ * mixed, unless the model kept it (src/runner/list-read-review.ts): one it
+ * replaced with a better read, or one an attempt failed before it answered,
+ * was not the step's read, and a step that only reads is compiled straight
+ * from what this returns (docs/specs/SPEC-codebehind-robustness.md §6.6).
+ *
  * Lives in this module rather than in `candidate.ts`, which re-exports it,
  * only because every ordinary run already loads this file while `candidate.ts`
  * pulls in prettier and esbuild through the writer. One implementation, in the
@@ -811,6 +818,9 @@ export function actionsOf(result: StepResult | undefined): RecordedAction[] {
   return (result?.turns ?? [])
     .flatMap((t) => t.subActions)
     .filter((sa) => !sa.error || (keepFail && sa.action.action === 'fail'))
+    // A list read the model was shown and did not keep was not this step's
+    // read: replaced by a later one, or never answered (issue #28).
+    .filter(listReadCompiles)
     .map((sa) => {
       // Here and not later, for `targeting`'s reason: a URL can carry a
       // secret, and the recording redacts what this returns.
