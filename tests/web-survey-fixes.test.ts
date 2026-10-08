@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
-import { executeAction, normaliseColour, normaliseKeyName, scrollToFitBoth, waitForThreshold } from '../src/browser/actions.js';
+import { executeAction, normaliseColour, normaliseKeyName, resolveRoleName, scrollToFitBoth, waitForThreshold } from '../src/browser/actions.js';
 import { parseAIResponse, parseAssertionCode } from '../src/ai/action-parser.js';
 import { installDialogGuard } from '../src/browser/manager.js';
 import { dialogRecords, disarmDialog } from '../src/browser/dialogs.js';
@@ -878,7 +878,163 @@ describe('§2.50 notifications are what the page marks as live regions', () => {
   });
 });
 
-describe('§2.34 role names with an icon glyph', () => {
+describe('§2.34 role names match what a person sees', () => {
+  const hit = (page: Page): Promise<string | undefined> => page.evaluate(() => document.body.dataset['hit']);
+
+  it.each([
+    ['an image', `<img alt="tick">`],
+    ['an SVG with a title', `<svg width="10" height="10"><title>Close icon</title><rect width="10" height="10"/></svg>`],
+    ['a glyph written into the DOM', `<span>✔</span>`],
+  ])('clicks the button whose visible text is the name when %s adds to its accessible name', async (_what, icon) => {
+    const page = await pageWith(`
+      <button onclick="document.body.dataset.hit = 'all'">${icon} Dismiss all</button>
+      <button onclick="document.body.dataset.hit = 'one'">${icon} Dismiss</button>`);
+    try {
+      expect(await page.locator('role=button[name="Dismiss"]').count()).toBe(0);
+      const result = await executeAction(page, act({ action: 'click', selector: 'role=button[name="Dismiss"]' }));
+      expect(result.success).toBe(true);
+      expect(await hit(page)).toBe('one');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('clicks a button by the symbol it shows, and still by its label', async () => {
+    const page = await pageWith(`
+      <button aria-label="Close dialog" onclick="document.body.dataset.hit = (document.body.dataset.hit || '') + 'x'">×</button>`);
+    try {
+      expect((await executeAction(page, act({ action: 'click', selector: 'role=button[name="Close dialog"]' }))).success).toBe(true);
+      expect((await executeAction(page, act({ action: 'click', selector: 'role=button[name="×"]' }))).success).toBe(true);
+      expect(await hit(page)).toBe('xx');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('finds a button CSS uppercases by the text the model wrote', async () => {
+    const page = await pageWith(`
+      <button style="text-transform: uppercase" onclick="document.body.dataset.hit = 'close'"><img alt="cross"> Close</button>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: 'role=button[name="Close"]' }));
+      expect(result.success).toBe(true);
+      expect(await hit(page)).toBe('close');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('refuses to guess between two buttons that read the same, and names both', async () => {
+    const page = await pageWith(`
+      <button onclick="document.body.dataset.hit = 'approve'"><img alt="approve"> Save</button>
+      <button onclick="document.body.dataset.hit = 'discard'"><img alt="discard"> Save</button>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: 'role=button[name="Save"]' }));
+      expect(result.success).toBe(false);
+      expect(result.matchCount).toBe(2);
+      expect(result.error).toContain('no button is named exactly "Save", and 2 read "Save" on screen');
+      expect(result.error).toContain('named "approve Save"');
+      expect(result.error).toContain('named "discard Save"');
+      expect(result.error).toContain('e.g. role=button[name="approve Save"]');
+      expect(await hit(page)).toBeUndefined();
+      // The name it suggests is one step 1 matches.
+      expect((await executeAction(page, act({ action: 'click', selector: 'role=button[name="approve Save"]' }))).success).toBe(true);
+      expect(await hit(page)).toBe('approve');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('lists the buttons the page has when nothing reads the name, and clicks none', async () => {
+    const page = await pageWith(`
+      <button onclick="document.body.dataset.hit = 'badge'"><img alt="tick"> Dismiss <span class="badge">3</span></button>
+      <button onclick="document.body.dataset.hit = 'cancel'">Cancel</button>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: 'role=button[name="Dismiss"]' }));
+      expect(result.success).toBe(false);
+      expect(result.matchCount).toBe(0);
+      expect(result.error).toContain('No button named "Dismiss" and none reads "Dismiss" on screen. Buttons on the page:');
+      expect(result.error).toContain('  - named "tick Dismiss 3" (reads "Dismiss 3")');
+      expect(result.error).toContain('  - named "Cancel"\n');
+      expect(await hit(page)).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
+  it('never lets a shorter name reach a longer label', async () => {
+    const page = await pageWith(`<button><img alt="tick"> Dismiss all</button>`);
+    try {
+      const resolution = await resolveRoleName(page, 'role=button[name="Dismiss"]');
+      expect(resolution).toMatchObject({ selector: 'role=button[name="Dismiss"]' });
+      expect(resolution.refusal).toBeUndefined();
+      expect(await resolution.describeMiss!()).toContain('  - named "tick Dismiss all" (reads "Dismiss all")');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('leaves a selector that matches as written alone', async () => {
+    const page = await pageWith(`<button>Dismiss</button><button><img alt="tick"> Dismiss</button>`);
+    try {
+      expect(await resolveRoleName(page, 'role=button[name="Dismiss"]')).toEqual({ selector: 'role=button[name="Dismiss"]' });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('waits as usual for a button that has not appeared yet', async () => {
+    const page = await pageWith(`
+      <script>
+        setTimeout(() => {
+          const b = document.createElement('button');
+          b.textContent = 'Dismiss';
+          b.onclick = () => { document.body.dataset.hit = 'late'; };
+          document.body.appendChild(b);
+        }, 300);
+      </script>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: 'role=button[name="Dismiss"]' }));
+      expect(result.success).toBe(true);
+      expect(await hit(page)).toBe('late');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('looks only inside the frame the action is scoped to', async () => {
+    const inner = `<button onclick=&quot;parent.document.body.dataset.hit = 'inner'&quot;><img alt=&quot;tick&quot;> Dismiss</button>`;
+    const page = await pageWith(`
+      <button onclick="document.body.dataset.hit = 'outer'"><img alt="tick"> Dismiss</button>
+      <iframe id="f" srcdoc="${inner}"></iframe>
+      <iframe id="empty" srcdoc="<button>Cancel</button>"></iframe>`);
+    try {
+      await page.frameLocator('#f').locator('button').waitFor();
+      await page.frameLocator('#empty').locator('button').waitFor();
+      const result = await executeAction(page, act({ action: 'click', frame: '#f', selector: 'role=button[name="Dismiss"]' }));
+      expect(result.success).toBe(true);
+      expect(await hit(page)).toBe('inner');
+      // The page's own Dismiss is not the empty frame's.
+      const miss = await resolveRoleName(page.frameLocator('#empty'), 'role=button[name="Dismiss"]');
+      expect(miss.selector).toBe('role=button[name="Dismiss"]');
+      expect(await miss.describeMiss!()).toContain('  - named "Cancel"');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('resolves the role-name segment of a scoped selector inside its scope', async () => {
+    const page = await pageWith(`
+      <button onclick="document.body.dataset.hit = 'page'"><img alt="tick"> Dismiss</button>
+      <div role="dialog"><button onclick="document.body.dataset.hit = 'dialog'"><img alt="tick"> Dismiss</button></div>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: 'role=dialog >> role=button[name="Dismiss"]' }));
+      expect(result.success).toBe(true);
+      expect(await hit(page)).toBe('dialog');
+    } finally {
+      await page.close();
+    }
+  });
+
   it('clicks the button whose accessible name carries an icon font glyph, and not a longer name', async () => {
     const page = await pageWith(`
       <style>.pi-check::before { content: "\\2714"; }</style>

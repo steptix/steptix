@@ -44,42 +44,252 @@ function resolveLocatorRoot(page: Page, frameSelector?: string): Page | FrameLoc
   return root;
 }
 
-/** `role=button[name="Dismiss"]`: the exact-name form, without Playwright's `i`/`s` flags. */
-const EXACT_ROLE_NAME = /role=([\w-]+)\[name=(["'])((?:(?!\2).)+)\2\]/g;
+/**
+ * One `>>` segment that names a role and an exact name — `role=button[name="Dismiss"]`,
+ * optionally followed by more attributes (`[pressed]`). Playwright's `i`/`s`
+ * flags and regex names are the model choosing its own matching, so they are
+ * left alone.
+ */
+const ROLE_NAME_SEGMENT = /^role=([\w-]+)\[name=(["'])((?:\\.|(?!\2)[^\\])+)\2\]((?:\[[^\]]*\])*)$/;
+
+/** At most this many elements are listed in a role-name failure. */
+const ROLE_NAME_LIST_LIMIT = 20;
+
+/** What {@link resolveRoleName} decided for a selector. */
+export interface RoleNameResolution {
+  /** The selector to act on: as written, or pinned to the one element whose
+   *  visible text is the name. */
+  selector: string;
+  /** Set when more than one element reads the name on screen: the action must
+   *  not run, and this says which ones did. */
+  refusal?: string;
+  /** How many elements read the name on screen, alongside `refusal`. */
+  matches?: number;
+  /** Set when a role name matched nothing either way. Lists the elements of
+   *  that role, read at the moment it is called — after the action's own wait
+   *  has timed out, not before. */
+  describeMiss?: () => Promise<string>;
+}
 
 /**
- * An exact role name that matches nothing, retried with icon glyphs and
- * punctuation around the name allowed (SPEC-web-survey-fixes.md §2.34).
- * An icon font draws its glyph with CSS `::before` content, which counts in the
- * accessible name, so PrimeFaces' Dismiss button is named "<glyph> Dismiss"
- * and `role=button[name="Dismiss"]` matched nothing on a dialog showing it.
- * The rewrite still anchors the whole name — "Dismiss all" stays a different
- * button — and is kept only when it finds something; otherwise the selector is
- * returned as written, so the failure names what the model wrote.
+ * Role names match what a person sees when the accessible name has icon text
+ * in it (SPEC-web-survey-fixes.md §2.34, issue 26).
+ *
+ * The browser's accessible name includes text nobody sees as text: an icon
+ * font's `::before` glyph, an `<img>`'s alt, an SVG's `<title>`. The model
+ * writes the name it sees in the snapshot, so PrimeFaces' "<glyph> Dismiss"
+ * button, or one with `<img alt="tick">` in front, never matched
+ * `role=button[name="Dismiss"]`. For each role-name segment of the selector:
+ *
+ *  1. The exact name, as written. A selector that matches is never touched.
+ *  2. Otherwise, the visible elements of that role whose `innerText` equals the
+ *     name, ignoring case and runs of spaces — or, when none does, equals it
+ *     with symbols around it ignored, for a glyph that is real text in the DOM.
+ *     One match is acted on by its position; more than one is refused, because
+ *     "✔ Save" and "✖ Save" are two buttons and guessing is how the wrong one
+ *     gets clicked.
+ *  3. Nothing either way: the selector runs as written, so Playwright's own
+ *     wait still covers an element that has not appeared yet, and a timeout
+ *     lists what that role does have on the page.
+ *
+ * The whole text must match, so "Dismiss" never reaches "Dismiss all" or
+ * "Dismiss 3". Only the standard role, the browser's own `innerText` and the
+ * name the model sent are used; nothing here knows any site.
  */
-export async function tolerateRoleName(root: Page | FrameLocator, selector: string): Promise<string> {
-  if (!new RegExp(EXACT_ROLE_NAME.source).test(selector)) return selector;
+export async function resolveRoleName(root: Page | FrameLocator, selector: string): Promise<RoleNameResolution> {
+  const segments = splitSelectorChain(selector);
+  if (!segments.some((s) => ROLE_NAME_SEGMENT.test(s))) return { selector };
   try {
-    if ((await root.locator(selector).count()) > 0) return selector;
-    const tolerant = selector.replace(EXACT_ROLE_NAME, (_m, role: string, _q: string, name: string) => {
-      // A quote is written as a hex escape: a bare `'` in the regex opens a
-      // string for Playwright's `>>` splitter, which then swallows whatever
-      // the click appends (`>> visible=true >> nth=0`) and refuses to parse.
-      const pattern = name.trim()
-        .replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')
-        .replace(/\s+/g, '\\s+')
-        .replace(/'/g, '\\x27')
-        .replace(/"/g, '\\x22');
-      return `role=${role}[name=/^\\W*${pattern}\\W*$/i]`;
-    });
-    if (tolerant !== selector && (await root.locator(tolerant).count()) > 0) {
-      logger.debug(`No element is named exactly as in ${selector}; matched ${tolerant}`);
-      return tolerant;
+    if ((await root.locator(selector).count()) > 0) return { selector };
+    const resolved: string[] = [];
+    const notes: string[] = [];
+    for (const segment of segments) {
+      const parsed = parseRoleNameSegment(segment);
+      if (parsed === null || (await root.locator([...resolved, segment].join(' >> ')).count()) > 0) {
+        resolved.push(segment);
+        continue;
+      }
+      const scope = resolved.join(' >> ');
+      const candidates = roleCandidates(root, scope, parsed);
+      const texts = await visibleTexts(candidates);
+      const hits = textMatches(texts, parsed.name);
+      if (hits.length === 0) {
+        return { selector, describeMiss: () => describeRoleMiss(root, scope, parsed) };
+      }
+      if (hits.length > 1) {
+        const names = await Promise.all(hits.map((i) => accessibleName(candidates.nth(i))));
+        return {
+          selector,
+          refusal: describeAmbiguousRoleName(selector, segment, parsed, names),
+          matches: hits.length,
+        };
+      }
+      const index = hits[0]!;
+      const name = await accessibleName(candidates.nth(index));
+      notes.push(
+        `${selector} had no exact match; used the ${parsed.role} whose visible text is `
+        + `"${oneLine(texts[index]!)}"${name ? ` (its name is "${name}")` : ''}.`,
+      );
+      resolved.push(`role=${parsed.role}${parsed.rest}`, 'visible=true', `nth=${index}`);
+    }
+    const pinned = resolved.join(' >> ');
+    if ((await root.locator(pinned).count()) > 0) {
+      for (const note of notes) logger.info(note);
+      return { selector: pinned };
     }
   } catch {
-    // An unparsable rewrite leaves the selector as the model wrote it.
+    // A selector Playwright cannot parse is left as the model wrote it, so the
+    // failure quotes what it sent.
   }
-  return selector;
+  return { selector };
+}
+
+/** A role-name segment's parts: the name unescaped, and any attributes after it. */
+interface RoleNameSegment {
+  role: string;
+  name: string;
+  rest: string;
+}
+
+function parseRoleNameSegment(segment: string): RoleNameSegment | null {
+  const m = ROLE_NAME_SEGMENT.exec(segment);
+  if (!m) return null;
+  return { role: m[1]!, name: m[3]!.replace(/\\(.)/g, '$1'), rest: m[4] ?? '' };
+}
+
+/**
+ * A selector's `>>` segments, trimmed. A `>>` inside a quoted string is part
+ * of that string — the way Playwright's own splitter reads it.
+ */
+function splitSelectorChain(selector: string): string[] {
+  const segments: string[] = [];
+  let quote: string | null = null;
+  let start = 0;
+  for (let i = 0; i < selector.length; i++) {
+    const c = selector[i]!;
+    if (quote !== null) {
+      if (c === '\\') i++;
+      else if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === '>' && selector[i + 1] === '>') {
+      segments.push(selector.slice(start, i).trim());
+      start = i + 2;
+      i++;
+    }
+  }
+  segments.push(selector.slice(start).trim());
+  return segments.filter(Boolean);
+}
+
+/** The visible elements of a segment's role, inside whatever came before it. */
+function roleCandidates(root: Page | FrameLocator, scope: string, parsed: RoleNameSegment): Locator {
+  const role = `role=${parsed.role}${parsed.rest} >> visible=true`;
+  return root.locator(scope ? `${scope} >> ${role}` : role);
+}
+
+/** Each candidate's `innerText`: the words a person sees, as the snapshot shows them. */
+function visibleTexts(candidates: Locator): Promise<string[]> {
+  return candidates.evaluateAll((els) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    els.map((el: any) => String(el.innerText ?? el.textContent ?? '')),
+  );
+}
+
+/** Whitespace collapsed and case folded: CSS can uppercase what the DOM says. */
+function comparable(text: string): string {
+  return oneLine(text).toLowerCase();
+}
+
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/** Symbols around the text dropped: a glyph written into the DOM as a character. */
+function withoutEdgeSymbols(text: string): string {
+  return text.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+}
+
+/**
+ * The indexes of the texts that read `name`: exactly (case and spacing aside)
+ * when any does, and otherwise with symbols around both ignored. The second
+ * pass only runs when the name has a letter or digit in it, so "×" never
+ * matches "✖" by both being reduced to nothing.
+ */
+function textMatches(texts: string[], name: string): number[] {
+  const wanted = comparable(name);
+  const exact = texts.flatMap((t, i) => (comparable(t) === wanted ? [i] : []));
+  if (exact.length > 0) return exact;
+  const loose = withoutEdgeSymbols(wanted);
+  if (loose === '') return [];
+  return texts.flatMap((t, i) => (withoutEdgeSymbols(comparable(t)) === loose ? [i] : []));
+}
+
+/**
+ * The accessible name Playwright matches `name=` against, read from the
+ * element's aria snapshot (`- button "tick Dismiss":`). Empty when the element
+ * has none or the snapshot cannot be read.
+ */
+async function accessibleName(target: Locator): Promise<string> {
+  try {
+    const snapshot = await target.ariaSnapshot({ timeout: MEASUREMENT_TIMEOUT_MS });
+    const quoted = /^- [^\s"]+ ("(?:[^"\\]|\\.)*")/.exec(snapshot)?.[1];
+    return quoted ? String(JSON.parse(quoted)) : '';
+  } catch {
+    return '';
+  }
+}
+
+/** `button` → `Buttons`, `checkbox` → `Checkboxes`. */
+function rolePlural(role: string): string {
+  const plural = role.endsWith('x') ? `${role}es` : `${role}s`;
+  return plural.charAt(0).toUpperCase() + plural.slice(1);
+}
+
+/** A name as it would be written back into a selector. */
+function quoteName(name: string): string {
+  return `"${name.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/** Safeguard 1: several elements read the name, so say which and let the retry pick. */
+function describeAmbiguousRoleName(
+  selector: string,
+  segment: string,
+  parsed: RoleNameSegment,
+  names: string[],
+): string {
+  const lines = [
+    `${selector}: no ${parsed.role} is named exactly "${parsed.name}", and ${names.length} `
+    + `read "${parsed.name}" on screen:`,
+    ...names.map((n) => `  - ${n ? `named "${n}"` : 'with no name'}`),
+  ];
+  const first = names[0];
+  if (first && new Set(names).size === names.length) {
+    const example = selector.replace(segment, `role=${parsed.role}[name=${quoteName(first)}]${parsed.rest}`);
+    lines.push(`Name the one you mean, e.g. ${example}.`);
+  } else {
+    lines.push('They share a name too, so scope the selector to the one you mean.');
+  }
+  return lines.join('\n');
+}
+
+/** Safeguard 2: nothing matched either way, so list what that role does have. */
+async function describeRoleMiss(root: Page | FrameLocator, scope: string, parsed: RoleNameSegment): Promise<string> {
+  const where = scope ? `inside ${scope}` : 'on the page';
+  const head = `No ${parsed.role} named "${parsed.name}" and none reads "${parsed.name}" on screen.`;
+  const candidates = roleCandidates(root, scope, parsed);
+  const texts = await visibleTexts(candidates);
+  if (texts.length === 0) return `${head} There are no visible ${rolePlural(parsed.role).toLowerCase()} ${where}.`;
+  const shown = texts.slice(0, ROLE_NAME_LIST_LIMIT);
+  const names = await Promise.all(shown.map((_t, i) => accessibleName(candidates.nth(i))));
+  const lines = shown.map((t, i) => {
+    const name = names[i]!;
+    const reads = oneLine(t);
+    const label = name ? `named "${name}"` : 'with no name';
+    return reads && comparable(reads) !== comparable(name) ? `  - ${label} (reads "${reads}")` : `  - ${label}`;
+  });
+  if (texts.length > shown.length) lines.push(`  … and ${texts.length - shown.length} more`);
+  return [`${head} ${rolePlural(parsed.role)} ${where}:`, ...lines].join('\n');
 }
 
 /**
@@ -423,7 +633,24 @@ export async function executeAction(
 
   // Resolve frame context once — used by all locator-based actions and the error handler
   const root = resolveLocatorRoot(page, effectiveFrame);
-  if (effectiveSelector) effectiveSelector = await tolerateRoleName(root, effectiveSelector);
+  /** What the role-name fallback found the role to have, for a timeout (§2.34). */
+  let describeRoleNameMiss: (() => Promise<string>) | undefined;
+  if (effectiveSelector) {
+    const roleName = await resolveRoleName(root, effectiveSelector);
+    if (roleName.refusal !== undefined) {
+      // Several elements read the name on screen. Acting on the first would be
+      // a guess, so nothing runs and the retry is told which names to pick from.
+      logger.error(`Action refused [${action.action}]: ${roleName.refusal}`);
+      return {
+        success: false,
+        error: roleName.refusal,
+        failedSelector: effectiveSelector,
+        ...(roleName.matches !== undefined && { matchCount: roleName.matches }),
+      };
+    }
+    effectiveSelector = roleName.selector;
+    describeRoleNameMiss = roleName.describeMiss;
+  }
   if (effectiveFrame) {
     // For nested frames ("A >> B" or "A B"), validate the outermost iframe exists on the page
     const outerSelector = effectiveFrame.includes('>>')
@@ -754,8 +981,7 @@ export async function executeAction(
       throw err;
     }
 
-    const errorMessage = err instanceof Error ? err.message : String(err);
-    logger.error(`Action failed [${eff.action}]: ${errorMessage}`);
+    let errorMessage = err instanceof Error ? err.message : String(err);
 
     // Count how many elements matched the selector — use the same frame root so the
     // count is meaningful (0 in the frame, not 0 in the main page for the wrong reason)
@@ -767,6 +993,14 @@ export async function executeAction(
         // Selector itself may be invalid — leave matchCount undefined
       }
     }
+
+    // A role name that still matches nothing: say what the role does have, so
+    // the retry picks a name from the page instead of guessing (§2.34).
+    if (matchCount === 0 && describeRoleNameMiss !== undefined) {
+      const listing = await describeRoleNameMiss().catch(() => '');
+      if (listing) errorMessage = `${listing}\n${errorMessage}`;
+    }
+    logger.error(`Action failed [${eff.action}]: ${errorMessage}`);
 
     return {
       success: false,
