@@ -203,7 +203,7 @@ part of the A–D comparison: each runs one file through the CLI runner
 
 | # | Test | Change | Commit | Result | Notes |
 |---|------|--------|--------|--------|-------|
-| 62 | Leafground | steptix/steptix#30: role names match visible text (issue #26) | `a869e2bc` | **pass** 23/23, 229 s, 0.95 M tokens | Run 2026-10-08 12:29 (log clock). The visible-text fallback resolved three role names that had no exact match. Two were `role=button[name="Show"]` in steps 18 and 19, and one was `[role="dialog"] >> role=button[name="Dismiss"]` in step 19, the PrimeFaces button that prompted §2.34. All three buttons' names start with an icon glyph. Steps 7 (a CSS `select[value=…]` that timed out) and 12 (a check that read a missing element) passed on retry; neither involved a role name |
+| 62 | Leafground | steptix/steptix#30: role names match visible text (issue #26) | `a869e2bc` | **pass** 23/23, 229 s, 0.95 M tokens | Run 2026-10-08 12:29 (log clock), with the change on #27's tip before #27 was rebased and merged; on `main` it is `3a42fd43`, which also has the two commits #27 gained before merging (`489cd19c`, `277f7420`). The visible-text fallback resolved three role names that had no exact match. Two were `role=button[name="Show"]` in steps 18 and 19, and one was `[role="dialog"] >> role=button[name="Dismiss"]` in step 19, the PrimeFaces button that prompted §2.34. All three buttons' names start with an icon glyph. Steps 7 (a CSS `select[value=…]` that timed out) and 12 (a check that read a missing element) passed on retry; neither involved a role name |
 
 ### Findings: what the framework does not support, or gets wrong
 
