@@ -40,6 +40,11 @@ vi.mock('playwright-extra', () => ({
 }));
 
 vi.mock('puppeteer-extra-plugin-stealth', () => ({ default: () => ({}) }));
+// `preflightCdpPort` probes through loopbackFetch, not the global fetch; route
+// it to the global this file stubs, so the stub still answers the preflight.
+vi.mock('../src/browser/loopback-fetch.js', () => ({
+  loopbackFetch: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args),
+}));
 
 const { launchBrowser } = await import('../src/browser/manager.js');
 
@@ -174,5 +179,39 @@ describe('browser.launchArgs', () => {
     );
 
     expect(launchedArgs()).toEqual(['--window-size=1280,720', '--marionette']);
+  });
+});
+
+// SPEC-web-survey-fixes.md §2.30: Chromium blocks ad hosts in its own resolver,
+// because intercepting every request — even with a route that blocks nothing —
+// changed one page's script timing enough to break it.
+describe('browser.blockAds', () => {
+  it('passes Chromium a host-resolver rule, before the author\'s own switches, and routes nothing', async () => {
+    const browser = launchFake();
+    const context = browser.contexts()[0] as unknown as Record<string, unknown>;
+    context['route'] = vi.fn(async () => {});
+    await launchBrowser(baseConfig({ blockAds: ['ads.example', 'tracker.example'], launchArgs: ['--disable-print-preview'] }));
+
+    const args = launchedArgs();
+    expect(args[0]).toBe('--window-size=1280,720');
+    expect(args[1]).toBe('--host-resolver-rules=MAP ads.example ~NOTFOUND, MAP *.ads.example ~NOTFOUND, '
+      + 'MAP tracker.example ~NOTFOUND, MAP *.tracker.example ~NOTFOUND');
+    expect(args[2]).toBe('--disable-print-preview');
+    expect(context['route']).not.toHaveBeenCalled();
+  });
+
+  it('adds no rule when the project lists no domains', async () => {
+    await launchBrowser(baseConfig({ blockAds: [] }));
+    expect(launchedArgs()).toEqual(['--window-size=1280,720']);
+  });
+
+  it('falls back to routing on an engine with no resolver switch', async () => {
+    const browser = launchFake();
+    const context = browser.contexts()[0] as unknown as Record<string, unknown>;
+    context['route'] = vi.fn(async () => {});
+    await launchBrowser(baseConfig({ blockAds: ['ads.example'], browser: 'firefox' }));
+
+    expect(launchedArgs().some((a) => a.startsWith('--host-resolver-rules'))).toBe(false);
+    expect(context['route']).toHaveBeenCalledTimes(1);
   });
 });

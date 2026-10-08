@@ -1,6 +1,6 @@
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import type { Browser, BrowserContext, Page } from 'playwright';
+import type { Frame, Browser, BrowserContext, Page } from 'playwright';
 import type { Config } from '../config/types.js';
 import { effectiveViewport } from '../config/viewport.js';
 import type { AIAction, BranchedAIResponse, TableReadMapping } from '../ai/types.js';
@@ -28,14 +28,18 @@ import type { ChatMessage } from '../ai/types.js';
 import {
   parseAIResponse,
   parseAssertionCode,
+  ASSERTION_CODE_REMINDER,
   parseBranchedResponse,
   extractJson,
   isKnownActionType,
   unknownActionTypeError,
 } from '../ai/action-parser.js';
+import { describeWhereExpectedIs } from '../browser/locate-text.js';
+import { resolveFrame } from '../browser/actions.js';
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
+import { disarmDialog } from '../browser/dialogs.js';
 import type {
   ActionExecutionResult,
   ExecuteActionOptions,
@@ -1900,6 +1904,12 @@ export function secretsFor(opts: StepExecutorOptions): string[] {
 
 /** Every name the test's steps capture — `[store as: x]` and `store as {{x}}`.
  *  Used only to make a refusal say "captured later" instead of "unknown". */
+/** A value short enough to quote back to the model in one line. */
+function truncateForPrompt(value: string, max = 120): string {
+  const flat = value.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
 function namesDefinedIn(steps: readonly string[]): ReadonlySet<string> {
   const out = new Set<string>();
   for (const step of steps) {
@@ -2532,11 +2542,21 @@ async function executeStepAttempt(
   // `[input: …]` answers grow the parameter map as the step runs.
   const secretsNow = (): string[] => secretsFor(opts);
   let page = pageTracker ? pageTracker.getActive() : opts.page;
+  // A `dialog` answer belongs to the step that set it
+  // (docs/specs/SPEC-web-survey-fixes.md §2.1): one a previous step armed and
+  // never used must not answer a dialog this step did not ask about.
+  try {
+    disarmDialog(page.context());
+  } catch {
+    // A page without a context (a test double) has no dialogs to disarm.
+  }
   const maxTurns = config.execution.maxTurns;
 
   // Accumulated across all turns
   const allTurns: TurnResult[] = [];
   const allCompletedActions: Array<{ action: string; description: string; selector?: string }> = [];
+  /** This turn's passed assertions, moved into `allCompletedActions` at its end. */
+  const passedChecks: Array<{ action: string; description: string }> = [];
   const collectedFailures: PriorFailureContext[] = [];
   const attemptStartUrl = page.url();
   /** Results from find/expand exploration actions — included in the continuation message */
@@ -2998,6 +3018,7 @@ async function executeStepAttempt(
       ? undefined
       : checkTurnReferences(aiResponse.actions, {
           known: new Set(Object.keys(opts.resolvedParameters ?? {})),
+          values: opts.resolvedParameters,
           definedLater,
           ...(opts.envData !== undefined && { envData: opts.envData }),
         });
@@ -3201,6 +3222,8 @@ async function executeStepAttempt(
           aiClient,
           apiResponseStore,
           attemptNumber,
+          priorCheckFailures: priorFailures.filter((f) => f.actionType === 'assert').map((f) => f.error),
+          ...(action.frame !== undefined && { frame: action.frame }),
           dismissalGuidance: opts.dismissalGuidance ?? false,
           fullPageScreenshots: config.browser.fullPageScreenshots,
           sendScreenshots: config.ai.sendScreenshots,
@@ -3224,9 +3247,35 @@ async function executeStepAttempt(
 
         if (!assertResult.pass) {
           turnFailed = true;
-          turnError = `Assertion failed: ${assertResult.description} — expected "${assertResult.expected}", got "${assertResult.actual}"`;
+          // Where the expected text really is, when it is on the page at all:
+          // the retry is shown only this sentence, and without it read the
+          // same wrong element again (SPEC-web-survey-fixes.md §2.25).
+          const where = against === 'predicate'
+            ? ''
+            : await describeWhereExpectedIs(page, assertResult.expected);
+          turnError = `Assertion failed: ${assertResult.description} — expected "${assertResult.expected}", got "${assertResult.actual}"${where}`;
+          // Recorded like a failed action, so the retry is told what the
+          // check read — it was told nothing, and read the same element again.
+          collectedFailures.push({
+            selector: '',
+            error: turnError,
+            actionType: 'assert',
+            startUrl: attemptStartUrl,
+            failureUrl: page.url(),
+            navigated: page.url() !== attemptStartUrl,
+          });
           break;
         }
+        // A check that PASSED is progress the next turn must be told about.
+        // Asserts are kept out of the continuation's action list (below), so
+        // a step that verifies two things checked the first, asked to go on,
+        // and was shown nothing saying it had: it checked "Form submitted"
+        // fifteen times and never reached "Received!"
+        // (docs/specs/SPEC-web-survey-fixes.md §2.16).
+        passedChecks.push({
+          action: 'assert',
+          description: `Verified, and it PASSED: ${assertResult.description} (read "${truncateForPrompt(assertResult.actual)}"). Do not check this again`,
+        });
         continue;
       }
 
@@ -3790,7 +3839,18 @@ async function executeStepAttempt(
         // (SPA route swap, redirect chain, toast render, etc.) before we capture
         // the next snapshot. Exits early on "no change at all" (no-op) or once
         // the signal has been stable for settleMs. See waitForPostActionSettle.
-        if (preSignal && result.success) {
+        //
+        // NOT inside a chain the model wrote to be immediate
+        // (docs/specs/SPEC-web-survey-fixes.md §2.17): a trigger followed by
+        // a `wait` (the wait IS the settle, on the condition the model named),
+        // and a `wait` followed by another action (the condition holds; act on
+        // it now). On a page that never stops moving — a progress bar that
+        // changes every 100 ms — each settle ran its full 3.5 s, so "click Stop
+        // when it reaches 75%" clicked Stop at 100%.
+        const nextInTurn = aiResponse.actions[emittedIndex + 1];
+        const chainedImmediately = nextInTurn !== undefined
+          && (nextInTurn.action === 'wait' || action.action === 'wait');
+        if (preSignal && result.success && !chainedImmediately) {
           await traceOp(`settle.post-action (${action.action})`, () =>
             waitForPostActionSettle(page, { preSignal }),
           ).catch(() => {
@@ -3884,6 +3944,24 @@ async function executeStepAttempt(
         }
       }
 
+      // A navigation that landed on an HTTP error page did not reach what the
+      // step asked for, unless the step is about that error: "Navigate to
+      // input.xhtml" sent to /pages/input.xhtml passed on a 404, and the next
+      // step had nothing to act on (SPEC-web-survey-fixes.md §2.35).
+      if (
+        result.success
+        && action.action === 'navigate'
+        && result.httpStatus !== undefined
+        && result.httpStatus >= 400
+        && !expectsErrorPage(instruction)
+      ) {
+        result = {
+          ...result,
+          success: false,
+          error: `Navigation answered HTTP ${result.httpStatus}: ${postUrl} is an error page, not the page the step asked for. Check the URL against the step`,
+        };
+      }
+
       if (!result.success) {
         turnFailed = true;
         turnError = result.error;
@@ -3941,6 +4019,8 @@ async function executeStepAttempt(
           description: a.description,
           ...(a.selector ? { selector: a.selector } : {}),
         })),
+      // …and the checks that passed, as checks rather than as actions.
+      ...passedChecks.splice(0),
     );
 
     // Remember whether this turn's effective action was a "wait" so next turn
@@ -4196,6 +4276,19 @@ interface EvaluateAssertionParams {
   aiClient: AiClient;
   apiResponseStore: ApiResponseStore | undefined;
   attemptNumber: number;
+  /**
+   * How this step's checks failed on earlier attempts, each with where the
+   * expected text really is when it was found (SPEC-web-survey-fixes.md
+   * §2.25). The code generator is the call that picks the element, so it is
+   * the one that has to hear it.
+   */
+  priorCheckFailures?: string[];
+  /**
+   * The assert's `frame`: the check reads an iframe's content, so its code runs
+   * in that frame (SPEC-web-survey-fixes.md §2.31). `document.querySelector`
+   * on the page never reaches into a frame.
+   */
+  frame?: string;
   dismissalGuidance: boolean;
   fullPageScreenshots: boolean;
   sendScreenshots: boolean;
@@ -4224,12 +4317,20 @@ const MAX_ASSERTION_CODE_ATTEMPTS = 2;
  */
 async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionResult> {
   let assertionCode: string | null = null;
+  let target: Page | Frame = p.page;
+  if (p.frame !== undefined && p.against !== 'predicate' && p.against !== 'api') {
+    const frame = await resolveFrame(p.page, p.frame);
+    if (frame) target = frame;
+    else logger.warn(`Assertion frame "${p.frame}" not found — the check runs on the page instead`);
+  }
   let aiInteraction: AiInteraction | undefined;
   /** Every code generation before the current one — calls made and paid for,
    *  which the result must still count (`supersededAiInteractions`). */
   const superseded: AiInteraction[] = [];
   let evalResult: { pass: boolean; actual: string } | null = null;
   let lastErr: string | undefined;
+  /** The previous reply, when it held no usable code. */
+  let unreadableReply: string | undefined;
 
   for (let attempt = 1; attempt <= MAX_ASSERTION_CODE_ATTEMPTS; attempt++) {
     // 1. Generate code (or regenerate it after a failure)
@@ -4267,6 +4368,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
         apiHistory,
         p.against,
         formatTestInfo(p.testName, p.baseUrl),
+        target === p.page ? undefined : p.frame,
       );
 
       const apiContext: ApiPromptContext | undefined = p.contextContent.includes('Type:')
@@ -4276,10 +4378,24 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
       const assertSystemPrompt = buildSystemPrompt(p.contextContent, apiContext, {
         dismissalGuidance: p.dismissalGuidance,
       });
+      const priorNote = p.priorCheckFailures !== undefined && p.priorCheckFailures.length > 0
+        ? `An earlier attempt at this check failed:\n${p.priorCheckFailures.map((e) => `- ${e}`).join('\n')}\n`
+          + 'Do not read the same element again unless it really is what the step means.'
+        : undefined;
       const codeCompletion = await p.aiClient.complete([
         { role: 'system', content: assertSystemPrompt },
         codeMsg,
+        ...(priorNote !== undefined ? [{ role: 'user' as const, content: priorNote }] : []),
+        // After an unreadable reply, the same prompt again tends to get the
+        // same reply. Say what was wrong (SPEC-web-survey-fixes.md §2.14).
+        ...(unreadableReply !== undefined
+          ? [
+              { role: 'assistant' as const, content: unreadableReply },
+              { role: 'user' as const, content: ASSERTION_CODE_REMINDER },
+            ]
+          : []),
       ], p.signal, { profile: 'authoring' });
+      unreadableReply = undefined;
 
       if (aiInteraction !== undefined) superseded.push(aiInteraction);
       aiInteraction = {
@@ -4301,14 +4417,17 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
       try {
         assertionCode = parseAssertionCode(codeCompletion.text);
       } catch (parseErr) {
-        lastErr = `Could not parse assertion code: ${String(parseErr)}`;
+        // Quote the start of what the model said, so the failure can be read
+        // from the log and the run result, not only from the report (§2.49).
+        lastErr = `Could not parse assertion code: ${String(parseErr)}. The model replied: ${quoteReply(codeCompletion.text)}`;
+        unreadableReply = codeCompletion.text;
         continue;
       }
     }
 
     // 2. Run the JS — with optional polling
     try {
-      evalResult = await runAssertionCode(p.page, assertionCode, p.poll);
+      evalResult = await runAssertionCode(target, assertionCode, p.poll);
       if (!evalResult || typeof evalResult.pass !== 'boolean' || typeof evalResult.actual !== 'string') {
         throw new Error(`Assertion code returned unexpected shape: ${JSON.stringify(evalResult)}`);
       }
@@ -4322,6 +4441,14 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
 
   if (!evalResult) {
     throw new Error(`Assertion code failed after ${MAX_ASSERTION_CODE_ATTEMPTS} attempts: ${lastErr ?? 'unknown error'}`);
+  }
+
+  // A required-field asterisk or a label's colon is not part of the label: the
+  // check for "Return date" read "Return date *" and failed (§2.43). Only the
+  // marks around the text are ignored, so "Done" against "Not Done" still fails.
+  if (!evalResult.pass && p.against !== 'predicate' && sameTextIgnoringMarks(evalResult.actual, p.expected)) {
+    logger.debug(`"${evalResult.actual}" is "${p.expected}" with label marks around it — passing`);
+    evalResult = { ...evalResult, pass: true };
   }
 
   logger.assertion(evalResult.pass, evalResult.actual, p.description);
@@ -4350,8 +4477,36 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
 }
 
 /** Run assertion JS code, optionally polling until pass or timeout. */
+/** How much of an unusable reply a failure message quotes (§2.49). */
+const REPLY_QUOTE_CHARS = 300;
+
+/** The start of a model reply, on one line, quoted for a failure message. */
+export function quoteReply(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (flat === '') return '(an empty reply)';
+  return flat.length > REPLY_QUOTE_CHARS
+    ? `"${flat.slice(0, REPLY_QUOTE_CHARS)}…" (${flat.length} characters)`
+    : `"${flat}"`;
+}
+
+/** Marks that sit around a label without being part of it (§2.43). */
+const LABEL_MARKS = /^[\s*:•·|]+|[\s*:•·|]+$/g;
+
+/**
+ * Whether what a check read is the expected text once whitespace is collapsed
+ * and required-field and label marks (`*`, `:`, bullets) are stripped from
+ * both ends. Nothing inside the text is ignored, and an empty expectation
+ * never matches this way.
+ */
+export function sameTextIgnoringMarks(actual: string, expected: string | undefined): boolean {
+  if (expected === undefined) return false;
+  const norm = (s: string) => s.replace(/\s+/g, ' ').replace(LABEL_MARKS, '').trim();
+  const want = norm(expected);
+  return want !== '' && norm(actual) === want;
+}
+
 async function runAssertionCode(
-  page: Page,
+  page: Page | Frame,
   code: string,
   poll: { timeoutMs?: number; intervalMs?: number } | undefined,
 ): Promise<{ pass: boolean; actual: string }> {
@@ -5217,3 +5372,12 @@ async function promptUser(question: string): Promise<string> {
 }
 // Suppress unused-export warning — kept intentionally as a deprecated fallback.
 void promptUser;
+
+/**
+ * Does the step expect to land on an error page — "Navigate to /status/404",
+ * "Verify the not-found page" — so an HTTP error status is its success, not a
+ * wrong URL (SPEC-web-survey-fixes.md §2.35)?
+ */
+export function expectsErrorPage(instruction: string): boolean {
+  return /\b[45]\d\d\b|\berror\b|not[ -]found|forbidden|unauthori[sz]ed|status code|server error/i.test(instruction);
+}

@@ -20,6 +20,7 @@ import {
   interpretReplCommand,
   maskIfSecretAuthored,
   parseConfig,
+  parseContext,
   parseFrontmatter,
   parseDataRows,
   scanSectionDataTables,
@@ -5155,6 +5156,8 @@ export class RunController {
     // The test's frontmatter dataSources (name → path) so the server can
     // resolve `${<name>.X}` test-level named sources on its side too.
     const dataSources = parseFrontmatter(this.document.getText()).dataSources;
+    // The test's own `## Context`, for the AI on every step (§2.46).
+    const testContext = parseContext(this.document.getText());
 
     const events = client.streamSteps(
       sessionId,
@@ -5165,6 +5168,7 @@ export class RunController {
         env,
         ...(envName && { envName }),
         ...(dataSources && Object.keys(dataSources).length > 0 && { dataSources }),
+        ...(testContext !== undefined && { testContext }),
         ...(includeConfig && Object.keys(sessionConfig).length > 0 && {
           config: sessionConfig,
         }),
@@ -5522,6 +5526,10 @@ export class RunController {
               ...(() => {
                 const ds = parseFrontmatter(this.document.getText()).dataSources;
                 return ds && Object.keys(ds).length > 0 ? { dataSources: ds } : {};
+              })(),
+              ...(() => {
+                const testContext = parseContext(this.document.getText());
+                return testContext !== undefined ? { testContext } : {};
               })(),
               ...(!this.configSentForSession &&
                 Object.keys(sessionConfig).length > 0 && { config: sessionConfig }),

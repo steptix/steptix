@@ -243,6 +243,7 @@ vi.mock('../src/utils/logger.js', () => ({
 import { createApiServer } from '../src/server/api-server.js';
 // The mocked logger above, imported so a test can read what the run said.
 import { logger } from '../src/utils/logger.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 /** Every `logger.warn` line this run produced. */
 const warnings = (): string[] =>
@@ -269,7 +270,7 @@ let toolsDir: string;
 beforeAll(async () => {
   const { app } = createApiServer(cfg);
   server = createServer(app);
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  await listenFetchable(server, '127.0.0.1');
   const addr = server.address();
   if (typeof addr === 'object' && addr !== null) baseUrl = `http://127.0.0.1:${addr.port}`;
 

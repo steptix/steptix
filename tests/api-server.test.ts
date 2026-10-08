@@ -170,6 +170,7 @@ import { createApiServer } from '../src/server/api-server.js';
 import { getBuildInfo } from '../src/utils/version.js';
 import { IdleMonitor } from '../src/server/idle-monitor.js';
 import { executeStep as executeStepMock } from '../src/runner/step-executor.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 /** The mock factory's fast implementation, captured before any test swaps it
  *  out, so a suite that installs a slow/failing step can put it back. */
@@ -242,9 +243,7 @@ let baseUrl: string;
 /** Boot an express app on a random port and return it with its base URL. */
 async function listenOnRandomPort(app: Express): Promise<{ server: Server; baseUrl: string }> {
   const started = createServer(app);
-  await new Promise<void>((resolve) => {
-    started.listen(0, '127.0.0.1', () => resolve());
-  });
+  await listenFetchable(started, '127.0.0.1');
   const addr = started.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
   return { server: started, baseUrl: `http://127.0.0.1:${port}` };
@@ -572,6 +571,31 @@ describe('API Server', () => {
 
       expect(status).toBe(400);
       expect(body.error).toContain('steps');
+    });
+  });
+
+  // SPEC-web-survey-fixes.md §2.46: the client sends the test's ## Context,
+  // and every step of the batch gets it.
+  describe("the test's ## Context", () => {
+    it('reaches every step of the batch', async () => {
+      const res = await api('POST', '/sessions/ctx-ok/steps', {
+        steps: ['Click Buy', 'Click Pay'],
+        testContext: 'The payment form is in the iframe `#card-frame`.',
+      });
+      expect(res.status).toBe(200);
+      const calls = vi.mocked(executeStepMock).mock.calls.slice(-2);
+      expect(calls).toHaveLength(2);
+      for (const call of calls) {
+        expect((call[3] as { contextContent: string }).contextContent).toContain(
+          'The payment form is in the iframe `#card-frame`.',
+        );
+      }
+    });
+
+    it('is refused when it is not text', async () => {
+      const res = await api('POST', '/sessions/ctx-bad/steps', { steps: ['Click Buy'], testContext: ['not', 'text'] });
+      expect(res.status).toBe(400);
+      expect(String(res.body.error)).toMatch(/testContext/);
     });
   });
 

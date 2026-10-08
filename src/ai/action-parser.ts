@@ -28,6 +28,9 @@ export const VALID_ACTION_TYPES: ReadonlySet<ActionType> = new Set<ActionType>([
   // both recordable by Record Steps, so both must run
   // (docs/specs/SPEC-record-steps.md §4).
   'reload', 'drag',
+  // docs/specs/SPEC-web-survey-fixes.md §2.1 — how the next browser dialog
+  // is answered.
+  'dialog',
   'hover', 'wait', 'scroll', 'switchFrame', 'switchPage', 'closePage', 'openPage',
   'openBrowser', 'switchBrowser', 'closeBrowser',
   'dismiss',
@@ -173,6 +176,39 @@ export const ACTION_TYPE_ALIASES: Readonly<Record<string, ActionType>> = {
   dragDrop: 'drag',
   drag_drop: 'drag',
   dragAndDropTo: 'drag',
+  // docs/specs/SPEC-web-survey-fixes.md §2.2. Every one of these was sent by
+  // gpt-6-luna in the web survey and refused; {@link ALIAS_DEFAULTS} adds the
+  // field that makes each one mean what its name says.
+  doubleClick: 'click',
+  dblclick: 'click',
+  dblClick: 'click',
+  rightClick: 'click',
+  contextClick: 'click',
+  contextMenu: 'click',
+  // §2.24: press and hold is a click held down before release.
+  longPress: 'click',
+  longClick: 'click',
+  pressAndHold: 'click',
+  clickAndHold: 'click',
+  holdClick: 'click',
+  // §2.41: clearing a field is typing nothing into it; ALIAS_DEFAULTS sets the empty value.
+  clear: 'type',
+  clearField: 'type',
+  clearInput: 'type',
+  clearText: 'type',
+  // §2.1. The six spellings the survey's runs sent for "answer the dialog".
+  acceptDialog: 'dialog',
+  acceptAlert: 'dialog',
+  acceptConfirm: 'dialog',
+  acceptPrompt: 'dialog',
+  confirmDialog: 'dialog',
+  handleDialog: 'dialog',
+  handleAlert: 'dialog',
+  dismissDialog: 'dialog',
+  dismissAlert: 'dialog',
+  dismissConfirm: 'dialog',
+  cancelDialog: 'dialog',
+  alert: 'dialog',
   'api': 'api_call',
   'http': 'api_call',
   'request': 'api_call',
@@ -233,6 +269,63 @@ const FOLDED_ACTION_TYPES: ReadonlyMap<string, ActionType> = new Map<string, Act
   ),
   ...[...VALID_ACTION_TYPES].map((type) => [foldActionName(type), type] as [string, ActionType]),
 ]);
+
+/**
+ * The field an alias implies, keyed by FOLDED alias. `doubleClick` is a
+ * `click`, but a single click would be the wrong action: the alias has to say
+ * how many. A field the model sent itself wins over the default.
+ */
+/** How long a press-and-hold holds when the step does not say (§2.24). */
+const DEFAULT_HOLD_MS = 2000;
+/** The longest hold accepted; a press nobody would make is a model mistake. */
+const MAX_HOLD_MS = 30_000;
+
+const ALIAS_DEFAULTS: ReadonlyMap<string, Partial<AIAction>> = new Map<string, Partial<AIAction>>([
+  ['doubleclick', { clickCount: 2 }],
+  ['dblclick', { clickCount: 2 }],
+  ['rightclick', { button: 'right' }],
+  ['contextclick', { button: 'right' }],
+  ['contextmenu', { button: 'right' }],
+  ['longpress', { holdMs: DEFAULT_HOLD_MS }],
+  ['longclick', { holdMs: DEFAULT_HOLD_MS }],
+  ['pressandhold', { holdMs: DEFAULT_HOLD_MS }],
+  ['clickandhold', { holdMs: DEFAULT_HOLD_MS }],
+  ['holdclick', { holdMs: DEFAULT_HOLD_MS }],
+  ['clear', { value: '' }],
+  ['clearfield', { value: '' }],
+  ['clearinput', { value: '' }],
+  ['cleartext', { value: '' }],
+  ['acceptdialog', { value: 'accept' }],
+  ['acceptalert', { value: 'accept' }],
+  ['acceptconfirm', { value: 'accept' }],
+  ['acceptprompt', { value: 'accept' }],
+  ['confirmdialog', { value: 'accept' }],
+  ['dismissdialog', { value: 'dismiss' }],
+  ['dismissalert', { value: 'dismiss' }],
+  ['dismissconfirm', { value: 'dismiss' }],
+  ['canceldialog', { value: 'dismiss' }],
+]);
+
+/**
+ * Apply {@link ALIAS_DEFAULTS} for the name the model actually sent, then put
+ * a `dialog` action's answer in one spelling: `value` is `accept` or
+ * `dismiss`, whatever word or flag the model used for it.
+ */
+function applyAliasDefaults(action: AIAction, rawActionType: string): void {
+  const defaults = ALIAS_DEFAULTS.get(foldActionName(rawActionType));
+  if (defaults !== undefined) {
+    for (const [key, value] of Object.entries(defaults)) {
+      const field = key as keyof AIAction;
+      if (action[field] === undefined) (action as unknown as Record<string, unknown>)[field] = value;
+    }
+  }
+  if (action.action === 'dialog') {
+    const answer = (action.value ?? '').trim().toLowerCase();
+    action.value = ['dismiss', 'cancel', 'no', 'reject', 'decline', 'false'].includes(answer)
+      ? 'dismiss'
+      : 'accept';
+  }
+}
 
 /**
  * The canonical type the model meant by `raw` — itself, an alias, or either
@@ -554,12 +647,13 @@ export function parseAIResponse(rawResponse: string): AIResponse {
  * Extracts the `code` field — a self-executing JS function string.
  */
 export function parseAssertionCode(rawResponse: string): string {
-  const jsonString = extractJson(rawResponse);
-
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonString);
+    parsed = JSON.parse(extractJson(rawResponse));
   } catch (err) {
+    // A reply that is not JSON at all may still be the code, fenced.
+    const fenced = fencedCode(rawResponse);
+    if (fenced !== undefined) return fenced;
     throw new Error(`Assertion code response is not valid JSON: ${String(err)}`);
   }
 
@@ -568,12 +662,40 @@ export function parseAssertionCode(rawResponse: string): string {
   }
 
   const obj = parsed as Record<string, unknown>;
-  if (typeof obj['code'] !== 'string' || !obj['code'].trim()) {
-    throw new Error('Assertion code response missing "code" field');
-  }
+  if (typeof obj['code'] === 'string' && obj['code'].trim()) return obj['code'];
 
-  return obj['code'];
+  // The assertion prompt is sent beside the ACTION system prompt, which
+  // teaches `{ "actions": [...] }`, and the model sometimes answers in that
+  // shape with the code inside the action. Measured in the web survey: two
+  // predicate checks ("is a number", "equals") failed on both attempts this way
+  // (docs/specs/SPEC-web-survey-fixes.md §2.14).
+  const actions = obj['actions'];
+  if (Array.isArray(actions)) {
+    for (const action of actions) {
+      const code = (action as Record<string, unknown> | null)?.['code'];
+      if (typeof code === 'string' && code.trim()) return code;
+    }
+  }
+  const fenced = fencedCode(rawResponse);
+  if (fenced !== undefined) return fenced;
+  throw new Error('Assertion code response missing "code" field');
 }
+
+/** The body of the first ```js / ```javascript fence that holds a function. */
+function fencedCode(raw: string): string | undefined {
+  const match = /```(?:js|javascript)\s*\n([\s\S]*?)```/i.exec(raw);
+  const body = match?.[1]?.trim();
+  return body && /=>|function\b/.test(body) ? body : undefined;
+}
+
+/**
+ * What to tell the model when its assertion reply could not be read, so the
+ * second attempt is not the first one asked again (§2.14).
+ */
+export const ASSERTION_CODE_REMINDER =
+  'Your previous reply could not be used: it was not a JSON object with a "code" field. '
+  + 'Do not reply with "actions". Reply with ONLY this JSON object: '
+  + '{ "code": "(() => { ... return { pass, actual }; })()" }';
 
 /**
  * Parse the AI response for a branched (conditional) step.
@@ -857,9 +979,38 @@ function parseAction(raw: unknown, index: number): AIAction {
       .find((v): v is string => typeof v === 'string' && v.trim() !== '' && v !== 'top' && v !== 'bottom');
     if (target !== undefined) action.target = target;
     if (action.selector === undefined && typeof obj['source'] === 'string') action.selector = obj['source'];
+    // §2.36: where on the target to let go — "below Item 3" in a sortable.
+    const position = [obj['position'], obj['targetPosition'], obj['dropPosition']]
+      .find((v): v is string => typeof v === 'string');
+    const side = position?.trim().toLowerCase().replace(/^(after|bottom)$/, 'below').replace(/^(before|top)$/, 'above');
+    if (side === 'above' || side === 'below' || side === 'left' || side === 'right') action.position = side;
   }
   if (typeof obj['value'] === 'string') action.value = obj['value'];
   if (typeof obj['url'] === 'string') action.url = obj['url'];
+  // docs/specs/SPEC-web-survey-fixes.md §2.2, §2.4, §2.8, §2.1. Each is read
+  // only on the action that uses it: `button` and `text` are common words a
+  // model could put on any action, and a stray one must not change a type.
+  if (actionType === 'click') {
+    const count = Number(obj['clickCount']);
+    if (count === 2) action.clickCount = 2;
+    const button = obj['button'];
+    if (button === 'right' || button === 'middle') action.button = button;
+    const hold = Number(obj['holdMs'] ?? obj['holdDuration']);
+    if (Number.isFinite(hold) && hold > 0) action.holdMs = Math.min(Math.round(hold), MAX_HOLD_MS);
+  }
+  if (actionType === 'select' && Array.isArray(obj['values'])) {
+    const values = obj['values'].filter((v): v is string => typeof v === 'string' && v !== '');
+    if (values.length > 0) action.values = values;
+  }
+  if (actionType === 'count' && obj['includeHidden'] === true) action.includeHidden = true;
+  if (actionType === 'dialog') {
+    const text = [obj['text'], obj['promptText'], obj['input']]
+      .find((v): v is string => typeof v === 'string');
+    if (text !== undefined) action.text = text;
+  }
+  // §2.27: text typed into whatever has focus.
+  if (actionType === 'keyboard' && typeof obj['text'] === 'string' && obj['text'] !== '') action.text = obj['text'];
+  applyAliasDefaults(action, rawActionType);
   // Upload paths (stories/upload-action.md §2). Normalised here so the cached
   // action and the compiled code-behind carry a relative, forward-slashed path
   // whatever spelling the model used. Normalisation ALSO runs at the point of

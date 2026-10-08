@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { SseParser, createApiClient } from '../src/mcp/api-client.js';
 import { ApiHttpError, ApiRouteNotFoundError } from '../src/mcp/types.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 // ---------------------------------------------------------------------------
 // The SSE reader is hand-written (taking runner-core as a dependency would put
@@ -212,7 +213,7 @@ async function startServer(
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => handler(req.url ?? '', res, req));
   });
-  await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+  await listenFetchable(server!, '127.0.0.1');
   const address = server.address();
   if (typeof address === 'string' || address === null) throw new Error('no port');
   return `http://127.0.0.1:${address.port}`;
@@ -360,7 +361,7 @@ describe('createApiClient.streamSteps', () => {
         res.end();
       });
     });
-    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+    await listenFetchable(server!, '127.0.0.1');
     const address = server.address();
     if (typeof address === 'string' || address === null) throw new Error('no port');
 

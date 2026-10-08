@@ -8,6 +8,7 @@
 // start/stop contract, same minimal behaviour with knobs flipped per test.
 
 import * as http from 'node:http';
+import { listenFetchable } from '../../../tests/listen-fetchable.cjs';
 
 export interface FakeBrowserTab {
   id: string;
@@ -34,13 +35,7 @@ export class FakeBrowserServer {
 
   async start(): Promise<void> {
     this.server = http.createServer((req, res) => this.handle(req, res));
-    await new Promise<void>((resolve) => {
-      this.server!.listen(0, '127.0.0.1', () => {
-        const addr = this.server!.address();
-        this.boundPort = typeof addr === 'object' && addr ? addr.port : 0;
-        resolve();
-      });
-    });
+    this.boundPort = await listenFetchable(this.server, '127.0.0.1');
   }
 
   async stop(): Promise<void> {

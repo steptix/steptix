@@ -45,6 +45,11 @@ vi.mock('playwright-extra', () => ({
 }));
 
 vi.mock('puppeteer-extra-plugin-stealth', () => ({ default: () => ({}) }));
+// `preflightCdpPort` probes through loopbackFetch, not the global fetch; route
+// it to the global this file stubs, so the stub still answers the preflight.
+vi.mock('../src/browser/loopback-fetch.js', () => ({
+  loopbackFetch: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args),
+}));
 
 const { launchBrowser } = await import('../src/browser/manager.js');
 

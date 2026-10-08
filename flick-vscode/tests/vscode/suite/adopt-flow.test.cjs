@@ -13,6 +13,7 @@
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const vscode = require('vscode');
+const { listenFetchable } = require('../../../../tests/listen-fetchable.cjs');
 
 const EXT_ID = 'pkent.flick-vscode';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -36,7 +37,7 @@ class FakeSessionsServer {
       res.writeHead(404);
       res.end('{}');
     });
-    await new Promise((r) => this.server.listen(0, '127.0.0.1', r));
+    await listenFetchable(this.server, '127.0.0.1');
     const addr = this.server.address();
     this.url = `http://127.0.0.1:${addr.port}`;
   }

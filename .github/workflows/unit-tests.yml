@@ -194,3 +194,8 @@ jobs:
       - name: steptix-vscode
         if: ${{ !cancelled() }}
         run: npm test --ignore-scripts --prefix steptix-vscode
+      # A static check, not a test: it reads the source, needs no build, and
+      # takes under a second, so it is not part of any `npm test`.
+      - name: No bare listen(0)
+        if: ${{ !cancelled() }}
+        run: node scripts/check-listen-fetchable.mjs

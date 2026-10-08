@@ -201,6 +201,7 @@ vi.mock('../src/utils/logger.js', () => ({
 import { createApiServer } from '../src/server/api-server.js';
 import { readLastRun } from '../src/codebehind/last-run.js';
 import { executeStep } from '../src/runner/step-executor.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 const API_KEY = 'sk-flow-control-test';
 const cfg: Config = {
@@ -223,7 +224,7 @@ let testFilePath: string;
 beforeAll(async () => {
   const { app } = createApiServer(cfg);
   server = createServer(app);
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  await listenFetchable(server, '127.0.0.1');
   const addr = server.address();
   if (typeof addr === 'object' && addr !== null) baseUrl = `http://127.0.0.1:${addr.port}`;
 

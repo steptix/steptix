@@ -18,9 +18,9 @@
  */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const net = require('node:net');
 const path = require('node:path');
 const vscode = require('vscode');
+const { freeFetchablePort } = require('../../../../tests/listen-fetchable.cjs');
 
 const EXT_ID = 'pkent.steptix-vscode';
 const TEST_APP_PORT = 8787;
@@ -80,17 +80,9 @@ async function up(url) {
   }
 }
 
-/** A port nothing is listening on right now. */
+/** A port nothing is listening on right now, and one `fetch` accepts. */
 function freePort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.unref();
-    srv.on('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-  });
+  return freeFetchablePort();
 }
 
 /** The extension's test hooks, after checking the server and the fixture app. */

@@ -80,6 +80,7 @@ Later examples illustrate individual features. Supply their application-specific
 | YAML frontmatter | `tags: [smoke, login]`, `timeout: 90s`, `env: staging`, `dataFile: data/cases.json`, `dataSources:` mapping, and `type: skill` for library files. |
 | `## Config` bullet list | `baseUrl`, `timeout`, `viewport`, `cdp`, `cdpTab`, `consoleLogLevel`, `serverFileLogLevel`, and `unmask`. Unrecognised keys are kept and never read, with no warning. |
 | `## Parameters` bullet list | `- name: value`, referenced in steps as `{{name}}`. |
+| `## Context` free text | Sent word for word to the AI with every step of the test, after the project's `context/**/*.md` files: how the app behaves, what may appear (ads, overlays, toasts), and any selectors or frame ids to use. `{{placeholders}}` in it are not substituted. |
 
 `viewport` accepts `mobile` (390×844), `tablet` (768×1024), `desktop` (1440×900), or a size such as `1280x720`. It changes page dimensions, not touch support, user agent, or full mobile-device emulation. Do not combine a per-test viewport with `cdp`.
 

@@ -77,6 +77,13 @@ export interface StreamStepsRequest {
    * test file's dir) on the server path, not just the CLI parse path.
    */
   dataSources?: Record<string, string>;
+  /**
+   * The test's own `## Context` (see `parseContext`), sent with every batch
+   * so the AI gets it for every step, after the project's context files
+   * (docs/specs/SPEC-web-survey-fixes.md §2.46). Mirrors
+   * `StepRequest.testContext` in src/server/session-manager.ts.
+   */
+  testContext?: string;
   parameters?: Record<string, string>;
   /**
    * Per-session config, write-once: the server refuses a batch that carries

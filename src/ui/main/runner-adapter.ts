@@ -24,6 +24,7 @@ import { executeStep } from '../../runner/step-executor.js';
 import { launchBrowser, closeBrowser } from '../../browser/manager.js';
 import { captureScreenshot } from '../../browser/screenshot.js';
 import { loadContextFiles } from '../../context/loader.js';
+import { withTestContext } from '../../context/test-context.js';
 import { bindVariable, interpolate } from '../../parser/parameters.js';
 import { interpolateEnvData, type EnvDataContext } from '../../parser/interpolate-env-data.js';
 import { parseSetStep } from '../../parser/set-step.js';
@@ -575,7 +576,8 @@ export class UIRunnerAdapter {
 
     // 5. Load context files
     const context = await loadContextFiles(this.config.tests.contextDir);
-    this.contextContent = context.combined;
+    // Then the test's own `## Context` (SPEC-web-survey-fixes.md §2.46).
+    this.contextContent = withTestContext(context.combined, parsedTest.context);
 
     // 6. Set up AI client and token tracker
     this.tokenTracker = new TokenTracker();

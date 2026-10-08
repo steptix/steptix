@@ -60,6 +60,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { listenFetchable } from '../../tests/listen-fetchable.cjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1731,7 +1732,12 @@ async function handleRequest(
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, () => {
+// With PORT=0 the OS picks the port, and must not pick one `fetch` and
+// Chromium refuse to connect to (tests/listen-fetchable.cjs).
+const listening = PORT === 0
+  ? listenFetchable(server)
+  : new Promise<void>((resolve) => server.listen(PORT, () => resolve()));
+void listening.then(() => {
   // The port actually bound, not the one asked for: with PORT=0 the OS picks
   // it, and tests/fixture-server.ts reads it from this line.
   const address = server.address();

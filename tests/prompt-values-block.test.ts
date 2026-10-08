@@ -375,7 +375,7 @@ describe('system prompt — the placeholder rule and the rewritten predicate cla
 
   it('shows one action that names a placeholder and one that must not', () => {
     expect(flat).toContain('"value": "{{email}}"');
-    expect(flat).toContain('NOT "value": "demo@securebank.com"');
+    expect(flat).toContain('NOT "value": "ada@example.com"');
     expect(flat).toContain('Counter-example — step "Verify {{outcome}}"');
     expect(flat).toContain('A placeholder goes in a field only when that field is filled FROM its value.');
   });

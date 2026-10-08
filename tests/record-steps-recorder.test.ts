@@ -20,6 +20,7 @@ import { StepRecorder, classifyHistoryMove, classifyNavigation, historyBehind, t
 import type { Box, RecordedAction } from '../src/recorder/types.js';
 import { addLogCallback } from '../src/utils/logger.js';
 import { until } from './record-toolbar-cdp.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 const PAGES: Record<string, string> = {
   '/board.html': `<!doctype html><html><head><title>Board</title></head><body>
@@ -233,7 +234,7 @@ beforeAll(async () => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.end(body);
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  await listenFetchable(server, '127.0.0.1');
   const addr = server.address();
   origin = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
   browser = await chromium.launch({ headless: true });

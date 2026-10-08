@@ -13,6 +13,7 @@ import {
 import { parseUseStep } from '../parser/use-step.js';
 import { readUserRootEnv } from '../env/user-root.js';
 import { logger } from '../utils/logger.js';
+import { isBlockableHost } from './block-hosts.js';
 
 /** True for a non-null, non-array object literal. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -342,6 +343,7 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
   // out and a key the file got right are indistinguishable.
   assertDesktopSection(userConfig['desktop'], resolvedPath);
   assertStatsSection(userConfig['stats'], resolvedPath);
+  assertBlockAds(userConfig['browser'], resolvedPath);
   const typed = userConfig as UserConfig;
   const merged = withMachineAiFloor(
     withEnvDefaults(mergeConfig(baseDefaults, typed)),
@@ -496,6 +498,35 @@ export function assertStatsSection(stats: unknown, configPath: string): void {
     throw new Error(
       `Invalid stats.enabled in ${configPath}: expected true or false, got ${describeValue(enabled)}. ` +
         'Write the JSON boolean, without quotes — only `false` turns recording off.',
+    );
+  }
+}
+
+/**
+ * `browser.blockAds` is the list of domains the project blocks
+ * (docs/specs/SPEC-web-survey-fixes.md §2.51), checked at LOAD. The framework
+ * holds no list, so `true` would block nothing while reading as "on": refused,
+ * with the form to write instead. Each entry must be a bare host name, because
+ * the names go into Chromium's `--host-resolver-rules` switch, where a comma
+ * or a space would add a rule of the author's own making.
+ */
+function assertBlockAds(browser: unknown, configPath: string): void {
+  if (!isPlainObject(browser)) return;
+  const value = browser['blockAds'];
+  if (value === undefined) return;
+  const example = '"blockAds": ["doubleclick.net", "googlesyndication.com"]';
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `Invalid browser.blockAds in ${configPath}: expected a list of domains, got ${describeValue(value)}. ` +
+        `Steptix has no built-in list; name the domains to block, e.g. ${example}.`,
+    );
+  }
+  const bad = value.filter((h) => !isBlockableHost(h));
+  if (bad.length > 0) {
+    throw new Error(
+      `Invalid browser.blockAds in ${configPath}: ${bad.map((h) => (typeof h === 'string' ? JSON.stringify(h) : describeValue(h))).join(', ')} ` +
+        `${bad.length === 1 ? 'is not a domain' : 'are not domains'}. Write each as a bare host name, ` +
+        'with no https://, path or wildcard: "doubleclick.net" blocks it and every subdomain.',
     );
   }
 }

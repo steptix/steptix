@@ -20,8 +20,8 @@
  */
 const assert = require('node:assert/strict');
 const http = require('node:http');
-const net = require('node:net');
 const vscode = require('vscode');
+const { freeFetchablePort } = require('../../../../tests/listen-fetchable.cjs');
 const { FakeLm, FakeDataPart } = require('../fakes/fake-lm.cjs');
 
 const EXT_ID = 'pkent.steptix-vscode';
@@ -41,16 +41,9 @@ async function waitFor(label, predicate, timeoutMs = 8_000) {
   throw new Error(`timeout waiting for: ${label}`);
 }
 
-/** A port nothing is listening on right now. */
+/** A port nothing is listening on right now, and one `fetch` accepts. */
 function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.once('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
+  return freeFetchablePort();
 }
 
 /** Occupy a port the way another VS Code window's bridge would. */

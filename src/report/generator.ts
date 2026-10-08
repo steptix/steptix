@@ -676,6 +676,18 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     .map((a) => renderAssertion(a))
     .join('\n');
 
+  // Calls the step made and then set aside — above all a check whose code
+  // could not be read or run on any attempt. Shown with their replies, so a
+  // failure such as "assertion response missing code" can be diagnosed from
+  // what the model actually said (SPEC-web-survey-fixes.md §2.49).
+  const discarded = step.discardedAiInteractions ?? [];
+  const discardedHtml = discarded.length > 0
+    ? `<details class="discarded-calls">
+    <summary>Model replies this step did not use (${discarded.length})</summary>
+    ${discarded.map((ai) => renderAiInteraction(ai)).join('\n')}
+  </details>`
+    : '';
+
   // Interrupted step: an amber "stopped here" note instead of the red failure
   // block (issue 021).
   // The three failure blocks, most specific first. A tolerated failure gets an amber
@@ -854,6 +866,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     ${turnsHtml}
     ${capturesHtml}
     ${assertionHtml}
+    ${discardedHtml}
     ${failureHtml}
     ${endScreenshotHtml}
   </div>
@@ -1396,6 +1409,15 @@ function renderAssertion(assertion: AssertionResult): string {
   const aiHtml = assertion.aiInteraction
     ? renderAiInteraction(assertion.aiInteraction)
     : '';
+  // Code replies replaced before this one — an unreadable reply, or code that
+  // threw — each with what the model said (§2.49).
+  const replaced = assertion.supersededAiInteractions ?? [];
+  const replacedHtml = replaced.length > 0
+    ? `<details class="discarded-calls">
+    <summary>Earlier code replies, replaced (${replaced.length})</summary>
+    ${replaced.map((ai) => renderAiInteraction(ai)).join('\n')}
+  </details>`
+    : '';
 
   const codeBlock = assertion.assertionCode
     ? `<details class="assertion-code">
@@ -1444,6 +1466,7 @@ function renderAssertion(assertion: AssertionResult): string {
   </div>
   ${codeBlock}
   ${aiHtml}
+  ${replacedHtml}
 </div>`;
 }
 

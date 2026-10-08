@@ -249,6 +249,7 @@ vi.mock('../src/utils/logger.js', () => ({
 import { createApiServer } from '../src/server/api-server.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { executeStep } from '../src/runner/step-executor.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 const stepMock = vi.mocked(executeStep);
 
@@ -293,7 +294,7 @@ let tmpRoot: string;
 
 async function listenOnRandomPort(app: Express): Promise<{ server: Server; baseUrl: string }> {
   const started = createServer(app);
-  await new Promise<void>((resolve) => { started.listen(0, '127.0.0.1', () => resolve()); });
+  await listenFetchable(started, '127.0.0.1');
   const addr = started.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
   return { server: started, baseUrl: `http://127.0.0.1:${port}` };

@@ -455,6 +455,7 @@ import {
   errandTabHeldBySession,
   errandTabNotFound,
 } from '../src/mcp/errors.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 const API_KEY = 'sk-errand-real-app';
 
@@ -490,7 +491,7 @@ beforeAll(async () => {
 
   const { app } = createApiServer(cfg);
   server = createServer(app);
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  await listenFetchable(server, '127.0.0.1');
   const addr = server.address();
   if (typeof addr !== 'object' || addr === null) throw new Error('no port');
   const baseUrl = `http://127.0.0.1:${addr.port}`;

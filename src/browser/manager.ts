@@ -5,7 +5,11 @@ import { chromium as stealthChromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { BrowserConfig } from '../config/types.js';
 import { formatViewport } from '../config/viewport.js';
+import { hostResolverRule, isBlockedHost } from '../config/block-hosts.js';
 import { logger } from '../utils/logger.js';
+import { loopbackFetch } from './loopback-fetch.js';
+import { installNoticeRecorder } from './notices.js';
+import { answerDialog } from './dialogs.js';
 
 /**
  * How much bigger the headed OS window is than the page inside it, when
@@ -1279,10 +1283,14 @@ async function formatTabList(pages: ReadonlyArray<Page>): Promise<string> {
  * Verify Chrome is reachable on the given CDP port before attempting to
  * connect. Throws an actionable error telling the user how to start Chrome
  * if it isn't. The optional `fetchFn` parameter exists for unit testing.
+ *
+ * `loopbackFetch`, not the global `fetch`: the port may be one the OS picked
+ * for a browser `start_cdp_browser` launched, and `fetch` refuses the Fetch
+ * standard's bad ports outright (loopback-fetch.ts).
  */
 export async function preflightCdpPort(
   port: number,
-  fetchFn: typeof fetch = fetch,
+  fetchFn: typeof fetch = loopbackFetch,
 ): Promise<void> {
   const url = `http://localhost:${port}/json/version`;
   const ac = new AbortController();
@@ -1360,6 +1368,19 @@ export interface LaunchOverrides {
 const dialogGuarded = new WeakSet<BrowserContext>();
 
 /**
+ * Abort every request in `context` to a host in `browser.blockAds`, for the
+ * engines that take no host-resolver switch. Chromium uses
+ * {@link hostResolverRule} instead (SPEC-web-survey-fixes.md §2.30, §2.51).
+ */
+async function blockHostRequests(context: BrowserContext, hosts: readonly string[]): Promise<void> {
+  await context.route(
+    (url) => isBlockedHost(url.toString(), hosts),
+    (route) => route.abort('blockedbyclient').catch(() => {}),
+  );
+  logger.info(`Requests to ${hosts.length} blocked host(s) are aborted in this browser (browser.blockAds)`);
+}
+
+/**
  * Take ownership of native JavaScript dialogs (`alert` / `confirm` / `prompt` /
  * `beforeunload`) for every page in a context.
  *
@@ -1385,38 +1406,19 @@ const dialogGuarded = new WeakSet<BrowserContext>();
  * own tabs that `PageTracker` deliberately ignores. Guarding only the pages we
  * track would leave a dialog on an unrelated tab able to kill the server.
  *
- * The disposition mirrors Playwright's own default exactly (accept
- * `beforeunload`, dismiss the rest), so runs behave as they always have. The
- * difference is that the failures are caught and the dialogs are finally
- * visible: until now every dialog in every run was dismissed silently, with
- * nothing in the log to say it ever happened.
+ * Unless a `dialog` action armed an answer first, the disposition mirrors
+ * Playwright's own default exactly (accept `beforeunload`, dismiss the rest),
+ * so runs behave as they always have. An armed answer, the record of every
+ * dialog, and the `.catch` that is the point of this function all live in
+ * `answerDialog` (src/browser/dialogs.ts, SPEC-web-survey-fixes.md §2.1). A
+ * dialog that is already gone by the time our answer reaches Chromium is an
+ * ordinary race, not a reason to lose every session on the server.
  */
 export function installDialogGuard(context: BrowserContext): void {
   if (dialogGuarded.has(context)) return;
   dialogGuarded.add(context);
 
-  context.on('dialog', (dialog: Dialog) => {
-    const type = dialog.type();
-    // `beforeunload` is accepted rather than dismissed for the same reason
-    // Playwright accepts it: dismissing one means "stay on this page", which
-    // silently cancels the navigation the step just asked for.
-    const accepting = type === 'beforeunload';
-    const where = dialog.page()?.url() ?? 'unknown page';
-    logger.info(
-      `Browser dialog [${type}] auto-${accepting ? 'accepted' : 'dismissed'} on ${where}` +
-        (dialog.message() ? `: ${dialog.message()}` : ''),
-    );
-    // The `.catch` is the entire point of this function. A dialog that is
-    // already gone by the time our answer reaches Chromium is an ordinary race,
-    // not a reason to lose every session on the server.
-    const answered = accepting ? dialog.accept() : dialog.dismiss();
-    void answered.catch((err: unknown) => {
-      logger.debug(
-        `Dialog [${type}] could not be ${accepting ? 'accepted' : 'dismissed'} — ` +
-          `it was already gone (${err instanceof Error ? err.message : String(err)})`,
-      );
-    });
-  });
+  context.on('dialog', (dialog: Dialog) => answerDialog(context, dialog));
 }
 
 /**
@@ -1478,10 +1480,13 @@ export async function launchBrowser(
   // started, and its command line is theirs. `connectOverCdpSession` returns
   // above before reaching here.
   const launchArgs = config.launchArgs ?? [];
+  // Before the author's own switches, so one they pass wins.
+  const blockHosts = config.blockAds ?? [];
+  const adArgs = blockHosts.length > 0 && browserType === 'chromium' ? [hostResolverRule(blockHosts)] : [];
   const launchOptions = {
     headless: !headed,
     slowMo: config.slowMo,
-    args: [`--window-size=${width},${height}`, ...launchArgs],
+    args: [`--window-size=${width},${height}`, ...adArgs, ...launchArgs],
   };
   if (launchArgs.length > 0) {
     logger.info(`Extra browser launch args: ${launchArgs.join(' ')}`);
@@ -1551,6 +1556,12 @@ export async function launchBrowser(
   // Before the first page exists, so no page can ever raise a dialog into the
   // unguarded default (issues/047).
   installDialogGuard(context);
+  await installNoticeRecorder(context);
+  const blocked = config.blockAds ?? [];
+  if (blocked.length > 0) {
+    if (browserType === 'chromium') logger.info(`${blocked.length} blocked host(s) do not resolve in this browser (browser.blockAds)`);
+    else await blockHostRequests(context, blocked);
+  }
 
   const page = await context.newPage();
   const pageTracker = new PageTracker(page);
@@ -1656,6 +1667,7 @@ async function connectOverCdpSession(
     // dialog on a tab we deliberately ignore could otherwise kill the server
     // (issues/047).
     installDialogGuard(context);
+    await installNoticeRecorder(context);
 
     const preExistingPages = new Set<Page>(context.pages());
     let page: Page;

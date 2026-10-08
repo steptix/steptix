@@ -29,6 +29,7 @@ import {
   streamFrames,
   translateRequest,
 } from '../steptix-vscode/src/extension/lm-bridge-core.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 /** What the bridge would answer with, for a fixed reply. */
 const REPLY = '{"entry":"compiled"}';
@@ -80,7 +81,7 @@ beforeAll(async () => {
     });
   });
 
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listenFetchable(server, '127.0.0.1');
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
   baseURL = `http://127.0.0.1:${port}/v1`;

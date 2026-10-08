@@ -11,6 +11,7 @@ import {
   pageContentNoBrowserYet,
   preflightError,
 } from '../src/mcp/errors.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 // ---------------------------------------------------------------------------
 // The tools, driven through a real MCP client over a real transport, with only
@@ -291,7 +292,7 @@ async function startSseServer(sse: string): Promise<string> {
       res.end(JSON.stringify({ error: 'not in this fixture' }));
     });
   });
-  await new Promise<void>((resolve) => sseServer!.listen(0, '127.0.0.1', resolve));
+  await listenFetchable(sseServer!, '127.0.0.1');
   const address = sseServer.address();
   if (typeof address === 'string' || address === null) throw new Error('no port');
   return `http://127.0.0.1:${address.port}`;

@@ -19,6 +19,8 @@
  *     OS-assigned ports nothing can guess.
  */
 
+import { loopbackFetch } from './loopback-fetch.js';
+
 /** Conventional ports a browser someone else started is likely to be on.
  *  Inherited from flick. 9229 is here to be *classified*, not attached to —
  *  see `classifyEngine`. */
@@ -48,6 +50,8 @@ export interface CdpDiscoveryPort {
 
 export interface DiscoverOptions {
   timeoutMs?: number;
+  /** Defaults to `loopbackFetch`, not the global `fetch`, which refuses
+   *  the Fetch standard's bad ports — see loopback-fetch.ts. */
   fetchFn?: typeof fetch;
 }
 
@@ -63,14 +67,14 @@ export async function discoverCdpPorts(
   options?: DiscoverOptions,
 ): Promise<CdpDiscoveryPort[]> {
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const fetchFn = options?.fetchFn ?? fetch;
+  const fetchFn = options?.fetchFn ?? loopbackFetch;
   return Promise.all(ports.map((port) => probePort(port, timeoutMs, fetchFn)));
 }
 
 export async function probePort(
   port: number,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
-  fetchFn: typeof fetch = fetch,
+  fetchFn: typeof fetch = loopbackFetch,
 ): Promise<CdpDiscoveryPort> {
   // Each fetch gets its own deadline so a slow /json/version doesn't starve
   // /json/list (sharing one timer produced spurious tabs:null errors against
@@ -173,7 +177,7 @@ function isBrowserDialog(url: string): boolean {
 export async function listPageTabs(
   port: number,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
-  fetchFn: typeof fetch = fetch,
+  fetchFn: typeof fetch = loopbackFetch,
 ): Promise<CdpDiscoveryTab[] | null> {
   try {
     return toPageTabs(await fetchJson(`http://127.0.0.1:${port}/json/list`, timeoutMs, fetchFn));
@@ -203,7 +207,7 @@ export async function closeTab(
   port: number,
   targetId: string,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
-  fetchFn: typeof fetch = fetch,
+  fetchFn: typeof fetch = loopbackFetch,
 ): Promise<{ ok: boolean; notFound: boolean; error: string | null }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -254,7 +258,7 @@ export async function activateTab(
   port: number,
   targetId: string,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
-  fetchFn: typeof fetch = fetch,
+  fetchFn: typeof fetch = loopbackFetch,
 ): Promise<{ ok: boolean; notFound: boolean; error: string | null }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -282,7 +286,7 @@ export async function activateTab(
 export async function portAnswers(
   port: number,
   timeoutMs: number = 500,
-  fetchFn: typeof fetch = fetch,
+  fetchFn: typeof fetch = loopbackFetch,
 ): Promise<boolean> {
   try {
     await fetchJson(`http://127.0.0.1:${port}/json/version`, timeoutMs, fetchFn);

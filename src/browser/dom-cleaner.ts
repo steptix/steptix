@@ -1,6 +1,8 @@
+import { noticeNote } from './notices.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Frame, Page } from 'playwright';
+import { describeDialogs, takeUnshownDialogs } from './dialogs.js';
 
 /** Default maximum character length for DOM snapshots (prevents token blowup).
  *  Overridable per-call via CaptureDomOptions.domSnapshotCharLimit. */
@@ -43,6 +45,8 @@ const ALLOWED_DOM_ATTRIBUTES: readonly string[] = [
   // Upload fields: `multiple` decides whether one step can send two files,
   // and `accept` tells the model which field wants which kind of file.
   'accept', 'multiple',
+  // Which elements a drag can pick up (docs/specs/SPEC-web-survey-fixes.md §2.18).
+  'draggable',
   // The row numbering `readTable` leaves on a table it has read
   // (SPEC-structured-table-reads §7.4): `data-steptix-row="7"` IS the framework's
   // answer to "row 7 of the Orders table", and the allowlist would otherwise
@@ -462,7 +466,29 @@ export async function captureDomSnapshot(page: Page, opts: CaptureDomOptions = {
       + DOM_SNAPSHOT_TRUNCATION_MARKER;
   }
 
-  return snapshot;
+  return snapshot + dialogNote(page) + (await noticeNote(page));
+}
+
+/**
+ * The browser dialogs answered since the last snapshot, as a comment after
+ * the markup (docs/specs/SPEC-web-survey-fixes.md §2.1). A dialog opens and
+ * closes between two snapshots, so without this the model never learns that
+ * one appeared or what it said. Empty when there were none, which keeps every
+ * dialog-free snapshot exactly as it was. A page without a context (a test
+ * double) has no dialogs to report.
+ */
+function dialogNote(page: Page): string {
+  let records;
+  try {
+    records = takeUnshownDialogs(page.context());
+  } catch {
+    return '';
+  }
+  if (records.length === 0) return '';
+  return '\n<!-- Browser dialogs answered since the last snapshot. Each is also readable in the '
+    + 'page as window.__steptixDialogs (type, message, answer, text). A dialog is answered the '
+    + 'moment it opens: to choose the answer, send a "dialog" action BEFORE the click that opens it.\n'
+    + `${describeDialogs(records)}\n-->`;
 }
 
 /** Options for captureVisibleText. */
@@ -774,6 +800,13 @@ export interface DomSearchMatch {
   attributes: string;
   /** Ancestor chain for orientation (e.g. "main > div#content > table") */
   context: string;
+  /**
+   * Present when the match is not rendered: the labels of the collapsed
+   * sections around it, outermost first — what a person would open to reach
+   * it (SPEC-web-survey-fixes.md §2.28). Empty when it is hidden but no label
+   * could be read.
+   */
+  collapsedUnder?: string[];
 }
 
 /** Aggregate result of a findInDom call. */
@@ -1178,7 +1211,12 @@ export function formatFindResults(result: DomSearchResult, query: string, contai
 
   const lines = result.matches.map((m, i) => {
     const contextPart = m.context ? ` (in ${m.context})` : '';
-    return `${i + 1}. <${m.tag}${m.attributes ? ' ' + m.attributes : ''}> "${m.text}"${contextPart}\n   selector: ${m.selector}`;
+    const hiddenPart = m.collapsedUnder === undefined
+      ? ''
+      : m.collapsedUnder.length > 0
+        ? `\n   hidden — inside collapsed: ${m.collapsedUnder.join(' › ')}. Open those first, outermost first; clicking it while hidden times out`
+        : '\n   hidden — not visible right now; reveal it before acting on it';
+    return `${i + 1}. <${m.tag}${m.attributes ? ' ' + m.attributes : ''}> "${m.text}"${contextPart}\n   selector: ${m.selector}${hiddenPart}`;
   });
 
   const shown = result.matches.length;
