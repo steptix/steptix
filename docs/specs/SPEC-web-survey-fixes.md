@@ -56,6 +56,7 @@ in the test files, not here.
 | 2.40 | A value from an unset environment variable is typed into the page | 41 | `bookstore_user: $DEMOQA_USERNAME` with no such variable stays the literal `$DEMOQA_USERNAME`, with a warning in the run result. The model typed it into the Book Store login, and in one run a check then "found" `$DEMOQA_USERNAME` on the page and passed the section: a false pass | A turn that names a placeholder still holding a bare `$NAME`, or types that literal, is refused before anything runs, naming the variable to set |
 | 2.41 | No way to clear a field | 44 | The model sent `clear`, which is not an action, and the turn was refused; the retry selected the text and pressed Backspace | `clear`, `clearField`, `clearInput` and `clearText` map to `type` with an empty value |
 | 2.42 | §2.34's rewrite broke on an apostrophe | 70 | The glyph-tolerant name for `role=combobox[name="I'm the only traveler"]` put a bare `'` in the regex. It parsed on its own, so the rewrite was kept, but Playwright's `>>` splitter read the `'` as an open string and the click's own `>> visible=true >> nth=0` made the selector unparsable; the retry recovered | Write `'` and `"` in the rewritten pattern as `'` and `"` |
+| 2.43 | A required-field asterisk fails a label check | 70 | "Verify a return date field is shown" expected "Return date" and read "Return date *"; the asterisk is the form's required marker. It failed on attempt 1 and §2.25's hint rescued it | A failed DOM check passes when the text read equals the expected text once whitespace is collapsed and `*`, `:`, bullets and bars are stripped from both ends. Nothing inside the text is ignored, so "Not Done" still fails "Done" |
 
 ## 2. Fixes
 
@@ -560,6 +561,16 @@ selector splitter to pair, so the selector survives whatever is appended to
 it. A test clicks a glyph button named "I'm the only traveler" through
 `executeAction` — the path that appends the visibility filter — and fails
 without the escape.
+
+### 2.43 Label marks are not part of a label
+
+**Fix.** `evaluateAssertion` checks a failed DOM or API result once more
+with `sameTextIgnoringMarks(actual, expected)`: collapse whitespace, strip
+`*`, `:`, `•`, `·` and `|` from both ends of each, and compare for
+equality. A match passes the check, with a debug line saying so. This is
+deliberately narrower than containment (§2.38 asks the model for containment
+where the step means it): marks inside the text, extra words and an empty
+expectation never match.
 
 ## 3. Failures caused by the test files or the sites
 

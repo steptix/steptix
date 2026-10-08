@@ -1079,3 +1079,16 @@ describe('§2.41 clearing a field', () => {
     }
   });
 });
+
+describe('§2.43 label marks around a checked text', () => {
+  it('ignores a required-field asterisk or a colon around the text, and nothing inside it', async () => {
+    const { sameTextIgnoringMarks } = await import('../src/runner/step-executor.js');
+    expect(sameTextIgnoringMarks('Return date *', 'Return date')).toBe(true);
+    expect(sameTextIgnoringMarks('Total:', 'Total')).toBe(true);
+    expect(sameTextIgnoringMarks('  Name  ', 'Name')).toBe(true);
+    expect(sameTextIgnoringMarks('Not Done', 'Done')).toBe(false);
+    expect(sameTextIgnoringMarks('Return date (optional)', 'Return date')).toBe(false);
+    expect(sameTextIgnoringMarks('*', '')).toBe(false);
+    expect(sameTextIgnoringMarks('anything', undefined)).toBe(false);
+  });
+});

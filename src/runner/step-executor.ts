@@ -4441,6 +4441,14 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
     throw new Error(`Assertion code failed after ${MAX_ASSERTION_CODE_ATTEMPTS} attempts: ${lastErr ?? 'unknown error'}`);
   }
 
+  // A required-field asterisk or a label's colon is not part of the label: the
+  // check for "Return date" read "Return date *" and failed (§2.43). Only the
+  // marks around the text are ignored, so "Done" against "Not Done" still fails.
+  if (!evalResult.pass && p.against !== 'predicate' && sameTextIgnoringMarks(evalResult.actual, p.expected)) {
+    logger.debug(`"${evalResult.actual}" is "${p.expected}" with label marks around it — passing`);
+    evalResult = { ...evalResult, pass: true };
+  }
+
   logger.assertion(evalResult.pass, evalResult.actual, p.description);
 
   // Predicate-mode failures don't have a literal `expected` to quote — the
@@ -4467,6 +4475,22 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
 }
 
 /** Run assertion JS code, optionally polling until pass or timeout. */
+/** Marks that sit around a label without being part of it (§2.43). */
+const LABEL_MARKS = /^[\s*:•·|]+|[\s*:•·|]+$/g;
+
+/**
+ * Whether what a check read is the expected text once whitespace is collapsed
+ * and required-field and label marks (`*`, `:`, bullets) are stripped from
+ * both ends. Nothing inside the text is ignored, and an empty expectation
+ * never matches this way.
+ */
+export function sameTextIgnoringMarks(actual: string, expected: string | undefined): boolean {
+  if (expected === undefined) return false;
+  const norm = (s: string) => s.replace(/\s+/g, ' ').replace(LABEL_MARKS, '').trim();
+  const want = norm(expected);
+  return want !== '' && norm(actual) === want;
+}
+
 async function runAssertionCode(
   page: Page | Frame,
   code: string,
