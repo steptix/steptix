@@ -962,7 +962,6 @@ describe('§2.37 a navigation that never gets a page says whether the site is up
       expect(err).toBeInstanceOf(Error);
       expect((err as Error).message).toMatch(/Timeout 2000ms exceeded/);
       expect((err as Error).message).toMatch(/answers outside the browser \(HTTP 200 in \d+ ms\)/);
-      expect((err as Error).message).toMatch(/--disable-http2/);
     } finally {
       await page.close();
       server.closeAllConnections();
@@ -1020,7 +1019,7 @@ describe('§2.39 a step that leaves the choice open is not a question', () => {
     const { buildSystemPrompt, contentBlocksToText } = await import('../src/ai/prompts.js');
     const text = contentBlocksToText(buildSystemPrompt(''));
     expect(text).toMatch(/A step that leaves a choice OPEN is not unclear/);
-    expect(text).toMatch(/tick two skills/);
+    expect(text).toMatch(/tick two options/);
   });
 });
 

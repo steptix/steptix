@@ -137,7 +137,7 @@ named in the notes so a flaky test is not hidden.
 
 | # | Test | A | B | C | D | D notes |
 |---|------|---|---|---|---|---------|
-| 39 | The Internet | blocked | blocked | **pass** (HTTP/1.1) | **pass** | Chromium's HTTP/2 to this host stalls from this network (§2.37); the project now sets `--disable-http2`. One navigation still hung once and the retry loaded it; basic auth passed by putting the credentials in the URL |
+| 39 | The Internet | blocked | blocked | pass* | pass* | *Both passes used `--disable-http2`, since withdrawn: Chromium's HTTP/2 to this host stalls from this network (§2.37) and turning it off routes around one site rather than fixing anything. Without it the test fails at step 1, now with a message saying the site answers outside the browser. Basic auth passed by putting the credentials in the URL |
 | 40 | Expand Testing | fail | fail | **pass** | **pass** | |
 | 41 | DemoQA | fail | fail | pass\* | fail 31/34 | \*C's pass was false: it typed `$DEMOQA_USERNAME` into the Book Store login and a check then found that text (§2.40). D refuses that and fails the section by name. Steps 1–28 pass; the section needs a real account |
 | 42 | UI Testing Playground | fail | fail | **pass** alone | **pass** | Batch C stopped the bar at 97%, alone at 75%. D stopped at 75% in the batch |
@@ -173,10 +173,10 @@ named in the notes so a flaky test is not hidden.
 | 72 | jQuery UI | fail | fail | **pass** | **pass** | |
 
 **Totals.** A: 6 of 34. B: 7. C: 33 reported, of which two were false (41
-typed an unset variable, 52 checked something already true); 39 needed the
-HTTP/1.1 switch. D: 33 passes once 52 and 56 were rewritten (60 proves less
-than it reads, finding 2), with 41
-failing for want of an account, which is the honest result.
+typed an unset variable, 52 checked something already true). D: 33 once 52 and
+56 were rewritten (60 proves less than it reads, finding 2), with 41 failing
+for want of an account. Both C and D counted 39 as a pass with HTTP/2 turned
+off; with that workaround withdrawn, the standing result is 32 of 34.
 
 Every C and D pass ran under AI with no compiled steps, so PR #19's changes,
 which are about compiled code-behind, had nothing to act on in either run.
@@ -185,7 +185,7 @@ which are about compiled code-behind, had nothing to act on in either run.
 
 | # | Test | Result | Issue |
 |---|------|--------|-------|
-| 39 | The Internet | pass | Needs `--disable-http2` on this network; the site is still slow for Chromium now and then |
+| 39 | The Internet | fail | Chromium's HTTP/2 connection to this host stalls from this network, while curl and Firefox load it; cause not found. Turning HTTP/2 off makes it pass but is not a fix |
 | 40 | Expand Testing | pass | |
 | 41 | DemoQA | fail | Book Store login needs `DEMOQA_USERNAME` and `DEMOQA_PASSWORD` in `survey/web/.env` (register at demoqa.com; it has a reCAPTCHA) |
 | 42 | UI Testing Playground | pass | Timing-sensitive: under a ten-test load the bar once stopped at 97% |
@@ -221,9 +221,12 @@ Fixed during the survey, with a spec section each: §2.1–§2.42. Still open:
    "placeholders have no value" warning also fires for every captured variable
    (the false warning under "Seen in every run"), so the one real warning is
    lost among false ones.
-5. **Chromium-only network quirks need a project-wide switch.** §2.37 names
-   the HTTP/2 stall, but the fix (`browser.launchArgs`) is per project; there
-   is no per-test or per-host way to say "this site over HTTP/1.1".
+5. **A Chromium-only network stall, cause unknown.** Chromium (and Edge) get
+   no page from the-internet.herokuapp.com over HTTP/2 from this network, while
+   curl over HTTP/2 and Firefox do. §2.37 now says so instead of a bare
+   timeout, but why it happens, and what the framework should do about it, is
+   still open. A documented per-test and per-project HTTP/2 setting, which
+   the timeout message would name, is steptix/steptix#20.
 6. **Conditional steps leave no per-step record.** 71's If step and the step
    after it report `unknown` in the run result, so whether the cookie dialog
    was there, and what was done about it, is not visible outside the HTML

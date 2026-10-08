@@ -95,7 +95,7 @@ describe('step prompt — readTable rule', () => {
     );
     expect(prompt).toContain('carries data-steptix-row="N"');
     expect(prompt).toContain('the row matching [data-steptix-row="7"] INSIDE that table');
-    expect(prompt).toContain('"#RadGrid1_ctl00__7" is row EIGHT');
+    expect(prompt).toContain('"#grid_row_7" is row EIGHT');
     // SCOPING is in the prose, not only in the example. Every read of this run
     // leaves the same attribute on ITS table, so a selector that is just
     // `[data-steptix-row="7"]` matches row 7 of the first table in the page —

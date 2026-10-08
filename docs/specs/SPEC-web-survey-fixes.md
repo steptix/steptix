@@ -50,13 +50,14 @@ in the test files, not here.
 | 2.34 | Exact role names miss icon buttons | 62 | An icon font draws its glyph with CSS `::before` content, and that counts in the accessible name. PrimeFaces' Dismiss button is named "<glyph> Dismiss", so `role=button[name="Dismiss"]` matched nothing on an open dialog, twice | When an exact `role=…[name="…"]` matches nothing, retry it as `name=/^W*…W*$/i` and keep that only if it finds something |
 | 2.35 | A navigation to a 404 passed | 62 | "Navigate to input.xhtml" was sent to `/pages/input.xhtml`, which answered 404 Not Found; the navigate succeeded because a page loaded, and the next step had no field to type into and asked for clarification | A navigate reports the document's HTTP status; a 4xx or 5xx fails it (retryably) unless the step mentions an error or a status code |
 | 2.36 | A drag cannot say which side to drop on | 72 | "Drag Item 1 below Item 3" let go on Item 3's centre. A jQuery UI sortable decides before or after by which half the pointer is in, so Item 1 landed before Item 3 | `position` on `drag` (`above`, `below`, `left`, `right`) lets go at 20% or 80% of the target's height or width |
-| 2.37 | A navigation timeout does not say whether the site is up | 39 | "page.goto: Timeout 30000ms exceeded" and nothing else. the-internet.herokuapp.com answered curl and Firefox in under a second, while Chromium and Edge hung on it every time, and the bare timeout read as "the site is down" | On a navigation timeout, ask the URL once from outside the browser and add which it is: the site answers (name the status and time, and the `--disable-http2` launch arg that fixed this site) or it does not answer at all |
+| 2.37 | A navigation timeout does not say whether the site is up | 39 | "page.goto: Timeout 30000ms exceeded" and nothing else. the-internet.herokuapp.com answered curl and Firefox in under a second, while Chromium and Edge hung on it every time, and the bare timeout read as "the site is down" | On a navigation timeout, ask the URL once from outside the browser and add which it is: the site answers (with its status and time) or it does not answer at all. The message names the symptom only, not a browser flag |
 | 2.38 | "The page says X" is checked by equality on the wrong element | 45 | The check generated for "Verify the page says the confirm returned true" read the value span (`true`) and compared it for equality with the whole sentence, so it failed; §2.25's hint rescued it on the second attempt in every run | The assertion prompt says "says/shows/displays/contains" passes by containment, exact equality only for "equals/exactly/only", and that the element read must hold all of the expected text, with an innermost-element example |
 | 2.39 | A step that leaves the choice open made the model ask | 56 | "Pick an experience level and tick two skills" returned a `prompt` action asking which level and which skills, and the step failed waiting for an answer | Rule 7 says a step that leaves a choice open is not unclear: choose any valid option and name it in the description; ask only when the step names something the page does not have |
 | 2.40 | A value from an unset environment variable is typed into the page | 41 | `bookstore_user: $DEMOQA_USERNAME` with no such variable stays the literal `$DEMOQA_USERNAME`, with a warning in the run result. The model typed it into the Book Store login, and in one run a check then "found" `$DEMOQA_USERNAME` on the page and passed the section: a false pass | A turn that names a placeholder still holding a bare `$NAME`, or types that literal, is refused before anything runs, naming the variable to set |
 | 2.41 | No way to clear a field | 44 | The model sent `clear`, which is not an action, and the turn was refused; the retry selected the text and pressed Backspace | `clear`, `clearField`, `clearInput` and `clearText` map to `type` with an empty value |
 | 2.42 | §2.34's rewrite broke on an apostrophe | 70 | The glyph-tolerant name for `role=combobox[name="I'm the only traveler"]` put a bare `'` in the regex. It parsed on its own, so the rewrite was kept, but Playwright's `>>` splitter read the `'` as an open string and the click's own `>> visible=true >> nth=0` made the selector unparsable; the retry recovered | Write `'` and `"` in the rewritten pattern as `'` and `"` |
 | 2.43 | A required-field asterisk fails a label check | 70 | "Verify a return date field is shown" expected "Return date" and read "Return date *"; the asterisk is the form's required marker. It failed on attempt 1 and §2.25's hint rescued it | A failed DOM check passes when the text read equals the expected text once whitespace is collapsed and `*`, `:`, bullets and bars are stripped from both ends. Nothing inside the text is ignored, so "Not Done" still fails "Done" |
+| 2.44 | Prompt examples copied from tested sites | 44, 45, 50, 56, 62, and the fixture app | Ten examples added with these fixes used ids and text from the sites under test (`#open-shadow`/`#fname`, `#copy`, `'Checked'`, "tick two skills", "confirm returned true", Red and Green in `#colors`), and four older ones used the fixture app and a Telerik grid (`demo@securebank.com`, "Transaction Dispute", `#RadGrid1_ctl00__7`). On those pages the model was shown the answer | Every example uses invented names (`#host`/`#field`, `#item`, `#grid_row_7`, "Ada", "Order 12 was placed."). CLAUDE.md now forbids site-specific selectors and text anywhere in the framework |
 
 ## 2. Fixes
 
@@ -490,8 +491,8 @@ http(s) URL, it GETs the URL once from Node with a 10 s ceiling and appends one
 sentence to the error:
 
 - the site answered: `The site answers outside the browser (HTTP 200 in 764
-  ms) but the browser got no page …`, naming `"launchArgs":
-  ["--disable-http2"]` as the fix that worked here;
+  ms) but the browser got no page, so something between the browser and this
+  site is stalling rather than the site being down.`;
 - it did not: `The site does not answer outside the browser either
   (ECONNREFUSED), so it is down or unreachable from this machine.`
 
@@ -502,13 +503,14 @@ Measured on the-internet.herokuapp.com, 2026-10-08: plain Playwright Chromium
 with no Steptix settings timed out at 30 s, and so did Edge and
 `--disable-quic`; `--disable-http2` loaded it in 5 s, Firefox in 6 s, and
 `curl --http2` in under 1 s. So it is Chromium's HTTP/2 to that host from
-this network, not the site and not ad blocking.
+this network, not the site and not ad blocking. Why Chromium's HTTP/2 stalls
+there is not yet known, and turning HTTP/2 off is a workaround for one site,
+not a fix, so the survey does not use it: test 39 is recorded as failing on
+this network until the cause is found.
 
-HTTP/1.1 is not the whole story. In the run after the switch, one navigation
-to `/shadowdom` still got no page in 30 s; the message said the site answered
-outside the browser in 712 ms, and the retry loaded it. The site is
-intermittently slow for Chromium either way, and the message now says so
-instead of a bare timeout.
+Even over HTTP/1.1, which run D tried before the switch was withdrawn, one
+navigation to `/shadowdom` got no page in 30 s; the message said the site
+answered outside the browser in 712 ms, and the retry loaded it.
 
 ### 2.38 "Says" checks read by containment
 
@@ -572,13 +574,22 @@ deliberately narrower than containment (§2.38 asks the model for containment
 where the step means it): marks inside the text, extra words and an empty
 expectation never match.
 
+### 2.44 Prompt examples name nothing real
+
+**Fix.** The examples in the action, assertion and recording prompts use
+invented names that no tested page uses. The rules around them are unchanged:
+each still teaches the same pattern (a shadow root's host and field, a frame's
+document, an open choice, containment). Results on 44, 45, 50, 56 and 62 from
+runs C and D were measured with the copied examples in place, so they are
+reruns' business to confirm.
+
 ## 3. Failures caused by the test files or the sites
 
 These are fixed in the test files.
 
 | # | What was wrong | Fix in the test file |
 |---|----------------|----------------------|
-| 39 | Chromium's HTTP/2 connection to the site stalls from this network; curl and Firefox get the page (§2.37) | The survey project sets `"launchArgs": ["--disable-http2"]` under `browser`, so every survey site is reached over HTTP/1.1 |
+| 39 | Chromium's HTTP/2 connection to the site stalls from this network; curl and Firefox get the page (§2.37) | Left failing. Turning HTTP/2 off made it pass in run D, but that routes around one site rather than fixing anything, so the switch was withdrawn; the cause is open. A documented per-test and per-project HTTP/2 setting is steptix/steptix#20 |
 | 40 | The table offers 3, 5, 10 and All per page, not 25 | Show All entries |
 | 41 | DemoQA's checkbox tree has no "expand all" button any more | Expand Home, then the folders, with the toggle next to each name |
 | 47 | Formy's Places autocomplete fills only the address field | Verify the address field instead of the city |

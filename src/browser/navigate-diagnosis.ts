@@ -3,13 +3,10 @@
  *
  * `page.goto` that never gets a response reports only "Timeout 30000ms
  * exceeded", which reads the same whether the site is down or the site is up
- * and something between Chromium and it stalls. Those want opposite fixes —
- * wait, or change how the browser connects — so on a timeout we ask the site
- * once from outside the browser and say which one it is.
- *
- * Measured on the-internet.herokuapp.com: curl and Firefox got a 200 in under
- * a second while Chromium and Edge hung on every attempt, and
- * `--disable-http2` made Chromium load it in five.
+ * and something between Chromium and it stalls. Those are different problems,
+ * so on a timeout we ask the site once from outside the browser and say which
+ * one it is. The message names the symptom only; it does not prescribe a
+ * browser flag, because a flag that makes one site load is not a fix.
  */
 import type { Page, Response } from 'playwright';
 
@@ -56,8 +53,7 @@ export async function diagnoseNavigationTimeout(
   if (found.ok) {
     return (
       `The site answers outside the browser (HTTP ${found.status} in ${found.ms} ms) but the browser got no page, ` +
-      'so something between the browser and this site is stalling rather than the site being down. ' +
-      'If it is HTTP/2, adding "launchArgs": ["--disable-http2"] under "browser" in steptix.config.json makes Chromium connect over HTTP/1.1.'
+      'so something between the browser and this site is stalling rather than the site being down.'
     );
   }
   return `The site does not answer outside the browser either (${found.reason}), so it is down or unreachable from this machine.`;

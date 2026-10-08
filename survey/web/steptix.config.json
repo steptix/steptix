@@ -1,8 +1,7 @@
 {
   "browser": {
     "headed": true,
-    "blockAds": true,
-    "launchArgs": ["--disable-http2"]
+    "blockAds": true
   },
   "tests": {
     "dir": "./tests",

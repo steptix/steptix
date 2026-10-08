@@ -273,6 +273,39 @@ any string literal that looks like a real credential: one assigned to a
 tracked `.env`, and a real value added to `.env.example`. A fake that names
 its own test is not a finding.
 
+## No site-specific code in the framework
+
+Steptix has to work on any website or web application, so the framework never
+knows about a particular one. Everything a test needs to know about its site
+lives in that test's `.md` file.
+
+- **Keep selectors out of the framework.** Never hardcode a selector, id,
+  class name, URL or piece of page text taken from a site or app under test —
+  the survey sites, `fixtures/test-app` (SecureBank) or any other — in `src/`,
+  `runner-core/` or the extensions: not in code, not in defaults, and not in AI
+  prompts. Selectors and page text for a site go in that site's test `.md`.
+- **Write prompt examples with invented names.** An example teaches a pattern,
+  so give it names no tested page uses (`#item`, `#host`, `#grid_row_7`, "Ada",
+  "Order 12 was placed."). An example copied from a test site hands the model
+  that site's answer and makes the site's results look better than the
+  framework is.
+- **Fix the pattern, not the site.** When one site exposes a gap, make the fix
+  react to what the page does (a hidden checkbox input, a drag that needs
+  intermediate moves, a frame) and check it would behave the same on any page
+  that does it.
+- **Don't route around one site with a switch.** A browser launch flag or a
+  config setting that makes one site work (`--disable-http2`, a longer global
+  timeout) is a workaround, not a fix. Find the cause; until then, record the
+  site as failing and why.
+- **Generic web standards are fine.** HTML element names, input types and ARIA
+  roles and attributes (`select`, `input[type=file]`, `[role="dialog"]`,
+  `aria-live`) describe every page, not one.
+
+When reviewing a diff, `/code-review` included, report as a blocking finding
+any selector, id, class name, URL or page text under `src/`, `runner-core/` or
+the extensions that appears on a site or app the tests drive. A name that
+appears only in a comment saying where a problem was found is not a finding.
+
 ## Seed gitignored files into a new worktree
 
 After creating a worktree (via `git worktree add` or the `EnterWorktree`
