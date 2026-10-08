@@ -23,6 +23,7 @@ import {
   stepParameters,
   staleHandleComplaint,
   tabIdentifierComplaint,
+  unmatchedRoleNameComplaint,
   unwaitedReadComplaint,
   undeclaredContextComplaint,
 } from '../src/codebehind/generate.js';
@@ -525,6 +526,49 @@ describe('ambiguousSelectorComplaint', () => {
     expect(
       ambiguousSelectorComplaint(entry(`await page.waitForSelector('a[href="/login"]');`), MEASURED),
     ).toBeUndefined();
+  });
+});
+
+/**
+ * SPEC-web-survey-fixes.md §2.34: a role name that matched nothing exactly was
+ * acted on through the runtime's fallback, which nothing replays.
+ */
+describe('unmatchedRoleNameComplaint', () => {
+  const FELL_BACK: RecordedAction[] = [
+    {
+      action: 'click',
+      selector: 'role=button[name="Dismiss"]',
+      description: 'Dismiss the dialog',
+      targeting: {
+        roleNameFallback: 'role=button >> visible=true >> internal:has-text=/^\\s*Dismiss\\s*$/i',
+        resolvedSelector: '#dialog button.dismiss',
+      },
+    },
+  ];
+  const entry = (body: string): string =>
+    `{ source: 'Dismiss the dialog', async run({ page }) { ${body} } }`;
+
+  it('refuses the role name as written, narrowed or not, and names what to use instead', () => {
+    for (const body of [
+      `await page.locator('role=button[name="Dismiss"]').click();`,
+      `await page.locator('role=button[name="Dismiss"]').first().click();`,
+    ]) {
+      const complaint = unmatchedRoleNameComplaint(entry(body), FELL_BACK);
+      expect(complaint).toContain('matches nothing');
+      expect(complaint).toContain('#dialog button.dismiss');
+    }
+    expect(entryFaults(entry(`await page.locator('role=button[name="Dismiss"]').click();`), {
+      source: 'Dismiss the dialog',
+      actions: FELL_BACK,
+    }).map((f) => f.check)).toContain('unmatched-role-name');
+  });
+
+  it('accepts the resolved handle, and says nothing when the run did not fall back', () => {
+    expect(unmatchedRoleNameComplaint(entry(`await page.locator('#dialog button.dismiss').click();`), FELL_BACK))
+      .toBeUndefined();
+    expect(unmatchedRoleNameComplaint(entry(`await page.locator('role=button[name="Dismiss"]').click();`), [
+      { action: 'click', selector: 'role=button[name="Dismiss"]', description: 'x', targeting: { matchCount: 1 } },
+    ])).toBeUndefined();
   });
 });
 

@@ -961,10 +961,130 @@ describe('§2.34 role names match what a person sees', () => {
     }
   }, 30_000);
 
+  it('finds a field by its label, and an icon button by its aria-label, when the name is mis-cased or missing a mark', async () => {
+    const page = await pageWith(`
+      <label>Email *<input id="email"></label>
+      <button aria-label="Close dialog" onclick="document.body.dataset.hit = 'close'">×</button>`);
+    try {
+      const typed = await executeAction(page, act({ action: 'type', selector: 'role=textbox[name="Email"]', value: 'ada@example.test' }));
+      expect(typed.success).toBe(true);
+      expect(await page.inputValue('#email')).toBe('ada@example.test');
+      const clicked = await executeAction(page, act({ action: 'click', selector: 'role=button[name="close dialog"]' }));
+      expect(clicked.success).toBe(true);
+      expect(await hit(page)).toBe('close');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('pins the element by its own text, so a button appearing before it does not move the target', async () => {
+    const page = await pageWith(`
+      <div id="bar"><button id="cancel">Cancel</button><button id="dismiss"><img alt="tick"> Dismiss</button></div>`);
+    try {
+      const { selector } = await resolveRoleName(page, 'role=button[name="Dismiss"]', { graceMs: 0 });
+      expect(selector).toContain('internal:has-text=');
+      expect(selector).not.toContain('nth=');
+      await page.evaluate(() => {
+        const b = document.createElement('button');
+        b.textContent = 'Undo';
+        document.getElementById('bar')!.prepend(b);
+      });
+      expect(await page.locator(selector).evaluateAll((els) => els.map((e) => e.id))).toEqual(['dismiss']);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('pins by position only when its text cannot pick it out alone', async () => {
+    // Playwright's text filter reads the hidden "3"; innerText does not.
+    const page = await pageWith(`<button>Cancel</button><button><img alt="tick"><span style="display:none">3</span>Save</button>`);
+    try {
+      const { selector } = await resolveRoleName(page, 'role=button[name="Save"]', { graceMs: 0 });
+      expect(selector).toBe('role=button >> visible=true >> nth=1');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('counts every element that reads the name, rather than refusing a count', async () => {
+    const page = await pageWith(`
+      <button><img alt="cart"> Add to cart</button>
+      <button><img alt="cart"> Add to cart</button>
+      <button>Add to wishlist</button>`);
+    try {
+      const counted = await executeAction(page, act({ action: 'count', selector: 'role=button[name="Add to cart"]', as: 'n' }));
+      expect(counted.success).toBe(true);
+      expect(counted.capturedValue).toBe('2');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('waits a moment for the named element before settling for one that only reads the same', async () => {
+    // A row's "✖ Remove" is on screen; the dialog's own Remove arrives later.
+    const page = await pageWith(`
+      <button onclick="document.body.dataset.hit = 'row'">✖ Remove</button>
+      <script>
+        setTimeout(() => {
+          const b = document.createElement('button');
+          b.textContent = 'Remove';
+          b.onclick = () => { document.body.dataset.hit = 'dialog'; };
+          document.body.appendChild(b);
+        }, 300);
+      </script>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: 'role=button[name="Remove"]' }));
+      expect(result.success).toBe(true);
+      expect(await hit(page)).toBe('dialog');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('looks past an exact match nobody can see', async () => {
+    const page = await pageWith(`
+      <button style="width: 0; height: 0; padding: 0; border: 0; overflow: hidden">Dismiss</button>
+      <button onclick="document.body.dataset.hit = 'seen'"><img alt="tick"> Dismiss</button>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: 'role=button[name="Dismiss"]' }));
+      expect(result.success).toBe(true);
+      expect(await hit(page)).toBe('seen');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('suggests a name with dollar signs in it exactly as the page has it', async () => {
+    const page = await pageWith(`<button aria-label="Pay $$ now">Pay</button><button aria-label="Pay later">Pay</button>`);
+    try {
+      const { refusal } = await resolveRoleName(page, 'role=button[name="Pay"]', { graceMs: 0 });
+      expect(refusal).toContain('e.g. role=button[name="Pay $$ now"].');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('tells a compile what it acted on instead of the name as written', async () => {
+    const page = await pageWith(`<button id="d"><img alt="tick"> Dismiss</button>`);
+    try {
+      const result = await executeAction(
+        page,
+        act({ action: 'click', selector: 'role=button[name="Dismiss"]' }),
+        undefined,
+        undefined,
+        { measure: true },
+      );
+      expect(result.success).toBe(true);
+      expect(result.targeting?.roleNameFallback).toContain('internal:has-text=');
+    } finally {
+      await page.close();
+    }
+  });
+
   it('never lets a shorter name reach a longer label', async () => {
     const page = await pageWith(`<button><img alt="tick"> Dismiss all</button>`);
     try {
-      const resolution = await resolveRoleName(page, 'role=button[name="Dismiss"]');
+      const resolution = await resolveRoleName(page, 'role=button[name="Dismiss"]', { graceMs: 0 });
       expect(resolution).toMatchObject({ selector: 'role=button[name="Dismiss"]' });
       expect(resolution.refusal).toBeUndefined();
       expect(await resolution.describeMiss!()).toContain('  - named "tick Dismiss all" (reads "Dismiss all")');
