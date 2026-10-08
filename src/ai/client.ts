@@ -43,7 +43,7 @@ function textFromV2(content: V2ContentBlock[]): string {
  * known statically — the hot path wants a fast answer, authoring wants a
  * considered one — so there is no runtime difficulty heuristic to tune.
  */
-export type CompleteProfile = 'routine' | 'retry' | 'authoring';
+export type CompleteProfile = 'routine' | 'retry' | 'authoring' | 'compile';
 
 /**
  * Effort and its output cap come from ONE record so they cannot drift apart.
@@ -62,6 +62,10 @@ const PROFILES: Record<CompleteProfile, { effort?: Effort; maxTokens: number }> 
   routine: { maxTokens: 4096 },
   retry: { effort: 'medium', maxTokens: 8192 },
   authoring: { effort: 'high', maxTokens: 16384 },
+  // Compile writing, repairing and reviewing code-behind: `authoring`'s effort
+  // and cap, under its own name so a compile's spend can be told from a run's
+  // (`logCompileUsage`; docs/specs/SPEC-codebehind-robustness.md §6.10).
+  compile: { effort: 'high', maxTokens: 16384 },
 };
 
 /**
@@ -252,6 +256,24 @@ function usageFromV2(usage: { input_tokens: number; output_tokens: number; cache
     outputTokens: usage.output_tokens,
     ...(typeof cached === 'number' && Number.isFinite(cached) && { cachedInputTokens: cached }),
   };
+}
+
+/**
+ * One line per COMPILE call — writing, repairing and reviewing code-behind —
+ * with what it cost in tokens (docs/specs/SPEC-codebehind-robustness.md §6.10).
+ * Compile runs at high effort, so its spend is worth seeing apart from the
+ * run's. Nothing for a run's own calls, and nothing for a call that reported no
+ * usage.
+ */
+function logCompileUsage(profile: CompleteProfile | undefined, model: string, usage: CompleteUsage | undefined): void {
+  if (profile !== 'compile' || usage === undefined) return;
+  const cached = usage.cachedInputTokens !== undefined && usage.cachedInputTokens > 0
+    ? ` (${usage.cachedInputTokens} cached)`
+    : '';
+  logger.info(
+    `Compile call to ${model}: ${usage.inputTokens} input tokens${cached}, ${usage.outputTokens} output tokens` +
+      (usage.estimated ? ' (estimated)' : ''),
+  );
 }
 
 export class AiClient {
@@ -562,7 +584,9 @@ export class AiClient {
       throw new Error('AI response contained no content');
     }
 
-    return { text, model, ...(v2.usage && { usage: usageFromV2(v2.usage) }) };
+    const usage = v2.usage ? usageFromV2(v2.usage) : undefined;
+    logCompileUsage(options?.profile, model, usage);
+    return { text, model, ...(usage && { usage }) };
   }
 
   /** Streaming chat completion, accumulated into a single response. */
@@ -641,6 +665,7 @@ export class AiClient {
       throw new Error('AI stream produced no content');
     }
 
+    logCompileUsage(options?.profile, model, usage);
     return { text, model, usage };
   }
 

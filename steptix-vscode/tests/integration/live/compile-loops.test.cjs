@@ -239,11 +239,15 @@ describe('Steptix live — compile loops and the conditions that drive them', fu
     return { file, uri, stepsFile };
   }
 
-  /** Run & Compile, return the proposal's content, apply it. */
+  /**
+   * Run & Compile, apply the proposal, and return its content with the
+   * recording run's own report — what the replay is compared against.
+   */
   async function compileAndApply({ file, uri, stepsFile }) {
     await vscode.commands.executeCommand('steptix.restartSession');
     await sleep(1_000);
     say(`Run & Compile ${path.basename(file)}`);
+    const reportBefore = hooks.lastReportPath();
     void vscode.commands.executeCommand('steptix.runAndCompile');
     await waitFor(
       'the compile proposes files for THIS test',
@@ -265,7 +269,19 @@ describe('Steptix live — compile loops and the conditions that drive them', fu
       () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
       15_000,
     );
-    return content;
+    // The recording run's own report. Read only now: the hook answers for the
+    // controller of the FOCUSED test file, and the proposal's diff holds focus
+    // until Apply gives it back — before Apply it answers nothing.
+    await waitFor(
+      'the recording run’s report',
+      () => {
+        const p = hooks.lastReportPath();
+        return Boolean(p) && p !== reportBefore && fs.existsSync(p);
+      },
+      60_000,
+    );
+    const recordedHtml = fs.readFileSync(hooks.lastReportPath(), 'utf8');
+    return { content, recordedHtml };
   }
 
   /** Run the applied file; return its statuses and its report's HTML. */
@@ -298,7 +314,7 @@ describe('Steptix live — compile loops and the conditions that drive them', fu
       ['accountBody', 'Check the account', '{{account}}'],
     ]);
 
-    const content = await compileAndApply(target);
+    const { content, recordedHtml } = await compileAndApply(target);
 
     // ── The conditions ──────────────────────────────────────────────────
     // One `condition` entry per condition line, bound by the whole authored
@@ -329,6 +345,13 @@ describe('Steptix live — compile loops and the conditions that drive them', fu
       1,
       'one entry for the Repeat tail',
     );
+    // The read the For each walks only reads, so it is written from the
+    // recording (§6.6): `step.read` with the AI's own fields, not a model's code.
+    const readBlocks = entriesFor(content, text.readAccounts);
+    assert.equal(readBlocks.length, 1, `exactly one entry for "${text.readAccounts}", got ${readBlocks.length}`);
+    assert.match(readBlocks[0], /fromRecording:\s*true/, `"${text.readAccounts}" must be written from the recording:\n${readBlocks[0]}`);
+    assert.match(readBlocks[0], /step\.read\(\{[\s\S]*multiple:\s*true[\s\S]*as:\s*'accounts'/, `"${text.readAccounts}" must read every match into {{accounts}}:\n${readBlocks[0]}`);
+
     // The For each body reads the item per pass — or, if the placeholder rule
     // declined it, says so. What it must never do is carry pass 1's value.
     const accountEntry = entriesFor(content, text.accountBody)[0];
@@ -378,22 +401,35 @@ describe('Steptix live — compile loops and the conditions that drive them', fu
     }
     // The `For each`'s count is not decided by any condition: it is the length
     // of the list the compiled READ stored (step 11, "Read the name of every
-    // account … [store as: accounts]"), so it measures the model's selector for
-    // that read, not the loop and condition machinery. Measured on a real-model
-    // run: one of three compiles read each row's three spans and stored nine
-    // values, and this replay ran nine passes. Generation is now shown the
-    // recorded value and refuses one written in, which makes that rarer but
-    // cannot make a model's selector right — and Run & Compile has no replay to
-    // catch it (the boxed `steptix compile` does, by decision 11's pass-count
-    // check). So a wrong count here is said loudly, with the entry that caused
-    // it, rather than failing a test about conditions.
-    const accountPasses = passesOf('Check the account');
-    if (JSON.stringify(accountPasses) !== JSON.stringify(['1/3', '2/3', '3/3'])) {
-      const readEntry = entriesFor(content, text.readAccounts)[0] ?? '(no entry was proposed for it)';
+    // account … [store as: accounts]"). That count used to be a warning,
+    // because it measured a model's selector — one compile read each row's
+    // spans and stored nine values. That step only reads, so its entry is now
+    // written from the recording with no model
+    // (docs/specs/SPEC-codebehind-robustness.md §6.6): the AI's own read, run
+    // again, which on the same page stores the same list. So the replay must
+    // run exactly the passes the recording run ran — an assertion.
+    //
+    // Whether that list was the RIGHT one is the recording run's own read:
+    // measured live, the model sometimes reads each row's name AND masked
+    // number (six values) where it means the name (three). The replay then
+    // faithfully runs six passes; that is the model's selector on that run,
+    // not compiled code, so it is said rather than failed on.
+    const readEntry = entriesFor(content, text.readAccounts)[0] ?? '(no entry was proposed for it)';
+    const recordedPasses = reportBands(recordedHtml)
+      .filter((b) => b.label === 'Check the account')
+      .map((b) => `${b.index}/${b.count}`);
+    assert.ok(recordedPasses.length > 0, "the recording run's report must show the For each body's passes");
+    assert.deepEqual(
+      passesOf('Check the account'),
+      recordedPasses,
+      `"For each {{account}} in {{accounts}}" must run the passes the recording run ran ` +
+        `(${JSON.stringify(recordedPasses)}). The list came from step 11 ("${text.readAccounts}"), ` +
+        `whose entry was:\n  source:${readEntry}`,
+    );
+    if (JSON.stringify(recordedPasses) !== JSON.stringify(['1/3', '2/3', '3/3'])) {
       say(
-        `WARNING: "For each {{account}} in {{accounts}}" ran ${accountPasses.length} pass(es) on the replay ` +
-          `(${JSON.stringify(accountPasses)}), not 3. The list came from the compiled step 11 ` +
-          `("${text.readAccounts}"), whose entry was:\n  source:${readEntry}`,
+        `WARNING: the recording run's own read of the account names ran ${recordedPasses.length} pass(es) ` +
+          `(${JSON.stringify(recordedPasses)}), not 3 — the model's selector on that run, which the replay reproduced.`,
       );
     }
   });
@@ -407,7 +443,7 @@ describe('Steptix live — compile loops and the conditions that drive them', fu
       ['verify', null, 'Verify the Payment method panel says "Paid by card"'],
     ]);
 
-    const content = await compileAndApply(target);
+    const { content } = await compileAndApply(target);
     for (const key of ['ifCash', 'elseIf']) {
       const blocks = entriesFor(content, text[key]);
       assert.equal(blocks.length, 1, `exactly one entry for "${text[key]}"`);

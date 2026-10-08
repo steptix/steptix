@@ -96,13 +96,35 @@ function fakeAi(): { client: AiClient; prompts: string[] } {
         return { text: JSON.stringify({ file: fenced }), model: 'stub-model' };
       }
       const source = JSON.stringify(sourceOf(prompt));
+      // A step whose transcript READ answers with a read of the same selector:
+      // compile withholds an entry that reads with any other
+      // (docs/specs/SPEC-codebehind-robustness.md §6.2).
+      const reads = recordedReadSelectors(prompt);
+      const body = reads.length > 0
+        ? reads.map((selector) => `await page.locator(${JSON.stringify(selector)}).allTextContents();`).join(' ')
+        : `await page.click('#go');`;
       const entry = isCondition(prompt)
         ? `{ source: ${source}, async condition({ page }) { return (await page.locator('#next:enabled').count()) > 0; } }`
-        : `{ source: ${source}, async run({ page }) { await page.click('#go'); } }`;
+        : `{ source: ${source}, async run({ page }) { ${body} } }`;
       return { text: JSON.stringify({ entry }), model: 'stub-model' };
     },
   } as unknown as AiClient;
   return { client, prompts };
+}
+
+/** The selectors the transcript's reads and counts used, off a generation
+ *  prompt's actions block. */
+function recordedReadSelectors(prompt: string): string[] {
+  const block = /## The actions the AI performed[^\n]*\n[\s\S]*?```json\n([\s\S]*?)```/.exec(prompt)?.[1];
+  if (!block) return [];
+  try {
+    const actions = JSON.parse(block) as Array<{ action: string; selector?: string }>;
+    return actions
+      .filter((a) => (a.action === 'read' || a.action === 'count') && typeof a.selector === 'string')
+      .map((a) => a.selector!);
+  } catch {
+    return [];
+  }
 }
 
 /** The first generation (not repair) prompt for `source`. */
@@ -1591,6 +1613,26 @@ describe("steptix compile — a replay whose loop runs a different number of pas
         },
       ],
     });
+  /** {@link readRow} with a click before the read. A step that ONLY reads is
+   *  written from its recording with no model at all
+   *  (docs/specs/SPEC-codebehind-robustness.md §6.6), so the tests about what
+   *  the MODEL is shown and may write use a step that also acts. */
+  const readRowActing = (value: string): StepResult => {
+    const row = readRow(value);
+    const turn = row.turns[0]!;
+    return {
+      ...row,
+      turns: [
+        {
+          ...turn,
+          subActions: [
+            { index: 1, action: { action: 'click', selector: '#show-accounts' }, durationMs: 1 },
+            { ...turn.subActions[0]!, index: 2 },
+          ],
+        },
+      ],
+    };
+  };
   const recordOf = (first: StepResult): CompileRunOutcome =>
     outcome(
       [
@@ -1829,9 +1871,11 @@ describe("steptix compile — a replay whose loop runs a different number of pas
   // may not write it in — measured on a real-model Run & Compile of
   // control-flow.md, which stored nine values where the recording read three.
 
+  // Reads with the selector `readRow` recorded: compile withholds a read with
+  // any other (docs/specs/SPEC-codebehind-robustness.md §6.2).
   const CLEAN_READ =
     `{ source: ${JSON.stringify(READ)}, async run({ page, step }) { ` +
-    "const names = page.locator('#account-list > li > span > span:first-child'); " +
+    "const names = page.locator('.account'); " +
     "await names.first().waitFor(); step.setVar('accounts', JSON.stringify(await names.allTextContents())); } }";
 
   /** `fakeAi`, with READ's prompts of one kind answered from `answers` in turn. */
@@ -1860,7 +1904,7 @@ describe("steptix compile — a replay whose loop runs a different number of pas
       [`{ source: ${JSON.stringify(READ)}, async run({ step }) { step.setVar('accounts', '${RECORDED}'); } }`, CLEAN_READ],
       (p) => !isStepRepair(p),
     );
-    const { runner } = scriptedRunner(recordOf(readRow(RECORDED)), [
+    const { runner } = scriptedRunner(recordOf(readRowActing(RECORDED)), [
       replayOf(codeRow(1, { outputs: { accounts: RECORDED } }), RECORDED),
     ]);
 
@@ -1892,7 +1936,7 @@ describe("steptix compile — a replay whose loop runs a different number of pas
       ],
       isStepRepair,
     );
-    const { runner } = scriptedRunner(recordOf(readRow(RECORDED)), [
+    const { runner } = scriptedRunner(recordOf(readRowActing(RECORDED)), [
       // The generated read throws on the replay, having stored six values.
       outcome([codeRow(1, { status: 'failed', error: 'strict mode violation: resolved to 9 elements', outputs: { accounts: SIX } })], 4),
       replayOf(codeRow(1, { outputs: { accounts: RECORDED } }), RECORDED),

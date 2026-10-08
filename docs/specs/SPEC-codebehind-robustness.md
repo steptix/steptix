@@ -855,6 +855,27 @@ starts no request, and otherwise by the time its requests actually take. A
 click that starts first-party polling pays the budget every time; the log
 names the request.
 
+> **As built (2026-10-08).** Measured live, the design as written cost a
+> compiled click about 0.9 s (median 61 ms → 974 ms over 41 steps; compiled
+> replays 59–239 % slower): 600 ms of quiet after any change to the page,
+> then a second quick-exit window after an entry that had already settled
+> itself. Two changes keep the waits for network work as designed and bring
+> the rest within the bound above. With no request tracked, a settle ends
+> once the page has held still for `quickExitMs` (250 ms), not `quietMs`.
+> And the runner's wait after an entry whose code ends with `step.settle()`
+> after its last action (`settlesAfterLastAction`) returns at once unless a
+> request began or the page changed since (`settle(signal, { ifActive: true
+> })`).
+>
+> Re-measured against `ba80b365` with those changes: compiled steps that act
+> went from a median 73 ms to about 385 ms, and compiled replays of the
+> fixture tests were 28–169 % slower. The runner's own wait after an entry is
+> now a median 2 ms; what remains is the 250 ms quick-exit window inside each
+> entry's own `step.settle()`. On the local fixture app, where an acting step
+> took 60–70 ms, the 20 % acceptance above cannot be met with that window.
+> The project owner kept 250 ms (§9 Q2) on 2026-10-08: robustness over
+> replay speed, at about 0.3 s per compiled step that acts.
+
 ### 6.5 `step.check`: a failed self-check in a read-only entry heals
 
 **Fixes:** B's outcome. A wrong generated read becomes a ⚠ and a repair,
@@ -1189,6 +1210,22 @@ Compile uses the session's model (`live-compile.ts:128-132`) with the
   setting only if the stronger model's compiles need fewer re-asks and Review
   rejections, and its replays pass at least as often. Otherwise remove it.
 
+> **As built (2026-10-08): measured, and removed.** The project owner
+> approved two rounds instead of five, `openai/gpt-6-luna` against
+> `openai/gpt-6-sol`.
+>
+> - **Round 1 found a leak.** Routing every `authoring`-profile call also
+>   sent a run's own assertion code to Sol, and one assertion step failed on
+>   Sol's replies. Compile's calls then moved to a `compile` profile of their
+>   own, with `authoring`'s effort and cap.
+> - **Round 2, with that fixed:** 8/8 tests in both arms, 0 re-asks, 0 Review
+>   rejections and 0 replay heals in both. Sol cost $0.81 against Luna's $0.04
+>   for the same 50 compile calls (round 1: $0.83 against $0.05).
+> - **The keep-rule above was not met, so the setting was removed.** What
+>   stays: the `compile` profile, an info line per compile call giving its
+>   model and tokens (`logCompileUsage`), and info lines for re-asks and
+>   Review verdicts.
+
 ## 7. How to work on this
 
 - **Before you start.** Read CLAUDE.md: seeding a new worktree
@@ -1263,6 +1300,30 @@ Compile uses the session's model (`live-compile.ts:128-132`) with the
   `armActionWatcher(context, page, …)` armed before each click and
   `settle()` after it, in place of `waitForPostActionSettle`. The two slow
   rows should then show the loaded page.
+
+> **As built (2026-10-08): three more static checks, from the live runs.**
+> Each live run's server logs were searched for `Code-behind failed for step`,
+> which a passing test can still hold: the replay healed the step under AI.
+> Three faults showed up that §6.1–§6.9 do not cover. Each one is now
+> a static check with generation's one re-ask (§6.2), so Review rejects a
+> revision that brings it in:
+>
+> - **`step.getVar('baseUrl')`** (`contextValueAsVariableComplaint`). The
+>   base URL is the context's `baseUrl`, not a variable. It went stale in
+>   about 2 of 5 `compile-codebehind` replays.
+> - **A matcher chained onto an assertion**, `step.expect(page.url()).toBe(…)`
+>   (`chainedAssertionComplaint`). `step.expect` returns nothing, so the
+>   replay threw. This was the entry Review revised in `compile-skill-subfolder`.
+> - **A tab named differently from the run**, `tabs.close("Account Summary")`
+>   where the run's `closePage` named `page:2` (`tabIdentifierComplaint`, which
+>   checks `tabs.switchTo` against `switchPage` the same way). A tab is found by
+>   label, URL or title, and "Account Summary" was the new tab's heading. The
+>   prompt now tells `tabs.close` to use the transcript's identifier, as it
+>   already told `tabs.switchTo`.
+>
+> The final full run at `29e45f51` (77 tests, 4 skipped) failed only
+> `cdp-tab-focus`, which §7 lists as an unrelated baseline. It had one stale
+> heal for each of the last two faults, with both tests green.
 
 ## 9. Open questions
 

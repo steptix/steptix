@@ -3,6 +3,12 @@ import { bindVariable, dottedThroughRename, interpolate } from '../parser/parame
 import { envDataRefsIn, interpolateEnvData, resolveEnvDataRef, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { createCapturingLog, type CapturedLog } from '../tools/step-api.js';
 import type { CodeBehindBinding, CodeBehindVarScope } from './loader.js';
+import { entryFunctionActs } from './entry-actions.js';
+import { executeAction } from '../browser/actions.js';
+import { storeCapture } from '../runner/store-capture.js';
+import { runSecrets } from '../utils/secrets.js';
+import { WIDE_PLACEHOLDER_SOURCE } from '../parser/parameters.js';
+import type { AIAction } from '../ai/types.js';
 import { unavailableBrowserApi, unavailableTabApi } from './tabs.js';
 import {
   resolveUploadPathSync,
@@ -17,7 +23,11 @@ import type {
   CodeBehindStepApi,
   CodeBehindTabApi,
   StepCodeEntry,
+  StepReadOptions,
 } from './types.js';
+
+/** A `{{name}}` in a recorded field, in the wide grammar the recording uses. */
+const PLACEHOLDER_IN_FIELD = new RegExp(WIDE_PLACEHOLDER_SOURCE, 'g');
 
 /**
  * Running one code-behind entry (stories/step-codebehind.md, "Execution").
@@ -51,6 +61,31 @@ export class CodeBehindDeliberateFailure extends CodeBehindExpectationError {
   constructor(message: string) {
     super(message);
     this.name = 'CodeBehindDeliberateFailure';
+  }
+}
+
+/** What a failed self-check's message starts with, whichever way it fails. */
+export const SELF_CHECK_FAILED = 'Self-check failed: ';
+
+/**
+ * What a failed `step.check` throws in an entry that takes no action
+ * (docs/specs/SPEC-codebehind-robustness.md §6.5, D4).
+ *
+ * Deliberately NOT a {@link CodeBehindExpectationError}. A self-check is the
+ * one the GENERATOR wrote to prove its own read was right — "one name per
+ * account row" — and when it fails, what is wrong is the generated code, not
+ * the application. So the runner reads it as broken code: the step heals under
+ * AI, which reads what the run read, the entry is flagged stale, and the next
+ * compile repairs it. Strict replay and keyless runs still never heal.
+ *
+ * In an entry that ACTS, `step.check` throws a `CodeBehindExpectationError`
+ * instead: a heal re-runs the step under AI, and after a click that can submit
+ * twice.
+ */
+export class CodeBehindCheckError extends Error {
+  constructor(message: string) {
+    super(`${SELF_CHECK_FAILED}${message}`);
+    this.name = 'CodeBehindCheckError';
   }
 }
 
@@ -189,6 +224,22 @@ export interface RunCodeBehindOptions {
    * boolean answer can still pass `{ verb: 'return' }`.
    */
   flowControlClaim?: ParsedFlowControlStep | undefined;
+  /**
+   * The wait after an action, armed for this entry just before it runs
+   * (`armActionWatcher`, docs/specs/SPEC-codebehind-robustness.md §6.4) —
+   * what `step.settle()` waits on. Absent where there is nothing to wait for
+   * (the computer surface, a caller with no page), and `step.settle()` then
+   * returns at once.
+   */
+  watcher?: { settle(signal?: AbortSignal): Promise<unknown> } | undefined;
+  /** The run's abort signal: a Stop ends a `step.settle()` at once. */
+  signal?: AbortSignal | undefined;
+  /** The active page when a `step.read` / `step.count` runs — after a tab
+   *  switch the entry made (§6.6). Defaults to `page`. */
+  activePage?: (() => Page) | undefined;
+  /** How long a count or a read of every match waits for its matches to hold
+   *  still (§6.6). Defaults to 10 s. */
+  readTimeoutMs?: number | undefined;
 }
 
 export interface CodeBehindOutcome {
@@ -266,6 +317,18 @@ export async function runCodeBehindEntry(
       options.envData,
       options.uploadPaths,
       options.flowControlClaim !== undefined && isReturnClaim(options.flowControlClaim),
+      {
+        settle: async () => {
+          await options.watcher?.settle(options.signal);
+        },
+        // Decided once, when the entry loads (§6.5): whether a failed
+        // `step.check` may heal. Any call the entry makes that is not known
+        // to be read-only counts as acting (`entryActs`).
+        acts: typeof entry.run === 'function' && entryFunctionActs(entry.run),
+        page: () => options.activePage?.() ?? options.page,
+        signal: options.signal,
+        readTimeoutMs: options.readTimeoutMs,
+      },
     ),
     log: createCapturingLog(options.label, logs),
     tabs: options.tabs ?? unavailableTabApi(),
@@ -452,6 +515,9 @@ export async function runCodeBehindCondition(
       options.envData,
       options.uploadPaths,
       false,
+      // No watcher: the framework has settled the page before a condition is
+      // asked, and a condition does not act, so `step.settle()` returns at once.
+      {},
     ),
     log: createCapturingLog(options.label, logs),
     tabs: options.tabs ?? unavailableTabApi(),
@@ -491,6 +557,26 @@ export async function runCodeBehindCondition(
       }),
     };
   }
+}
+
+/** What a run lends the step API beyond the variable view. */
+interface StepApiRuntime {
+  /** `step.settle()` — the wait on this entry's armed watcher (§6.4). */
+  settle?: () => Promise<void>;
+  /**
+   * The entry ACTS on the page (`entryActs`, §6.3): its failed `step.check`
+   * fails the step rather than healing it (§6.5). Absent — a condition entry,
+   * which never acts — and a failed check heals like any throw.
+   */
+  acts?: boolean;
+  /** The page a `step.read` / `step.count` reads — the active one, after a
+   *  tab switch the entry made (§6.6). Absent, and they throw. */
+  page?: () => Page;
+  /** The run's abort signal. */
+  signal?: AbortSignal | undefined;
+  /** How long a count or a read of every match waits for its matches to
+   *  stop changing (§6.6). */
+  readTimeoutMs?: number | undefined;
 }
 
 /**
@@ -535,8 +621,11 @@ function makeStepApi(
    *  not `fail` — which is what `step.exit()` is allowed on
    *  (stories/step-flow-control.md, decision 11). */
   claimsReturn = false,
+  /** What the entry's run lends the step API beyond variables — see
+   *  {@link StepApiRuntime}. */
+  runtime: StepApiRuntime = {},
 ): CodeBehindStepApi {
-  return {
+  const api: CodeBehindStepApi = {
     getVar(name) {
       // Own properties throughout: a bare index into any of these three plain
       // objects answers `getVar('constructor')` / `getVar('toString')` with a
@@ -611,6 +700,21 @@ function makeStepApi(
         throw new CodeBehindExpectationError(message ?? 'Code-behind expectation failed');
       }
     },
+    check(condition, message) {
+      if (condition) return;
+      const said = typeof message === 'string' && message.trim() !== '' ? message : "the entry's own check";
+      // A heal re-runs the step under AI, and after a click that can submit
+      // twice: in an entry that acts, a failed self-check fails the step, as a
+      // failed `expect` does (§6.5).
+      if (runtime.acts === true) throw new CodeBehindExpectationError(`${SELF_CHECK_FAILED}${said}`);
+      throw new CodeBehindCheckError(said);
+    },
+    async settle() {
+      // The wait after an action (docs/specs/SPEC-codebehind-robustness.md
+      // §6.4), on the watcher armed for this entry. Never throws: a settle
+      // that cannot complete leaves the entry to read the page as it is.
+      await runtime.settle?.().catch(() => {});
+    },
     fail(message) {
       // No claim guard, the mirror of `exit`'s (decision 10): the unsafe direction
       // for an exit is passing work that did not happen, and there is no unsafe
@@ -649,7 +753,119 @@ function makeStepApi(
       }
       return resolveUploadPathSync(relative, uploadPaths ?? {});
     },
+    read(options) {
+      return recordedRead('read', options, { api, scope, resolvedParameters, outputs, envData, runtime });
+    },
+    async count(options) {
+      return Number(
+        await recordedRead('count', options, { api, scope, resolvedParameters, outputs, envData, runtime }),
+      );
+    },
   };
+  return api;
+}
+
+/** How long the number of matches must hold still before a count or a read
+ *  of every match takes them (§6.6). */
+const MATCHES_QUIET_MS = 300;
+
+/**
+ * `step.read` / `step.count`: the AI's `read` or `count` action, run again —
+ * the code half of a step compiled from its recording
+ * (docs/specs/SPEC-codebehind-robustness.md §6.6, D7).
+ *
+ * The same PATH, not just the same reader: the action goes through
+ * `executeAction`, which cleans the selector, moves an iframe written into it
+ * to the frame field and resolves the frame before it reads — exactly as when
+ * the model emitted it. So on the same page it produces exactly what the run
+ * produced, and stores it the same way (`storeCapture`, under the frame's name
+ * for the capture, as `step.setVar` does).
+ *
+ * Before a count or a read of every match it waits for the number of matches
+ * to hold still for 300 ms: neither waits for elements on its own, and the AI's
+ * read came after the page had settled and the model had thought.
+ *
+ * Its self-check: given the `kinds` the run's read matched, a match of any
+ * other kind fails as `step.check` does — in an entry that only reads, the
+ * step falls back to AI and the entry is regenerated. An empty result passes,
+ * as it does under AI.
+ */
+async function recordedRead(
+  kind: 'read' | 'count',
+  options: StepReadOptions,
+  ctx: {
+    api: CodeBehindStepApi;
+    scope: CodeBehindVarScope;
+    resolvedParameters: Record<string, string>;
+    outputs: Record<string, string>;
+    envData: EnvDataContext | undefined;
+    runtime: StepApiRuntime;
+  },
+): Promise<string | string[]> {
+  const page = ctx.runtime.page?.();
+  if (!page) throw new Error(`step.${kind} needs a page, and this run has none`);
+  if (typeof options?.selector !== 'string' || options.selector.trim() === '') {
+    throw new Error(`step.${kind} needs a selector`);
+  }
+  // A placeholder in a recorded field is the AUTHORED name: filled through
+  // the frame, as `step.getVar` reads it.
+  const fill = (text: string): string =>
+    text
+      .replace(PLACEHOLDER_IN_FIELD, (_m, name: string) => valueOrThrow(kind, `{{${name}}}`, ctx.api.getVar(name)))
+      .replace(/\$\{([^}]+)\}/g, (_m, ref: string) => valueOrThrow(kind, `\${${ref}}`, ctx.api.getVar(ref)));
+  const effective =
+    options.as === undefined
+      ? undefined
+      : ((Object.hasOwn(ctx.scope.renames, options.as) ? ctx.scope.renames[options.as] : undefined) ?? options.as);
+  const action: AIAction = {
+    action: kind,
+    selector: fill(options.selector),
+    ...(kind === 'read' && options.multiple === true && { multiple: true }),
+    ...(kind === 'read' && options.attribute !== undefined && { attribute: fill(options.attribute) }),
+    ...(kind === 'read' && options.pattern !== undefined && { pattern: fill(options.pattern) }),
+    ...(options.frame !== undefined && { frame: fill(options.frame) }),
+    ...(effective !== undefined && { as: effective }),
+    description: `${kind} ${options.selector} (code-behind)`,
+  };
+  const plural = kind === 'count' || options.multiple === true;
+  const kinds = options.kinds ?? [];
+  const result = await executeAction(page, action, undefined, ctx.runtime.signal, {
+    ...(kinds.length > 0 && { kinds: true }),
+    ...(plural && {
+      settleMatches: { quietMs: MATCHES_QUIET_MS, timeoutMs: ctx.runtime.readTimeoutMs ?? 10_000 },
+    }),
+  });
+  if (!result.success) throw new Error(result.error ?? `step.${kind} failed`);
+
+  // The self-check, before anything is stored: a wrong read must not reach the
+  // map, even for the moment before the step falls back to AI.
+  if (kinds.length > 0 && result.kinds !== undefined) {
+    const other = result.kinds.filter((k) => !kinds.includes(k));
+    if (other.length > 0) {
+      ctx.api.check(
+        false,
+        `the ${kind} matched ${other.map((k) => `\`${k}\``).join(', ')} where the run read ` +
+          `${kinds.map((k) => `\`${k}\``).join(', ')}`,
+      );
+    }
+  }
+
+  if (effective !== undefined) {
+    const stored = storeCapture(ctx.resolvedParameters, effective, result, () =>
+      runSecrets({ parameters: ctx.resolvedParameters, ...(ctx.envData !== undefined && { envData: ctx.envData }) }),
+    );
+    if (stored !== undefined) ctx.outputs[effective] = stored;
+  }
+  return result.capturedValues ?? result.capturedValue ?? '';
+}
+
+/** A placeholder's value, or a throw naming it: a read built around a missing
+ *  value would read something else entirely. */
+function valueOrThrow(kind: string, placeholder: string, value: string | undefined): string {
+  if (value === undefined) {
+    throw new Error(`step.${kind}: ${placeholder} has no value on this run`);
+  }
+  return value;
 }
 
 /**

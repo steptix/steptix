@@ -17,10 +17,11 @@ import { buildCodeBehindRegistry, type CodeBehindBinding } from './loader.js';
 import {
   aiEntryFor,
   anyActionCarriesPlaceholder,
-  askWithCaptureRetry,
+  askCheckedRepair,
   capturedValueGuards,
   compilePromptSecrets,
   compilableCondition,
+  entryFromRecording,
   generateConditionEntry,
   generateStepEntry,
   guardedValues,
@@ -30,6 +31,7 @@ import {
   refuseReason,
   stepEnvRefs,
   stepParameters,
+  stepSubstitution,
   unresolvedRefsReason,
   SET_STEP_NOT_COMPILED,
   SURFACE_SWITCH_NOT_COMPILED,
@@ -40,7 +42,7 @@ import {
 } from './generate.js';
 import { maskValueForPrompt, type LoopContext } from '../ai/prompts.js';
 import { buildRepairPrompt, type RepairPromptInput } from './repair.js';
-import { reviewCandidate } from './review.js';
+import { evidenceKey, evidenceKeyOf, reviewCandidate, type EntryEvidence } from './review.js';
 // The two refusals both compilers say; they live beside `generationRefusal`.
 // Safe in this direction because live-compile.ts's only reference back here is
 // an `import type` (stories/step-failure-outcomes.md, decisions 10 and 11).
@@ -70,7 +72,7 @@ import {
   resolveEnvDataRef,
 } from '../parser/interpolate-env-data.js';
 import { bindVariable, clearDottedKeys, loadDataFile, placeholderRoot } from '../parser/parameters.js';
-import { evidenceRows, recordingDirFor, writeReplayFailure } from './recording.js';
+import { evidenceRows, recordingDirFor, writeReplayFailure, type RecordedAction } from './recording.js';
 import {
   inheritLoopBindings,
   isSecretParameterName,
@@ -811,6 +813,20 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
    */
   const conditionsNotCompiled: Array<{ number: number; message: string }> = [];
   /**
+   * Steps whose generated (or repaired) code was WITHHELD: it still read with a
+   * different selector from the one the recording read with after its one
+   * re-ask (docs/specs/SPEC-codebehind-robustness.md §6.2). Modelled on
+   * `conditionsNotCompiled`, for the same reasons: not fatal — the check fails
+   * nothing, it leaves one step on AI — so the step leaves the selection, no
+   * replay round expects code from it, the summary names it, and nothing is
+   * written for it, so the next compile takes it again. Never `ai: true`, which
+   * would keep it on AI for good.
+   */
+  const stepsNotCompiled: Array<{ number: number; message: string }> = [];
+  /** What each step entry was generated from, for Review (§6.2) — the
+   *  evidence pass's actions and values, keyed by entry. */
+  const evidence = new Map<string, EntryEvidence>();
+  /**
    * The runtime loop a line sits in the body of, as the prompts name it
    * (decision 2): its authored guard line, and a `For each`'s runtime item.
    * The live compiler's plan asks the same `innermostLoopGuard`.
@@ -919,16 +935,38 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     }
 
     const loop = loopContextAt(step.index, result?.loop?.values ?? passValues);
+    const evidenceCaptures = recordedCapturesOf(step.binding, result?.outputs);
+    evidence.set(evidenceKeyOf(step.binding!), {
+      step: step.number,
+      actions: actionsOf(result),
+      substitute: stepSubstitution(step.binding!, passValues, test.envData),
+      ...(evidenceCaptures && { recordedCaptures: evidenceCaptures }),
+      variables: new Set(Object.keys(passValues)),
+    });
     // An evidence pass that HEALED — its entry threw and the step ran under AI,
     // which is how a stale step joins the selection — is repaired rather than
     // generated from scratch, as the live compiler does it: shown the entry
     // that broke, what it threw, and the page it threw on. Plain generation
     // hands the model the same page and lets it write the same broken selector
     // again. No entry text to repair from (the file was edited) falls through.
-    const healed = result?.codeBehindStale
+    //
+    // Ahead of both: a step that only reads is written from the evidence
+    // pass's recording, with no model (docs/specs/SPEC-codebehind-robustness.md
+    // §6.6) — healed or not, since the pass that healed it chose its read
+    // afresh.
+    const fromRecording = entryFromRecording({
+      binding: step.binding!,
+      actions: actionsOf(result),
+      resolvedParameters: passValues,
+      ...(test.envData && { envData: test.envData }),
+      ...(result?.surface !== undefined && { surface: result.surface }),
+    });
+    const healed = fromRecording === undefined && result?.codeBehindStale
       ? await repairHealedStep(step, result, passValues, promptSecretsFor(passValues, step.binding), options, candidate, loop)
       : undefined;
-    const generated = healed ?? await generateStepEntry({
+    const generated: GeneratedEntry = fromRecording !== undefined
+      ? { kind: 'entry', code: fromRecording, fromRecording: true }
+      : healed ?? await generateStepEntry({
       binding: step.binding!,
       actions: actionsOf(result),
       ...(result?.assertions && { assertions: result.assertions }),
@@ -978,6 +1016,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       }
     }
     if (applied.kind === 'declined') declined++;
+    if (applied.kind === 'error' && applied.withheld) {
+      // See `stepsNotCompiled`: no entry, no failed compile.
+      stepsNotCompiled.push({ number: step.number, message: applied.message });
+      stepEvent(
+        'generate',
+        step,
+        `not compiled — ${applied.message}; the step stays AI, and the next compile tries again`,
+      );
+      continue;
+    }
     if (applied.kind === 'error') {
       return finish(
         'failed',
@@ -994,13 +1042,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     }
   }
 
-  // A condition that got no entry leaves the selection: no replay round may
-  // expect code from it, and `compiled` counts entries this compile wrote.
-  if (conditionsNotCompiled.length > 0) {
-    const dropped = new Set(conditionsNotCompiled.map((c) => c.number));
+  // A condition — or a step (§6.2) — that got no entry leaves the selection:
+  // no replay round may expect code from it, and `compiled` counts entries this
+  // compile wrote.
+  const dropFromSelection = (numbers: readonly number[]): void => {
+    if (numbers.length === 0) return;
+    const dropped = new Set(numbers);
     const order = selection.order.filter((s) => !dropped.has(s.number));
     selection = { keys: new Set(order.map((s) => s.key!)), order, errors: [] };
-  }
+  };
+  dropFromSelection([...conditionsNotCompiled, ...stepsNotCompiled].map((c) => c.number));
 
   // The candidate trail (stories/codebehind-recording-on-disk.md): what the
   // compile has so far, on disk beside the recording, after every stage.
@@ -1017,6 +1068,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       // them.
       steps: test.expansion?.rawSteps ?? test.steps,
       guarded: [...allParameters(parameters), ...allEnvRefs(test)],
+      evidence: (file, entry) => evidence.get(evidenceKey(file, entry)),
       aiClient: options.aiClient,
       ...(options.signal && { signal: options.signal }),
     },
@@ -1345,6 +1397,28 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     declined++;
     writtenOffAi.push(step.number);
   };
+  /**
+   * An entry written from the recording that failed a strict replay
+   * (docs/specs/SPEC-codebehind-robustness.md §6.6): take back the compile's
+   * entry for it, list it as not compiled, and drop it from the selection, so
+   * it stays on AI until a Run & Compile writes it again from a live run.
+   * False — and nothing done — for any other entry, or when taking it back is
+   * unsafe; the caller then does what it did before.
+   */
+  const leaveWithoutCode = async (step: CompileStep, error: string): Promise<boolean> => {
+    if (step.kind === 'condition' || step.key === undefined) return false;
+    if (!/\bfromRecording\s*:\s*true\b/.test(candidate.entryTextFor(step) ?? '')) return false;
+    if (!(await candidate.retract(step))) return false;
+    await candidate.persist();
+    proven.delete(step.key);
+    // The summary adds "It stays AI; compile again to retry" — and a compile's
+    // own AI run is the live run this entry is written again from.
+    const message = `its code, written from the recording, failed on the replay (${error})`;
+    stepsNotCompiled.push({ number: step.number, message });
+    dropFromSelection([step.number]);
+    stepEvent('replay', step, `not compiled — ${message}`);
+    return true;
+  };
 
   for (let round = 1; round <= maxRounds; round++) {
     const outcome = await replay(round);
@@ -1428,6 +1502,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     );
     if (round === maxRounds) break;
 
+    // An entry written from the recording failed (§6.6). Strict replay does
+    // not heal, so this round has no fresh transcript to write it again from,
+    // and a model repair would be the reinvention §6.6 removed. It gets no
+    // entry instead — never `ai: true`, so the next Run & Compile writes it
+    // again from a live run.
+    if (await leaveWithoutCode(failed.step, failed.error)) {
+      lastFailure = undefined;
+      continue;
+    }
+
     stepEvent('repair', failed.step, 'regenerating from the failure');
     // The failing pass's values, from the same fold generation reads — over
     // THIS replay's rows, whose pass failed. Its whole map, not its innermost
@@ -1468,6 +1552,9 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
                 recordedAt(failed.step.index),
                 record.steps[failed.step.index],
               ),
+              // The recording's evidence pass: what the entry was generated
+              // from, and what the repair is checked against (§6.2).
+              actions: actionsOf(record.steps[failed.step.index]),
             },
           );
     proven.delete(failed.step.key!);
@@ -1489,6 +1576,27 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       keptAiConditions.add(failed.step.key!);
       continue;
     }
+    if (applied.kind === 'error' && applied.withheld) {
+      // The repair still read with a different selector from the recording's
+      // (§6.2). The entry is known wrong — it failed this replay — and so is its
+      // replacement, so the step gets NO entry: the compile takes back what it
+      // proposed for it and the step leaves the selection, staying on AI until a
+      // later compile. Where taking it back is unsafe (a later identically
+      // worded entry would slide into its slot), it is written off as before.
+      if (await candidate.retract(failed.step)) {
+        await candidate.persist();
+        stepsNotCompiled.push({ number: failed.step.number, message: applied.message });
+        dropFromSelection([failed.step.number]);
+        stepEvent(
+          'repair',
+          failed.step,
+          `not compiled — ${applied.message}; the step stays AI, and the next compile tries again`,
+        );
+      } else {
+        await writeOff(failed.step, applied.message, 'because its repair still read with a different selector');
+      }
+      continue;
+    }
     if (applied.kind === 'error') {
       return finish(
         'failed',
@@ -1506,10 +1614,11 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   }
 
   // A step that failed every round is written off: `ai: true` with the last
-  // error as its comment, then one round to confirm the rest still passes.
+  // error as its comment, then one round to confirm the rest still passes. An
+  // entry written from the recording is left without code instead (§6.6).
   if (!green && !failure && lastFailure) {
     const { step, error } = lastFailure;
-    await writeOff(step, error, `after ${maxRounds} round(s)`);
+    if (!(await leaveWithoutCode(step, error))) await writeOff(step, error, `after ${maxRounds} round(s)`);
     const outcome = await replay(rounds + 1);
     const failed = failureOf(outcome);
     // The same two ways a round can be complete as the loop above: a test can
@@ -1630,6 +1739,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     && toleratedInReplay.length === 0
     && notAttempted.length === 0
     && conditionsNotCompiled.length === 0
+    && stepsNotCompiled.length === 0
       ? 'green'
       : 'partial';
   const keptAi = keptAiExisting + declined;
@@ -1659,6 +1769,10 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     conditionsNotCompiled.length > 0
       ? `${listSteps(conditionsNotCompiled.map((c) => c.number))} not compiled ` +
         `(${conditionsNotCompiled[0]!.message})`
+      : '',
+    stepsNotCompiled.length > 0
+      ? `${listSteps(stepsNotCompiled.map((c) => c.number))} not compiled ` +
+        `(${stepsNotCompiled[0]!.message})`
       : '',
     unproven.length > 0 ? `${unproven.length} unproven (${listSteps(unproven)})` : '',
     unreached.length > 0
@@ -1702,13 +1816,17 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     ...(endedAsWritten && { endedAsWritten }),
     notAttempted,
     ...(failure !== undefined && { error: failure }),
-    ...((loopWarnings.length > 0 || conditionsNotCompiled.length > 0) && {
+    ...((loopWarnings.length > 0 || conditionsNotCompiled.length > 0 || stepsNotCompiled.length > 0) && {
       warnings: [
         ...loopWarnings,
         ...conditionsNotCompiled.map(
           (c) =>
             `step ${c.number}'s condition was not compiled: ${c.message}. The model keeps ` +
             'deciding it; compile again to retry.',
+        ),
+        ...stepsNotCompiled.map(
+          (c) =>
+            `step ${c.number} was not compiled: ${c.message}. It stays AI; compile again to retry.`,
         ),
       ],
     }),
@@ -2927,12 +3045,18 @@ async function repairStep(
     /** What the recording captured on the failing pass, RAW, by authored
      *  capture name ({@link recordedCapturesAt}). */
     recordedCaptures?: Record<string, string> | undefined;
+    /** The recording's evidence pass for the step — what the entry was
+     *  generated from, and what its repair is checked against
+     *  (docs/specs/SPEC-codebehind-robustness.md §6.2). A strict replay that
+     *  failed as code has no transcript of its own. */
+    actions?: RecordedAction[] | undefined;
   },
 ): Promise<GeneratedEntry> {
   const parameters = stepParameters(step.binding!, values, options.test.envData);
   // The step passed Generate, so every reference it makes resolved there;
   // the repair sees the same list, and the same guard.
   const envRefs = stepEnvRefs(step.binding!, options.test.envData).resolved;
+  const actions = extras.actions ?? [];
   const repairInput: RepairPromptInput = {
     rawStepText: step.text,
     stepIndex: step.number,
@@ -2952,8 +3076,9 @@ async function repairStep(
     round,
     ...(extras.loop && { loop: extras.loop }),
     ...(extras.recordedCaptures && { recordedCaptures: extras.recordedCaptures }),
+    ...(actions.length > 0 && { actions }),
   };
-  const { result } = await askWithCaptureRetry(
+  return askCheckedRepair(
     options.aiClient,
     options.contextContent,
     (retry) => buildRepairPrompt({ ...repairInput, ...(retry && { retry }) }),
@@ -2971,9 +3096,16 @@ async function repairStep(
       // from the page rather than store.
       ...capturedValueGuards(extras.recordedCaptures, step.text),
     ],
+    {
+      binding: step.binding!,
+      actions,
+      substitute: stepSubstitution(step.binding!, values, options.test.envData),
+      ...(extras.recordedCaptures && { recordedCaptures: extras.recordedCaptures }),
+      secrets: extras.secrets,
+      variables: new Set(Object.keys(values)),
+    },
     options.signal,
   );
-  return result;
 }
 
 /**
@@ -3048,6 +3180,9 @@ async function repairHealedStep(
   // What the healed pass captured under AI — the answer the broken entry was
   // meant to produce, which the repair must reproduce and must not write in.
   const recordedCaptures = recordedCapturesOf(binding, result.outputs);
+  // The healed pass's transcript, which the repair is checked against
+  // (docs/specs/SPEC-codebehind-robustness.md §6.2).
+  const actions = actionsOf(result);
   const repairInput: RepairPromptInput = {
     rawStepText: step.text,
     stepIndex: step.number,
@@ -3061,8 +3196,9 @@ async function repairHealedStep(
     ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
     ...(loop && { loop }),
     ...(recordedCaptures && { recordedCaptures }),
+    actions,
   };
-  const { result: repaired } = await askWithCaptureRetry(
+  return askCheckedRepair(
     options.aiClient,
     options.contextContent,
     (retry) => buildRepairPrompt({ ...repairInput, ...(retry && { retry }) }),
@@ -3070,9 +3206,16 @@ async function repairHealedStep(
       ...guardedValues(parameters, envRefs.resolved, binding.source),
       ...capturedValueGuards(recordedCaptures, binding.source),
     ],
+    {
+      binding,
+      actions,
+      substitute: stepSubstitution(binding, values, options.test.envData),
+      ...(recordedCaptures && { recordedCaptures }),
+      secrets,
+      variables: new Set(Object.keys(values)),
+    },
     options.signal,
   );
-  return repaired;
 }
 
 /** Every parameter value in play, for the review's leak guard. Unlike the

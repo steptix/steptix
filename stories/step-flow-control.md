@@ -230,6 +230,15 @@ ignored:
    millisecond after the click that changes it is the stale answer that
    would make the return miss.
 
+   > **Amended by [SPEC-codebehind-robustness.md](../docs/specs/SPEC-codebehind-robustness.md)
+   > §6.1.** The gate applies to a COMPILED conditional flow-control line too:
+   > before its entry runs, unless the run's values already decide the
+   > condition. Code waits with `followNavigation` on, so a navigation that
+   > lands during the quiet wait is followed — its `domcontentloaded`, then
+   > quiet once more, inside the same budget — rather than ending the wait at
+   > the moment the old document goes away. Compiled conditions wait the same
+   > way. The model's own gates keep their timing.
+
 7. **Grouping exemption.** A flow-control step is never a conditional and
    never a continuation. Conditionals immediately before one form no group
    and run as ordinary steps, the rule `Set` established and for the same

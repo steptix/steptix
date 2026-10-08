@@ -23,10 +23,11 @@ import {
 } from './candidate.js';
 import {
   anyActionCarriesPlaceholder,
-  askWithCaptureRetry,
+  askCheckedRepair,
   capturedValueGuards,
   compilableCondition,
   compilePromptSecrets,
+  entryFromRecording,
   generateConditionEntry,
   generateStepEntry,
   guardedValues,
@@ -38,6 +39,7 @@ import {
   USE_AI_NOT_COMPILED,
   stepEnvRefs,
   stepParameters,
+  stepSubstitution,
   unresolvedRefsReason,
   valueMatchWarning,
   type ConditionObservation,
@@ -50,7 +52,7 @@ import { readLastRun, type LastRunStep } from './last-run.js';
 import { entryTextIn } from './writer.js';
 import type { CodeBehindBinding } from './loader.js';
 import { codeBehindFileKey as fileKey, recordingDirFor } from './recording.js';
-import { reviewCandidate } from './review.js';
+import { evidenceKey, evidenceKeyOf, reviewCandidate, type EntryEvidence } from './review.js';
 import type { CompileStatus, CompileSummary } from './compile.js';
 
 /**
@@ -786,6 +788,14 @@ export class LiveCompiler {
   /** Content last handed to the reviewer, per file, so a second block does
    *  not pay to review a file it did not change. */
   private readonly reviewed = new Map<string, string>();
+  /**
+   * What each step entry was generated from — its pass's recorded actions and
+   * values — for the Review pass to hold a revision to
+   * (docs/specs/SPEC-codebehind-robustness.md §6.2). Recorded once per entry,
+   * from the pass that took its key (`takenKeys`): the one whose transcript the
+   * entry was generated from.
+   */
+  private readonly evidence = new Map<string, EntryEvidence>();
   /** The last-run sidecar's rows, read once and shared by every step. */
   private lastRun: Promise<LastRunStep[]> | undefined;
 
@@ -1550,6 +1560,28 @@ export class LiveCompiler {
    */
   private async askModel(step: CompileStep, input: LiveStepInput): Promise<GeneratedEntry> {
     const binding = step.binding!;
+    const recordedCaptures = recordedCapturesOf(binding, input.result.outputs);
+    this.evidence.set(evidenceKeyOf(binding), {
+      step: step.number,
+      actions: actionsOf(input.result),
+      substitute: stepSubstitution(binding, input.resolvedParameters, this.options.envData),
+      ...(recordedCaptures && { recordedCaptures }),
+      variables: new Set(Object.keys(input.resolvedParameters)),
+    });
+    // A step that only reads is written from this pass's recording, with no
+    // model (docs/specs/SPEC-codebehind-robustness.md §6.6). Ahead of the
+    // repair branch too: a stale `fromRecording` entry is written again from
+    // the AI pass that healed it, whose read the AI chose afresh — so a change
+    // to the page repairs itself, from the live run rather than the recording
+    // on disk (stories/codebehind-selector-ambiguity.md).
+    const fromRecording = entryFromRecording({
+      binding,
+      actions: actionsOf(input.result),
+      resolvedParameters: input.resolvedParameters,
+      ...(this.options.envData && { envData: this.options.envData }),
+      ...(input.result.surface !== undefined && { surface: input.result.surface }),
+    });
+    if (fromRecording !== undefined) return { kind: 'entry', code: fromRecording, fromRecording: true };
     const failed = await this.priorFailure(binding, input.result.codeBehindStale?.error);
     if (failed !== undefined) {
       const repaired = await this.askForRepair(step, input, failed);
@@ -1632,6 +1664,11 @@ export class LiveCompiler {
     // What the healed pass captured under AI — the answer the broken entry was
     // meant to produce, which the repair must reproduce and must not write in.
     const recordedCaptures = recordedCapturesOf(binding, input.result.outputs);
+    const secrets = this.promptSecrets(input.resolvedParameters, binding);
+    // The healed pass's transcript: what the AI did once the entry had thrown,
+    // and so what the repaired entry must do — read with the selectors it read
+    // with above all (docs/specs/SPEC-codebehind-robustness.md §6.2).
+    const actions = actionsOf(input.result);
     const repairInput: RepairPromptInput = {
       rawStepText: step.text,
       stepIndex: step.number,
@@ -1648,15 +1685,20 @@ export class LiveCompiler {
       // (§7.6). Without it the block asked the binding rule about both and
       // wrote the credential into the prompt in clear.
       parameterMap: input.resolvedParameters,
-      secrets: this.promptSecrets(input.resolvedParameters, binding),
+      secrets,
       ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
       // The loop the step repeats in, as generation is told it (decision 2):
       // the repaired entry replays on every pass, so what changes per pass is
       // read with `step.getVar`, never the healed pass's item.
       ...(loop && { loop }),
       ...(recordedCaptures && { recordedCaptures }),
+      actions,
     };
-    const { result } = await askWithCaptureRetry(
+    // Held to what a generated entry is: the leak guard, then the static
+    // checks with their one re-ask, and a read that does not keep the run's
+    // selector withheld (§6.2) — the stale entry then stays as it is on disk
+    // and the next compile tries again.
+    return askCheckedRepair(
       this.options.aiClient,
       this.options.contextContent,
       (retry) => buildRepairPrompt({ ...repairInput, ...(retry && { retry }) }),
@@ -1671,9 +1713,16 @@ export class LiveCompiler {
         ...guardedValues(parameters, envRefs.resolved, binding.source),
         ...capturedValueGuards(recordedCaptures, binding.source),
       ],
+      {
+        binding,
+        actions,
+        substitute: stepSubstitution(binding, input.resolvedParameters, this.options.envData),
+        ...(recordedCaptures && { recordedCaptures }),
+        secrets,
+        variables: new Set(Object.keys(input.resolvedParameters)),
+      },
       this.signal,
     );
-    return result;
   }
 
   private async generate(step: CompileStep, ask: () => Promise<GeneratedEntry>): Promise<void> {
@@ -1782,10 +1831,15 @@ export class LiveCompiler {
           markdownName: path.basename(this.options.testFilePath),
           steps: this.plan.map((p) => p.text),
           guarded: this.guardedValues(),
+          evidence: (file, entry) => this.evidence.get(evidenceKey(file, entry)),
           aiClient: this.options.aiClient,
           ...(this.signal && { signal: this.signal }),
         },
         (message) => {
+          // In the server's log too: a client shows the event and drops it,
+          // and whether Review revised or was rejected is part of what decides
+          // the compile's model (docs/specs/SPEC-codebehind-robustness.md §6.10).
+          logger.info(`Review: ${message}`);
           this.emit({
             type: 'compile:step',
             phase: 'review',

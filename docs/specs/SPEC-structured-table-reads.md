@@ -2695,6 +2695,14 @@ Update the code-generation prompt, context types, undeclared-context static
 check, review prompt, and repair prompt for `tables`. A compile/replay test must
 prove that a reordered table still yields the same records without an AI call.
 
+> **Extended by** [SPEC-codebehind-robustness.md](SPEC-codebehind-robustness.md)
+> §6.6, which applies this rule to plain reads and counts and goes one step
+> further: a step whose transcript only reads or counts is compiled from its
+> recording with no model, as `step.read(…)` / `step.count(…)` calls that run
+> the AI's own action through `executeAction`. A `readTable` step is not one of
+> them — it keeps the `tables.read` shape above, and stays on AI until that
+> helper exists.
+
 ### 9.3 Captures and output accounting
 
 The existing `[store as: orders]`/capture accounting must recognize that the

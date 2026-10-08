@@ -21,8 +21,9 @@ import {
   contentBlocksToText,
 } from '../ai/prompts.js';
 import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome, ScrollPositionInfo, GridStructureSketch } from '../ai/prompts.js';
-import { diagnosePageState, waitForPageStability, waitForPostActionSettle, capturePageSignal, PageActivityTracker } from '../browser/page-state.js';
-import type { PageStateDiagnosis } from '../browser/page-state.js';
+import { diagnosePageState, waitForPageStability, waitForPostActionSettle, capturePageSignal, PageActivityTracker, armActionWatcher } from '../browser/page-state.js';
+import type { ActionWatcher, ObservedRequest, PageStateDiagnosis } from '../browser/page-state.js';
+import { actingCalls, entryFunctionActs, settlesAfterLastAction } from '../codebehind/entry-actions.js';
 import type { ChatMessage } from '../ai/types.js';
 import {
   parseAIResponse,
@@ -61,8 +62,8 @@ import {
   substituteText,
   type PlaceholderValues,
 } from './placeholder-substitution.js';
-import { bindVariable } from '../parser/parameters.js';
-import { decideConditionLocally } from './literal-decision.js';
+import { decideConditionLocally, type LocalDecision } from './literal-decision.js';
+import { storeCapture } from './store-capture.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import {
   isReturnClaim,
@@ -76,7 +77,7 @@ import {
 } from '../parser/failure-tail.js';
 import { envDataRefsIn, resolveEnvDataRef } from '../parser/interpolate-env-data.js';
 import { parseOutputPrefixes, buildEnrichedInstruction } from '../server/run-helpers.js';
-import { maskRecordSecrets, redact, runSecrets } from '../utils/secrets.js';
+import { redact, runSecrets } from '../utils/secrets.js';
 import { warnBindingOnce, type CodeBehindBinding } from '../codebehind/loader.js';
 import {
   entrySourceText,
@@ -852,6 +853,11 @@ async function executeStepUnrecorded(
         'a step that is not a condition line — the step runs under AI',
     );
   } else if (binding?.entry && binding.entry.ai !== true) {
+    // A compiled `If … then return / stop / fail` reads the page once, so it
+    // waits for it exactly as the AI judgement would (§6.1 of
+    // docs/specs/SPEC-codebehind-robustness.md). Before the entry, and only
+    // for an entry that will run as the step's code.
+    if (isStepCode(binding.entry)) await settleBeforeCompiledFlowControl(opts);
     const codeResult = await runCodeBehindStep(stepIndex, instruction, binding, opts, startTime);
     // The tail applies to a replay failure exactly as to an AI one (decision 5).
     // Applied at the CALL rather than inside, so all six of that function's
@@ -1102,13 +1108,9 @@ async function decideFlowControlLocally(
   // already.
   if (!claim || claim.body === undefined) return undefined;
 
-  const values: PlaceholderValues = {
-    parameters: opts.resolvedParameters ?? {},
-    ...(opts.envData !== undefined && { envData: opts.envData }),
-  };
-  const secrets = secretsFor(opts);
-  const local = decideConditionLocally(claim.body, values, (text) => redact(text, secrets));
+  const local = localFlowControlDecision(opts);
   if (!local) return undefined;
+  const secrets = secretsFor(opts);
 
   // No settle, no DOM snapshot, no model call — so no `turns`, and the row's
   // own absence of turns is the visible record that nothing was asked.
@@ -1155,6 +1157,24 @@ async function decideFlowControlLocally(
     ...(screenshotBase64 !== undefined && { screenshotBase64 }),
     aiExplanation: `The step's condition held (${local.reasoning}) and the step says to fail the test.`,
   };
+}
+
+/**
+ * The step's conditional flow-control line, decided from this run's values —
+ * or null when there is no such claim or the values cannot answer it. One
+ * reading for both of its askers: {@link decideFlowControlLocally}, and the
+ * compiled line's settle ({@link settleBeforeCompiledFlowControl}), which must
+ * agree on which lines are questions about the page.
+ */
+function localFlowControlDecision(opts: StepExecutorOptions): LocalDecision | null {
+  const claim = opts.flowControlClaim;
+  if (!claim || claim.body === undefined) return null;
+  const values: PlaceholderValues = {
+    parameters: opts.resolvedParameters ?? {},
+    ...(opts.envData !== undefined && { envData: opts.envData }),
+  };
+  const secrets = secretsFor(opts);
+  return decideConditionLocally(claim.body, values, (text) => redact(text, secrets));
 }
 
 /**
@@ -1287,18 +1307,56 @@ export async function runConditionCode(
  * `While` asked straight after `Click Next` would otherwise read page 1's
  * button. No-op on the computer surface (there is no DOM signal for a native
  * window) and when there is no page.
+ *
+ * `followNavigation` carries the wait across a navigation that lands during it
+ * (`waitForPageStability`, docs/specs/SPEC-codebehind-robustness.md §6.1).
+ * CODE passes it — a compiled condition, and a compiled conditional
+ * flow-control line — because code reads the page the instant the wait
+ * returns, with no model think time behind it. The model's own gates keep
+ * today's timing.
  */
-export async function settleBeforeConditions(opts: StepExecutorOptions): Promise<void> {
+export async function settleBeforeConditions(
+  opts: StepExecutorOptions,
+  settle: { followNavigation?: boolean } = {},
+): Promise<void> {
   if (opts.computer) return;
   const page = opts.pageTracker ? opts.pageTracker.getActive() : opts.page;
   if (!page) return;
-  await settleConditionPage(page, opts.config);
+  await settleConditionPage(page, opts.config, settle.followNavigation === true);
 }
 
-async function settleConditionPage(page: Page, config: Config): Promise<void> {
+async function settleConditionPage(page: Page, config: Config, followNavigation = false): Promise<void> {
   await waitForPageStability(page, {
     timeoutMs: Math.min(10_000, config.execution.timeout * 1000),
     quiesceMs: 1000,
+    ...(followNavigation && { followNavigation: true }),
+  });
+}
+
+/**
+ * The wait a compiled conditional flow-control line gets before its entry
+ * reads the page (docs/specs/SPEC-codebehind-robustness.md §6.1, D1).
+ *
+ * `If the page title contains "Dashboard" then return` — and its `stop` and
+ * `fail` siblings — decides by reading the page ONCE. Under AI the step waits
+ * at the flow-control gate first (stories/step-flow-control.md, decision 6);
+ * a compiled condition waits at the same gate (`settleBeforeConditions`). The
+ * compiled line did not, so its entry read the title tens of milliseconds
+ * after the previous step's sign-in click, while the login request was still
+ * in flight, and the return missed.
+ *
+ * Only for a line whose run values do NOT already decide it: a condition the
+ * values answer is not a question about the page, and the AI path asks no
+ * page either (`decideFlowControlLocally`). Never a failure: a settle that
+ * cannot complete leaves the entry to read the page as it is, as before.
+ */
+async function settleBeforeCompiledFlowControl(opts: StepExecutorOptions): Promise<void> {
+  if (opts.flowControlClaim?.body === undefined) return;
+  if (localFlowControlDecision(opts)) return;
+  await traceOp('settle.codebehind-flow-control', () =>
+    settleBeforeConditions(opts, { followNavigation: true }),
+  ).catch(() => {
+    // As at the AI gate: the entry then reads whatever the page is.
   });
 }
 
@@ -1331,6 +1389,157 @@ async function runCodeBehindStep(
   const context = codeBehindRunContext(binding, opts, `codebehind:${stepIndex}`);
   let page = context.page;
 
+  // The wait after an action (docs/specs/SPEC-codebehind-robustness.md §6.4),
+  // armed on the context just before the entry runs, so the requests its
+  // first action starts — in this tab or one it opens — are seen. What
+  // `step.settle()` waits on inside the entry, and what the runner waits on
+  // after an entry that acts. Not on the computer surface: there is no DOM.
+  const watcher = opts.computer
+    ? undefined
+    : armActionWatcher(context.context, page, {
+        budgetMs: actionSettleBudgetMs(opts.config),
+        quietMs: 600,
+        quickExitMs: 250,
+        activePage: () => activePageOf(opts) ?? page,
+      });
+  try {
+    await watcher?.ready;
+    return await runCodeBehindStepArmed(stepIndex, instruction, binding, opts, startTime, {
+      entry,
+      code,
+      context,
+      page,
+      watcher,
+    });
+  } finally {
+    watcher?.dispose();
+  }
+}
+
+/**
+ * The most the wait after a compiled action waits — the flow-control gate's
+ * own budget (§6.4): up to 10 s, capped by `execution.timeout`.
+ */
+function actionSettleBudgetMs(config: Config): number {
+  return Math.min(10_000, config.execution.timeout * 1000);
+}
+
+/**
+ * The wait after an action, armed for an AI action on a compile run (§6.9) —
+ * or undefined when the page has no context to listen on.
+ */
+function armCompileWatcher(page: Page, config: Config): (ActionWatcher & { ready: Promise<void> }) | undefined {
+  let context: BrowserContext | undefined;
+  try {
+    context = page.context();
+  } catch {
+    return undefined;
+  }
+  if (!context) return undefined;
+  return armActionWatcher(context, page, {
+    budgetMs: actionSettleBudgetMs(config),
+    quietMs: 600,
+    quickExitMs: 250,
+  });
+}
+
+/** The active page right now — after a switch the entry made — or undefined
+ *  when no tracker can say. */
+function activePageOf(opts: StepExecutorOptions): Page | undefined {
+  try {
+    if (opts.browserTracker) return opts.browserTracker.getActivePage();
+    if (opts.pageTracker) return opts.pageTracker.getActive();
+  } catch {
+    /* closeBrowser left none */
+  }
+  return undefined;
+}
+
+/**
+ * Wait for what an acting entry's actions started (§6.4) — before the
+ * screenshot, so the report shows the result, and before a heal, so the model
+ * that takes the step over sees the page the entry left rather than one
+ * mid-request. Never a failure: at the budget the log names what is pending.
+ */
+async function settleAfterAction(
+  watcher: ActionWatcher,
+  stepIndex: number,
+  opts: StepExecutorOptions,
+  /** The entry's code ends by settling after its last action: wait again
+   *  only if something happened since (`ifActive`). */
+  settledItself = false,
+): Promise<void> {
+  const report = await traceOp('settle.codebehind-action', () =>
+    watcher.settle(opts.signal, settledItself ? { ifActive: true } : undefined),
+  ).catch(() => undefined);
+  if (report && report.stillPending.length > 0) {
+    logger.info(
+      `The wait after step ${stepIndex} stopped at ${Math.round(actionSettleBudgetMs(opts.config) / 1000)} s; ` +
+        `still pending: ${report.stillPending.join(', ')}`,
+    );
+  }
+}
+
+/** A page's URL, or undefined when it cannot say. */
+function urlOf(page: Page): string | undefined {
+  try {
+    return page.url();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A broken entry's error, with the navigation it ran into said out loud
+ * (docs/specs/SPEC-codebehind-robustness.md §6.8).
+ *
+ * In failure A the ⚠ landed on a cookie-banner step whose click timed out
+ * while the PREVIOUS step's sign-in was still taking the page to the
+ * Dashboard, and nothing in the error said the page had moved. The executor
+ * does not know which step ran before, so the sentence names none — and says
+ * "may", because a click of the entry's own can lead away too. An entry that
+ * navigates outright (`goto` and its kin) moved the page itself, and gets no
+ * sentence. The URLs are masked: a URL can carry a secret.
+ */
+function withNavigationNote(
+  error: string,
+  from: string | undefined,
+  to: string | undefined,
+  code: string,
+  secrets: string[],
+): string {
+  if (from === undefined || to === undefined || from === to) return error;
+  if (actingCalls(code).some((call) => call.kind === 'navigation')) return error;
+  const said = error.trimEnd();
+  const stop = /[.!?]$/.test(said) ? ' ' : '. ';
+  return (
+    `${said}${stop}The page navigated from ${redact(from, secrets)} to ${redact(to, secrets)} while this entry ` +
+    'ran. The previous step may not wait for its navigation.'
+  );
+}
+
+/** {@link runCodeBehindStep}, with its watcher armed. */
+async function runCodeBehindStepArmed(
+  stepIndex: number,
+  instruction: string,
+  binding: CodeBehindBinding,
+  opts: StepExecutorOptions,
+  startTime: number,
+  armed: {
+    entry: NonNullable<CodeBehindBinding['entry']>;
+    code: string;
+    context: ReturnType<typeof codeBehindRunContext>;
+    page: Page;
+    watcher: ActionWatcher | undefined;
+  },
+): Promise<{ result?: StepResult; stale?: StepResult['codeBehindStale'] }> {
+  const { context, watcher } = armed;
+  const code = armed.code;
+  let page = armed.page;
+  // Where the page was when the entry started — so a failure can say that the
+  // page moved under it (§6.8).
+  const urlAtStart = urlOf(armed.page);
+
   const outcome = await runCodeBehindEntry({
     ...context,
     ...(opts.codeBehindPauseBeforeRun && { pauseBeforeRun: true }),
@@ -1338,7 +1547,16 @@ async function runCodeBehindStep(
     // decision 11). The claim is the authored line's, computed by the run loop,
     // so a compiled return is legal exactly where the AI `return` action is.
     ...(opts.flowControlClaim !== undefined && { flowControlClaim: opts.flowControlClaim }),
+    ...(watcher && { watcher }),
+    ...(opts.signal && { signal: opts.signal }),
+    // What a `step.read` / `step.count` reads from, and how long a plural one
+    // waits for its matches to hold still (§6.6).
+    activePage: () => activePageOf(opts) ?? page,
+    readTimeoutMs: actionSettleBudgetMs(opts.config),
   });
+  // Read straight away: a navigation that lands during the wait below did
+  // not happen while the entry ran.
+  const urlAtEnd = urlOf(armed.page);
 
   // The entry may have moved the active tab or browser (`ctx.tabs`,
   // `ctx.browsers`). Everything below has to describe where the step ENDED —
@@ -1352,6 +1570,12 @@ async function runCodeBehindStep(
     page = opts.pageTracker.getActive();
   }
 
+  // After an entry that ACTS — passed, threw or failed — wait for what its
+  // actions started (§6.4). A read-only entry started nothing and skips it.
+  if (watcher && typeof armed.entry.run === 'function' && entryFunctionActs(armed.entry.run)) {
+    await settleAfterAction(watcher, stepIndex, opts, settlesAfterLastAction(code));
+  }
+
   // A `step.filePath` that could not resolve is not broken code: the entry is
   // fine and the file is missing, so healing under AI would spend a turn and
   // throw away a working entry for nothing.
@@ -1363,19 +1587,26 @@ async function runCodeBehindStep(
   // under AI and discard its entry on the first run that took the branch.
   const brokenCode =
     outcome.status === 'failed' && !outcome.expectationFailed && !outcome.nonRetryable;
+  // What the broken entry threw, and — when the page moved while it ran — that
+  // too (§6.8): the ⚠ otherwise points at a step that only ran into the
+  // previous step's navigation.
+  const brokenError =
+    outcome.error === undefined
+      ? undefined
+      : withNavigationNote(outcome.error, urlAtStart, urlAtEnd, code, secretsFor(opts));
   // Strict first: a compile replay that also happens to run keyless is still a
   // replay, and its own copy is the one that explains the red step.
   const healingDeclined = opts.codeBehindStrict || opts.keyless;
   if (brokenCode && !healingDeclined) {
     logger.warn(
-      `Code-behind failed for step ${stepIndex} — falling through to AI: ${outcome.error ?? 'unknown error'}`,
+      `Code-behind failed for step ${stepIndex} — falling through to AI: ${brokenError ?? 'unknown error'}`,
     );
     binding.entry = undefined;
     return {
       stale: {
         file: binding.file,
         source: binding.source,
-        error: outcome.error ?? 'unknown error',
+        error: brokenError ?? 'unknown error',
       },
     };
   }
@@ -1436,11 +1667,11 @@ async function runCodeBehindStep(
   }
 
   if (brokenCode && opts.codeBehindStrict) {
-    logger.error(`Step ${stepIndex} FAILED (code-behind, strict): ${outcome.error ?? ''}`);
+    logger.error(`Step ${stepIndex} FAILED (code-behind, strict): ${brokenError ?? ''}`);
     return {
       result: {
         ...base,
-        error: outcome.error ?? 'Code-behind entry threw',
+        error: brokenError ?? 'Code-behind entry threw',
         aiExplanation:
           'The code-behind entry threw and strict mode is on, so the step was ' +
           'not re-run under AI. This is a compile replay: the point is to find ' +
@@ -1468,7 +1699,7 @@ async function runCodeBehindStep(
     // wording differs, because the reader's next move does.
     const byPolicy = opts.keylessReason === 'policy';
     logger.error(
-      `Step ${stepIndex} FAILED (code-behind, ${byPolicy ? 'AI forbidden by policy' : 'no AI configured'}): ${outcome.error ?? ''}`,
+      `Step ${stepIndex} FAILED (code-behind, ${byPolicy ? 'AI forbidden by policy' : 'no AI configured'}): ${brokenError ?? ''}`,
     );
     return {
       result: {
@@ -1477,7 +1708,7 @@ async function runCodeBehindStep(
         codeBehindHealSkipped: {
           file: binding.file,
           source: binding.source,
-          error: outcome.error ?? 'unknown error',
+          error: brokenError ?? 'unknown error',
         },
         aiExplanation:
           (byPolicy
@@ -1486,7 +1717,7 @@ async function runCodeBehindStep(
               'so the step was not re-run under AI. '
             : 'The code-behind entry threw, and this machine has no AI configured, ' +
               'so the step was not re-run under AI. ') +
-          `The entry failed with: ${outcome.error ?? 'unknown error'}`,
+          `The entry failed with: ${brokenError ?? 'unknown error'}`,
       },
     };
   }
@@ -3501,116 +3732,88 @@ async function executeStepAttempt(
       };
       /** Set when a readTable's error quotes the model's structure answer. */
       let errorQuotesModel = false;
-      const result = await traceOp(`action.${action.action}: ${action.description}`, async () => {
-        if (action.action !== 'readTable') {
-          return executeAction(page, action, baseUrl, opts.signal, execOptions);
-        }
-        // Structured table reads carry a structure question of their own
-        // (SPEC-structured-table-reads.md §7.10) — at most one model call,
-        // and only on a SHAPE refusal. `secretsNow()` is the same set the DOM snapshot is
-        // redacted with, so a secret column is masked in the sketch before it
-        // reaches the model, exactly as it is masked in the page the model is
-        // shown one message earlier (§7.6).
-        const outcome = await runReadTableAction({
-          page,
-          action,
-          baseUrl,
-          execOptions,
-          config,
-          aiClient,
-          signal: opts.signal,
-          maskValues: secretsNow(),
-          stepText: promptAuthored,
-          memo: opts.structureMemo,
-          stepIndex,
-          onAiInteraction: (interaction) => {
-            turnAiInteractions.push({ ...interaction, attemptNumber });
-          },
+      // During a compile run, the wait after a compiled action is armed for an
+      // AI action that changes the page too (docs/specs/SPEC-codebehind-robustness.md
+      // §6.9) — on top of the post-action settle below, not instead of it, and
+      // waited on only for a request still in flight once that settle is done.
+      // So the page after the step shows what a slow request produced, and the
+      // generator is shown the requests each action started. An ordinary run
+      // keeps today's wait.
+      const watcher = opts.captureStepContext === true && preSignal !== undefined
+        ? armCompileWatcher(page, config)
+        : undefined;
+      /** What the watcher saw this action start (§6.9). */
+      let observedRequests: ObservedRequest[] | undefined;
+      let result: ActionExecutionResult;
+      let subDuration = 0;
+      try {
+        await watcher?.ready;
+        result = await traceOp(`action.${action.action}: ${action.description}`, async () => {
+          if (action.action !== 'readTable') {
+            return executeAction(page, action, baseUrl, opts.signal, execOptions);
+          }
+          // Structured table reads carry a structure question of their own
+          // (SPEC-structured-table-reads.md §7.10) — at most one model call,
+          // and only on a SHAPE refusal. `secretsNow()` is the same set the DOM snapshot is
+          // redacted with, so a secret column is masked in the sketch before it
+          // reaches the model, exactly as it is masked in the page the model is
+          // shown one message earlier (§7.6).
+          const outcome = await runReadTableAction({
+            page,
+            action,
+            baseUrl,
+            execOptions,
+            config,
+            aiClient,
+            signal: opts.signal,
+            maskValues: secretsNow(),
+            stepText: promptAuthored,
+            memo: opts.structureMemo,
+            stepIndex,
+            onAiInteraction: (interaction) => {
+              turnAiInteractions.push({ ...interaction, attemptNumber });
+            },
+          });
+          if (outcome.mapping !== undefined) {
+            // Record site 1: the turn's action list. Replacing the SLOT rather
+            // than writing through the object keeps `emitted` as the model
+            // wrote it.
+            recordedEmitted = { ...emitted, mapping: outcome.mapping };
+            aiResponse.actions[emittedIndex] = recordedEmitted;
+          }
+          if (outcome.quotesModel) errorQuotesModel = true;
+          return outcome.result;
         });
-        if (outcome.mapping !== undefined) {
-          // Record site 1: the turn's action list. Replacing the SLOT rather
-          // than writing through the object keeps `emitted` as the model
-          // wrote it.
-          recordedEmitted = { ...emitted, mapping: outcome.mapping };
-          aiResponse.actions[emittedIndex] = recordedEmitted;
-        }
-        if (outcome.quotesModel) errorQuotesModel = true;
-        return outcome.result;
-      });
-      const subDuration = Date.now() - subStartTime;
+        subDuration = Date.now() - subStartTime;
 
-      // Post-action settle: waits for the page to reflect the action's effect
-      // (SPA route swap, redirect chain, toast render, etc.) before we capture
-      // the next snapshot. Exits early on "no change at all" (no-op) or once
-      // the signal has been stable for settleMs. See waitForPostActionSettle.
-      if (preSignal && result.success) {
-        await traceOp(`settle.post-action (${action.action})`, () =>
-          waitForPostActionSettle(page, { preSignal }),
-        ).catch(() => {
-          /* settle errors are non-fatal — proceed to capture post-state */
-        });
+        // Post-action settle: waits for the page to reflect the action's effect
+        // (SPA route swap, redirect chain, toast render, etc.) before we capture
+        // the next snapshot. Exits early on "no change at all" (no-op) or once
+        // the signal has been stable for settleMs. See waitForPostActionSettle.
+        if (preSignal && result.success) {
+          await traceOp(`settle.post-action (${action.action})`, () =>
+            waitForPostActionSettle(page, { preSignal }),
+          ).catch(() => {
+            /* settle errors are non-fatal — proceed to capture post-state */
+          });
+        }
+        if (watcher && result.success) {
+          const report = await traceOp(`settle.compile-requests (${action.action})`, () =>
+            watcher.settle(opts.signal, { onlyIfPending: true }),
+          ).catch(() => undefined);
+          if (report && (report.requests ?? []).length > 0) observedRequests = report.requests;
+        }
+      } finally {
+        watcher?.dispose();
       }
 
       // Store captured value from "read" / "count" / "readTable" actions into
-      // the live parameter map.
-      //
-      // All three through `bindVariable` (src/parser/parameters.ts), because a
-      // capture can land on a name a `For each` is binding — `Read the order
-      // id from the summary [store as: order]` after `For each {{order}} in
-      // {{orders}}` — and §8.2 says a rebind of a root erases that root's
-      // dotted keys. A plain `resolvedParameters[as] =` left `order.id`
-      // holding the LAST PASS's id, so `{{order.id}}` in a later step
-      // substituted a row the author had just overwritten, silently, with
-      // §8.3's refusal unable to fire on a key that was still there.
-      if (result.capturedRecords !== undefined && action.as && opts.resolvedParameters) {
-        // Structured capture (readTable) — JSON-encoded like the flat list, so
-        // the map stays Record<string, string> and no protocol or session
-        // storage migrates (SPEC-structured-table-reads.md §7.1). `For each`
-        // parses it back and binds each record's properties.
-        //
-        // The capture itself is summarised by `readTable captured N rows × M
-        // columns as "{{name}}"` (§7.6), written where the bound and the
-        // placeholder-skip count are known — in executeAction. This line is
-        // about STORAGE, and reads like its two siblings below.
-        const rows = result.capturedRecords.length;
-        bindVariable(opts.resolvedParameters, action.as, JSON.stringify(result.capturedRecords));
-        logger.info(
-          `Stored ${rows} row record${rows === 1 ? '' : 's'} as "{{${action.as}}}"`,
-        );
-      } else if (result.capturedValues !== undefined && action.as && opts.resolvedParameters) {
-        // List capture (read multiple: true) — JSON-encode so it round-trips
-        // through the string-valued param map. Tools that declare an
-        // array-typed parameter decode this back into a typed array at the
-        // bridge boundary.
-        const json = JSON.stringify(result.capturedValues);
-        bindVariable(opts.resolvedParameters, action.as, json);
-        logger.info(
-          `Stored ${result.capturedValues.length} captured value${
-            result.capturedValues.length === 1 ? '' : 's'
-          } as "{{${action.as}}}"`,
-        );
-      } else if (result.capturedValue !== undefined && action.as && opts.resolvedParameters) {
-        bindVariable(opts.resolvedParameters, action.as, result.capturedValue);
-        // The only one of the three "Stored …" lines that prints the VALUE,
-        // and it printed it raw. `logger` does not redact — the run-log file
-        // does, on its way to disk, and the SSE `output` bridge does not — so
-        // a `[store as: password]` capture reached the console and every
-        // client watching the stream in clear (§7.6). Masked after the bind,
-        // so the name the author just chose is already in the map the set is
-        // built from; by shape as well as by value, because a one-row read
-        // stores a record under a name that says nothing.
-        //
-        // It is also the ONLY line that prints a capture. `executeRead`
-        // (src/browser/actions.ts) had one of its own — raw, and one frame too
-        // deep to ever mask, because down there the value has no name yet
-        // (review 6, finding 2). Masking has to happen where the name is, so
-        // the line lives here and there is exactly one of it.
-        logger.info(
-          `Stored captured value as "{{${action.as}}}": "${redact(
-            maskRecordSecrets(result.capturedValue),
-            secretsFor(opts),
-          )}"`,
-        );
+      // the live parameter map — through the one helper a compiled
+      // `step.read` / `step.count` stores through too, so a step compiled
+      // from its recording stores exactly what this run stores
+      // (src/runner/store-capture.ts; SPEC-codebehind-robustness.md §6.6).
+      if (action.as && opts.resolvedParameters) {
+        storeCapture(opts.resolvedParameters, action.as, result, () => secretsFor(opts));
       }
 
       // Capture state after action (full-page for report visibility).
@@ -3650,6 +3853,10 @@ async function executeStepAttempt(
         // `targeting` exists, so an upload carrying only a route would read as
         // measured and take the wrong selector rules.
         ...(result.upload !== undefined && { upload: result.upload }),
+        // The first-party requests the action started, observed on a compile
+        // run (§6.9). `actionsOf` merges them onto the action, before the
+        // recording's redaction, for the generator to read as evidence.
+        ...(observedRequests !== undefined && { requests: observedRequests }),
         durationMs: subDuration,
         ...(result.error !== undefined && { error: result.error }),
         // The one site whose error is the browser action layer's own —

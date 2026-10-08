@@ -34,6 +34,9 @@ const settle = vi.hoisted(() => ({
   /** `'settle'` per settle, in sequence with whatever a test's own condition
    *  entries push — so a test can say the settle came FIRST, not just once. */
   order: [] as string[],
+  /** What each settle was asked for — code waits across a navigation
+   *  (docs/specs/SPEC-codebehind-robustness.md §6.1). */
+  options: [] as unknown[],
 }));
 
 vi.mock('../src/runner/step-executor.js', async (importOriginal) => ({
@@ -48,9 +51,10 @@ vi.mock('../src/runner/step-executor.js', async (importOriginal) => ({
       evidence: judge.evidence,
     };
   }),
-  settleBeforeConditions: vi.fn(async () => {
+  settleBeforeConditions: vi.fn(async (_opts: unknown, options?: unknown) => {
     settle.calls++;
     settle.order.push('settle');
+    settle.options.push(options);
   }),
 }));
 
@@ -210,6 +214,7 @@ beforeEach(() => {
   judge.answers = [];
   settle.calls = 0;
   settle.order = [];
+  settle.options = [];
   warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
   vi.spyOn(logger, 'error').mockImplementation(() => {});
 });
@@ -452,6 +457,9 @@ describe('a chain decided by code', () => {
       }),
     });
     expect(settle.order).toEqual(['settle', 'a', 'b']);
+    // …and carried across a navigation that lands during it: code reads the
+    // page the instant the wait returns (SPEC-codebehind-robustness.md §6.1).
+    expect(settle.options).toEqual([{ followNavigation: true }]);
   });
 });
 

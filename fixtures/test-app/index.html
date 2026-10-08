@@ -265,7 +265,12 @@
       const errorBanner = document.getElementById('error-banner');
 
       try {
-        const res = await fetch('/api/login', {
+        // `?loginDelay=<ms>` on this page slows the login API down by that much
+        // (capped at 5 s by the server): the slow-login live test
+        // (docs/specs/SPEC-codebehind-robustness.md §8).
+        const loginDelay = new URLSearchParams(window.location.search).get('loginDelay');
+        const loginUrl = loginDelay ? '/api/login?delay=' + encodeURIComponent(loginDelay) : '/api/login';
+        const res = await fetch(loginUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'same-origin',

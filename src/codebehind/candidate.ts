@@ -8,8 +8,11 @@ import type { CodeBehindBinding } from './loader.js';
 import { resolveCodeBehindCacheDir } from './loader.js';
 import {
   createFile,
+  entryTextIn,
   formatCodeBehindSource,
+  listEntries,
   spliceEntry,
+  withoutEntry,
   type WriteEntryRequest,
 } from './writer.js';
 
@@ -138,6 +141,49 @@ export class Candidate {
     return step.key ? this.entryText.get(step.key) : undefined;
   }
 
+  /**
+   * Take back what this compile proposed for one step: put the entry the file
+   * on disk had back, or — when it had none — take the compile's entry out
+   * (docs/specs/SPEC-codebehind-robustness.md §6.2, a step left without code).
+   * Never touches an entry the author has on disk beyond restoring it.
+   *
+   * False when there was nothing to take back, or when taking it out would let
+   * a later identically-worded entry slide into its slot (`withoutEntry`); the
+   * caller then falls back to what it did before this existed.
+   */
+  async retract(step: CompileStep): Promise<boolean> {
+    const binding = step.binding;
+    if (!binding) return false;
+    const current = this.current.get(binding.file);
+    if (current === undefined) return false;
+    const original = this.original.get(binding.file) ?? null;
+    const onDisk =
+      original === null
+        ? undefined
+        : entryTextIn(original, binding.source, binding.section, binding.occurrence);
+    const next =
+      onDisk !== undefined
+        ? spliceEntry(current, {
+            file: binding.file,
+            source: binding.source,
+            ...(binding.section !== undefined && { section: binding.section }),
+            occurrence: binding.occurrence,
+            entryCode: onDisk,
+          }).text
+        : withoutEntry(current, binding.source, binding.section, binding.occurrence);
+    if (next === undefined) return false;
+    const key = entryKeyOf(binding);
+    if (onDisk !== undefined) this.entryText.set(key, onDisk);
+    else this.entryText.delete(key);
+    // A file the compile created and has now emptied is no proposal at all.
+    if (original === null && listEntries(next).length === 0) {
+      this.current.delete(binding.file);
+      return true;
+    }
+    this.current.set(binding.file, await formatCodeBehindSource(next, binding.file));
+    return true;
+  }
+
   async replaceFile(file: string, content: string): Promise<void> {
     this.current.set(file, await formatCodeBehindSource(content, file));
   }
@@ -233,7 +279,15 @@ export async function applyGenerated(
   try {
     if (generated.kind === 'entry') {
       await candidate.apply(step, generated.code);
-      stepEvent(phase, step, phase === 'repair' ? 'repaired' : 'generated');
+      stepEvent(
+        phase,
+        step,
+        generated.fromRecording
+          ? 'written from the recording, with no model call'
+          : phase === 'repair'
+            ? 'repaired'
+            : 'generated',
+      );
     } else if (generated.kind === 'declined') {
       await candidate.apply(step, aiEntryFor(step.text, generated.reason));
       stepEvent(phase, step, `kept as AI: ${generated.reason}`);

@@ -28,9 +28,10 @@ import type { AssertionResult } from '../report/types.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import { logger } from '../utils/logger.js';
 import { EMPTY, MASK, inheritLoopBindings, redact, runSecrets, secretValues } from '../utils/secrets.js';
+import { actingCalls, codeText, matchClose } from './entry-actions.js';
 import type { CodeBehindBinding } from './loader.js';
 import type { RecordedAction } from './recording.js';
-import { CODE, COMMENT, matchForward, scan, type StringToken } from './tokenizer.js';
+import { CODE, COMMENT, TEMPLATE, matchForward, scan, type StringToken } from './tokenizer.js';
 
 /**
  * Turning one recorded step into its code-behind entry
@@ -307,8 +308,9 @@ export interface PlaceholderReport {
 
 /** What one generation call produced. */
 export type GeneratedEntry =
-  /** Code, guard-checked, ready for the candidate. */
-  | { kind: 'entry'; code: string; references?: PlaceholderReport }
+  /** Code, guard-checked, ready for the candidate. `fromRecording`: written
+   *  from the step's recording with no model (§6.6, `entryFromRecording`). */
+  | { kind: 'entry'; code: string; references?: PlaceholderReport; fromRecording?: true }
   /** Not expressible as code — becomes an `ai: true` entry with this reason. */
   | { kind: 'declined'; reason: string }
   /**
@@ -318,8 +320,20 @@ export type GeneratedEntry =
    * refused the answer for writing in a value the RECORDING captured — the
    * one refusal {@link askWithCaptureRetry} re-asks over. It never leaves that
    * helper: the code it holds is the refused answer.
+   *
+   * `withheld` marks an answer that came back but must not be kept, and must
+   * not be replaced by an `ai: true` entry either
+   * (docs/specs/SPEC-codebehind-robustness.md §6.2): its code still read with
+   * a different selector from the one the run read with after its one
+   * re-ask. The step gets NO entry — it runs on AI, which reads what the run
+   * read, and the next compile tries it again. Not fatal to any compile.
    */
-  | { kind: 'error'; message: string; refusedCapture?: { name: string; code: string } };
+  | {
+      kind: 'error';
+      message: string;
+      refusedCapture?: { name: string; code: string };
+      withheld?: true;
+    };
 
 /**
  * One value the leak guard refuses to see in generated code.
@@ -424,107 +438,559 @@ export async function generateStepEntry(
     ...guardedValues(parameters, envRefs.resolved, binding.source),
     ...capturedValueGuards(recordedCaptures, binding.source),
   ];
-  // Every value this step's references resolved to, keyed by the name the
-  // MODEL would have written in an action: the authored name, the run-time
-  // name a skill rename gave it, and each `${…}` reference. Used to read a
-  // placeholder-bearing selector the way the runtime read it — see
-  // `ambiguousSelectorComplaint`.
-  const substitute = (text: string): string =>
-    applyKnownValues(
-      text,
-      { ...options.resolvedParameters, ...Object.fromEntries(parameters.map((p) => [p.name, p.value])) },
-      envRefs.resolved,
-    );
-
-  // A recorded value written into the answer costs one re-ask here, before
-  // anything else looks at it (`askWithCaptureRetry`).
-  const asked = await askWithCaptureRetry(
-    options.aiClient,
-    options.contextContent,
-    (retry) => buildStepCodePrompt({ ...promptInput, ...(retry && { retry }) }),
-    guarded,
-    options.signal,
+  return reported(
+    await askChecked(
+      options.aiClient,
+      options.contextContent,
+      (retry) => buildStepCodePrompt({ ...promptInput, ...(retry && { retry }) }),
+      guarded,
+      {
+        binding,
+        actions: options.actions,
+        substitute: stepSubstitution(binding, options.resolvedParameters, options.envData),
+        ...(recordedCaptures && { recordedCaptures }),
+        ...(options.secrets && { secrets: options.secrets }),
+        variables: new Set(Object.keys(options.resolvedParameters)),
+      },
+      options.signal,
+    ),
   );
+}
+
+/**
+ * Every value a step's references resolved to, keyed by the name the MODEL
+ * would have written in an action: the authored name, the run-time name a
+ * skill rename gave it, and each `${…}` reference. Reads a placeholder-bearing
+ * selector the way the runtime read it — see `ambiguousSelectorComplaint` and
+ * `recordedReadMismatch`. Exported for the review pass, which checks a
+ * revision against the values of the pass each entry was generated from.
+ */
+export function stepSubstitution(
+  binding: CodeBehindBinding,
+  resolvedParameters: Record<string, string>,
+  envData?: EnvDataContext | undefined,
+): (text: string) => string {
+  const parameters = stepParameters(binding, resolvedParameters, envData);
+  const envRefs = stepEnvRefs(binding, envData).resolved;
+  const values = { ...resolvedParameters, ...Object.fromEntries(parameters.map((p) => [p.name, p.value])) };
+  return (text: string): string => applyKnownValues(text, values, envRefs);
+}
+
+/** What one entry answer is checked against before it is kept. */
+export interface EntryCheckContext {
+  binding: CodeBehindBinding;
+  /** The recorded run's actions for the step — the pass the answer is for. */
+  actions: RecordedAction[];
+  /** {@link stepSubstitution} for that pass. */
+  substitute?: ((text: string) => string) | undefined;
+  /** What the pass captured, by authored name — for the read check's words. */
+  recordedCaptures?: Record<string, string> | undefined;
+  /** The run's mask set, applied to anything the checks quote. */
+  secrets?: readonly string[] | undefined;
+  /** The variable names the run had when the step ran — so a context value read
+   *  as a variable (`step.getVar('baseUrl')`) is told from a real one. */
+  variables?: ReadonlySet<string> | undefined;
+}
+
+/**
+ * The static backstops an entry answer goes through, one re-ask shared between
+ * them, and which answer wins (docs/specs/SPEC-codebehind-robustness.md §6.2).
+ * Generation and both compilers' repairs come through here, so a repaired
+ * entry is held to what a generated one is.
+ *
+ * All of the checks are for the case the prompt cannot cover: the model was
+ * told the thing and wrote it the other way anyway. Two grades:
+ *
+ *  - **The read check** ({@link recordedReadMismatch}). A read with a
+ *    different selector does not throw; it returns different data, and no
+ *    later step can tell. An answer that still fails it after the one re-ask
+ *    is WITHHELD: the step gets no entry at all. Keeping it would replay a
+ *    wrong read; an `ai: true` entry would keep the step on AI for good.
+ *  - **The others** — selector ambiguity (it throws on replay, so it is
+ *    self-announcing), a literal upload path, an undeclared context property,
+ *    a stale tab handle (it drives the wrong tab and PASSES), a read that
+ *    races its own action. One re-ask, then take what we get, warned about.
+ *
+ * Which answer is kept:
+ *
+ * | First answer              | Re-ask                               | Kept                     |
+ * |---------------------------|--------------------------------------|--------------------------|
+ * | passes every check        | (not asked)                          | first                    |
+ * | fails the read check      | fixes it                             | re-ask (warned)          |
+ * | fails the read check      | still fails it, or no entry          | neither: withheld        |
+ * | fails another check only  | keeps the read                       | re-ask (warned)          |
+ * | fails another check only  | breaks the read, or no entry         | first (warned)           |
+ *
+ * A recorded value written into the answer costs the one re-ask first, before
+ * anything else looks at it (`askWithCaptureRetry`). If that one was spent,
+ * the static faults are said rather than asked about — except a failed read,
+ * which is withheld.
+ */
+async function askChecked(
+  aiClient: AiClient,
+  contextContent: string,
+  prompt: (retry?: EntryRetry) => ChatMessage,
+  guarded: readonly GuardedValue[],
+  checks: EntryCheckContext,
+  signal?: AbortSignal | undefined,
+): Promise<GeneratedEntry> {
+  const label = checks.binding.source;
+  const asked = await askWithCaptureRetry(aiClient, contextContent, prompt, guarded, signal);
   const first = asked.result;
   if (first.kind !== 'entry') return first;
 
-  // ── The static backstops ──────────────────────────────────────────────────
-  // All of them are for the case the prompt cannot cover: the model was told
-  // the thing and wrote it the other way anyway.
-  //
-  // Selector ambiguity first (stories/codebehind-selector-ambiguity.md) — it
-  // throws on replay, so it is self-announcing, where a stale handle
-  // (stories/codebehind-framework-actions.md) drives the wrong tab and PASSES.
-  // One re-ask is shared between them all: more would multiply a compile's
-  // model calls for a handful of heuristics, and the complaint text carries
-  // whichever fault fired.
-  const complaint =
-    staticEntryComplaint(first.code, options.actions, substitute) ??
-    undeclaredContextComplaint(first.code) ??
-    staleHandleComplaint(first.code) ??
-    unwaitedReadComplaint(first.code);
-  if (complaint === undefined) return reported(first);
-  // …shared with the recorded-value re-ask too. If that one was spent, this
-  // answer is the re-ask's, and the fault is said rather than asked about.
+  const readFault = (code: string): ReadMismatch | undefined =>
+    recordedReadMismatch(code, checks.actions, {
+      source: checks.binding.source,
+      ...(checks.substitute && { substitute: checks.substitute }),
+      ...(checks.recordedCaptures && { recordedCaptures: checks.recordedCaptures }),
+      ...(checks.secrets && { secrets: checks.secrets }),
+    });
+  const otherFault = (code: string): string | undefined =>
+    staticEntryComplaint(code, checks.actions, checks.substitute) ??
+    undeclaredContextComplaint(code) ??
+    staleHandleComplaint(code) ??
+    unwaitedReadComplaint(code) ??
+    selfCheckInActingEntryComplaint(code) ??
+    unwaitedNavigationComplaint(code, checks.actions, checks.secrets) ??
+    contextValueAsVariableComplaint(code, checks.variables) ??
+    chainedAssertionComplaint(code) ??
+    tabIdentifierComplaint(code, checks.actions, checks.secrets);
+
+  const firstRead = readFault(first.code);
+  const firstOther = otherFault(first.code);
+  if (firstRead === undefined && firstOther === undefined) return first;
+
   if (asked.reasked) {
+    if (firstRead !== undefined) return withheldForRead(label, firstRead, 'its one re-ask went to a recorded value it had written in');
     logger.warn(
-      `Code-behind for "${binding.source}" has a fault the static check can see, and its one ` +
-        `re-ask went to a recorded value it had written in. ${complaint}`,
+      `Code-behind for "${label}" has a fault the static check can see, and its one ` +
+        `re-ask went to a recorded value it had written in. ${firstOther}`,
     );
-    return reported(first);
+    return first;
   }
 
-  logger.debug(`Code-behind re-asking for "${binding.source}": ${complaint}`);
+  const complaint = [firstRead?.complaint, firstOther].filter((c) => c !== undefined).join('\n\n');
+  // Said at info, in a line: a re-ask is a second model call, and how often
+  // a compile needs one is what decides which model it should use
+  // (docs/specs/SPEC-codebehind-robustness.md §6.10). The whole complaint stays
+  // at debug.
+  logger.info(`Code-behind for "${label}" was asked once more: ${firstSentence(complaint)}`);
+  logger.debug(`Code-behind re-asking for "${label}": ${complaint}`);
   const second = await askForEntry(
-    options.aiClient,
-    options.contextContent,
-    buildStepCodePrompt({ ...promptInput, retry: { previousEntry: first.code, complaint } }),
+    aiClient,
+    contextContent,
+    prompt({ previousEntry: first.code, complaint }),
     guarded,
-    options.signal,
+    signal,
   );
 
-  // ONE re-ask, then take what we get. The second answer is never re-checked
-  // for the same fault, so this cannot spin — and it is never allowed to be
-  // worse than the first: a re-ask that errors (the call failed, or the new
-  // code tripped the leak guard) or declines falls back to the answer that
-  // already passed every guard, rather than turning a heuristic into a failed
-  // compile. `compileTest` treats a generation error as fatal for the whole
-  // run, which is not a power a textual check over generated code should have.
+  // ONE re-ask, then decide. The second answer is never re-asked about, so
+  // this cannot spin. A re-ask that errors (the call failed, or the new code
+  // tripped the leak guard) or declines falls back to the first answer — unless
+  // that one read with the wrong selector, which no fallback can keep.
   if (second.kind !== 'entry') {
-    logger.debug(
-      `The re-ask for "${binding.source}" produced no entry ` +
-        `(${second.kind === 'error' ? second.message : second.reason}); keeping the first answer`,
-    );
-    return reported(first);
+    const why = second.kind === 'error' ? second.message : second.reason;
+    if (firstRead !== undefined) return withheldForRead(label, firstRead, `the re-ask produced no entry (${why})`);
+    logger.debug(`The re-ask for "${label}" produced no entry (${why}); keeping the first answer`);
+    return first;
   }
-  const stillWrong = staticEntryComplaint(second.code, options.actions, substitute);
+  const secondRead = readFault(second.code);
+  if (secondRead !== undefined) {
+    if (firstRead !== undefined) return withheldForRead(label, secondRead, 'the re-ask still did');
+    // The re-ask broke the read the first answer had right: the first answer
+    // stands, with the fault it was re-asked about said out loud.
+    logger.warn(
+      `Code-behind for "${label}": the re-ask changed the selector the run read with, so the first ` +
+        `answer is kept. ${firstOther ?? ''}`.trimEnd(),
+    );
+    return first;
+  }
+  warnRemainingFaults(second.code, label, checks);
+  return second;
+}
+
+/** A complaint's first sentence, for a one-line log. */
+function firstSentence(text: string): string {
+  const line = text.split('\n')[0]!.trim();
+  const end = /\.(?:\s|$)/.exec(line);
+  const sentence = end ? line.slice(0, end.index + 1) : line;
+  return sentence.length > 240 ? `${sentence.slice(0, 239)}…` : sentence;
+}
+
+/** The withheld outcome for a read that did not keep the run's selector. */
+function withheldForRead(
+  label: string,
+  mismatch: ReadMismatch,
+  why: string,
+): GeneratedEntry {
+  logger.warn(
+    `Code-behind for "${label}" was not written: ${READ_SELECTOR_WITHHELD} ` +
+      `(${mismatch.selector}), and ${why}. The step stays AI; the next compile tries again.`,
+  );
+  return {
+    kind: 'error',
+    message: `${READ_SELECTOR_WITHHELD} (${mismatch.selector})`,
+    withheld: true,
+  };
+}
+
+/**
+ * Why a step is left without code when its read did not keep the run's
+ * selector — the words both compilers' summaries and notes carry
+ * (docs/specs/SPEC-codebehind-robustness.md §6.2).
+ */
+export const READ_SELECTOR_WITHHELD = 'its code did not read with the selector the run used';
+
+/** Today's warnings for faults an answer kept after its re-ask still has. */
+function warnRemainingFaults(code: string, label: string, checks: EntryCheckContext): void {
+  const stillWrong = staticEntryComplaint(code, checks.actions, checks.substitute);
   if (stillWrong !== undefined) {
     logger.warn(
-      `Code-behind for "${binding.source}" still has a fault the static check can see; ` +
+      `Code-behind for "${label}" still has a fault the static check can see; ` +
         `it may throw or hard-code a path on replay. ${stillWrong}`,
     );
   }
-  const stillUndeclared = undeclaredContextComplaint(second.code);
+  const stillUndeclared = undeclaredContextComplaint(code);
   if (stillUndeclared !== undefined) {
     logger.warn(
-      `Code-behind for "${binding.source}" still uses a context property it does not ` +
+      `Code-behind for "${label}" still uses a context property it does not ` +
         `destructure; it will throw on replay. ${stillUndeclared}`,
     );
   }
-  if (staleHandleComplaint(second.code) !== undefined) {
+  const stillStale = staleHandleComplaint(code);
+  if (stillStale !== undefined) {
     logger.warn(
-      `Code-behind for "${binding.source}" still uses \`page\` after switching tab or browser; ` +
-        `it may drive the tab the step left. ${complaint}`,
+      `Code-behind for "${label}" still uses \`page\` after switching tab or browser; ` +
+        `it may drive the tab the step left. ${stillStale}`,
     );
   }
-  const stillUnwaited = unwaitedReadComplaint(second.code);
+  const stillUnwaited = unwaitedReadComplaint(code);
   if (stillUnwaited !== undefined) {
     logger.warn(
-      `Code-behind for "${binding.source}" still asserts on a page value it never waited for; ` +
+      `Code-behind for "${label}" still asserts on a page value it never waited for; ` +
         `it may read the state from before the step. ${stillUnwaited}`,
     );
   }
-  return reported(second);
+  const stillSelfCheck = selfCheckInActingEntryComplaint(code);
+  if (stillSelfCheck !== undefined) {
+    logger.warn(
+      `Code-behind for "${label}" still self-checks in an entry that acts; the runtime fails that ` +
+        `check as an assertion. ${stillSelfCheck}`,
+    );
+  }
+  const stillContextVariable = contextValueAsVariableComplaint(code, checks.variables);
+  if (stillContextVariable !== undefined) {
+    logger.warn(
+      `Code-behind for "${label}" still reads a context value as a variable; it answers undefined on ` +
+        `replay. ${stillContextVariable}`,
+    );
+  }
+  const stillChained = chainedAssertionComplaint(code);
+  if (stillChained !== undefined) {
+    logger.warn(`Code-behind for "${label}" still chains a matcher onto an assertion; it throws on replay. ${stillChained}`);
+  }
+  const stillTabIdentifier = tabIdentifierComplaint(code, checks.actions, checks.secrets);
+  if (stillTabIdentifier !== undefined) {
+    logger.warn(
+      `Code-behind for "${label}" still names a tab differently from the run; it may find no tab on replay. ` +
+        stillTabIdentifier,
+    );
+  }
+  const stillUnwaitedNavigation = unwaitedNavigationComplaint(code, checks.actions, checks.secrets);
+  if (stillUnwaitedNavigation !== undefined) {
+    logger.warn(
+      `Code-behind for "${label}" still does not wait after an action that leads to another page; ` +
+        `the runtime's own wait after the entry is all that covers it. ${stillUnwaitedNavigation}`,
+    );
+  }
+}
+
+/** One static check's finding about one entry. */
+export interface EntryFault {
+  check:
+    | 'read'
+    | 'ambiguous-selector'
+    | 'upload-path'
+    | 'undeclared-context'
+    | 'stale-handle'
+    | 'unwaited-read'
+    | 'self-check-in-acting-entry'
+    | 'unwaited-navigation'
+    | 'context-value-as-variable'
+    | 'chained-assertion'
+    | 'tab-identifier';
+  complaint: string;
+  /** The recorded selector, for a `read` fault. */
+  selector?: string;
+}
+
+/**
+ * Every static fault of one entry, by check — what the review pass compares
+ * before and after a revision (docs/specs/SPEC-codebehind-robustness.md §6.2):
+ * a revision may not bring into an entry a fault the generated entry did not
+ * have. The checks that need the recording — the read check, selector
+ * ambiguity, a literal upload path — run only when `actions` are given.
+ */
+export function entryFaults(
+  code: string,
+  ctx: {
+    source: string;
+    actions?: readonly RecordedAction[] | undefined;
+    substitute?: ((text: string) => string) | undefined;
+    recordedCaptures?: Record<string, string> | undefined;
+    secrets?: readonly string[] | undefined;
+    variables?: ReadonlySet<string> | undefined;
+  },
+): EntryFault[] {
+  const actions = [...(ctx.actions ?? [])];
+  const out: EntryFault[] = [];
+  const read = recordedReadMismatch(code, actions, {
+    source: ctx.source,
+    ...(ctx.substitute && { substitute: ctx.substitute }),
+    ...(ctx.recordedCaptures && { recordedCaptures: ctx.recordedCaptures }),
+    ...(ctx.secrets && { secrets: ctx.secrets }),
+  });
+  if (read) out.push({ check: 'read', complaint: read.complaint, selector: read.selector });
+  const found: Array<[EntryFault['check'], string | undefined]> = [
+    ['ambiguous-selector', ambiguousSelectorComplaint(code, actions, ctx.substitute)],
+    ['upload-path', literalUploadPathComplaint(code, actions)],
+    ['undeclared-context', undeclaredContextComplaint(code)],
+    ['stale-handle', staleHandleComplaint(code)],
+    ['unwaited-read', unwaitedReadComplaint(code)],
+    ['self-check-in-acting-entry', selfCheckInActingEntryComplaint(code)],
+    ['unwaited-navigation', unwaitedNavigationComplaint(code, actions, ctx.secrets)],
+    ['context-value-as-variable', contextValueAsVariableComplaint(code, ctx.variables)],
+    ['chained-assertion', chainedAssertionComplaint(code)],
+    ['tab-identifier', tabIdentifierComplaint(code, actions, ctx.secrets)],
+  ];
+  for (const [check, complaint] of found) {
+    if (complaint !== undefined) out.push({ check, complaint });
+  }
+  return out;
+}
+
+/**
+ * A REPAIR answer, held to what a generated one is
+ * (docs/specs/SPEC-codebehind-robustness.md §6.2): the leak guard and its
+ * recorded-value re-ask as before, then generation's static checks — the read
+ * check included — with the same one re-ask, the same precedence and the same
+ * withheld outcome. Under §6.5 this is the path a wrong read is regenerated
+ * through, so it cannot be the one path that never looks at the read.
+ *
+ * `prompt` builds the repair prompt; its `retry` block carries the complaint.
+ */
+export async function askCheckedRepair(
+  aiClient: AiClient,
+  contextContent: string,
+  prompt: (retry?: EntryRetry) => ChatMessage,
+  guarded: readonly GuardedValue[],
+  checks: EntryCheckContext,
+  signal?: AbortSignal | undefined,
+): Promise<GeneratedEntry> {
+  return askChecked(aiClient, contextContent, prompt, guarded, checks, signal);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// The read check (docs/specs/SPEC-codebehind-robustness.md §6.2)
+// ───────────────────────────────────────────────────────────────────────────
+
+/** A recorded read the entry does not read with, and the re-ask's words. */
+export interface ReadMismatch {
+  /** The recorded selector, masked. */
+  selector: string;
+  complaint: string;
+}
+
+/**
+ * The first recorded `read` or `count` whose selector the entry does not
+ * contain, or undefined when it reads with every one of them.
+ *
+ * Reads are the one action where a wrong selector fails silently: a click on
+ * the wrong element throws or visibly does the wrong thing, while a read that
+ * matches more elements, or fewer, just returns different data. Failure B of
+ * the robustness spec read each account row's name AND its masked number —
+ * six values for three rows — because a rewrite dropped one `:first-child`.
+ *
+ * "Contains" is textual, and compares what the run read with against what the
+ * code holds as a string — single- or double-quoted, or a template literal —
+ * after normalising whitespace and quote style. Accepted spellings: the
+ * selector as recorded, after parameter substitution, or the action's verified
+ * `targeting.resolvedSelector`; a selector split across a chain
+ * (`frameLocator(a).locator(b)`, `locator(a).locator(b)`) counts when every
+ * part is there. A template literal whose only expressions are
+ * `step.getVar('name')` is read as `{{name}}` and substituted, so a locator
+ * built from a parameter matches a recording that holds the parameter's value.
+ *
+ * What it cannot tell: whether a DIFFERENT selector would have read the same
+ * elements. `#account-list .account-name` would have; it is refused all the
+ * same — the run is the only reference compile has, and the cost of refusing
+ * an equivalent is one re-ask.
+ *
+ * Two exemptions:
+ *  - a selector holding a `{{placeholder}}` or `${…}`: the entry builds it from
+ *    `step.getVar`, and the placeholder rule judges that;
+ *  - the selector story's carve-out: a read whose `resolvedBy` is `positional`
+ *    while the step names what distinguishes its target — a parameter, or a
+ *    quoted value — where the entry must build a data-driven locator
+ *    instead (stories/codebehind-selector-ambiguity.md, "What generation does
+ *    with it").
+ */
+export function recordedReadMismatch(
+  code: string,
+  actions: readonly RecordedAction[],
+  ctx: {
+    /** The step's authored line, for the positional carve-out. */
+    source: string;
+    substitute?: (text: string) => string;
+    recordedCaptures?: Record<string, string>;
+    secrets?: readonly string[];
+  },
+): ReadMismatch | undefined {
+  let held: Set<string> | undefined;
+  const asked = new Set<string>();
+  for (const action of actions) {
+    if (action.action !== 'read' && action.action !== 'count') continue;
+    const selector = action.selector;
+    if (typeof selector !== 'string' || selector.trim() === '') continue;
+    if (ANY_PLACEHOLDER_RE.test(selector) || envDataRefsIn(selector).length > 0) continue;
+    if (action.targeting?.resolvedBy === 'positional' && namesItsTarget(ctx.source)) continue;
+    if (asked.has(selector)) continue;
+    asked.add(selector);
+
+    held ??= selectorStringsIn(code, ctx.substitute);
+    const spellings = [selector, ctx.substitute?.(selector), action.targeting?.resolvedSelector]
+      .filter((s): s is string => typeof s === 'string' && s.trim() !== '')
+      .map(normaliseSelector);
+    if (spellings.some((s) => coveredBy(s, held!))) continue;
+
+    const masked = redact(selector, [...(ctx.secrets ?? [])]);
+    return { selector: masked, complaint: readMismatchComplaint(action, masked, ctx) };
+  }
+  return undefined;
+}
+
+/** Does the step name what distinguishes its target — a parameter, an
+ *  environment reference, or a value the author quoted? */
+function namesItsTarget(source: string): boolean {
+  return (
+    placeholderNamesIn(source).length > 0 ||
+    envDataRefsIn(source).length > 0 ||
+    authorQuotedLiterals(source).size > 0
+  );
+}
+
+/** The re-ask's words for one read the entry does not keep. */
+function readMismatchComplaint(
+  action: RecordedAction,
+  selector: string,
+  ctx: { recordedCaptures?: Record<string, string>; secrets?: readonly string[] },
+): string {
+  const counts = action.action === 'count';
+  const matched = action.targeting?.matchCount;
+  const captured = counts ? undefined : capturedCount(action, ctx.recordedCaptures);
+  const facts = [
+    matched !== undefined ? `matched ${matched} element${matched === 1 ? '' : 's'}` : '',
+    captured !== undefined ? `captured ${captured === 1 ? 'one value' : `${captured} values`}` : '',
+  ].filter(Boolean).join(' and ');
+  const resolved = action.targeting?.resolvedSelector;
+  return (
+    `The recorded run ${counts ? 'counted' : 'read'} with \`${selector}\`${facts ? `, which ${facts}` : ''}. ` +
+    `Your entry ${counts ? 'counts' : 'reads'} with a different selector. A ${counts ? 'count' : 'read'} ` +
+    'that matches more or fewer elements does not throw; it returns different data. Use the recorded ' +
+    `selector as written${resolved !== undefined ? ` (or its verified resolvedSelector \`${redact(resolved, [...(ctx.secrets ?? [])])}\`)` : ''} — ` +
+    'every part of it, `:first-child` and `:nth-of-type` included. Narrow or wait around it if you need ' +
+    'to, but read with it.'
+  );
+}
+
+/** How many values the run captured for this read, when the step captured it. */
+function capturedCount(
+  action: RecordedAction,
+  recorded: Record<string, string> | undefined,
+): number | undefined {
+  if (recorded === undefined || typeof action.as !== 'string') return undefined;
+  const names = [action.as, action.as.replace(/^__skill\d+_/, '')];
+  const name = names.find((n) => Object.hasOwn(recorded, n));
+  if (name === undefined) return undefined;
+  const value = recorded[name]!;
+  const items = jsonStringItems(value);
+  if (items.length > 0 || /^\s*\[\s*\]\s*$/.test(value)) return items.length;
+  return 1;
+}
+
+/** A selector in the one spelling two equal selectors share: whitespace runs
+ *  collapsed, none around a combinator, single quotes as double. */
+function normaliseSelector(selector: string): string {
+  return selector
+    .trim()
+    .replace(/'/g, '"')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*(>>|[>+~,])\s*/g, '$1');
+}
+
+/**
+ * Is `selector` (normalised) one of `held`, or a chain of them — a head that is
+ * held, then a descendant combinator or a `>>`, then a tail that is covered in
+ * turn? What `page.locator(a).locator(b)` and a frame's `frameLocator(a)
+ * .locator(b)` read with, where the run wrote `a b`.
+ */
+function coveredBy(selector: string, held: ReadonlySet<string>): boolean {
+  if (held.has(selector)) return true;
+  let depth = 0;
+  let quote: string | undefined;
+  for (let i = 0; i < selector.length; i++) {
+    const c = selector[i]!;
+    if (quote !== undefined) {
+      if (c === '\\') i++;
+      else if (c === quote) quote = undefined;
+      continue;
+    }
+    if (c === '"') {
+      quote = c;
+      continue;
+    }
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    if (depth !== 0) continue;
+    const split =
+      c === ' ' ? { head: i, tail: i + 1 } : selector.startsWith('>>', i) ? { head: i, tail: i + 2 } : undefined;
+    if (split === undefined) continue;
+    const head = selector.slice(0, split.head);
+    if (head !== '' && held.has(head) && coveredBy(selector.slice(split.tail), held)) return true;
+  }
+  return false;
+}
+
+/**
+ * Every string the entry holds that could be a selector, normalised: each
+ * single- or double-quoted literal, and each template literal that is plain
+ * text or whose only expressions are `step.getVar('name')` — read as
+ * `{{name}}`, then substituted the way the recording's selector is.
+ */
+function selectorStringsIn(
+  code: string,
+  substitute: ((text: string) => string) | undefined,
+): Set<string> {
+  const s = scan(code);
+  const out = new Set<string>();
+  for (const token of s.strings) out.add(normaliseSelector(token.value));
+  for (let i = 0; i < code.length; i++) {
+    if (s.mask[i] !== TEMPLATE || code[i] !== '`' || (i > 0 && s.mask[i - 1] === TEMPLATE)) continue;
+    let end = i + 1;
+    while (end < code.length && s.mask[end] === TEMPLATE) end++;
+    const body = code
+      .slice(i + 1, end - 1)
+      .replace(
+        /\$\{\s*(?:await\s+)?step\s*\.\s*getVar\s*\(\s*(['"])([^'"]+)\1\s*\)\s*!?\s*(?:\?\?\s*(?:''|""))?\s*\}/g,
+        (_m, _q: string, name: string) => `{{${name}}}`,
+      );
+    if (body.includes('${')) continue;
+    out.add(normaliseSelector(body));
+    if (substitute) out.add(normaliseSelector(substitute(body)));
+    i = end - 1;
+  }
+  return out;
 }
 
 /**
@@ -684,9 +1150,12 @@ export function staleHandleComplaint(code: string): string | undefined {
 }
 
 /** Reads that take whatever the DOM holds at that instant. None of them
- *  retries, so each is only as correct as the wait in front of it. */
+ *  retries, so each is only as correct as the wait in front of it. `title()`
+ *  and `isVisible()` joined after failure A of
+ *  docs/specs/SPEC-codebehind-robustness.md §3.1: a sign-in click's entry read
+ *  both 57 ms after the click and passed on the page it was leaving. */
 const INSTANT_READ =
-  /\.\s*(?:textContent|innerText|inputValue|allTextContents|allInnerTexts|getAttribute)\s*\(/;
+  /\.\s*(?:textContent|innerText|innerHTML|inputValue|allTextContents|allInnerTexts|getAttribute|title|url|isVisible|isHidden|isEnabled|isDisabled|isChecked|isEditable|count)\s*\(/g;
 
 /**
  * Constructs that block until the page reaches a NAMED state.
@@ -713,6 +1182,10 @@ const WAITS_FOR_STATE = new RegExp(
     'toContainText',
     'toHaveValue',
     'toHaveCount',
+    // The wait after an action, on the entry's own watcher
+    // (docs/specs/SPEC-codebehind-robustness.md §6.4): every first-party
+    // request the action started, then the page quiet.
+    String.raw`\bstep\s*\.\s*settle\s*\(`,
   ].join('|'),
 );
 
@@ -740,26 +1213,110 @@ const WAITS_FOR_STATE = new RegExp(
  * read AND no state wait anywhere in the entry, so an entry that waits on some
  * unrelated line is left alone — and, like its siblings, absence of the
  * pattern means the check did not run, never that the entry is proven safe.
+ *
+ * And it fires only on a read that comes AFTER an action (`actingCalls`,
+ * docs/specs/SPEC-codebehind-robustness.md §6.3). The fault is a read racing
+ * what the entry's own action caused; an entry that takes no action caused
+ * nothing, and the runner has already settled the page before it. Firing on
+ * one anyway is what started failure B of that spec: a read-only capture was
+ * re-asked, rewritten, and lost the selector the recording read with.
  */
 export function unwaitedReadComplaint(code: string): string | undefined {
-  if (!/\bstep\s*\.\s*expect\s*\(/.test(code)) return undefined;
-  if (!INSTANT_READ.test(code)) return undefined;
+  // `step.check` is an assertion too (§6.5) — and it never belongs after an
+  // action, which `selfCheckInActingEntryComplaint` says separately.
+  if (!/\bstep\s*\.\s*(?:expect|check)\s*\(/.test(code)) return undefined;
   if (WAITS_FOR_STATE.test(code)) return undefined;
+  const action = actingCalls(code)[0];
+  if (action === undefined) return undefined;
+  const text = codeText(code);
+  const readAfter = [...text.matchAll(INSTANT_READ)].some((m) => m.index! > action.index);
+  if (!readAfter) return undefined;
   return (
-    'The entry reads a value out of the page and asserts on it without ever waiting for the '
-    + 'state it asserts. `step.expect` does not retry and the read does not either, so on replay '
-    + 'this compares whatever the page held a millisecond after the action — which, when a '
-    + 'request is still in flight, is the value from BEFORE the step. Wait for the NEW state '
-    + "first: `await page.locator('#upload-status', { hasText: 'Uploaded logo.png' }).waitFor()` "
-    + '(or `.filter({ hasText: ... })` on a locator you already have) does not resolve until that '
-    + 'text is present, and `page.waitForFunction` covers what a text filter cannot. Read the '
-    + 'value into `step.expect` after that, not instead of it.'
+    `The entry acts on the page (\`${action.call}\`) and then reads a value out of it and asserts on `
+    + 'it, without ever waiting for the state it asserts. `step.expect` does not retry and the read '
+    + 'does not either, so on replay this compares whatever the page held a millisecond after the '
+    + 'action — which, when a request is still in flight, is the value from BEFORE the step. Wait '
+    + "for the NEW state first: `await page.locator('#upload-status', { hasText: 'Uploaded logo.png' })"
+    + ".waitFor()` (or `.filter({ hasText: ... })` on a locator you already have) does not resolve "
+    + 'until that text is present, and `page.waitForFunction` covers what a text filter cannot. '
+    + 'When the action leads to another page, or starts a request, `await step.settle()` straight '
+    + 'after it: it waits for every request the action started — the navigation a login answer '
+    + 'begins included — and then for the page to hold still. Never wait with a URL taken from one '
+    + 'data row: other rows of the same test may stay on this page. Read the value into '
+    + '`step.expect` after that, not instead of it.'
+  );
+}
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * a `step.check` in an entry that acts (docs/specs/SPEC-codebehind-robustness.md
+ * §6.5).
+ *
+ * A failed self-check heals: the step re-runs under AI. After a click that can
+ * submit twice, so the runtime fails an acting entry's `step.check` like a
+ * `step.expect` — and this says so at compile time, where the model can still
+ * write the assertion it meant. "Acting" is `entryActs`'s, so a call to a
+ * helper counts.
+ */
+export function selfCheckInActingEntryComplaint(code: string): string | undefined {
+  if (!/\bstep\s*\.\s*check\s*\(/.test(codeText(code))) return undefined;
+  const action = actingCalls(code)[0];
+  if (action === undefined) return undefined;
+  return (
+    `The entry calls \`step.check\` and also acts on the page (\`${action.call}\`). \`step.check\` is ` +
+    'the self-check of an entry that only reads: when it fails the step re-runs under AI, and after an ' +
+    'action that would do the action twice. In an entry that acts, assert with `step.expect(…)`.'
+  );
+}
+
+/** What a navigation counts as waited for: every state wait, plus the
+ *  web-first assertions on a URL or a title, and Playwright's own navigation
+ *  wait. */
+const WAITS_FOR_NAVIGATION = new RegExp(`${WAITS_FOR_STATE.source}|waitForNavigation|toHaveURL|toHaveTitle`);
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * an action NAVIGATED on the recorded run, and the entry does not wait after
+ * its last action (docs/specs/SPEC-codebehind-robustness.md §6.7).
+ *
+ * Compiled code is fast enough to read the page it is leaving: failure A's
+ * sign-in entry read the title 57 ms after its click, while the login request
+ * that would move the page was still in flight. The prompt's legend says to
+ * wait with `step.settle()`; this is the backstop for an answer that did not.
+ *
+ * "After its last action" because the transcript cannot say which call in the
+ * code is the one that navigated, and a step's navigation is its last action
+ * far more often than not. A `goto` (or `reload`, `goBack`, `goForward`) as the
+ * last action waits for its page by itself.
+ */
+export function unwaitedNavigationComplaint(
+  code: string,
+  actions: readonly RecordedAction[],
+  secrets: readonly string[] = [],
+): string | undefined {
+  const moved = actions.find((a) => a.navigated !== undefined);
+  if (moved?.navigated === undefined) return undefined;
+  const calls = actingCalls(code);
+  const last = calls[calls.length - 1];
+  if (last === undefined || last.kind === 'navigation') return undefined;
+  if (WAITS_FOR_NAVIGATION.test(code.slice(last.index))) return undefined;
+  const mask = (url: string): string => redact(url, [...secrets]);
+  return (
+    `On the recorded run, the \`${moved.action}\` action changed the page's URL, from ${mask(moved.navigated.from)} ` +
+    `to ${mask(moved.navigated.to)}, and this entry does not wait after its last action (\`${last.call}\`). ` +
+    'Compiled code runs in milliseconds, so without a wait whatever comes next reads or acts on the page being ' +
+    'left. Put `await step.settle()` straight after the action that leads to another page: it waits for every ' +
+    'request the action started and the navigation they begin, then for the page to hold still. Do not wait ' +
+    'for that URL by name: other rows of a data table may not navigate.'
   );
 }
 
 /** Everything `run`'s context object carries. Used bare, each of these is a
  *  `ReferenceError` unless the entry destructured it. */
 const CONTEXT_PROPERTIES = ['page', 'context', 'browser', 'step', 'log', 'tabs', 'browsers'] as const;
+
+/** The context's plain values — used bare as values, not through a `.`. */
+const CONTEXT_VALUES = ['baseUrl'] as const;
 
 /** The destructured parameter list of `async run({ ... })` — or of `async
  *  condition({ ... })`, which receives the same context object
@@ -796,15 +1353,162 @@ export function undeclaredContextComplaint(code: string): string | undefined {
       .map((part) => part.split(':')[0]!.trim())
       .filter(Boolean),
   );
+  const complaint = (name: string): string =>
+    `The entry uses \`${name}\` but \`${fn}\` does not destructure it — the parameter list is ` +
+    `\`{ ${[...declared].join(', ')} }\`, so this throws \`ReferenceError: ${name} is not defined\` ` +
+    `on the first replay. Add \`${name}\` to the destructured context object.`;
   for (const name of CONTEXT_PROPERTIES) {
     if (declared.has(name)) continue;
     if (!new RegExp(`(?:^|[^\\w$.])${name}\\s*\\.`).test(code)) continue;
     // A local of the same name is defined, whatever the parameter list says.
     if (new RegExp(`(?:const|let|var)\\s+${name}\\b`).test(code)) continue;
+    return complaint(name);
+  }
+  // The context's VALUES are used bare, not through a member access —
+  // `page.goto(baseUrl)`, `${baseUrl}/login` — so they are looked for as a
+  // name on its own, outside strings and comments, and not as an object key.
+  // Measured live: an entry for "Navigate to the baseUrl" called
+  // `page.goto(baseUrl)` from `run({ page, step })`, and threw on replay.
+  const text = codeText(code);
+  for (const name of CONTEXT_VALUES) {
+    if (declared.has(name)) continue;
+    if (!new RegExp(`(?:^|[^\\w$.])${name}\\b(?!\\s*:)`).test(text)) continue;
+    if (new RegExp(`(?:const|let|var|function)\\s+${name}\\b`).test(text)) continue;
+    return complaint(name);
+  }
+  return undefined;
+}
+
+/** `step.getVar('baseUrl')` — a context value asked for as a test variable. */
+const GETVAR_OF_CONTEXT_VALUE = /\bgetVar\s*\(\s*(['"`])(baseUrl)\1\s*\)/;
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * a context VALUE read as a test variable: `step.getVar('baseUrl')`.
+ *
+ * Measured live: the entry for "Navigate to the baseUrl" read
+ * `const baseUrl = step.getVar('baseUrl')` and called `page.goto(baseUrl)`. No
+ * variable of that name exists — the base URL is the context's `baseUrl` — so
+ * `getVar` answered undefined and the step fell back to AI on the replay.
+ * `undeclaredContextComplaint` cannot see it: the name IS declared, as a local.
+ * `variables` are the names the run had when the step ran; a test that does
+ * define a variable of that name gets no complaint.
+ */
+export function contextValueAsVariableComplaint(
+  code: string,
+  variables?: ReadonlySet<string>,
+): string | undefined {
+  const found = GETVAR_OF_CONTEXT_VALUE.exec(code);
+  if (!found) return undefined;
+  const name = found[2]!;
+  if (variables?.has(name)) return undefined;
+  return (
+    `The entry reads \`step.getVar('${name}')\`, but no test variable is called \`${name}\` — on replay it ` +
+    `answers undefined. \`${name}\` is part of the context: take it in the parameter list ` +
+    `(\`async run({ page, step, ${name} })\`) and use it directly.`
+  );
+}
+
+/** `step.expect(` / `step.check(` (the method in group 1), or a bare
+ *  `expect(` — searched for in {@link codeText}, so never inside a string. */
+const ASSERTION_CALL = /(?:\bstep\s*\.\s*(expect|check)|(?:^|[^\w$.])expect)\s*\(/g;
+
+/** An `expect` of the entry's own, which may well return a matcher. */
+const OWN_EXPECT = /(?:function|const|let|var)\s+expect\b/;
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * a matcher chained onto an assertion, in Jest's and Playwright Test's style:
+ * `step.expect(page.url()).toBe(baseUrl)`.
+ *
+ * `step.expect` and `step.check` take the condition itself and return nothing,
+ * so the chained `.toBe` reads a property of undefined and throws on every
+ * replay — after the step's action has run, so the step heals under AI each
+ * time. Measured live: compile-skill-subfolder's entry for "Navigate to the
+ * baseUrl", as Review revised it, threw `Cannot read properties of undefined
+ * (reading 'toBe')`. A bare `expect(…).toBe(…)` is the same idiom, and no
+ * `expect` exists in an entry (rule 6: no imports).
+ */
+export function chainedAssertionComplaint(code: string): string | undefined {
+  const text = codeText(code);
+  for (const m of text.matchAll(ASSERTION_CALL)) {
+    const method = m[1];
+    if (method === undefined && OWN_EXPECT.test(text)) continue;
+    const close = matchClose(text, m.index! + m[0].length - 1);
+    if (close === -1) continue;
+    const chained = /^\s*\??\.\s*([A-Za-z_$][\w$]*)/.exec(text.slice(close + 1));
+    if (!chained) continue;
+    const member = chained[1]!;
+    const assertion = method === undefined ? 'step.expect' : `step.${method}`;
     return (
-      `The entry uses \`${name}\` but \`${fn}\` does not destructure it — the parameter list is ` +
-      `\`{ ${[...declared].join(', ')} }\`, so this throws \`ReferenceError: ${name} is not defined\` ` +
-      `on the first replay. Add \`${name}\` to the destructured context object.`
+      `The entry chains \`.${member}\` onto \`${method === undefined ? 'expect' : assertion}(…)\`, Jest's and ` +
+      'Playwright Test\'s matcher style. ' +
+      (method === undefined
+        ? 'No `expect` exists in an entry — rule 6, no imports — so on replay this throws. '
+        : `\`${assertion}\` takes the condition itself and returns nothing, so on replay this throws ` +
+          `\`Cannot read properties of undefined (reading '${member}')\`. `) +
+      `Write the comparison as the condition: \`${assertion}(page.url() === expected, 'The page is the ` +
+      `one the step names')\`.`
+    );
+  }
+  return undefined;
+}
+
+/** The tab calls that take an identifier, by the recorded action each stands
+ *  for. */
+const TAB_IDENTIFIER_ACTION = { close: 'closePage', switchTo: 'switchPage' } as const;
+
+/** The plain string literal `rest` starts with, unescaped — undefined for
+ *  anything else: a variable, a call, a template literal with `${…}`. */
+function leadingStringLiteral(rest: string): string | undefined {
+  const m = /^\s*(['"`])((?:\\.|(?!\1)[^\\\n])*)\1/.exec(rest);
+  if (!m || (m[1] === '`' && m[2]!.includes('${'))) return undefined;
+  return m[2]!.replace(/\\(.)/g, '$1');
+}
+
+/**
+ * Why this entry must not be written as it stands, or undefined when it may —
+ * `tabs.close` or `tabs.switchTo` given an identifier the run did not use.
+ *
+ * Both find a tab by its label, a URL substring or a title substring
+ * (`PageTracker.closePage`), and the identifier the run's `closePage` or
+ * `switchPage` action named is the one known to find it. Measured live:
+ * compile-tabs' "Close the tab showing "Account Summary"" ran `closePage
+ * page:2`, and the entry wrote `tabs.close("Account Summary")` — the new tab's
+ * heading, which is neither its title ("SecureBank — New Tab") nor its URL —
+ * so every replay threw `no page matching` and healed the step under AI.
+ * A literal the run never used is refused even when it would have matched
+ * too: the run is the only reference compile has, and the cost of refusing
+ * one that works is one re-ask.
+ */
+export function tabIdentifierComplaint(
+  code: string,
+  actions: readonly RecordedAction[],
+  secrets: readonly string[] = [],
+): string | undefined {
+  const used: Record<keyof typeof TAB_IDENTIFIER_ACTION, Set<string>> = { close: new Set(), switchTo: new Set() };
+  for (const action of actions) {
+    const call = action.action === 'closePage' ? 'close' : action.action === 'switchPage' ? 'switchTo' : undefined;
+    if (call === undefined || typeof action.page !== 'string' || action.page.trim() === '') continue;
+    used[call].add(action.page);
+  }
+  if (used.close.size === 0 && used.switchTo.size === 0) return undefined;
+
+  const text = codeText(code);
+  const tabs = [...contextAliases(text, 'tabs')].map((n) => n.replace(/\$/g, '\\$')).join('|');
+  for (const m of text.matchAll(new RegExp(String.raw`(?:^|[^\w$])(?:${tabs})\s*\.\s*(close|switchTo)\s*\(`, 'g'))) {
+    const call = m[1] as keyof typeof TAB_IDENTIFIER_ACTION;
+    const ran = [...used[call]];
+    // A recorded identifier built from a parameter is the placeholder rule's.
+    if (ran.length === 0 || ran.some((id) => ANY_PLACEHOLDER_RE.test(id))) continue;
+    const written = leadingStringLiteral(code.slice(m.index! + m[0].length));
+    if (written === undefined || ran.includes(written)) continue;
+    const quote = (id: string): string => JSON.stringify(redact(id, [...secrets]));
+    return (
+      `The entry ${call === 'close' ? 'closes' : 'switches to'} the tab ${quote(written)}, but the run's ` +
+      `\`${TAB_IDENTIFIER_ACTION[call]}\` named it ${ran.map(quote).join(' or ')}. \`tabs.${call}\` finds a tab ` +
+      'by its label (`\'main\'`, `\'page:2\'`), a URL substring or a title substring — not by what the page ' +
+      `shows — so write the identifier the run used: \`tabs.${call}(${quote(ran[0]!)})\`.`
     );
   }
   return undefined;
@@ -867,7 +1571,7 @@ export async function askForEntry(
     const completion = await aiClient.complete(
       [{ role: 'system', content: buildSystemPrompt(contextContent) }, prompt],
       signal,
-      { profile: 'authoring' },
+      { profile: 'compile' },
     );
     answer = parseStepCodeOrDecline(completion.text, expect);
   } catch (err) {
@@ -1923,7 +2627,9 @@ const CONDITION_FORBIDDEN: ReadonlyArray<{ re: RegExp; why: string }> = [
     why: 'navigates. A condition is asked about the page the run is on, and must leave it there',
   },
   {
-    re: /\.\s*waitFor\w*\s*\(/,
+    // `step.settle()` too (docs/specs/SPEC-codebehind-robustness.md §6.4): it
+    // waits for an entry's own actions, and a condition takes none.
+    re: /\.\s*(?:waitFor\w*|settle)\s*\(/,
     why:
       'waits. The framework has already waited for the page to settle before it asks, so answer ' +
       'about the page now — an absent element is an answer, so check `await locator.count()` first',
@@ -2836,6 +3542,7 @@ export async function generateConditionEntry(
   const complaint = firstHard ?? undeclaredContextComplaint(first.code);
   if (complaint === undefined) return first;
 
+  logger.info(`Code-behind for condition "${binding.source}" was asked once more: ${firstSentence(complaint)}`);
   logger.debug(`Code-behind re-asking for condition "${binding.source}": ${complaint}`);
   const second = await askForEntry(
     options.aiClient,
@@ -2884,4 +3591,155 @@ export async function generateConditionEntry(
     );
   }
   return second;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Steps that only read, written from the recording
+// (docs/specs/SPEC-codebehind-robustness.md §6.6)
+// ───────────────────────────────────────────────────────────────────────────
+
+/** What a step that only reads is compiled from: its pass's transcript and values. */
+export interface RecordingEntryInput {
+  binding: CodeBehindBinding;
+  actions: RecordedAction[];
+  resolvedParameters: Record<string, string>;
+  envData?: EnvDataContext | undefined;
+  /** The surface the step ran on; a computer-mode step never qualifies. */
+  surface?: 'browser' | 'computer' | undefined;
+}
+
+/**
+ * The entry for a step that only reads or counts, written from its recording
+ * with NO model — or undefined when the step does not qualify, and goes to the
+ * model as before (docs/specs/SPEC-codebehind-robustness.md §6.6, D7).
+ *
+ * When the AI performed such a step it did not write code: it chose a `read`
+ * or `count` action, and Steptix carried it out — cleaned the selector,
+ * resolved its frame, read each match, stored the result. The model chose only
+ * the action's fields, and the recording keeps them exactly. So the entry is
+ * those fields handed to `step.read` / `step.count`, which run the same path:
+ * on the same page it produces exactly what the run produced, and failure B —
+ * a compiled read whose selector lost a `:first-child` — cannot happen.
+ *
+ * A step qualifies when ALL of these hold:
+ *  - it ran on the browser surface, and nothing refuses it (`refuseReason`);
+ *  - every recorded action is a `read` or a `count` (`find` and `expand` only
+ *    showed the model the page, and are left out), each with a selector;
+ *  - each of them stores into a capture the step's own line declares, and
+ *    every capture the line declares is stored by one of them — so the entry
+ *    stores exactly what the run stored;
+ *  - no recorded field holds a resolved parameter value: a model that wrote
+ *    row 1's value where `{{account}}` belonged would freeze row 1 into the
+ *    file. The leak guard decides, as it does for generated code;
+ *  - no read falls under the selector story's positional carve-out — a
+ *    positional target the step distinguishes by name. That one needs the
+ *    model, to build a locator from the value.
+ *
+ * Names: the recorded `as` and any `{{placeholder}}` in a recorded field are
+ * the RUN's names, which a skill body or a looped section renames
+ * (`__skill1_total`). They are written back as the authored names
+ * (`binding.scope.renames`), which `step.read` resolves through the frame at
+ * replay.
+ */
+export function entryFromRecording(input: RecordingEntryInput): string | undefined {
+  const { binding } = input;
+  if (input.surface === 'computer') return undefined;
+  if (refuseReason(binding.source, input.actions) !== undefined) return undefined;
+  if (parseFlowControlStep(binding.source.trim())) return undefined;
+
+  const reads = input.actions.filter((a) => !EXPLORATION_ACTIONS.has(a.action));
+  if (reads.length === 0) return undefined;
+  if (!reads.every((a) => a.action === 'read' || a.action === 'count')) return undefined;
+
+  const authored = authoredNameOf(binding);
+  const { captures } = referencedVariableNames(binding.source);
+  const declared = new Set([...captures, ...inlineCaptureNames(binding.source)]);
+  if (declared.size === 0) return undefined;
+  const stored = new Set<string>();
+  for (const action of reads) {
+    if (typeof action.selector !== 'string' || action.selector.trim() === '') return undefined;
+    if (typeof action.as !== 'string' || action.as.trim() === '') return undefined;
+    const name = authored(action.as);
+    if (!declared.has(name)) return undefined;
+    stored.add(name);
+    if (action.targeting?.resolvedBy === 'positional' && namesItsTarget(binding.source)) return undefined;
+  }
+  for (const name of declared) if (!stored.has(name)) return undefined;
+
+  // The leak guard over the recorded fields, exactly as over generated code.
+  const parameters = stepParameters(binding, input.resolvedParameters, input.envData);
+  const envRefs = stepEnvRefs(binding, input.envData);
+  if (envRefs.unresolved.length > 0) return undefined;
+  const guarded = guardedValues(parameters, envRefs.resolved, binding.source);
+  const fieldText = reads
+    .map((a) => [a.selector, a.attribute, a.pattern, a.frame].filter((f) => typeof f === 'string').join('\n'))
+    .join('\n');
+  if (findInlinedParameterValue(fieldText, guarded)) return undefined;
+
+  const calls = reads.flatMap((action) => {
+    const fields: string[] = [`selector: ${tsString(authoredPlaceholders(action.selector!, binding))}`];
+    if (action.action === 'read' && action.multiple === true) fields.push('multiple: true');
+    if (action.action === 'read' && typeof action.attribute === 'string') {
+      fields.push(`attribute: ${tsString(authoredPlaceholders(action.attribute, binding))}`);
+    }
+    if (action.action === 'read' && typeof action.pattern === 'string') {
+      fields.push(`pattern: ${tsString(authoredPlaceholders(action.pattern, binding))}`);
+    }
+    if (typeof action.frame === 'string') fields.push(`frame: ${tsString(authoredPlaceholders(action.frame, binding))}`);
+    fields.push(`as: ${tsString(authored(action.as!))}`);
+    const kinds = action.targeting?.kinds;
+    if (kinds !== undefined && kinds.length > 0) fields.push(`kinds: [${kinds.map(tsString).join(', ')}]`);
+    return [
+      `    await step.${action.action === 'count' ? 'count' : 'read'}({`,
+      ...fields.map((field) => `      ${field},`),
+      '    });',
+    ];
+  });
+
+  return [
+    '{',
+    `  source: ${tsString(binding.source)},`,
+    '  fromRecording: true,',
+    '  async run({ step }) {',
+    ...calls,
+    '  },',
+    '}',
+  ].join('\n');
+}
+
+/** A single-quoted TypeScript string literal for `text` — the file's own
+ *  style, and a selector's `[data-testid="x"]` stays readable. */
+function tsString(text: string): string {
+  const body = text
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n');
+  return `'${body}'`;
+}
+
+/** The authored name for a run name the binding's frame renamed — or the
+ *  name itself, when nothing renamed it. */
+function authoredNameOf(binding: CodeBehindBinding): (runName: string) => string {
+  const back = new Map<string, string>();
+  for (const [authored, run] of Object.entries(binding.scope.renames)) back.set(run, authored);
+  return (runName: string): string => back.get(runName) ?? runName;
+}
+
+/** `text` with every `{{run_name}}` (or `{{run_name.prop}}`) written back as
+ *  the authored name. */
+function authoredPlaceholders(text: string, binding: CodeBehindBinding): string {
+  const authored = authoredNameOf(binding);
+  return text.replace(PLACEHOLDER_REF_RE, (match, name: string) => {
+    const dot = name.indexOf('.');
+    const root = dot < 0 ? name : name.slice(0, dot);
+    const mapped = authored(root);
+    if (mapped === root) return match;
+    return `{{${mapped}${dot < 0 ? '' : name.slice(dot)}}}`;
+  });
+}
+
+/** `store as {{x}}` names in the step's own words. */
+function inlineCaptureNames(source: string): string[] {
+  return [...source.matchAll(CAPTURE_DEFINITION_RE)].map((m) => m[1]!);
 }

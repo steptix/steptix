@@ -9,6 +9,117 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — compiled code-behind holds up on replay
+
+Run & Compile's code could pass under AI and fail only on a later replay: an
+entry raced what its own click had started, or read with a different selector
+from the one the AI run read with. See
+[docs/specs/SPEC-codebehind-robustness.md](docs/specs/SPEC-codebehind-robustness.md).
+
+- **A compiled `If … then return` (or `then stop`, `then fail`) waits for the
+  page before it reads it**, as the AI judgement and compiled conditions
+  already did: up to 10 s for 1 s of quiet. A line the run's values already
+  decide does not wait. The wait now also follows a navigation that lands
+  during it, for compiled lines and compiled conditions, instead of ending
+  the moment the old page goes away. A compiled sign-in followed by such a
+  line used to read the title of a page that was still loading.
+- **A compiled step that acts waits for what its action started.** After an
+  entry that clicks, fills, navigates or calls a helper, the runtime waits for
+  the requests the action began on the page's own site — a login request and
+  the navigation it triggers included — and then for the page to hold still,
+  up to 10 s. A read-only entry does not wait; one that starts no request
+  waits only until the page has held still for 250 ms, and an entry that
+  ends with its own `step.settle()` is not waited for twice. Polls, WebSockets, analytics and third-party requests
+  are not waited for; a wait that reaches its limit says in the log what was
+  still pending and the run carries on. Before, a compiled sign-in passed
+  57 ms after its click, and the next step judged a page that had not
+  changed yet.
+- **New `step.settle()`** for code-behind entries: the same wait, inside the
+  entry — `await page.click(…); await step.settle();` and then read or
+  assert. It names no URL, so it suits a data row whose click navigates and
+  one whose click shows an error. Compile now writes it after an action that
+  changes the page, and its wait check accepts it.
+- **New `step.check(condition, message)`: a compiled read's own self-check
+  falls back to AI instead of failing the run.** A capture step's code checks
+  what it read ("one name per account row"). When that check fails, the code
+  is wrong, not the app — so in an entry that only reads, a failed
+  `step.check` is treated like code that threw: the step re-runs under AI,
+  shows ⚠ with "Self-check failed: …", and the next compile repairs it. In an
+  entry that acts it fails the step, as `step.expect` does, because a re-run
+  after a click would click twice. `step.expect` is unchanged, and strict
+  replays and runs with no AI still never fall back. Compile writes
+  `step.check` for steps that only read, and refuses it in an entry that acts.
+- **Compile's wait check fires only on a read after an action.** An entry that
+  only reads is no longer re-asked to wait, which had led to captures losing
+  the selector the run read with. The check now also knows `title()`,
+  `url()`, `isVisible()`, `count()` and the other one-shot reads, and its
+  advice covers an action that leads to another page.
+- **A compiled read keeps the selector the AI run read with.** Compile checks
+  every generated, repaired and reviewed entry against the run's recorded
+  reads and counts. An entry that reads with a different selector is asked
+  once to fix it; if it still differs, **the step is left without code**: it
+  runs on AI, which reads what the run read, and the next compile tries again.
+  Run & Compile counts it among the steps that "could not be generated; they
+  stay AI", and `steptix compile` lists it as not compiled instead of failing.
+  A Review revision that changes such a selector is rejected, and the log
+  names any selector Review changes. Before, one rewrite dropped a
+  `:first-child`, and a replay read six values where the run had read three.
+- **A step that only reads or counts is compiled from the recording, with no
+  model call.** When the AI ran such a step it wrote no code: it chose a
+  `read` or `count` action and Steptix carried it out. Compile now writes that
+  action into the entry as `step.read({ selector, multiple, as, … })` or
+  `step.count({ … })`, marked `fromRecording: true`, and these run the same
+  path the AI's action took and store the result the same way — on the same
+  page they store exactly what the run stored. A step that also clicks, asserts
+  or uses a parameter's value in its selector still goes to the model, which
+  is told to do its read with `step.read`.
+- **New `step.read(options)` and `step.count(options)`** for code-behind
+  entries. A count or a read of every match first waits until the number of
+  matches stops changing for 300 ms. Given `kinds` — the kinds of element the
+  run read, such as `span.account-name` — a read that matches another kind
+  fails its self-check, so the step falls back to AI and is written again;
+  an empty result passes, as under AI. Review leaves an entry written from the
+  recording alone. One that fails a `steptix compile` replay is left without
+  code rather than marked `ai: true`, so the next compile writes it again from
+  a fresh run.
+- **Compile is told which actions led to another page.** The recording now
+  keeps, per action, where the page's URL went (`navigated: { from, to }`,
+  secrets masked), the generator is told to wait for that page with
+  `step.settle()` rather than a URL a data row may not reach, and an entry
+  that does not wait after its last action is asked once to fix it.
+- **A ⚠ says when the page moved under the entry.** When compiled code fails
+  and the page's URL changed while it ran, the error adds "The page navigated
+  from … to … while this entry ran. The previous step may not wait for its
+  navigation." Before, the ⚠ pointed at the step that ran into another step's
+  navigation, with nothing to say so.
+- **A compile run waits for a slow request an AI action started.** During
+  Run & Compile and `steptix compile`'s recording, an AI action that changes
+  the page is followed, after the usual settle, by a wait for any request to
+  the page's own site still in flight — so the page the generator is shown
+  after the step is the one the request produced. Each action's requests
+  (method, path, status, time) go into the recording and are shown to the
+  generator as what was observed on that run. Ordinary runs are unchanged.
+- **The server log says what a compile did and what it cost.** One line per
+  compile model call gives the model and its input (cached) and output
+  tokens. Further lines say when compile asked a model again about an entry,
+  and what Review did to a file. A run's own model calls get no such line.
+- **Compiled code that reads the base URL as a variable is caught.** Compile
+  had sometimes written `step.getVar('baseUrl')`, which is always undefined.
+  The base URL is the context's `baseUrl`, so such a step fell back to AI on
+  every replay. Compile now asks once more, and so does Review.
+- **Compiled code that chains a matcher onto an assertion is caught.** An entry
+  had written `step.expect(page.url()).toBe(…)`, Jest's style; `step.expect`
+  takes the condition and returns nothing, so every replay threw. Compile now
+  asks once more for the comparison as the condition, and Review rejects a
+  revision that brings the chain in. A bare `expect(…).toBe(…)` is caught the
+  same way.
+- **Compiled code closes or switches to a tab by the name the run used.** An
+  entry had closed "Account Summary", the new tab's heading, where the run
+  closed `page:2`; `tabs.close` finds a tab by its label, URL or title, so
+  every replay found nothing. Compile is now told to use the run's identifier,
+  asks once more when an entry names a tab the run did not, and Review rejects
+  a revision that renames one.
+
 ### Added — copy a variable, or export them all as CSV, from the Variables view and panel
 
 Right-click a variable in Steptix's Variables view, or in the Test Runner

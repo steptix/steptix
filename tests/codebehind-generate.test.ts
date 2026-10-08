@@ -15,13 +15,18 @@ import { readFileSync } from 'node:fs';
 import {
   aiEntryFor,
   ambiguousSelectorComplaint,
+  chainedAssertionComplaint,
+  contextValueAsVariableComplaint,
+  entryFaults,
   generateStepEntry,
   refuseReason,
   stepParameters,
   staleHandleComplaint,
+  tabIdentifierComplaint,
   unwaitedReadComplaint,
   undeclaredContextComplaint,
 } from '../src/codebehind/generate.js';
+import type { RecordedAction } from '../src/codebehind/recording.js';
 import { buildRepairPrompt } from '../src/codebehind/repair.js';
 import { buildFileReviewPrompt, parseFileRevision } from '../src/codebehind/review.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
@@ -606,6 +611,34 @@ describe('undeclaredContextComplaint', () => {
     ).toBeUndefined();
   });
 
+  // Measured live: the entry for "Navigate to the baseUrl" in
+  // flow-control-slow-live.md called `page.goto(baseUrl)` from
+  // `run({ page, step })` and threw `baseUrl is not defined` on replay.
+  it('catches baseUrl used bare without being destructured', () => {
+    const complaint = undeclaredContextComplaint(
+      `{\n  source: 'Navigate to the baseUrl',\n  async run({ page, step }) {\n    await page.goto(baseUrl);\n  },\n}`,
+    );
+    expect(complaint).toMatch(/`baseUrl`/);
+    expect(complaint).toMatch(/ReferenceError: baseUrl is not defined/);
+    expect(
+      undeclaredContextComplaint(
+        '{ source: \'x\', async run({ page }) { await page.goto(`${baseUrl}/login.html`); } }',
+      ),
+    ).toMatch(/`baseUrl`/);
+  });
+
+  it('stays quiet about baseUrl when it is destructured, a local, a key, a property or only in a string', () => {
+    for (const body of [
+      `async run({ page, baseUrl }) { await page.goto(baseUrl); }`,
+      `async run({ page, step }) { const baseUrl = step.getVar('base'); await page.goto(baseUrl); }`,
+      `async run({ page, step }) { step.setVar('target', JSON.stringify({ baseUrl: 'x' })); await page.click('#go'); }`,
+      `async run(ctx) { await ctx.page.goto(ctx.baseUrl); }`,
+      `async run({ page, log }) { log.info('baseUrl is set'); await page.click('#go'); }`,
+    ]) {
+      expect(undeclaredContextComplaint(`{ source: 'x', ${body} }`), body).toBeUndefined();
+    }
+  });
+
   it('is not fooled by a property access on something else', () => {
     expect(
       undeclaredContextComplaint(
@@ -617,6 +650,225 @@ describe('undeclaredContextComplaint', () => {
       // `info.browsers` is a property access, not a bare `browsers.` use —
       // but `step` IS used bare and undeclared, so that is what it reports.
     ).toMatch(/`step`/);
+  });
+});
+
+describe('contextValueAsVariableComplaint', () => {
+  // Reproduced live (compile-codebehind.test.cjs, 2 of 5 runs): the reviewed
+  // entry for "Navigate to the baseUrl", verbatim. No variable is called
+  // `baseUrl`, so `getVar` answered undefined and every replay healed it.
+  const READS_BASEURL_AS_VARIABLE = `{
+  source: 'Navigate to the baseUrl',
+  async run({ page, step }) {
+    const baseUrl = step.getVar('baseUrl');
+    await page.goto(baseUrl);
+    await step.settle();
+    const destination = new URL(baseUrl).href;
+    await page.waitForURL(destination);
+    step.expect(page.url() === destination, 'The page URL matches the base URL');
+  },
+}`;
+  const TAKES_BASEURL_FROM_CONTEXT = READS_BASEURL_AS_VARIABLE.replace(
+    "async run({ page, step }) {\n    const baseUrl = step.getVar('baseUrl');",
+    'async run({ page, step, baseUrl }) {',
+  );
+
+  it('catches the context value read as a variable', () => {
+    const complaint = contextValueAsVariableComplaint(READS_BASEURL_AS_VARIABLE, new Set(['username']));
+    expect(complaint).toBe(
+      "The entry reads `step.getVar('baseUrl')`, but no test variable is called `baseUrl` — on replay it " +
+        'answers undefined. `baseUrl` is part of the context: take it in the parameter list ' +
+        '(`async run({ page, step, baseUrl })`) and use it directly.',
+    );
+    expect(contextValueAsVariableComplaint('await page.goto(step.getVar("baseUrl"));')).toBeDefined();
+    expect(contextValueAsVariableComplaint('await page.goto(step.getVar(`baseUrl`));')).toBeDefined();
+  });
+
+  it('stays quiet for the context value taken from the context, or a test that has such a variable', () => {
+    expect(contextValueAsVariableComplaint(TAKES_BASEURL_FROM_CONTEXT, new Set())).toBeUndefined();
+    expect(contextValueAsVariableComplaint(READS_BASEURL_AS_VARIABLE, new Set(['baseUrl']))).toBeUndefined();
+    expect(contextValueAsVariableComplaint("step.getVar('baseUrlForApi')")).toBeUndefined();
+  });
+
+  it('is one of the faults Review holds a revision to', () => {
+    expect(entryFaults(READS_BASEURL_AS_VARIABLE, { source: 'Navigate to the baseUrl' }).map((f) => f.check)).toContain(
+      'context-value-as-variable',
+    );
+    expect(
+      entryFaults(READS_BASEURL_AS_VARIABLE, { source: 'Navigate to the baseUrl', variables: new Set(['baseUrl']) })
+        .map((f) => f.check),
+    ).not.toContain('context-value-as-variable');
+  });
+
+  it('makes generation re-ask once, and keeps the answer that takes it from the context', async () => {
+    const prompts: string[] = [];
+    const answers = [READS_BASEURL_AS_VARIABLE, TAKES_BASEURL_FROM_CONTEXT];
+    const client = {
+      complete: async (messages: ChatMessage[]) => {
+        const last = messages[messages.length - 1]!;
+        prompts.push(typeof last.content === 'string' ? last.content : contentBlocksToText(last.content));
+        return { text: JSON.stringify({ entry: answers[Math.min(prompts.length - 1, 1)] }), model: 'stub' };
+      },
+    } as unknown as AiClient;
+    const result = await generateStepEntry({
+      binding: {
+        file: path.resolve(path.sep, 'nowhere', 'x.steps.ts'),
+        source: 'Navigate to the baseUrl',
+        occurrence: 0,
+        scope: { renames: {}, inputs: {} },
+      },
+      actions: [{ action: 'navigate', url: 'http://localhost:8787', description: 'Navigate to the base URL' }],
+      resolvedParameters: {},
+      aiClient: client,
+      contextContent: '',
+      testName: 'compile-codebehind.md',
+      baseUrl: 'http://localhost:8787',
+    });
+    expect(result).toMatchObject({ kind: 'entry', code: TAKES_BASEURL_FROM_CONTEXT });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toContain("never `step.getVar('baseUrl')`, which answers undefined");
+    expect(prompts[1]).toContain("The entry reads `step.getVar('baseUrl')`, but no test variable is called `baseUrl`");
+  });
+});
+
+describe('chainedAssertionComplaint', () => {
+  // The shape measured live (compile-skill-subfolder.test.cjs): a Jest-style
+  // matcher on `step.expect`, which returns nothing, so every replay threw
+  // `Cannot read properties of undefined (reading 'toBe')` and healed.
+  const CHAINS_A_MATCHER = `{
+  source: 'Navigate to the baseUrl',
+  async run({ page, step, baseUrl }) {
+    await page.goto(baseUrl);
+    await step.settle();
+    const destination = new URL(baseUrl).href;
+    await page.waitForURL(destination);
+    step.expect(page.url()).toBe(destination);
+  },
+}`;
+  const COMPARES_IN_THE_CONDITION = CHAINS_A_MATCHER.replace(
+    'step.expect(page.url()).toBe(destination);',
+    "step.expect(page.url() === destination, 'The page URL matches the base URL');",
+  );
+
+  it('catches a matcher chained onto step.expect or step.check', () => {
+    expect(chainedAssertionComplaint(CHAINS_A_MATCHER)).toBe(
+      "The entry chains `.toBe` onto `step.expect(…)`, Jest's and Playwright Test's matcher style. " +
+        '`step.expect` takes the condition itself and returns nothing, so on replay this throws ' +
+        "`Cannot read properties of undefined (reading 'toBe')`. Write the comparison as the condition: " +
+        "`step.expect(page.url() === expected, 'The page is the one the step names')`.",
+    );
+    expect(chainedAssertionComplaint('step.check(names.length > 0)\n      .toEqual(true);')).toMatch(
+      /chains `\.toEqual` onto `step\.check\(…\)`.*`step\.check\(page\.url\(\) === expected/,
+    );
+    expect(chainedAssertionComplaint("step.expect(await heading.textContent())?.toContain('Accounts');")).toMatch(
+      /`\.toContain`/,
+    );
+  });
+
+  it("catches Jest's and Playwright Test's bare expect, which no entry has", () => {
+    expect(chainedAssertionComplaint('await expect(page).toHaveURL(baseUrl);')).toMatch(
+      /chains `\.toHaveURL` onto `expect\(…\)`.*No `expect` exists in an entry/,
+    );
+    expect(chainedAssertionComplaint('expect(count).not.toBe(0);')).toMatch(/`\.not`/);
+  });
+
+  it('stays quiet for the comparison written as the condition, and for the same words in a string', () => {
+    expect(chainedAssertionComplaint(COMPARES_IN_THE_CONDITION)).toBeUndefined();
+    expect(chainedAssertionComplaint("step.expect(ok, 'step.expect(x).toBe(y)');")).toBeUndefined();
+    expect(chainedAssertionComplaint("log.info('expect(page).toHaveURL(x)');")).toBeUndefined();
+    expect(chainedAssertionComplaint('// step.expect(x).toBe(y)\nstep.expect(ok);')).toBeUndefined();
+  });
+
+  it('leaves an entry the expect it defines itself', () => {
+    expect(
+      chainedAssertionComplaint(
+        "function expect(v) { return { toBe: (w) => v === w }; }\nstep.expect(expect(1).toBe(1), 'one');",
+      ),
+    ).toBeUndefined();
+  });
+
+  it('is one of the faults Review holds a revision to', () => {
+    const source = 'Navigate to the baseUrl';
+    expect(entryFaults(CHAINS_A_MATCHER, { source }).map((f) => f.check)).toContain('chained-assertion');
+    expect(entryFaults(COMPARES_IN_THE_CONDITION, { source }).map((f) => f.check)).not.toContain('chained-assertion');
+  });
+
+  it('makes generation re-ask once, and keeps the answer that compares in the condition', async () => {
+    const prompts: string[] = [];
+    const answers = [CHAINS_A_MATCHER, COMPARES_IN_THE_CONDITION];
+    const client = {
+      complete: async (messages: ChatMessage[]) => {
+        const last = messages[messages.length - 1]!;
+        prompts.push(typeof last.content === 'string' ? last.content : contentBlocksToText(last.content));
+        return { text: JSON.stringify({ entry: answers[Math.min(prompts.length - 1, 1)] }), model: 'stub' };
+      },
+    } as unknown as AiClient;
+    const result = await generateStepEntry({
+      binding: {
+        file: path.resolve(path.sep, 'nowhere', 'x.steps.ts'),
+        source: 'Navigate to the baseUrl',
+        occurrence: 0,
+        scope: { renames: {}, inputs: {} },
+      },
+      actions: [{ action: 'navigate', url: 'http://localhost:8787', description: 'Navigate to the base URL' }],
+      resolvedParameters: {},
+      aiClient: client,
+      contextContent: '',
+      testName: 'compile-skill-subfolder.md',
+      baseUrl: 'http://localhost:8787',
+    });
+    expect(result).toMatchObject({ kind: 'entry', code: COMPARES_IN_THE_CONDITION });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("The entry chains `.toBe` onto `step.expect(…)`, Jest's and Playwright Test's");
+  });
+});
+
+describe('tabIdentifierComplaint', () => {
+  // Measured live (compile-tabs.test.cjs): the run closed the new tab as
+  // `page:2`, and the entry closed "Account Summary" — the tab's heading,
+  // which is neither its title nor its URL — so every replay threw
+  // `no page matching` and healed under AI.
+  const CLOSED_PAGE_2: RecordedAction[] = [
+    { action: 'closePage', page: 'page:2', description: 'Close the tab showing Account Summary' },
+  ];
+  const source = 'Close the tab showing "Account Summary"';
+  const entryClosing = (id: string) =>
+    `{\n  source: ${JSON.stringify(source)},\n  async run({ step, tabs }) {\n` +
+    `    const main = await tabs.close(${id});\n` +
+    `    step.expect(main === tabs.active(), 'The main tab is active again');\n  },\n}`;
+
+  it("catches a tab named otherwise than the run's closePage named it", () => {
+    expect(tabIdentifierComplaint(entryClosing('"Account Summary"'), CLOSED_PAGE_2)).toBe(
+      'The entry closes the tab "Account Summary", but the run\'s `closePage` named it "page:2". `tabs.close` ' +
+        "finds a tab by its label (`'main'`, `'page:2'`), a URL substring or a title substring — not by what " +
+        'the page shows — so write the identifier the run used: `tabs.close("page:2")`.',
+    );
+  });
+
+  it("holds switchTo to the run's switchPage the same way", () => {
+    const switched: RecordedAction[] = [{ action: 'switchPage', page: 'main', description: 'Switch back' }];
+    expect(tabIdentifierComplaint("const main = await tabs.switchTo('Window & Tab Test');", switched)).toMatch(
+      /switches to the tab "Window & Tab Test", but the run's `switchPage` named it "main"/,
+    );
+    expect(tabIdentifierComplaint("const main = await tabs.switchTo('main');", switched)).toBeUndefined();
+  });
+
+  it("stays quiet for the run's identifier, a computed one, or a call the run did not make", () => {
+    expect(tabIdentifierComplaint(entryClosing("'page:2'"), CLOSED_PAGE_2)).toBeUndefined();
+    expect(tabIdentifierComplaint(entryClosing('`page:2`'), CLOSED_PAGE_2)).toBeUndefined();
+    expect(tabIdentifierComplaint(entryClosing('label'), CLOSED_PAGE_2)).toBeUndefined();
+    expect(tabIdentifierComplaint(entryClosing('`page:${n}`'), CLOSED_PAGE_2)).toBeUndefined();
+    expect(tabIdentifierComplaint(entryClosing('"Account Summary"'), [])).toBeUndefined();
+    // A switch the run made says nothing about a close it did not make.
+    const switchedOnly: RecordedAction[] = [{ action: 'switchPage', page: 'page:2', description: 'Switch' }];
+    expect(tabIdentifierComplaint(entryClosing('"Account Summary"'), switchedOnly)).toBeUndefined();
+  });
+
+  it('is one of the faults Review holds a revision to, given the recording', () => {
+    expect(entryFaults(entryClosing('"Account Summary"'), { source, actions: CLOSED_PAGE_2 }).map((f) => f.check))
+      .toContain('tab-identifier');
+    expect(entryFaults(entryClosing('"Account Summary"'), { source }).map((f) => f.check))
+      .not.toContain('tab-identifier');
   });
 });
 
@@ -743,11 +995,107 @@ describe('unwaitedReadComplaint', () => {
     expect(
       unwaitedReadComplaint(
         entryWith(
+          `    await page.locator('#statement-upload').click();\n` +
           `    await page.locator('#upload-status').waitFor({ state: 'visible' });\n` +
           `    step.expect((await page.locator('#upload-status').textContent()) === 'ok', 'status');`,
         ),
       ),
     ).toBeDefined();
+  });
+
+  // …and its read-only twin: with no action before the read there is nothing
+  // the read could race (docs/specs/SPEC-codebehind-robustness.md §6.3).
+  it('says nothing about the same read in an entry that takes no action', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    await page.locator('#upload-status').waitFor({ state: 'visible' });\n` +
+          `    step.expect((await page.locator('#upload-status').textContent()) === 'ok', 'status');`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  // Failure A of the robustness spec (§3.1), verbatim: the sign-in click's
+  // entry read the title and a visibility 57 ms after the click, while the
+  // login request was in flight, and passed on the page it was leaving.
+  it("complains about failure A's sign-in entry: title() and isVisible() read straight after a click", () => {
+    const complaint = unwaitedReadComplaint(
+      entryWith(
+        `    await page.locator('#sign-in-btn').click();\n` +
+        `    const dashboard = (await page.title()).includes('Dashboard');\n` +
+        `    const signInFormVisible = await page.locator('#email').isVisible();\n` +
+        `    step.expect(\n` +
+        `      dashboard || signInFormVisible,\n` +
+        `      'Sign-in attempt reached the dashboard or left the sign-in form available',\n` +
+        `    );`,
+      ),
+    );
+    expect(complaint).toBeDefined();
+    // It names the action, and says how to wait for a page the action leads to
+    // without freezing one data row's URL into the code.
+    expect(complaint).toContain('`.click(`');
+    // §6.4 is in, so the advice is the wait on the entry's own watcher.
+    expect(complaint).toContain('`await step.settle()` straight after it');
+    expect(complaint).toMatch(/Never wait with a URL taken from one data row/);
+  });
+
+  it('accepts step.settle() as the wait after the action (§6.4)', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    await page.locator('#sign-in-btn').click();\n` +
+          `    await step.settle();\n` +
+          `    step.expect((await page.title()).includes('Dashboard'), 'signed in');`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  // Failure B (§3.2): a capture that only reads. The check fired on it, the
+  // re-ask rewrote it, and the selector the recording read with was lost.
+  it("says nothing about failure B's read-only capture entry", () => {
+    expect(
+      unwaitedReadComplaint(
+        `{\n  source: 'Read the name of every account in the Your accounts panel [store as: accounts]',\n` +
+        `  async run({ page, step, log }) {\n` +
+        `    const accountRows = page.locator('#account-list [data-testid="account-row"]');\n` +
+        `    const accountNames = page\n` +
+        `      .locator('#account-list [data-testid="account-row"] > span > span')\n` +
+        `      .filter({ hasNotText: '$' });\n` +
+        `    const accounts = (await accountNames.allTextContents()).map((name) => name.trim());\n` +
+        `    const rowCount = await accountRows.count();\n` +
+        `    step.setVar('accounts', JSON.stringify(accounts));\n` +
+        `    step.expect(\n` +
+        `      accounts.length === rowCount && accounts.every((name) => name.length > 0),\n` +
+        `      'Read all populated account names from the Your accounts panel',\n` +
+        `    );\n` +
+        `  },\n}`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('says nothing about a read made BEFORE the action, with nothing read after it', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    const before = (await page.locator('#total').textContent())?.trim();\n` +
+          `    await page.locator('#recalculate').click();\n` +
+          `    step.expect(before !== '', 'a total was shown before recalculating');`,
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('counts a helper call as the action — it may click', () => {
+    expect(
+      unwaitedReadComplaint(
+        entryWith(
+          `    await signIn(page, step.getVar('username'));\n` +
+          `    step.expect((await page.title()).includes('Dashboard'), 'signed in');`,
+        ),
+      ),
+    ).toMatch(/`signIn\(`/);
   });
 
   it('accepts a text-filtered wait before the read', () => {
@@ -837,10 +1185,20 @@ describe('unwaitedReadComplaint', () => {
   it('is reported after the faults that throw on replay', () => {
     const bothFaults =
       `{\n  source: 'x',\n  async run({ step }) {\n` +
+      `    await page.locator('#statement-upload').click();\n` +
       `    const message = (await page.locator('#upload-status').textContent());\n` +
       `    step.expect(message === 'ok', 'status');\n  },\n}`;
     expect(undeclaredContextComplaint(bothFaults)).toMatch(/`page`/);
     expect(unwaitedReadComplaint(bothFaults)).toBeDefined();
+  });
+
+  it('leaves the read-only twin to the fault that throws', () => {
+    const readOnly =
+      `{\n  source: 'x',\n  async run({ step }) {\n` +
+      `    const message = (await page.locator('#upload-status').textContent());\n` +
+      `    step.expect(message === 'ok', 'status');\n  },\n}`;
+    expect(undeclaredContextComplaint(readOnly)).toMatch(/`page`/);
+    expect(unwaitedReadComplaint(readOnly)).toBeUndefined();
   });
 });
 
@@ -1274,11 +1632,13 @@ describe('generateStepEntry — the static backstop', () => {
   // `securebank-upload.md`, and it needs no `targeting` to fire.
   it('re-asks about a read that never waited, and takes the waiting answer', async () => {
     const racy =
-      `{ source: 'Assert the status', async run({ page, step }) { ` +
+      `{ source: 'Upload and check the status', async run({ page, step }) { ` +
+      `await page.locator('#upload-btn').click(); ` +
       `const m = await page.locator('#upload-status').textContent(); ` +
       `step.expect(m === 'Uploaded logo.png', 'status'); } }`;
     const waiting =
-      `{ source: 'Assert the status', async run({ page, step }) { ` +
+      `{ source: 'Upload and check the status', async run({ page, step }) { ` +
+      `await page.locator('#upload-btn').click(); ` +
       `const s = page.locator('#upload-status', { hasText: 'Uploaded logo.png' }); ` +
       `await s.waitFor(); step.expect((await s.textContent()) !== null, 'status'); } }`;
     const { client, calls } = stubSequence(
@@ -1286,8 +1646,11 @@ describe('generateStepEntry — the static backstop', () => {
       JSON.stringify({ entry: waiting }),
     );
     const result = await generateStepEntry({
-      binding: bindingFor('Assert the status'),
-      actions: [{ action: 'read', selector: '#upload-status' }],
+      binding: bindingFor('Upload and check the status'),
+      actions: [
+        { action: 'click', selector: '#upload-btn' },
+        { action: 'read', selector: '#upload-status' },
+      ],
       resolvedParameters: {},
       aiClient: client,
       contextContent: '',
@@ -1296,6 +1659,27 @@ describe('generateStepEntry — the static backstop', () => {
     expect(calls).toHaveLength(2);
     expect(contentBlocksToText(calls[1]![1]!.content)).toContain('without ever waiting');
     expect(result).toEqual({ kind: 'entry', code: waiting });
+  });
+
+  // The same read with no action before it is not re-asked
+  // (docs/specs/SPEC-codebehind-robustness.md §6.3): it raced nothing, and the
+  // re-ask is what rewrote failure B's selector.
+  it('does not re-ask a read-only entry about waiting', async () => {
+    const readOnly =
+      `{ source: 'Assert the status', async run({ page, step }) { ` +
+      `const m = await page.locator('#upload-status').textContent(); ` +
+      `step.expect(m === 'Uploaded logo.png', 'status'); } }`;
+    const { client, calls } = stubSequence(JSON.stringify({ entry: readOnly }));
+    const result = await generateStepEntry({
+      binding: bindingFor('Assert the status'),
+      actions: [{ action: 'read', selector: '#upload-status' }],
+      resolvedParameters: {},
+      aiClient: client,
+      contextContent: '',
+      testName: 'demo',
+    });
+    expect(calls).toHaveLength(1);
+    expect(result).toEqual({ kind: 'entry', code: readOnly });
   });
 });
 

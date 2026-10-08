@@ -518,7 +518,9 @@ describe('browser.ambiguousTarget', () => {
 
     expect(result.success).toBe(true);
     expect(result.capturedValues).toHaveLength(3);
-    expect(result.targeting).toEqual({ matchCount: 3 });
+    // …and the kinds of element it read: a read compiled from the recording
+    // checks itself against them (SPEC-codebehind-robustness.md §6.6).
+    expect(result.targeting).toEqual({ matchCount: 3, kinds: ['span'] });
     expect(result.targeting?.resolvedSelector).toBeUndefined();
   });
 
@@ -533,7 +535,7 @@ describe('browser.ambiguousTarget', () => {
 
     expect(result.success).toBe(true);
     expect(result.capturedValue).toBe('3');
-    expect(result.targeting).toEqual({ matchCount: 3 });
+    expect(result.targeting).toEqual({ matchCount: 3, kinds: ['button'] });
   });
 
   it('leaves plural actions unmeasured on an ordinary run', async () => {
@@ -583,6 +585,7 @@ describe('browser.ambiguousTarget', () => {
       matchCount: 1,
       resolvedSelector: '#outcome',
       resolvedBy: 'attribute',
+      kinds: ['div'],
     });
   });
 });

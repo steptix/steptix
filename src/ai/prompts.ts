@@ -1135,7 +1135,14 @@ export function formatStepHistoryEntry(
  * and its absence is first-class: a transcript without it builds exactly the
  * prompt it built before the measurement existed.
  */
-export type TranscriptAction = AIAction & { targeting?: ActionTargeting };
+export type TranscriptAction = AIAction & {
+  targeting?: ActionTargeting;
+  /** The page's URL changed while the action ran
+   *  (docs/specs/SPEC-codebehind-robustness.md §6.7). */
+  navigated?: { from: string; to: string };
+  /** The first-party requests the action started, observed on this run (§6.9). */
+  requests?: Array<{ method: string; path: string; status?: number; ms?: number }>;
+};
 
 /**
  * Actions whose runtime target is ONE element, so a `matchCount` above 1 is a
@@ -1516,8 +1523,79 @@ function jsonArrayLength(value: string): number | undefined {
  * must read as normal rather than as an error
  * (stories/codebehind-selector-ambiguity.md, "What generation does with it").
  */
+/**
+ * Does the transcript READ with a selector — a `read` or a `count`?
+ * (docs/specs/SPEC-codebehind-robustness.md §6.2.) The clauses that say to
+ * keep such a selector are emitted only then, so a prompt for a step that
+ * reads nothing stays byte-identical.
+ */
+function readsWithSelector(actions: TranscriptAction[]): boolean {
+  return actions.some(
+    (a) => (a.action === 'read' || a.action === 'count') && typeof a.selector === 'string' && a.selector.trim() !== '',
+  );
+}
+
+/**
+ * Is this step offered `step.check`? (docs/specs/SPEC-codebehind-robustness.md
+ * §6.5.) Only when every recorded action reads, counts or explores — `find`,
+ * `expand` — and one of them reads or counts: a capture step like "Read the
+ * name of every account", whose self-check is about its own read. A step that
+ * acts, or that states an expectation (an `assert`), is not: its check is
+ * `step.expect`, and a failed self-check there would re-run an action.
+ */
+export function offersSelfCheck(actions: readonly { action: string }[]): boolean {
+  const reads = actions.some((a) => a.action === 'read' || a.action === 'count');
+  return reads && actions.every((a) => ['read', 'count', 'find', 'expand'].includes(a.action));
+}
+
+/**
+ * The API lines for `step.read` / `step.count`, and for a step that ALSO acts
+ * the instruction to read with them (docs/specs/SPEC-codebehind-robustness.md
+ * §6.6) — or '' for a step that reads nothing. A step that ONLY reads is
+ * written from its recording with no model at all, so a prompt that shows
+ * these is normally one for a step that clicks, then reads.
+ */
+function recordedReadApi(actions: TranscriptAction[]): string {
+  if (!readsWithSelector(actions)) return '';
+  const acts = actions.some(
+    (a) => !['read', 'count', 'find', 'expand'].includes(a.action),
+  );
+  return (
+    "\n- `await step.read({ selector, multiple, attribute, pattern, frame, as, kinds })` / `await step.count({ selector, frame, as, kinds })` — the AI's own `read` / `count` action, run again: the same selector cleaning, frame resolution and per-element reader, and the result stored under `as` exactly as the run stored it. Returns the value (the list for `multiple`) or the count. Pass the `kinds` the transcript shows for that action: a match of any other kind then fails the read's self-check." +
+    (acts
+      ? ' **Do this step\'s read with it**, passing the recorded action\'s own fields as they appear in the transcript, rather than writing the read yourself: it then reads exactly what the run read.'
+      : '')
+  );
+}
+
+/** The API line for `step.check`, for a step {@link offersSelfCheck} offers it to. */
+const SELF_CHECK_API =
+  "\n- `step.check(condition, message)` — a self-check on your OWN read, for an entry like this one that only reads: that what you read from was really there and the right shape (one name per row, a populated value). If it fails, the step falls back to AI and this entry is regenerated — it does not fail the run. Use it, not `step.expect`, for the check a capture makes on itself.";
+
+/** Rule 7's half of the read-selector rule (§6.2). */
+function readSelectorRule7(actions: TranscriptAction[]): string {
+  if (!readsWithSelector(actions)) return '';
+  return (
+    ' That preference is for a selector you write new. A selector a `read` or `count` above used is part of ' +
+    'what was read: keep it exactly as written, `:first-child` and `:nth-of-type` included — a read with a ' +
+    'different selector does not throw, it returns different data, and compile refuses an entry that reads ' +
+    'with anything else.'
+  );
+}
+
 const SELECTOR_RULE_INFERRED =
   `8. **A transcript selector is not evidence that it matches one element.** The recorded actions ran through a visible-only filter and took the first match, so a selector that worked there may match several — while the same selector in generated code is strict and throws on the second one ("resolved to N elements"). Use a handle the DOM above shows to be unique: a role with its accessible name, an \`id\`, a \`data-testid\`. Where the DOM cannot settle it, reproduce the runtime's own tolerance rather than guessing — \`page.locator(sel).locator('visible=true').first()\`.`;
+
+/** {@link SELECTOR_RULE_INFERRED}, with the read-selector exception when the
+ *  transcript reads (§6.2) — a read or a count takes every match by design, so
+ *  "use a unique handle" is not advice for one. */
+function selectorRuleInferred(actions: TranscriptAction[]): string {
+  if (!readsWithSelector(actions)) return SELECTOR_RULE_INFERRED;
+  return (
+    SELECTOR_RULE_INFERRED +
+    ' A selector a `read` or `count` above used is the exception: it is part of what was read, so keep it as written, `:first-child` included.'
+  );
+}
 
 /**
  * What `targeting` is, said once, above the transcript that carries it.
@@ -1536,9 +1614,54 @@ function targetingLegend(actions: TranscriptAction[]): string {
     `- \`matchCount\` — elements the selector matched, hidden ones included. This is the number strict mode counts, so it is the one that decides whether your entry throws.\n` +
     `- \`visibleMatchCount\` — how many of those were visible: what the runtime chose between when it took the first.\n` +
     `- \`resolvedSelector\` — a selector for the element that was actually acted on, verified in the page to match it and nothing else.\n` +
-    `- \`resolvedBy\` — how that handle was built: \`attribute\` (the element's own id / data-testid / name / aria-label / href), \`scoped\` (that same handle qualified by an addressable ancestor), \`positional\` (an \`nth-of-type\` chain).\n\n` +
+    `- \`resolvedBy\` — how that handle was built: \`attribute\` (the element's own id / data-testid / name / aria-label / href), \`scoped\` (that same handle qualified by an addressable ancestor), \`positional\` (an \`nth-of-type\` chain).\n` +
+    (actions.some((a) => (a.targeting?.kinds?.length ?? 0) > 0)
+      ? `- \`kinds\` — on a \`read\` or \`count\`: the kinds of element it matched, each as its tag name and class names (\`span.account-name\`). A selector that would also match another kind reads something else.\n`
+      : '') +
+    `\n` +
     `An \`upload\` action also carries \`upload.via\`: \`"input"\` means the files were set straight onto an \`<input type="file">\`, \`"chooser"\` means a control was clicked and the picker it opened was answered. Write whichever shape the transcript shows.\n\n` +
     `An action with no \`targeting\` was not measured. Nothing follows from its absence.\n\n`
+  );
+}
+
+/**
+ * What `navigated` means, said once above the transcript — only when an action
+ * carries it, so every other prompt stays byte-identical
+ * (docs/specs/SPEC-codebehind-robustness.md §6.7).
+ */
+function navigationLegend(actions: TranscriptAction[]): string {
+  if (!actions.some((a) => a.navigated !== undefined)) return '';
+  return (
+    'An action with `navigated` changed the page\'s URL on this run. The entry must wait for the page it leads to ' +
+    'before anything after it, with `await step.settle()`, and must not hard-code the URL: other rows of a data ' +
+    'table may not navigate.\n\n'
+  );
+}
+
+/**
+ * What `requests` means, said once above the transcript — only when an action
+ * carries it (docs/specs/SPEC-codebehind-robustness.md §6.9). Evidence, never a
+ * requirement (D5): what one run's server did is not a contract the entry may
+ * wait on by name.
+ */
+function requestsLegend(actions: TranscriptAction[]): string {
+  if (!actions.some((a) => (a.requests?.length ?? 0) > 0)) return '';
+  return (
+    'An action with `requests` started those requests to the page\'s own site on this run — method, path, ' +
+    'status, and how many milliseconds each took. They were observed on this run: evidence of what the action ' +
+    'does and how long the page takes to answer it, not something the entry must wait for by name. ' +
+    '`await step.settle()` already waits for whatever requests an action starts.\n\n'
+  );
+}
+
+/** The transcript with each `navigated` URL masked: a URL can carry a secret.
+ *  The same array when there is nothing to mask. */
+function maskNavigation(actions: TranscriptAction[], secrets: readonly string[]): TranscriptAction[] {
+  if (secrets.length === 0 || !actions.some((a) => a.navigated !== undefined)) return actions;
+  return actions.map((a) =>
+    a.navigated === undefined
+      ? a
+      : { ...a, navigated: { from: redact(a.navigated.from, [...secrets]), to: redact(a.navigated.to, [...secrets]) } },
   );
 }
 
@@ -1580,7 +1703,11 @@ function measuredSelectorRules(actions: TranscriptAction[]): string | undefined 
       ? `   - On a \`read\` with \`multiple\` or a \`count\`, \`matchCount\` is context for the loop you are writing, not a problem: many matches is what those actions are for.`
       : '',
     unmeasured
-      ? `   - An action with no \`targeting\` was not measured: prefer a stable handle (a role with its accessible name, an \`id\`, a \`data-testid\`), and where you cannot tell, reproduce the runtime's tolerance rather than guessing.`
+      ? `   - An action with no \`targeting\` was not measured: prefer a stable handle (a role with its accessible name, an \`id\`, a \`data-testid\`), and where you cannot tell, reproduce the runtime's tolerance rather than guessing.${
+          readsWithSelector(actions)
+            ? ' Not for a \`read\` or \`count\`: its selector is part of what was read, and is kept as written, \`:first-child\` included.'
+            : ''
+        }`
       : '',
   ].filter(Boolean).join('\n');
 
@@ -1868,7 +1995,7 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
 
   const actionBlock = input.actions.length === 0
     ? '(no actions recorded)'
-    : `\`\`\`json\n${JSON.stringify(input.actions, null, 2)}\n\`\`\``;
+    : `\`\`\`json\n${JSON.stringify(maskNavigation(input.actions, input.secrets ?? []), null, 2)}\n\`\`\``;
 
   const assertionBlock = (input.assertions ?? []).length === 0
     ? ''
@@ -1925,7 +2052,7 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
   // today's inference when there is not, so a transcript with no `targeting`
   // builds byte-for-byte the prompt it built before the measurement existed.
   const selectorRules =
-    (measuredSelectorRules(input.actions) ?? SELECTOR_RULE_INFERRED) +
+    (measuredSelectorRules(input.actions) ?? selectorRuleInferred(input.actions)) +
     placeholderSelectorRule(input.actions);
   // The post-condition rule follows whatever the selector rules ended on —
   // one numbered rule when nothing was measured or nothing resolved, two when
@@ -1973,7 +2100,7 @@ ${wholeTestBlock}${formatLoopBlock(input.loop, 'step')}
 ${paramBlock}
 
 ## The actions the AI performed (this run's transcript)
-${targetingLegend(input.actions)}${actionBlock}${assertionBlock}${captureBlock}${domBlock(input.domBefore, input.urlBefore, 'before')}${domBlock(input.domAfter, input.urlAfter, 'after')}${candidateBlock}${retryBlock}
+${targetingLegend(input.actions)}${navigationLegend(input.actions)}${requestsLegend(input.actions)}${actionBlock}${assertionBlock}${captureBlock}${domBlock(input.domBefore, input.urlBefore, 'before')}${domBlock(input.domAfter, input.urlAfter, 'after')}${candidateBlock}${retryBlock}
 
 ## What to return
 
@@ -2003,14 +2130,15 @@ The "entry" string holds one TypeScript object literal with exactly this shape:
 - \`page\`, \`context\`, \`browser\` — the live Playwright instances the run is driving.
 - \`step.getVar(name)\` / \`step.setVar(name, value)\` — the test's variable scope, by the name as written in the markdown: \`{{username}}\` is \`step.getVar('username')\`. An environment placeholder is read by the name inside its braces: \`\${data.url}\` is \`step.getVar('data.url')\`, \`\${env.BASE_URL}\` is \`step.getVar('env.BASE_URL')\`. It returns a string (or undefined).
 - \`step.expect(condition, message)\` — a failed expectation fails the step.
+- \`await step.settle()\` — wait until what your actions so far started is over: every request they began on this site (the navigation a login answer starts included), then the page holding still. It names no URL, so it is right for a data row whose click navigates and one whose click only shows an error. It never throws.${offersSelfCheck(input.actions) ? SELF_CHECK_API : ''}${recordedReadApi(input.actions)}
 - \`step.filePath(relative)\` — turns a path written in a step (relative to the test file's folder) into the absolute path Playwright needs. Synchronous; throws if the file is missing.${claimsFlowControl ? FLOW_CONTROL_API : ''}${claimsFail ? FAIL_API : ''}
 - \`log.info(...)\` / \`log.warn(...)\` / \`log.error(...)\` — recorded into the report.
-- \`baseUrl\` — the test's configured base URL, when it has one.
+- \`baseUrl\` — the test's configured base URL, when it has one. It is part of the context, not a variable: take it in the parameter list (\`async run({ page, step, baseUrl })\`), never \`step.getVar('baseUrl')\`, which answers undefined.
 - \`tabs\` — tab control, the code equivalent of the \`openPage\` / \`switchPage\` / \`closePage\` actions:
   - \`await tabs.open(url, { as })\` — open a new tab at \`url\` and make it active. \`as\` is optional and names it.
   - \`await tabs.openedBy(() => ...)\` — run the callback and adopt the tab the PAGE opened (a \`window.open\`, or a click on \`target="_blank"\`). Use this whenever the transcript is a \`click\` followed by a \`switchPage\`: the wait is armed before the click, so there is no race.
   - \`await tabs.switchTo(id)\` — make an already-open tab active. \`id\` is a label (\`'main'\`, \`'page:2'\`, or an \`as\` name), a URL substring, or a title substring — the same identifier the \`switchPage\` action in the transcript used.
-  - \`await tabs.close(id)\` — close a tab. The main tab cannot be closed.
+  - \`await tabs.close(id)\` — close a tab, by the same identifier the \`closePage\` action in the transcript used — text on the page is not one. The main tab cannot be closed.
   - \`tabs.list()\` — \`{ label, url, isActive }[]\`. \`tabs.active()\` — the active page.
 - \`browsers\` — browser control, the code equivalent of \`openBrowser\` / \`switchBrowser\` / \`closeBrowser\`:
   - \`await browsers.open(label, { engine, channel, headed })\` — launch an isolated browser under \`label\` and make it active. Options are all optional; without them it matches the run's own browser.
@@ -2024,9 +2152,9 @@ Rules — all of them are enforced:
 2. **Compute dynamic values at runtime.** If the step describes a computation (today's date, a derived code, a formatted number), do the computation in the code. Never freeze this run's answer as a literal.
 3. **Write the step's outputs** with \`step.setVar\`, using the capture name from the step text.
 4. **Turn assertions into \`step.expect(condition, message)\`**, with a message that names what was compared.
-5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake.
+5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake. After an action that changes the page — a click that submits or navigates, anything that starts a request — \`await step.settle()\` before you read or assert anything: a locator's auto-wait finds the OLD page's element just as happily, and a title or URL read does not wait at all.
 6. **No imports.** Everything you need arrives via the context object — and everything you use must be in \`run\`'s destructured parameter list. The shape above shows \`{ page, step, log }\` because that is the common case, not because it is the whole context: an entry that calls \`tabs.open(...)\` must be written \`async run({ page, step, log, tabs })\`. A name you use but do not destructure is a \`ReferenceError\` on the first replay.
-7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones. A \`role=…[name="…"]\` selector from the transcript matches the WHOLE name: keep it as written in \`page.locator(…)\`, or pass \`exact: true\` if you rewrite it as \`getByRole\` — without it \`getByRole\` matches any name that contains the text, in any capitalisation.${historyRule(input.actions)}${dragRule(input.actions)}${tabHandleRule(input.actions)}
+7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.${readSelectorRule7(input.actions)} A \`role=…[name="…"]\` selector from the transcript matches the WHOLE name: keep it as written in \`page.locator(…)\`, or pass \`exact: true\` if you rewrite it as \`getByRole\` — without it \`getByRole\` matches any name that contains the text, in any capitalisation.${historyRule(input.actions)}${dragRule(input.actions)}${tabHandleRule(input.actions)}
 7b. **Files come through \`step.filePath\`.** An \`upload\` action's \`filePath\` / \`filePaths\` in the transcript are relative to the test file, so pass each through \`step.filePath('…')\` — the verbatim string — and give the result to Playwright. When the action's \`upload.via\` is \`"input"\`, that is \`await page.locator('#statement-file').setInputFiles(step.filePath('attachments/logo.png'))\`. When it is \`"chooser"\`, the action clicked a control that opened a picker, so write:
 \`\`\`
 const chooser = page.waitForEvent('filechooser');
@@ -2040,9 +2168,9 @@ ${postConditionNumber}. **End with a post-condition, and make it wait.** The las
 
    **Wait for the NEW state, then assert — never the other way round.** \`step.expect\` does not retry, and neither does a read. Code arrives a millisecond after the click that triggered the change, while the request producing it is still in flight, so \`step.expect((await el.textContent())?.includes('Uploaded logo.png'))\` compares the text the page had BEFORE the step and fails. A bare \`locator.waitFor()\` has the same hole: its default state is \`visible\`, so on an element that is already on the page it returns at once having proved nothing — and a status region reused between steps is already visible, still showing the previous message.
 
-   Wait on the state itself. \`await page.locator('#upload-status', { hasText: 'Uploaded logo.png' }).waitFor()\` — or \`.filter({ hasText: '…' })\` on a locator you already hold — does not resolve until that text is there, so the wait IS the assertion. \`await page.waitForFunction(...)\` covers what a text filter cannot: a count that has to change, an attribute that has to flip, a value computed from the page. Reading a value into \`step.expect\` is right once something has proved the page moved — wait first, then read. (Rule 6 rules out Playwright's \`expect(locator).toHaveText(...)\`; the forms above are the waiting ones you have.)
+   After the step's action, \`await step.settle()\` first: the requests the action started are then answered and the page has stopped moving. Then, when the step states what should happen, wait on that state itself. \`await page.locator('#upload-status', { hasText: 'Uploaded logo.png' }).waitFor()\` — or \`.filter({ hasText: '…' })\` on a locator you already hold — does not resolve until that text is there, so the wait IS the assertion. \`await page.waitForFunction(...)\` covers what a text filter cannot: a count that has to change, an attribute that has to flip, a value computed from the page. Reading a value into \`step.expect\` is right once something has proved the page moved — wait first, then read. (Rule 6 rules out Playwright's \`expect(locator).toHaveText(...)\`; the forms above are the waiting ones you have.)
 
-   **And it has to be able to FAIL.** A post-condition that cannot go red proves nothing at all — it is the same as having none, only harder to notice. Never compare a value to itself, or to a variable you just assigned from the same read: \`step.expect((await rows.count()) === rowCount)\` re-reads what it has already stored, so it passes just as happily on an empty page. When the step states an expectation, assert THAT — the literal it names, the count it names. When it states none, which is the usual shape of a capture step ("Count the rows [as: n]", "Read the balance [as: b]"), assert what makes the capture worth trusting instead: that the thing you read from was really there and really populated, e.g. \`await page.locator('#documents-body > tr').first().waitFor()\` before reading the count. Never that the number equals itself.${trackerPostCondition(input.actions)}${claimsFlowControl ? flowControlRule(postConditionNumber) : ''}${claimsFail ? failRule(postConditionNumber) : ''}${failureTail ? failureTailRule(postConditionNumber, failureTail) : ''}
+   **And it has to be able to FAIL.** A post-condition that cannot go red proves nothing at all — it is the same as having none, only harder to notice. Never compare a value to itself, or to a variable you just assigned from the same read: \`step.expect((await rows.count()) === rowCount)\` re-reads what it has already stored, so it passes just as happily on an empty page. When the step states an expectation, assert THAT — the literal it names, the count it names. When it states none, which is the usual shape of a capture step ("Count the rows [as: n]", "Read the balance [as: b]"), assert what makes the capture worth trusting instead: that the thing you read from was really there and really populated, e.g. \`await page.locator('#documents-body > tr').first().waitFor()\` before reading the count. Never that the number equals itself.${offersSelfCheck(input.actions) ? ' In this step, write that check as `step.check(condition, message)`: it is about your own read, so if it fails the step falls back to AI rather than failing the run.' : ''}${trackerPostCondition(input.actions)}${claimsFlowControl ? flowControlRule(postConditionNumber) : ''}${claimsFail ? failRule(postConditionNumber) : ''}${failureTail ? failureTailRule(postConditionNumber, failureTail) : ''}
 
 Respond with ONLY the JSON object — no prose around it.`;
 
