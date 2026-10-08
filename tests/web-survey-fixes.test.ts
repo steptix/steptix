@@ -11,7 +11,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { executeAction, normaliseColour, normaliseKeyName, scrollToFitBoth, waitForThreshold } from '../src/browser/actions.js';
 import { parseAIResponse, parseAssertionCode } from '../src/ai/action-parser.js';
-import { installDialogGuard, isAdRequest } from '../src/browser/manager.js';
+import { installDialogGuard } from '../src/browser/manager.js';
 import { dialogRecords, disarmDialog } from '../src/browser/dialogs.js';
 import { installNoticeRecorder } from '../src/browser/notices.js';
 import { captureDomSnapshot, findInDom, formatFindResults } from '../src/browser/dom-cleaner.js';
@@ -143,13 +143,6 @@ describe('§2.5 ads that block clicks', () => {
     }
   }, 30_000);
 
-  it('recognises ad hosts by suffix, and nothing else', () => {
-    expect(isAdRequest('https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js')).toBe(true);
-    expect(isAdRequest('https://securepubads.g.doubleclick.net/tag/js/gpt.js')).toBe(true);
-    expect(isAdRequest('https://www.google.com/search?q=doubleclick.net')).toBe(false);
-    expect(isAdRequest('https://notdoubleclick.net/')).toBe(false);
-    expect(isAdRequest('not a url')).toBe(false);
-  });
 });
 
 describe('§2.6 key names', () => {

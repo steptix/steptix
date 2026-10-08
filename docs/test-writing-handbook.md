@@ -225,6 +225,71 @@ YAML number is dropped without a warning.
 Unrecognised keys are stored and never read, with no warning. A `## Config`
 key is not a test variable; declare inputs under `## Parameters`.
 
+### Ads and other third-party content
+
+Ads, cookie banners and chat widgets can cover what a step needs to click.
+There are two ways to deal with them, and they suit different projects.
+
+**Tell the AI how to handle them, in `## Context`.** The page loads as a real
+visitor sees it, ads included, and the AI closes or scrolls past what gets in
+the way. Use this when the ads are part of what you are testing, or when you
+do not know in advance where they come from:
+
+```markdown
+# Search the catalogue
+
+## Context
+- The page shows ads, and sometimes a full-screen one when a page opens.
+  Close it with its Close or ✕ button before doing anything else. If two are
+  stacked, close the top one first.
+- A cookie banner may cover the bottom of the page. Click "Accept" on it.
+
+## Config
+- baseUrl: https://catalogue.example.test
+
+## Steps
+1. Navigate to /search
+2. Type "lamp" into the search field and press Enter
+3. Verify at least one result mentions "lamp"
+```
+
+**Stop them loading, with `browser.blockAds`.** List the domains in the
+project's `steptix.config.json`. The browser cannot reach any of them, or any
+subdomain of them: requests fail as if the domain did not exist, so their ads
+never appear. Every test in the project gets it, at no cost per step:
+
+```json
+{
+  "browser": {
+    "blockAds": [
+      "doubleclick.net",
+      "googlesyndication.com",
+      "adservice.google.com"
+    ]
+  }
+}
+```
+
+- **Steptix has no list of its own.** It blocks exactly the domains you name,
+  and nothing when the key is absent or `[]`.
+- **Write bare host names.** `"doubleclick.net"` blocks `doubleclick.net`
+  and `securepubads.g.doubleclick.net`, but not `notdoubleclick.net`. Do not
+  write `https://`, a path or a `*`: the config refuses to load and names the
+  entry.
+- **Finding the domains.** Open the page in a browser, look at the Network
+  tab of the developer tools, and note the domains the ads are loaded from.
+  An ad's iframe `src` shows it too.
+- **It is not only for ads.** Any third-party content a test does not need
+  can be blocked the same way, such as a chat widget's domain.
+- **When not to use it.** If the app under test integrates with one of those
+  services (it shows its own ads, or reports purchases to an ad network),
+  blocking it changes what the app does. Leave the domain off the list.
+- **Not for a browser you attach to.** A browser reached through `cdp` is
+  your own, so nothing is blocked there.
+
+Both can be used together: block the ad networks you know about, and keep a
+line in `## Context` for anything that still gets through.
+
 ## 3. Step vocabulary
 
 The model chooses actions from what the page offers, so these are phrasings,

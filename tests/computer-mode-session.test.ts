@@ -1204,35 +1204,35 @@ describe('browser.launchArgs reaches the launch from the project (§5.10)', () =
 describe('browser.blockAds reaches the launch from the project', () => {
   it('the project setting is passed to launchBrowser', async () => {
     const manager = makeManager();
-    const testFilePath = writeProject({ browser: { blockAds: true } });
+    const testFilePath = writeProject({ browser: { blockAds: ['ads.example'] } });
 
     await manager.executeSteps('s-ads', { steps: ['Click Print'], testFilePath });
 
-    expect(launchConfig().blockAds).toBe(true);
+    expect(launchConfig().blockAds).toEqual(['ads.example']);
   });
 
   it('a project that says nothing keeps the server setting', async () => {
     const manager = makeManager({
       ...baseConfig,
-      browser: { ...baseConfig.browser, blockAds: true },
+      browser: { ...baseConfig.browser, blockAds: ['server.example'] },
     } as Config);
     const testFilePath = writeProject({ desktop: { enabled: true } });
 
     await manager.executeSteps('s-ads-server', { steps: ['Click Print'], testFilePath });
 
-    expect(launchConfig().blockAds).toBe(true);
+    expect(launchConfig().blockAds).toEqual(['server.example']);
   });
 
-  it('a project can turn it off where the server has it on', async () => {
+  it('a project can block nothing where the server blocks some', async () => {
     const manager = makeManager({
       ...baseConfig,
-      browser: { ...baseConfig.browser, blockAds: true },
+      browser: { ...baseConfig.browser, blockAds: ['server.example'] },
     } as Config);
-    const testFilePath = writeProject({ browser: { blockAds: false } });
+    const testFilePath = writeProject({ browser: { blockAds: [] } });
 
     await manager.executeSteps('s-ads-off', { steps: ['Click Print'], testFilePath });
 
-    expect(launchConfig().blockAds).toBe(false);
+    expect(launchConfig().blockAds).toEqual([]);
   });
 });
 

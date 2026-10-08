@@ -64,6 +64,7 @@ in the test files, not here.
 | 2.48 | The AI could not see what a page adds outside `<body>` | 40, 44 | The snapshot walked `document.body` only. Google's full-screen and anchored ads are appended to `<html>` beside `<body>`, so their Close buttons never reached the AI; told by `## Context` to close ads, it waited and stalled | Walk every child of `<html>` but `<head>`, frames included |
 | 2.49 | An unusable model reply left no trace | 40 | 'Assertion code response missing code field' failed c40's 'Verify that 3 equals 3' on two of three runs; the replies were counted but not shown, so the cause was a guess | The report shows unused and replaced replies in full; the failure message quotes the start of the last one |
 | 2.50 | Notifications recognised by class-name guesses | 62 | §2.33 recorded an element as a notification if its class contained toast, growl, snackbar or notification. Those are library vocabulary, one of them PrimeFaces' own, so the list suited the sites it came from and missed any other name (`flash-message`) | Only WAI-ARIA live regions count: `role` alert, status or log, an `aria-live` other than off, or `<output>`. Leafground's notification is marked that way and is still recorded |
+| 2.51 | A built-in list of ad domains | 40, 44, 59 | `browser.blockAds: true` blocked 13 ad-network domains chosen by the framework: a list that is never complete, goes stale, and decides for every project what counts as an ad | `blockAds` is the project's own list of domains (`["doubleclick.net", …]`); the framework has none. `true` and anything that is not a bare host name are refused at load |
 
 ## 2. Fixes
 
@@ -706,6 +707,39 @@ Tests: a message appended to an existing `aria-live` container is recorded;
 `role="status"`, `role="log"` and `<output>` are recorded and
 `aria-live="off"` is not; elements classed toast, snackbar, notification and
 flash-message with no live-region marking are not recorded.
+
+### 2.51 The project lists the domains to block
+
+**Problem.** `browser.blockAds: true` (§2.5, §2.23, §2.30) stopped the
+browser reaching 13 ad-network domains chosen by the framework. That is a list
+built from the sites the survey met: it is never complete, it goes stale as ad
+networks change domains, and a project could neither add a domain nor drop one
+it depends on.
+
+**Fix.** `blockAds` is now the project's own list of domains:
+`"blockAds": ["doubleclick.net", "googlesyndication.com"]`. Each entry
+blocks that host and every subdomain of it, in the same two ways as before:
+Chromium's `--host-resolver-rules` (`MAP <host> ~NOTFOUND`), and a route
+that aborts matching requests on Firefox and WebKit. The framework holds no
+list and blocks nothing unless a project names domains
+(`src/config/block-hosts.ts`).
+
+The loader refuses `true`, which would otherwise read as "on" and block
+nothing, with the form to write instead. It also refuses any entry that is not
+a bare host name, naming each. That matters beyond tidiness: the names go into
+a Chromium switch, where a comma or a space would start a rule of the
+author's own making (`MAP * 127.0.0.1` sends every request elsewhere).
+`hostResolverRule` leaves out anything that is not a host name as well, for a
+config that reaches the launcher by another path.
+
+The survey's own `steptix.config.json` now lists the 13 domains it used. The
+handbook's "Ads and other third-party content" section shows both ways to deal
+with ads: `## Context` to handle them, `blockAds` to stop them loading.
+
+Tests: a list loads as written; no key blocks nothing; `true`, URLs, wildcards,
+a rule-injecting entry and a number are refused with each named; the schema
+takes a list of strings; host matching covers subdomains, case, look-alikes and
+query strings; the resolver rule holds only the listed hosts.
 
 ## 3. Failures caused by the test files or the sites
 

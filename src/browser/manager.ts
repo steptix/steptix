@@ -5,6 +5,7 @@ import { chromium as stealthChromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { BrowserConfig } from '../config/types.js';
 import { formatViewport } from '../config/viewport.js';
+import { hostResolverRule, isBlockedHost } from '../config/block-hosts.js';
 import { logger } from '../utils/logger.js';
 import { loopbackFetch } from './loopback-fetch.js';
 import { installNoticeRecorder } from './notices.js';
@@ -1367,6 +1368,19 @@ export interface LaunchOverrides {
 const dialogGuarded = new WeakSet<BrowserContext>();
 
 /**
+ * Abort every request in `context` to a host in `browser.blockAds`, for the
+ * engines that take no host-resolver switch. Chromium uses
+ * {@link hostResolverRule} instead (SPEC-web-survey-fixes.md §2.30, §2.51).
+ */
+async function blockHostRequests(context: BrowserContext, hosts: readonly string[]): Promise<void> {
+  await context.route(
+    (url) => isBlockedHost(url.toString(), hosts),
+    (route) => route.abort('blockedbyclient').catch(() => {}),
+  );
+  logger.info(`Requests to ${hosts.length} blocked host(s) are aborted in this browser (browser.blockAds)`);
+}
+
+/**
  * Take ownership of native JavaScript dialogs (`alert` / `confirm` / `prompt` /
  * `beforeunload`) for every page in a context.
  *
@@ -1400,63 +1414,6 @@ const dialogGuarded = new WeakSet<BrowserContext>();
  * dialog that is already gone by the time our answer reaches Chromium is an
  * ordinary race, not a reason to lose every session on the server.
  */
-/**
- * Hosts that serve ads and nothing a page under test needs to work
- * (docs/specs/SPEC-web-survey-fixes.md §2.5). Matched against the request's
- * host name, as a suffix, so `pagead2.googlesyndication.com` is caught by
- * `googlesyndication.com`.
- */
-export const AD_HOSTS: readonly string[] = [
-  'doubleclick.net',
-  'googlesyndication.com',
-  'googleadservices.com',
-  'adservice.google.com',
-  'googletagservices.com',
-  'amazon-adsystem.com',
-  'adnxs.com',
-  'taboola.com',
-  'outbrain.com',
-  'criteo.com',
-  'pubmatic.com',
-  'rubiconproject.com',
-  'adsrvr.org',
-];
-
-/** Is `url` served by one of {@link AD_HOSTS}? */
-export function isAdRequest(url: string): boolean {
-  let host: string;
-  try {
-    host = new URL(url).hostname.toLowerCase();
-  } catch {
-    return false;
-  }
-  return AD_HOSTS.some((ad) => host === ad || host.endsWith(`.${ad}`));
-}
-
-/**
- * The Chromium switch that makes every {@link AD_HOSTS} name fail to resolve
- * (SPEC-web-survey-fixes.md §2.30). Chromium's own resolver refuses them, so
- * no request is intercepted: routing every request through Playwright, even
- * one that blocks nothing, delayed the scripts on one survey page enough to
- * lose a race in its own start-up, and its download dialog never finished.
- */
-export function adHostResolverRule(): string {
-  return '--host-resolver-rules=' + AD_HOSTS.flatMap((h) => [`MAP ${h} ~NOTFOUND`, `MAP *.${h} ~NOTFOUND`]).join(', ');
-}
-
-/**
- * Abort every request in `context` to an ad host (`browser.blockAds`), for
- * the engines that take no host-resolver switch. Chromium uses
- * {@link adHostResolverRule} instead.
- */
-async function blockAdRequests(context: BrowserContext): Promise<void> {
-  await context.route(
-    (url) => isAdRequest(url.toString()),
-    (route) => route.abort('blockedbyclient').catch(() => {}),
-  );
-  logger.info('Ad requests are blocked for this browser (browser.blockAds)');
-}
-
 export function installDialogGuard(context: BrowserContext): void {
   if (dialogGuarded.has(context)) return;
   dialogGuarded.add(context);
@@ -1524,7 +1481,8 @@ export async function launchBrowser(
   // above before reaching here.
   const launchArgs = config.launchArgs ?? [];
   // Before the author's own switches, so one they pass wins.
-  const adArgs = config.blockAds === true && browserType === 'chromium' ? [adHostResolverRule()] : [];
+  const blockHosts = config.blockAds ?? [];
+  const adArgs = blockHosts.length > 0 && browserType === 'chromium' ? [hostResolverRule(blockHosts)] : [];
   const launchOptions = {
     headless: !headed,
     slowMo: config.slowMo,
@@ -1599,9 +1557,10 @@ export async function launchBrowser(
   // unguarded default (issues/047).
   installDialogGuard(context);
   await installNoticeRecorder(context);
-  if (config.blockAds === true) {
-    if (browserType === 'chromium') logger.info('Ad hosts do not resolve in this browser (browser.blockAds)');
-    else await blockAdRequests(context);
+  const blocked = config.blockAds ?? [];
+  if (blocked.length > 0) {
+    if (browserType === 'chromium') logger.info(`${blocked.length} blocked host(s) do not resolve in this browser (browser.blockAds)`);
+    else await blockHostRequests(context, blocked);
   }
 
   const page = await context.newPage();

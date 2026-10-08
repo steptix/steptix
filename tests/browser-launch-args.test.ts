@@ -190,18 +190,18 @@ describe('browser.blockAds', () => {
     const browser = launchFake();
     const context = browser.contexts()[0] as unknown as Record<string, unknown>;
     context['route'] = vi.fn(async () => {});
-    await launchBrowser(baseConfig({ blockAds: true, launchArgs: ['--disable-print-preview'] }));
+    await launchBrowser(baseConfig({ blockAds: ['ads.example', 'tracker.example'], launchArgs: ['--disable-print-preview'] }));
 
     const args = launchedArgs();
     expect(args[0]).toBe('--window-size=1280,720');
-    expect(args[1]).toMatch(/^--host-resolver-rules=MAP doubleclick\.net ~NOTFOUND, MAP \*\.doubleclick\.net ~NOTFOUND, /);
-    expect(args[1]).toContain('MAP *.googlesyndication.com ~NOTFOUND');
+    expect(args[1]).toBe('--host-resolver-rules=MAP ads.example ~NOTFOUND, MAP *.ads.example ~NOTFOUND, '
+      + 'MAP tracker.example ~NOTFOUND, MAP *.tracker.example ~NOTFOUND');
     expect(args[2]).toBe('--disable-print-preview');
     expect(context['route']).not.toHaveBeenCalled();
   });
 
-  it('adds no rule when it is off', async () => {
-    await launchBrowser(baseConfig({ blockAds: false }));
+  it('adds no rule when the project lists no domains', async () => {
+    await launchBrowser(baseConfig({ blockAds: [] }));
     expect(launchedArgs()).toEqual(['--window-size=1280,720']);
   });
 
@@ -209,7 +209,7 @@ describe('browser.blockAds', () => {
     const browser = launchFake();
     const context = browser.contexts()[0] as unknown as Record<string, unknown>;
     context['route'] = vi.fn(async () => {});
-    await launchBrowser(baseConfig({ blockAds: true, browser: 'firefox' }));
+    await launchBrowser(baseConfig({ blockAds: ['ads.example'], browser: 'firefox' }));
 
     expect(launchedArgs().some((a) => a.startsWith('--host-resolver-rules'))).toBe(false);
     expect(context['route']).toHaveBeenCalledTimes(1);

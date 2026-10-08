@@ -1,7 +1,21 @@
 {
   "browser": {
     "headed": true,
-    "blockAds": true
+    "blockAds": [
+      "doubleclick.net",
+      "googlesyndication.com",
+      "googleadservices.com",
+      "adservice.google.com",
+      "googletagservices.com",
+      "amazon-adsystem.com",
+      "adnxs.com",
+      "taboola.com",
+      "outbrain.com",
+      "criteo.com",
+      "pubmatic.com",
+      "rubiconproject.com",
+      "adsrvr.org"
+    ]
   },
   "tests": {
     "dir": "./tests",

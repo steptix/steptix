@@ -145,12 +145,15 @@ export interface BrowserConfig {
   /** Bypass Content-Security-Policy on the page. Useful when CSP blocks scripts
    *  the site itself needs (cascading failures). Default false. */
   bypassCSP?: boolean;
-  /** Abort requests to well-known ad networks (doubleclick, googlesyndication,
-   *  Amazon and Taboola ads and similar), so ads cannot cover the page or slow
-   *  it down. Off by default, because a site under test could depend on one of
-   *  them (docs/specs/SPEC-web-survey-fixes.md §2.5). Not applied to a CDP
-   *  browser: that browser is the user's own. */
-  blockAds?: boolean;
+  /** Domains the browser may not reach, each with every subdomain, e.g.
+   *  `["doubleclick.net", "googlesyndication.com"]`. For ad networks, and
+   *  anything else third-party that covers a page or slows it down. Requests
+   *  to them fail as if the domain did not exist. The project supplies the
+   *  list: Steptix has none of its own, and blocks nothing by default
+   *  (docs/specs/SPEC-web-survey-fixes.md §2.51). Bare host names only, no
+   *  `https://`, paths or wildcards. Not applied to a CDP browser: that
+   *  browser is the user's own. */
+  blockAds?: string[];
   /** What a SINGULAR action does when its selector resolves to more than one
    *  candidate element. `'first'` (default, and today's behaviour) acts on the
    *  first of them; `'fail'` refuses to act and returns the count, which flows
