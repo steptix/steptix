@@ -856,6 +856,20 @@ describe('§2.34 role names with an icon glyph', () => {
       await page.close();
     }
   });
+
+  it('keeps a name with an apostrophe parseable once the click adds its own filters', async () => {
+    // DummyTicket's "I'm the only traveler" (survey run D, test 70).
+    const page = await pageWith(`
+      <style>.pi-check::before { content: "\\2714"; }</style>
+      <button onclick="document.body.dataset.hit = 'solo'"><span class="pi-check"></span><span>I'm the only traveler</span></button>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: `role=button[name="I'm the only traveler"]` }));
+      expect(result.success).toBe(true);
+      expect(await page.evaluate(() => document.body.dataset['hit'])).toBe('solo');
+    } finally {
+      await page.close();
+    }
+  });
 });
 
 describe('§2.35 a navigation that lands on an error page', () => {

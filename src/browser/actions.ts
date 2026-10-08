@@ -62,7 +62,14 @@ export async function tolerateRoleName(root: Page | FrameLocator, selector: stri
   try {
     if ((await root.locator(selector).count()) > 0) return selector;
     const tolerant = selector.replace(EXACT_ROLE_NAME, (_m, role: string, _q: string, name: string) => {
-      const pattern = name.trim().replace(/[.*+?^${}()|[\]\\/]/g, '\\$&').replace(/\s+/g, '\\s+');
+      // A quote is written as a hex escape: a bare `'` in the regex opens a
+      // string for Playwright's `>>` splitter, which then swallows whatever
+      // the click appends (`>> visible=true >> nth=0`) and refuses to parse.
+      const pattern = name.trim()
+        .replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')
+        .replace(/\s+/g, '\\s+')
+        .replace(/'/g, '\\x27')
+        .replace(/"/g, '\\x22');
       return `role=${role}[name=/^\\W*${pattern}\\W*$/i]`;
     });
     if (tolerant !== selector && (await root.locator(tolerant).count()) > 0) {

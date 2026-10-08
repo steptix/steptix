@@ -55,6 +55,7 @@ in the test files, not here.
 | 2.39 | A step that leaves the choice open made the model ask | 56 | "Pick an experience level and tick two skills" returned a `prompt` action asking which level and which skills, and the step failed waiting for an answer | Rule 7 says a step that leaves a choice open is not unclear: choose any valid option and name it in the description; ask only when the step names something the page does not have |
 | 2.40 | A value from an unset environment variable is typed into the page | 41 | `bookstore_user: $DEMOQA_USERNAME` with no such variable stays the literal `$DEMOQA_USERNAME`, with a warning in the run result. The model typed it into the Book Store login, and in one run a check then "found" `$DEMOQA_USERNAME` on the page and passed the section: a false pass | A turn that names a placeholder still holding a bare `$NAME`, or types that literal, is refused before anything runs, naming the variable to set |
 | 2.41 | No way to clear a field | 44 | The model sent `clear`, which is not an action, and the turn was refused; the retry selected the text and pressed Backspace | `clear`, `clearField`, `clearInput` and `clearText` map to `type` with an empty value |
+| 2.42 | §2.34's rewrite broke on an apostrophe | 70 | The glyph-tolerant name for `role=combobox[name="I'm the only traveler"]` put a bare `'` in the regex. It parsed on its own, so the rewrite was kept, but Playwright's `>>` splitter read the `'` as an open string and the click's own `>> visible=true >> nth=0` made the selector unparsable; the retry recovered | Write `'` and `"` in the rewritten pattern as `'` and `"` |
 
 ## 2. Fixes
 
@@ -550,6 +551,16 @@ MCP client can be an older build than the server.
 of `type`, and `ALIAS_DEFAULTS` gives them `value: ""`, so the field is
 cleared and filled with nothing — what "Clear the text box" asks for.
 
+### 2.42 Quotes in a tolerant role name
+
+**Fix.** `tolerateRoleName` escapes regex specials, turns whitespace into
+`s+`, and now writes `'` as `'` and `"` as `"`, which the
+regex reads as the same characters. No quote character is left for the
+selector splitter to pair, so the selector survives whatever is appended to
+it. A test clicks a glyph button named "I'm the only traveler" through
+`executeAction` — the path that appends the visibility filter — and fails
+without the escape.
+
 ## 3. Failures caused by the test files or the sites
 
 These are fixed in the test files.
@@ -573,6 +584,9 @@ These are fixed in the test files.
 | 64 | "Navigate to signup" clicked a link that opened a new tab, so "the main tab" was a different tab | Stay in one tab: go to the URLs directly, and close the signup tab rather than switching back |
 | 66 | The test had no way to say that a buggy build is meant to fail | Give each row its expected answer, so build 2's wrong answer (23) is the pass condition |
 | 70 | "Choose to add 1 more passenger" was ambiguous: the page has a checkbox and a count | Name both controls |
+| 56 | The sign-up form shows no confirmation: it reloads with the values in the address. "Verify the page confirms the submission" named something the page does not have, and earlier runs passed it only by accepting the address as evidence | Verify the address carries the submitted name |
+| 52 | "Drag the Shopping portlet to the top of its column": Shopping is the only portlet in the middle column, so the step and its check were true before anything moved, and passed twice while the drag only selected text | Drag Shopping by its title bar above Feeds, and check the first column lists Shopping above Feeds and the middle column no longer holds it |
+| 41 | The Book Store section signs in with `DEMOQA_USERNAME` and `DEMOQA_PASSWORD`, an account only a person can register (reCAPTCHA) | Left as is: set both in `survey/web/.env`. Until then §2.40 fails the section by name |
 
 ## 4. Out of scope
 

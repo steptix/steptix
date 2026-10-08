@@ -22,7 +22,7 @@ an iframe, alerts, delayed content, drag and drop, shadow DOM, auto-suggestions.
 5. Select two tools in the tools list
 6. Upload file \attachments\notes.txt
 7. Submit the form
-8. Verify the page confirms the submission
+8. Verify the page address now carries the submitted name "Survey Tester" (the form shows no confirmation message; it reloads with the values in the address)
 9. Navigate to the baseUrl
 10. Click "Delay"
 11. Click the button that loads the delayed text, and wait for the text to appear

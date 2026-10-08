@@ -27,8 +27,8 @@ sortable lists, an alert box demo.
 9. Wait until the dialog says "Complete!"
 10. Close the download dialog
 11. Navigate to /sorting/
-12. In the Portlets tab, drag the "Shopping" portlet to the top of its column
-13. Verify "Shopping" is now the first portlet in its column
+12. In the Portlets tab, drag the "Shopping" portlet by its title bar onto the "Feeds" portlet, so that it lands above Feeds in the first column
+13. Verify the first column now lists "Shopping" above "Feeds", and the middle column no longer holds "Shopping"
 14. Navigate to /select-dropdown-menu/
 15. Select "India" in the country dropdown
 16. Verify the dropdown shows India
