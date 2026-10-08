@@ -61,6 +61,7 @@ in the test files, not here.
 | 2.45 | A project's context files never reached the model on the server | every survey run | Context was loaded once per session from the server's own `tests.contextDir`, so the survey's `context/public-sites.md` (close ads and overlays) was replaced by the repo's sample API docs | Load context on every batch from the test's project |
 | 2.46 | No way for a test to tell the AI what it needs | 40, 44, 59 and any test | Only the project's context files reached the AI, and the description under the title is not sent | A `## Context` section, sent word for word with every step after the project's context; selectors and frame ids welcome |
 | 2.47 | Ads hidden by hardcoded Google selectors | 40, 44, 59 | §2.5 and §2.22 recognised and hid ads by a fixed list of Google ad markup and CSS selectors, which breaks the no-site-specific-code rule and missed other ad networks | Removed. Ads are handled by the test's `## Context` or a step; a covered click or drag fails naming what is in the way |
+| 2.48 | The AI could not see what a page adds outside `<body>` | 40, 44 | The snapshot walked `document.body` only. Google's full-screen and anchored ads are appended to `<html>` beside `<body>`, so their Close buttons never reached the AI; told by `## Context` to close ads, it waited and stalled | Walk every child of `<html>` but `<head>`, frames included |
 
 ## 2. Fixes
 
@@ -635,6 +636,27 @@ Playwright's message names the element in the way; a drag still checks that the
 pointer reaches its source before pressing. `browser.blockAds`, which stops
 requests to a list of ad-network domains when a project turns it on, is
 unchanged.
+
+### 2.48 The snapshot reads everything the page shows, not only `<body>`
+
+**Fix.** `capture-dom.js` walked `document.body` and nothing else. Scripts can
+add elements as children of `<html>` beside `<body>`, and the browser shows
+them like any other: on LetCode and Expand Testing, Google's full-screen and
+anchored ads are `<ins>` elements appended to `<html>`, each holding the ad
+frame with its Close button. The AI never saw them. With the test's
+`## Context` telling it to close ads it recognised the ad from the
+`#google_vignette` address, waited, and stalled, because there was nothing in
+its snapshot to click. Frames from other domains were never the issue:
+`injectFrameContent` reads every frame through Playwright, whatever its
+origin.
+
+The snapshot now walks every child of `<html>` except `<head>`, in document
+order, so what sits beside `<body>` is captured with its frames, and the
+`[iframe:N]` numbering still follows Playwright's `locator('iframe')` order. A
+test builds that layout — an overlay appended to `<html>` holding a frame with
+a Close button, beside a frame inside `<body>` — and checks both frames land
+under their own `<iframe>` and that the Close button can be clicked through its
+frame path; it fails with the body-only walk.
 
 ## 3. Failures caused by the test files or the sites
 

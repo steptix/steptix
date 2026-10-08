@@ -1086,3 +1086,41 @@ describe('§2.43 label marks around a checked text', () => {
     expect(sameTextIgnoringMarks('anything', undefined)).toBe(false);
   });
 });
+
+describe('§2.48 content added outside <body>', () => {
+  it('reaches the snapshot, frames included, and can be clicked through its frame path', async () => {
+    const page = await pageWith('<iframe id="inline" srcdoc="<button>Inside body frame</button>"></iframe><p>Page text</p>');
+    try {
+      // What a full-screen ad script does: a fixed overlay appended to <html>,
+      // beside <body>, holding a frame with its own Close button.
+      await page.evaluate(() => {
+        const doc = (globalThis as any).document;
+        const ins = doc.createElement('ins');
+        ins.id = 'overlay_host';
+        ins.style.cssText = 'position:fixed;inset:0;display:block;background:#fff;z-index:9';
+        const frame = doc.createElement('iframe');
+        frame.id = 'overlay_frame';
+        frame.style.cssText = 'width:600px;height:300px;border:0';
+        frame.srcdoc = '<button id="dismiss" onclick="parent.document.getElementById(\'overlay_host\').remove()">Close</button>';
+        ins.appendChild(frame);
+        doc.documentElement.appendChild(ins);
+      });
+      await page.frameLocator('#overlay_frame').locator('#dismiss').waitFor();
+
+      const snapshot = await captureDomSnapshot(page);
+      expect(snapshot).toContain('Inside body frame');
+      expect(snapshot).toContain('Page text');
+      expect(snapshot).toMatch(/<iframe[^>]*id="overlay_frame"[^>]*> <!-- #overlay_frame -->/);
+      expect(snapshot).toContain('Close');
+      // Each frame's content sits under its own <iframe>, not swapped.
+      expect(snapshot.indexOf('Inside body frame')).toBeLessThan(snapshot.indexOf('id="overlay_frame"'));
+      expect(snapshot.indexOf('id="overlay_frame"')).toBeLessThan(snapshot.indexOf('Close'));
+
+      const result = await executeAction(page, act({ action: 'click', selector: '#dismiss', frame: '#overlay_frame' }));
+      expect(result.success).toBe(true);
+      expect(await page.locator('#overlay_host').count()).toBe(0);
+    } finally {
+      await page.close();
+    }
+  });
+});

@@ -16,9 +16,16 @@ nested iframes three deep, tab switching, summing a table column, open and
 closed shadow roots.
 
 ## Context
-- The workspace shows ads, sometimes full screen right after clicking a card's
-  "Play Sandbox" link. Close any ad that covers the page with its Close or ✕
-  button, then carry on. An ad is not a failure.
+- The site shows Google ads. An ad is not a failure: deal with it the way a
+  person would, then carry on with the step.
+- On the workspace page an "Unlock more content" wall can cover everything,
+  with a single "View a short ad" button and no close button. Click
+  "View a short ad". The ad that opens has a countdown, and its CLOSE button
+  sits under the ad until the countdown ends: wait about 30 seconds after
+  starting it, then click CLOSE. After that the site stays open for the day.
+- Other ads have a Close or ✕ button. A banner anchored to the bottom of the
+  window has a ˅ button that collapses it; use it when the banner covers what
+  you need.
 
 ## Config
 - baseUrl: https://letcode.in/test

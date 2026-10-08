@@ -637,7 +637,19 @@
   try {
     var body = document.body;
     if (!body) return '<body>(empty)</body>';
-    var result = processElement(body, 0);
+    // Scripts can add elements as children of <html> beside <body> — Google's
+    // full-screen and anchored ads do, with their Close buttons — and the page
+    // shows them like anything else. Walk every child of <html> but <head>, in
+    // document order, so they reach the snapshot and the [iframe:N] numbering
+    // keeps Playwright's locator('iframe') order (SPEC-web-survey-fixes.md
+    // §2.48).
+    var result = '';
+    var top = document.documentElement ? document.documentElement.children : [body];
+    for (var t = 0; t < top.length; t++) {
+      var child = top[t];
+      if (child.tagName === 'HEAD') continue;
+      result += processElement(child, 0);
+    }
     return result || '<body>(no content)</body>';
   } catch (err) {
     return '<error>Failed to capture DOM: ' + String(err) + '</error>';
