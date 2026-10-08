@@ -362,7 +362,39 @@
         out += ' ' + name + '="' + escapeAttr(live[name]) + '"';
       }
     }
+    if (USE_ATTR_ALLOWLIST) out += identityClass(el, out);
     return out;
+  }
+
+  // An element with no text and nothing in the allowlist to name it is,
+  // in an allowlisted snapshot, indistinguishable from its siblings: three
+  // empty <div>s that are the red, green and blue circles of a drag page, or
+  // the empty <span> that is a tree's expand toggle. Its class is then the
+  // only identity it has (docs/specs/SPEC-web-survey-fixes.md §2.18), so keep
+  // a few READABLE class names — never a hashed or generated one, which would
+  // only invite a selector that breaks on the next build.
+  var NAMING_ATTRS = ['id', 'data-testid', 'name', 'aria-label', 'title', 'alt', 'placeholder', 'href', 'for', 'value'];
+  function identityClass(el, emitted) {
+    var raw = el.getAttribute && el.getAttribute('class');
+    if (!raw) return '';
+    for (var i = 0; i < NAMING_ATTRS.length; i++) {
+      if (emitted.indexOf(' ' + NAMING_ATTRS[i] + '="') !== -1) return '';
+    }
+    if ((el.textContent || '').trim() !== '') return '';
+    var kept = [];
+    var tokens = raw.split(/\s+/);
+    for (var t = 0; t < tokens.length && kept.length < 4; t++) {
+      var tok = tokens[t];
+      if (!/^[A-Za-z][A-Za-z0-9_-]{1,40}$/.test(tok)) continue;
+      if (/\d{3,}/.test(tok)) continue;
+      if (/^(css|sc|jsx|emotion|svelte|chakra|mantine|tw)-/i.test(tok)) continue;
+      // A styled-components / CSS-modules hash: a short prefix, then a run of
+      // mixed-case letters and digits ("sc-bdVaJa", "Button_root__x8Kf2").
+      if (/[a-z][A-Z]/.test(tok) && /\d/.test(tok)) continue;
+      if (/__[A-Za-z0-9]{4,}$/.test(tok)) continue;
+      kept.push(tok);
+    }
+    return kept.length > 0 ? ' class="' + escapeAttr(kept.join(' ')) + '"' : '';
   }
 
   // The one hidden element that IS a legitimate target.
@@ -394,6 +426,8 @@
   }
 
   var iframeIdx = 0;
+  /** How many open shadow roots the walk is inside. */
+  var shadowDepth = 0;
 
   function processElement(el, depth) {
     var tag = el.tagName.toLowerCase();
@@ -442,6 +476,13 @@
            + indent + '</svg>\n';
     }
 
+    if (tag === 'iframe' && shadowDepth > 0) {
+      // Playwright's locator('iframe').all() lists shadow-root frames after
+      // every light-DOM one, so an index here would point injectFrameContent
+      // at the wrong frame. Shown, not expanded.
+      return indent + '<iframe' + getAttributes(el, tag) + '> <!-- inside a shadow root: contents not captured -->\n';
+    }
+
     if (tag === 'iframe') {
       var attrs = getAttributes(el, tag);
       var frameSelector = buildSelector(el);
@@ -457,8 +498,24 @@
       return indent + '<' + tag + attrs + '>\n';
     }
 
+    // An open shadow root is what the page renders, and Playwright's CSS
+    // selectors reach into it as written; without it a web component's fields
+    // were simply absent (SPEC-web-survey-fixes.md §2.26). A closed root is
+    // unreachable from page script, for Playwright too, so it stays invisible.
+    var shadowOutput = '';
+    if (el.shadowRoot) {
+      shadowDepth++;
+      try {
+        shadowOutput = indent + '  <!-- shadow-root (open) -->\n'
+          + processChildNodes(el.shadowRoot, depth + 1)
+          + indent + '  <!-- /shadow-root -->\n';
+      } finally {
+        shadowDepth--;
+      }
+    }
     var childOutput = processChildNodes(el, depth + 1);
     return indent + '<' + tag + attrs + '>\n'
+         + shadowOutput
          + childOutput
          + indent + '</' + tag + '>\n';
   }
@@ -545,7 +602,8 @@
 
               var firstOmitted = headCount + 1;
               var lastOmitted = headCount + omittedCount;
-              if (parentSel === null) parentSel = buildSelector(parent);
+              // A shadow root is not an element; its host is what a selector names.
+              if (parentSel === null) parentSel = buildSelector(parent.nodeType === 11 ? parent.host : parent);
               var parentPart = parentSel ? parentSel + ' > ' : '';
               output += indent + '<!-- ' + omittedCount + ' similar <' + runTag
                      + '> elements omitted (nth-of-type ' + firstOmitted + '..' + lastOmitted
@@ -579,7 +637,19 @@
   try {
     var body = document.body;
     if (!body) return '<body>(empty)</body>';
-    var result = processElement(body, 0);
+    // Scripts can add elements as children of <html> beside <body> — Google's
+    // full-screen and anchored ads do, with their Close buttons — and the page
+    // shows them like anything else. Walk every child of <html> but <head>, in
+    // document order, so they reach the snapshot and the [iframe:N] numbering
+    // keeps Playwright's locator('iframe') order (SPEC-web-survey-fixes.md
+    // §2.48).
+    var result = '';
+    var top = document.documentElement ? document.documentElement.children : [body];
+    for (var t = 0; t < top.length; t++) {
+      var child = top[t];
+      if (child.tagName === 'HEAD') continue;
+      result += processElement(child, 0);
+    }
     return result || '<body>(no content)</body>';
   } catch (err) {
     return '<error>Failed to capture DOM: ' + String(err) + '</error>';

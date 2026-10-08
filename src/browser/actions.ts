@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { Page, FrameLocator, Locator } from 'playwright';
+import type { Frame, Page, FrameLocator, Locator } from 'playwright';
 import type { AIAction, ActionType, TableReadColumn, TableReadMapping } from '../ai/types.js';
 // §9.2: one validator for both paths into the table extractor. The dependency
 // points this way because the parser owns the §6.2 rules and their wording;
@@ -15,6 +15,8 @@ import {
 } from '../ai/action-parser.js';
 import { logger } from '../utils/logger.js';
 import { resolveUploadPaths, uploadPathsOf, type UploadPathContext } from './upload-paths.js';
+import { armDialog, describeDialogs, takeUnreportedDefaultAnswers } from './dialogs.js';
+import { gotoWithDiagnosis } from './navigate-diagnosis.js';
 
 /**
  * Resolves the locator root for an action.
@@ -40,6 +42,68 @@ function resolveLocatorRoot(page: Page, frameSelector?: string): Page | FrameLoc
     root = root.frameLocator(segment);
   }
   return root;
+}
+
+/** `role=button[name="Dismiss"]`: the exact-name form, without Playwright's `i`/`s` flags. */
+const EXACT_ROLE_NAME = /role=([\w-]+)\[name=(["'])((?:(?!\2).)+)\2\]/g;
+
+/**
+ * An exact role name that matches nothing, retried with icon glyphs and
+ * punctuation around the name allowed (SPEC-web-survey-fixes.md §2.34).
+ * An icon font draws its glyph with CSS `::before` content, which counts in the
+ * accessible name, so PrimeFaces' Dismiss button is named "<glyph> Dismiss"
+ * and `role=button[name="Dismiss"]` matched nothing on a dialog showing it.
+ * The rewrite still anchors the whole name — "Dismiss all" stays a different
+ * button — and is kept only when it finds something; otherwise the selector is
+ * returned as written, so the failure names what the model wrote.
+ */
+export async function tolerateRoleName(root: Page | FrameLocator, selector: string): Promise<string> {
+  if (!new RegExp(EXACT_ROLE_NAME.source).test(selector)) return selector;
+  try {
+    if ((await root.locator(selector).count()) > 0) return selector;
+    const tolerant = selector.replace(EXACT_ROLE_NAME, (_m, role: string, _q: string, name: string) => {
+      // A quote is written as a hex escape: a bare `'` in the regex opens a
+      // string for Playwright's `>>` splitter, which then swallows whatever
+      // the click appends (`>> visible=true >> nth=0`) and refuses to parse.
+      const pattern = name.trim()
+        .replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')
+        .replace(/\s+/g, '\\s+')
+        .replace(/'/g, '\\x27')
+        .replace(/"/g, '\\x22');
+      return `role=${role}[name=/^\\W*${pattern}\\W*$/i]`;
+    });
+    if (tolerant !== selector && (await root.locator(tolerant).count()) > 0) {
+      logger.debug(`No element is named exactly as in ${selector}; matched ${tolerant}`);
+      return tolerant;
+    }
+  } catch {
+    // An unparsable rewrite leaves the selector as the model wrote it.
+  }
+  return selector;
+}
+
+/**
+ * The Playwright `Frame` a frame selector names, with the same segmenting as
+ * {@link resolveLocatorRoot}, or null when any level is missing. For code that
+ * has to run INSIDE the frame — an assertion's `page.evaluate` — where a
+ * FrameLocator will not do (SPEC-web-survey-fixes.md §2.31).
+ */
+export async function resolveFrame(page: Page, frameSelector: string): Promise<Frame | null> {
+  const segments = frameSelector.includes('>>')
+    ? frameSelector.split('>>').map((s) => s.trim()).filter(Boolean)
+    : frameSelector.trim().split(/\s+/);
+  let current: Frame = page.mainFrame();
+  for (const segment of segments) {
+    try {
+      const handle = await current.locator(segment).first().elementHandle({ timeout: 5_000 });
+      const next = handle ? await handle.contentFrame() : null;
+      if (!next) return null;
+      current = next;
+    } catch {
+      return null;
+    }
+  }
+  return current;
 }
 
 /**
@@ -249,6 +313,9 @@ export interface ActionExecutionResult {
   /** What the runtime found at the instant it acted. Absent unless the caller
    *  asked to measure, and absent whenever measurement was impossible. */
   targeting?: ActionTargeting;
+  /** `navigate` only: the HTTP status of the document it landed on
+   *  (SPEC-web-survey-fixes.md §2.35). */
+  httpStatus?: number;
   /** The kinds of element a `read` or `count` matched, when the caller asked
    *  for them ({@link ExecuteActionOptions.kinds}). */
   kinds?: string[];
@@ -356,6 +423,7 @@ export async function executeAction(
 
   // Resolve frame context once — used by all locator-based actions and the error handler
   const root = resolveLocatorRoot(page, effectiveFrame);
+  if (effectiveSelector) effectiveSelector = await tolerateRoleName(root, effectiveSelector);
   if (effectiveFrame) {
     // For nested frames ("A >> B" or "A B"), validate the outermost iframe exists on the page
     const outerSelector = effectiveFrame.includes('>>')
@@ -395,6 +463,8 @@ export async function executeAction(
   let remainingMs: number | undefined;
   /** Which route an `upload` took, for the transcript a compile reads. */
   let uploadRoute: UploadRoute | undefined;
+  /** The HTTP status a `navigate` landed on (§2.35). */
+  let httpStatus: number | undefined;
 
   try {
     // ── Measurement (stories/codebehind-selector-ambiguity.md) ──────────────
@@ -476,12 +546,21 @@ export async function executeAction(
 
     switch (eff.action) {
       case 'click':
-        await executeClick(root, eff, remainingMs);
+        await executeClick(page, root, eff, remainingMs);
         break;
 
       case 'type':
-        await executeType(root, eff, remainingMs);
+        await executeType(page, root, eff, remainingMs);
         break;
+
+      case 'dialog': {
+        const late = executeDialog(page, eff);
+        if (late !== undefined) {
+          logger.warn(`Action refused [dialog]: ${late}`);
+          return { success: false, error: late };
+        }
+        break;
+      }
 
       case 'select':
         await executeSelect(root, eff, remainingMs);
@@ -489,7 +568,7 @@ export async function executeAction(
 
       case 'navigate':
         // Navigation always operates at the page level — iframes don't navigate independently
-        await executeNavigate(page, eff, baseUrl);
+        httpStatus = await executeNavigate(page, eff, baseUrl);
         break;
 
       case 'back':
@@ -507,7 +586,7 @@ export async function executeAction(
         break;
 
       case 'drag':
-        await executeDrag(root, eff, remainingMs);
+        await executeDrag(page, root, eff, remainingMs);
         break;
 
       case 'upload':
@@ -663,6 +742,7 @@ export async function executeAction(
       success: true,
       ...(targeting !== undefined && { targeting }),
       ...(uploadRoute !== undefined && { upload: { via: uploadRoute } }),
+      ...(httpStatus !== undefined && { httpStatus }),
     };
   } catch (err) {
     // A run abort (issue 022) must propagate as a throw, not be swallowed into a
@@ -763,30 +843,272 @@ const MIN_ACTION_TIMEOUT_MS = 1_000;
  *  spend Playwright's default 30s retrying before we swallow the throw. */
 const MEASUREMENT_TIMEOUT_MS = 2_000;
 
+/**
+ * Click, double-click or right-click `selector` (SPEC-web-survey-fixes.md
+ * §2.2, §2.5, §2.10).
+ *
+ * Two recoveries, each for one measured failure and each narrow on purpose:
+ *  - a styled checkbox or radio whose `<input>` is hidden gets its label or a
+ *    visible ancestor clicked instead, because a hidden input never becomes
+ *    clickable and the click would only time out;
+ *  - a click blocked by an AD gets the page's ads hidden and one more try.
+ *    Only ad markup counts: a real overlay still fails the click, which is
+ *    what tells the author the page is in the way.
+ */
 async function executeClick(
+  page: Page,
   root: Page | FrameLocator,
   action: AIAction,
   timeoutMs?: number,
 ): Promise<void> {
   const selector = requireSelector(action);
-  await root
-    .locator(selector)
-    .locator('visible=true')
-    .first()
-    .click({ timeout: timeoutMs ?? CLICK_TIMEOUT_MS });
+  const hold = action.clickCount === 2 ? 0 : (action.holdMs ?? 0);
+  const options = {
+    // The hold is part of the click, so it is added to the time allowed.
+    timeout: (timeoutMs ?? CLICK_TIMEOUT_MS) + hold,
+    ...(action.button !== undefined && action.button !== 'left' && { button: action.button }),
+    // Playwright's `delay` is the time between mousedown and mouseup (§2.24).
+    ...(hold > 0 && { delay: hold }),
+  };
+  const press = (target: Locator): Promise<void> =>
+    action.clickCount === 2 ? target.dblclick(options) : target.click(options);
+
+  const matches = root.locator(selector);
+  const stand = await standInForHiddenToggle(root, matches);
+  if (stand !== null) {
+    logger.info(`"${selector}" is a hidden checkbox or radio — clicking its visible label instead`);
+    await press(stand);
+    return;
+  }
+
+  const target = matches.locator('visible=true').first();
+  await press(target);
 }
 
+/**
+ * When every match of a click's selector is a HIDDEN checkbox or radio, the
+ * element a person would click instead: its `<label for>`, the `<label>` it
+ * sits in, or the nearest of its three closest ancestors that is visible.
+ * `null` when the selector matches something else, matches nothing yet (the
+ * normal click then waits for it), or has a visible match.
+ */
+async function standInForHiddenToggle(root: Page | FrameLocator, matches: Locator): Promise<Locator | null> {
+  try {
+    const total = await matches.count();
+    if (total === 0) return null;
+    if ((await matches.locator('visible=true').count()) > 0) return null;
+    const input = matches.first();
+    const id = await input.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any) => {
+        const toggle = el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio');
+        return toggle ? String(el.id ?? '') : null;
+      },
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+    if (id === null) return null;
+    const candidates: Locator[] = [];
+    // From the ROOT, which is the input's own frame. A chained XPath that
+    // starts with // is relative to the element in Playwright, so it would
+    // only ever search inside the input.
+    if (id !== '') {
+      const quoted = id.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      candidates.push(root.locator(`label[for="${quoted}"]`));
+    }
+    candidates.push(input.locator('xpath=ancestor::label[1]'));
+    // Never <body> or <html>: clicking the page itself "succeeds" and does nothing.
+    for (let depth = 1; depth <= 3; depth++) {
+      candidates.push(input.locator(`xpath=ancestor::*[not(self::body) and not(self::html)][${depth}]`));
+    }
+    for (const candidate of candidates) {
+      const first = candidate.first();
+      if (!(await first.isVisible().catch(() => false))) continue;
+      // "Visible" includes the 1×1 px clip wrapper accessible toggles hide
+      // their input in (PrimeFaces' ui-helper-hidden-accessible): something
+      // else covers it, so the click timed out (SPEC-web-survey-fixes.md
+      // §2.32). Only stand in with something a person could click.
+      const box = await first.boundingBox().catch(() => null);
+      if (box !== null && box.width >= 4 && box.height >= 4) return first;
+    }
+  } catch {
+    // Anything unexpected leaves the ordinary click to report what is wrong.
+  }
+  return null;
+}
+
+
+/**
+ * Inputs whose value cannot be empty, so `clear()` (a `fill('')`) throws
+ * "Malformed value" on them, and `fill` replaces the value anyway (§2.7).
+ */
+const MALFORMED_WHEN_EMPTY = /Malformed value/i;
+
+/** Text-like elements, where pressing End moves the caret and nothing else. */
+const END_KEY_SAFE_TYPES = new Set(['text', 'search', 'email', 'password', 'url', 'tel', 'textarea', 'contenteditable']);
+
 async function executeType(
+  page: Page,
   root: Page | FrameLocator,
   action: AIAction,
   clearTimeoutMs?: number,
 ): Promise<void> {
   const selector = requireSelector(action);
-  const value = action.value ?? '';
+  let value = action.value ?? '';
   const locator = root.locator(selector).locator('visible=true').first();
-  // Clear existing content first, then type
-  await locator.clear({ timeout: clearTimeoutMs ?? TYPE_CLEAR_TIMEOUT_MS });
+  await uncoverForTyping(locator);
+  // A custom element whose field lives in a CLOSED shadow root, a canvas
+  // editor, anything `fill` refuses as "not an <input>": click it and type,
+  // which is how a person reaches a field nothing can query
+  // (SPEC-web-survey-fixes.md §2.27).
+  if (!(await isFillable(locator))) {
+    await locator.click({ timeout: clearTimeoutMs ?? TYPE_CLEAR_TIMEOUT_MS });
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.type(value);
+    return;
+  }
+  // Clear existing content first, then type. A colour, date or range input
+  // cannot be empty, so its clear throws; `fill` replaces its value anyway.
+  let clearable = true;
+  try {
+    await locator.clear({ timeout: clearTimeoutMs ?? TYPE_CLEAR_TIMEOUT_MS });
+  } catch (err) {
+    if (!MALFORMED_WHEN_EMPTY.test(err instanceof Error ? err.message : String(err))) throw err;
+    clearable = false;
+  }
+  const kind = await inputKindOf(locator);
+  if (kind === 'color') value = normaliseColour(value);
+  if (kind === 'range') value = await clampToRange(locator, value);
   await locator.fill(value, { timeout: TYPE_FILL_TIMEOUT_MS });
+  // `fill` fires `input` and nothing else. A filter or autocomplete that
+  // listens for `keyup` never sees the change, which is how two of the
+  // survey's sites kept every row after "Type test into the filter" (§2.3).
+  // End fires keydown and keyup and leaves the text as it is.
+  if (clearable && kind !== undefined && END_KEY_SAFE_TYPES.has(kind)) {
+    await locator.press('End', { timeout: MEASUREMENT_TIMEOUT_MS }).catch(() => {});
+  }
+}
+
+/**
+ * Scroll a field out from under whatever covers it before typing
+ * (SPEC-web-survey-fixes.md §2.20). `click` retries scroll alignments until
+ * the element is what the pointer would hit; `fill` does not, so it types
+ * into a field a person could not reach. A page that checks — the survey's
+ * overlapped-element page clears the field on `input` when its centre is
+ * covered — then loses every character. A person scrolls the field clear
+ * first; so does this. Best effort: a field nothing will uncover is typed
+ * into as before.
+ */
+async function uncoverForTyping(locator: Locator): Promise<void> {
+  try {
+    await locator.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any) => {
+        const root = el.getRootNode();
+        const w = globalThis as any;
+        const finder = typeof root.elementFromPoint === 'function' ? root : w.document;
+        const reachable = (): boolean => {
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) return true;
+          const x = r.left + r.width / 2;
+          const y = r.top + r.height / 2;
+          if (x < 0 || y < 0 || x > w.innerWidth || y > w.innerHeight) return false;
+          const hit = finder.elementFromPoint(x, y);
+          return hit === el || (hit !== null && el.contains(hit));
+        };
+        if (reachable()) return;
+        for (const block of ['center', 'start', 'end']) {
+          el.scrollIntoView({ block, inline: 'nearest', behavior: 'instant' });
+          if (reachable()) return;
+        }
+      },
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    // Best effort, never a reason to fail the type.
+  }
+}
+
+/**
+ * Can Playwright's `fill` take this element: an `<input>`, `<textarea>`,
+ * `<select>` or contenteditable, or a `<label>` for one? True when it cannot
+ * be told, so the ordinary path reports what is wrong.
+ */
+async function isFillable(locator: Locator): Promise<boolean> {
+  try {
+    return await locator.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any) => {
+        const tag = String(el.tagName);
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable) return true;
+        return tag === 'LABEL' && el.control != null;
+      },
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    return true;
+  }
+}
+
+/** The element's input type in lower case, `textarea`, `contenteditable`,
+ *  another tag name, or `undefined` when it cannot be read. */
+async function inputKindOf(locator: Locator): Promise<string | undefined> {
+  try {
+    return await locator.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any) => {
+        if (el.tagName === 'INPUT') return String(el.type || 'text').toLowerCase();
+        if (el.isContentEditable) return 'contenteditable';
+        return String(el.tagName).toLowerCase();
+      },
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A range input refuses a value outside its own min and max as malformed, and
+ * "set the slider to its maximum" was typed as 100 into a slider that stops at
+ * 10. Clamp a number to the range, and read "max"/"min" as the ends.
+ */
+async function clampToRange(locator: Locator, value: string): Promise<string> {
+  let bounds: { min: number; max: number };
+  try {
+    bounds = await locator.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any) => ({
+        min: el.min === '' ? 0 : Number(el.min),
+        max: el.max === '' ? 100 : Number(el.max),
+      }),
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    return value;
+  }
+  const word = value.trim().toLowerCase();
+  if (/^max(imum)?$/.test(word)) return String(bounds.max);
+  if (/^min(imum)?$/.test(word)) return String(bounds.min);
+  const n = Number(word.replace(/%$/, ''));
+  if (!Number.isFinite(n)) return value;
+  return String(Math.min(bounds.max, Math.max(bounds.min, n)));
+}
+
+/**
+ * A colour input accepts exactly `#rrggbb` in lower case. `#F00` and `F00`
+ * are what a step says; anything else is passed through for Playwright to
+ * refuse with its own message.
+ */
+export function normaliseColour(value: string): string {
+  const hex = value.trim().replace(/^#/, '').toLowerCase();
+  if (/^[0-9a-f]{3}$/.test(hex)) return `#${hex.split('').map((c) => c + c).join('')}`;
+  if (/^[0-9a-f]{6}$/.test(hex)) return `#${hex}`;
+  return value;
 }
 
 async function executeSelect(
@@ -797,6 +1119,34 @@ async function executeSelect(
   const selector = requireSelector(action);
   const value = action.value ?? '';
   const locator = root.locator(selector).locator('visible=true').first();
+  // A `<select multiple>` takes every option in one call (§2.8). Split only
+  // when the element is a multi-select: a single select's option can contain
+  // a comma ("Washington, DC").
+  const wanted = action.values ?? (value.includes(',') ? value.split(',').map((v) => v.trim()) : undefined);
+  if (wanted !== undefined && wanted.filter((v) => v !== '').length > 1 && (await isMultiSelect(locator))) {
+    const resolved = await locator.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any, names: string[]) => {
+        const norm = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const options: any[] = Array.from(el.options);
+        return names.map((name) => {
+          const match = options.find((o) => o.value === name)
+            ?? options.find((o) => norm(o.label || o.text) === norm(name))
+            ?? options.find((o) => norm(o.value) === norm(name));
+          return match ? String(match.value) : null;
+        });
+      },
+      wanted.filter((v) => v !== ''),
+      { timeout: byValueTimeoutMs ?? SELECT_BY_VALUE_TIMEOUT_MS },
+    );
+    const missing = wanted.filter((v) => v !== '').filter((_, i) => resolved[i] === null);
+    if (missing.length > 0) {
+      throw new Error(`select: the list has no option ${missing.map((m) => `"${m}"`).join(', ')}`);
+    }
+    await locator.selectOption(resolved as string[], { timeout: SELECT_BY_LABEL_TIMEOUT_MS });
+    return;
+  }
   try {
     // Try matching by value attribute first
     await locator.selectOption(value, { timeout: byValueTimeoutMs ?? SELECT_BY_VALUE_TIMEOUT_MS });
@@ -806,7 +1156,47 @@ async function executeSelect(
   }
 }
 
-async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): Promise<void> {
+/** Is the element a `<select multiple>`? False when it cannot be read. */
+async function isMultiSelect(locator: Locator): Promise<boolean> {
+  try {
+    return await locator.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any) => el.tagName === 'SELECT' && el.multiple === true,
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** How long after a dialog opens a `dialog` action is still "late" for it. */
+const LATE_DIALOG_WINDOW_MS = 60_000;
+
+/**
+ * Arm the answer for the next dialog (SPEC-web-survey-fixes.md §2.1), and
+ * return an error when a dialog that this action meant to answer has already
+ * been answered the other way — the answer cannot be changed after the fact,
+ * but the model can open the dialog again now that the answer is set.
+ * `undefined` when the arming stands on its own.
+ */
+function executeDialog(page: Page, action: AIAction): string | undefined {
+  const accept = action.value !== 'dismiss';
+  const context = page.context();
+  armDialog(context, { accept, ...(action.text !== undefined && { text: action.text }) });
+  const missed = takeUnreportedDefaultAnswers(context, Date.now() - LATE_DIALOG_WINDOW_MS).filter(
+    (r) => r.type !== 'beforeunload' && ((r.answer === 'accepted') !== accept || (accept && action.text !== undefined)),
+  );
+  if (missed.length === 0) return undefined;
+  return (
+    'The dialog was already answered before this "dialog" action ran — a dialog is answered '
+    + `the moment it opens:\n${describeDialogs(missed)}\n`
+    + `The answer is now set to ${accept ? 'accept' : 'dismiss'}. Open the dialog again (click the same `
+    + 'control) and it will be answered that way. Next time, send the "dialog" action BEFORE the click.'
+  );
+}
+
+async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): Promise<number | undefined> {
   let url = action.url ?? action.value ?? '';
 
   if (!url) {
@@ -830,7 +1220,10 @@ async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): 
     }
   }
 
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  const response = await gotoWithDiagnosis(page, url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  // The main document's status, so the step loop can tell a 404 from the page
+  // the step asked for (§2.35). Null for a same-document or about: navigation.
+  return response?.status();
 }
 
 /**
@@ -931,8 +1324,18 @@ async function executeReload(page: Page): Promise<void> {
  *
  * A drag the application ignored still "succeeds" here, exactly as a click on a
  * dead button does: the next `Verify` is what says whether it worked.
+ *
+ * The pointer moves in STEPS (SPEC-web-survey-fixes.md §2.9). `dragTo` jumps
+ * from source to target, and jQuery UI's draggable and sortable both ignore
+ * a jump: the survey's photo-to-trash drag and its sortable list reorder
+ * "succeeded" and changed nothing. A person presses, moves a little past the
+ * drag threshold, and glides — so this does the same. Chromium still dispatches
+ * the HTML5 drag events for real mouse movement, so a native drag-and-drop
+ * keeps working. When either end has no box in the viewport (off-screen or
+ * detached), `dragTo` takes over, because it scrolls and this cannot.
  */
 async function executeDrag(
+  page: Page,
   root: Page | FrameLocator,
   action: AIAction,
   timeoutMs?: number,
@@ -942,9 +1345,144 @@ async function executeDrag(
   if (!target) {
     throw new Error('drag action requires a "target": the CSS selector of the element to drop onto');
   }
+  const timeout = timeoutMs ?? DRAG_TIMEOUT_MS;
   const source = root.locator(selector).locator('visible=true').first();
   const destination = root.locator(target).locator('visible=true').first();
-  await source.dragTo(destination, { timeout: timeoutMs ?? DRAG_TIMEOUT_MS });
+  await source.scrollIntoViewIfNeeded({ timeout }).catch(() => {});
+  // A headed launch has `viewport: null`, and so does every CDP page, so
+  // `viewportSize()` is null exactly where drags run most. The window's own
+  // inner size is in the same CSS pixels as `boundingBox` either way.
+  let viewport: { width: number; height: number } | null;
+  try {
+    viewport = await page.evaluate(() => ({
+      width: (globalThis as any).innerWidth as number,
+      height: (globalThis as any).innerHeight as number,
+    }));
+  } catch {
+    viewport = page.viewportSize();
+  }
+  const inView = (box: { x: number; y: number; width: number; height: number } | null): boolean =>
+    box !== null && (viewport === null
+      || (box.x + box.width / 2 >= 0 && box.y + box.height / 2 >= 0
+        && box.x + box.width / 2 <= viewport.width && box.y + box.height / 2 <= viewport.height));
+  let from = await source.boundingBox({ timeout }).catch(() => null);
+  let to = await destination.boundingBox({ timeout }).catch(() => null);
+  if (from !== null && to !== null && viewport !== null && (!inView(from) || !inView(to))) {
+    // Scrolling the source in leaves it at the viewport's edge, often with the
+    // target still below (SPEC-web-survey-fixes.md §2.19). `dragTo` would then
+    // scroll mid-drag, and Chromium abandons an HTML5 drag that scrolls: the
+    // drag "succeeds" and nothing is dropped. Centre the pair instead, when
+    // they fit on one screen together.
+    const scroll = scrollToFitBoth(from, to, viewport);
+    if (scroll !== null) {
+      // `instant` overrides a page's `scroll-behavior: smooth`, so the boxes
+      // read next are where the pointer will actually be.
+      try {
+        await page.evaluate(({ dx, dy }) => (globalThis as any).scrollBy({ left: dx, top: dy, behavior: 'instant' }), scroll);
+      } catch {
+        // The boxes are read again below; an unscrolled pair falls back to `dragTo`.
+      }
+      from = await source.boundingBox({ timeout }).catch(() => null);
+      to = await destination.boundingBox({ timeout }).catch(() => null);
+    }
+  }
+  if (from === null || to === null || !inView(from) || !inView(to)) {
+    await source.dragTo(destination, { timeout });
+    return;
+  }
+  // A click refuses to press through something laid over its target; a drag
+  // by mouse coordinates does not, so anything that slid over the source — an
+  // overlay, a banner, an ad frame — took the press and the drag "succeeded"
+  // with nothing moved (§2.22). Put the pointer on the source and ask whether
+  // the source felt it. If not, `dragTo`'s actionability check names what
+  // intercepts the pointer, so the failure says what is in the way.
+  const startX = from.x + from.width / 2;
+  const startY = from.y + from.height / 2;
+  const reached = await pointerReaches(page, source, startX, startY);
+  if (!reached) {
+    await source.dragTo(destination, { timeout });
+    return;
+  }
+  await page.mouse.down();
+  // Past the 1–5 px threshold libraries wait for before they call it a drag.
+  await page.mouse.move(startX + 6, startY + 6, { steps: 3 });
+  // The target can move once the drag starts (a sortable opens a gap), so its
+  // box is read again rather than trusted from before the press.
+  const landing = (await destination.boundingBox().catch(() => null)) ?? to;
+  // A sortable puts the item before or after the target by which half the
+  // pointer is in, so "below Item 3" lets go in the lower part, not on the
+  // midpoint (SPEC-web-survey-fixes.md §2.36).
+  const fx = action.position === 'left' ? 0.2 : action.position === 'right' ? 0.8 : 0.5;
+  const fy = action.position === 'above' ? 0.2 : action.position === 'below' ? 0.8 : 0.5;
+  await page.mouse.move(landing.x + landing.width * fx, landing.y + landing.height * fy, { steps: 15 });
+  await page.mouse.up();
+}
+
+type Box = { x: number; y: number; width: number; height: number };
+
+/**
+ * Move the pointer to (x, y) and say whether the element felt it: a
+ * `mousemove` there whose path includes the element. False means something
+ * else is on top at that point — a frame over it takes the event and the
+ * element's own window sees nothing. True when it cannot be told, so a probe
+ * that fails to install leaves the drag as it was.
+ */
+async function pointerReaches(page: Page, element: Locator, x: number, y: number): Promise<boolean> {
+  try {
+    await element.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any) => {
+        const w = globalThis as any;
+        if (w.__steptixPointerProbe) w.removeEventListener('mousemove', w.__steptixPointerProbe, true);
+        w.__steptixPointerOver = false;
+        w.__steptixPointerProbe = (e: any) => { w.__steptixPointerOver = e.composedPath().includes(el); };
+        w.addEventListener('mousemove', w.__steptixPointerProbe, true);
+      },
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    await page.mouse.move(x, y);
+    return true;
+  }
+  // Two moves, so the last one is a real change of position even when the
+  // pointer was already resting at (x, y).
+  await page.mouse.move(x - 1, y - 1);
+  await page.mouse.move(x, y);
+  try {
+    return await element.evaluate(
+      () => {
+        const w = globalThis as any;
+        w.removeEventListener('mousemove', w.__steptixPointerProbe, true);
+        delete w.__steptixPointerProbe;
+        return w.__steptixPointerOver === true;
+      },
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The scroll that centres two boxes in the viewport together, or null when
+ * their combined extent is wider or taller than the viewport, so no single
+ * scroll position shows both centres. Boxes are viewport-relative.
+ */
+export function scrollToFitBoth(
+  a: Box,
+  b: Box,
+  viewport: { width: number; height: number },
+): { dx: number; dy: number } | null {
+  const left = Math.min(a.x, b.x);
+  const top = Math.min(a.y, b.y);
+  const right = Math.max(a.x + a.width, b.x + b.width);
+  const bottom = Math.max(a.y + a.height, b.y + b.height);
+  if (right - left > viewport.width || bottom - top > viewport.height) return null;
+  const dx = Math.round((left + right) / 2 - viewport.width / 2);
+  const dy = Math.round((top + bottom) / 2 - viewport.height / 2);
+  return dx === 0 && dy === 0 ? null : { dx, dy };
 }
 
 /**
@@ -1637,6 +2175,64 @@ async function pollUntil(
   }
 }
 
+export interface ThresholdWait {
+  /** The current number, or null when the element or a number is not there. */
+  read: () => Promise<number | null>;
+  op: '>=' | '<=' | '>' | '<';
+  limit: number;
+  /** How long the value may stand still (or move away) before the wait fails. */
+  idleMs: number;
+  /** The ceiling however steadily it moves. */
+  maxMs: number;
+  what: string;
+  signal?: AbortSignal | undefined;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Wait for a moving number to pass a limit, for as long as it keeps moving
+ * towards it (SPEC-web-survey-fixes.md §2.21). The survey's progress bar
+ * reached 75% after 8, 18 and 22 seconds on three runs, so any fixed timeout
+ * either fails a slow run or makes a wrong selector wait for ages. A person
+ * keeps watching while the bar moves and gives up when it stops: each step
+ * towards the limit pushes the deadline out by `idleMs`, up to `maxMs`. A
+ * value that stands still, or moves the wrong way, fails after `idleMs`, as an
+ * ordinary wait would.
+ */
+export async function waitForThreshold(w: ThresholdWait): Promise<void> {
+  const now = w.now ?? Date.now;
+  const sleep = w.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const passes = (n: number): boolean =>
+    w.op === '>=' ? n >= w.limit : w.op === '<=' ? n <= w.limit : w.op === '>' ? n > w.limit : n < w.limit;
+  const towards = (from: number, to: number): boolean => (w.op === '>=' || w.op === '>' ? to > from : to < from);
+  const start = now();
+  const ceiling = start + w.maxMs;
+  let deadline = Math.min(start + w.idleMs, ceiling);
+  let best: number | null = null;
+  for (;;) {
+    if (w.signal?.aborted) return;
+    const n = await w.read();
+    if (n !== null) {
+      if (passes(n)) return;
+      if (best === null || towards(best, n)) {
+        if (best !== null) deadline = Math.min(now() + w.idleMs, ceiling);
+        best = n;
+      }
+    }
+    const left = deadline - now();
+    if (left <= 0) {
+      const seen = best === null ? 'no number was read' : `it got no further than ${best}`;
+      const err = new Error(
+        `Timeout exceeded waiting for ${w.what}: ${seen}, and it stopped moving towards ${w.limit} for ${w.idleMs}ms`,
+      );
+      err.name = 'TimeoutError';
+      throw err;
+    }
+    await sleep(Math.min(100, left));
+  }
+}
+
 // Exported for unit tests (issue 022) — verifies the clamped `timeout` is the
 // value actually forwarded into Playwright's wait calls. Not part of the public
 // API; `executeAction` is the entry point in normal use.
@@ -1696,6 +2292,15 @@ export async function executeWait(
     }
 
     case 'text':
+      // Inside a frame, wait in THAT frame (SPEC-web-survey-fixes.md §2.29):
+      // the page's own body never contains a frame's text, so a dialog in a
+      // demo iframe that already said "Complete!" waited out its timeout.
+      // getByText matches rendered text, the frame-scoped counterpart of the
+      // innerText check below.
+      if (root !== page) {
+        await root.getByText(condition).first().waitFor({ state: 'visible', timeout });
+        break;
+      }
       await page.waitForFunction(
         // Match VISIBLE text via innerText — NOT textContent. textContent
         // concatenates the source of every <script>/<style> and the text of
@@ -1748,9 +2353,43 @@ export async function executeWait(
       const selector = action.selector ?? condition;
       const expr = action.expected ?? condition;
       const negate = expr.startsWith('!');
-      const attr = negate ? expr.slice(1) : expr.split('=')[0]!;
-      const val = negate ? null : (expr.split('=').slice(1).join('=') || null);
+      // `aria-valuenow>=75`: a numeric comparison (SPEC-web-survey-fixes.md
+      // §2.13). A progress bar steps past 75 without ever sitting on it, so an
+      // exact `=75` waits out its whole timeout.
+      const compared = negate ? null : /^([^<>=]+?)\s*(>=|<=|>|<)\s*(-?\d+(?:\.\d+)?)\s*$/.exec(expr);
+      const attr = negate ? expr.slice(1) : compared ? compared[1]!.trim() : expr.split('=')[0]!;
+      const val = negate || compared ? null : (expr.split('=').slice(1).join('=') || null);
+      const comparison = compared ? { op: compared[2]!, limit: Number(compared[3]) } : null;
       const target = root.locator(sanitizeCssSelector(selector));
+
+      if (comparison !== null) {
+        await waitForThreshold({
+          read: async () => {
+            if ((await target.count()) === 0) return null;
+            try {
+              return await target.first().evaluate(
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                (el: any, attribute) => {
+                  const raw = el.getAttribute(attribute) ?? (attribute === 'value' ? el.value : null);
+                  const n = Number.parseFloat(String(raw ?? ''));
+                  return Number.isNaN(n) ? null : n;
+                },
+                attr,
+                { timeout: 1_000 },
+              );
+            } catch {
+              return null;
+            }
+          },
+          op: comparison.op as ThresholdWait['op'],
+          limit: comparison.limit,
+          idleMs: timeout,
+          maxMs: MAX_WAIT_TIMEOUT_MS,
+          what: `${selector} to have ${expr}`,
+          signal,
+        });
+        break;
+      }
 
       await pollUntil(
         async () => {
@@ -2054,9 +2693,59 @@ async function executeDismiss(root: Page | FrameLocator, action: AIAction): Prom
 }
 
 async function executeKeyboard(page: Page, action: AIAction): Promise<void> {
+  // `text` types into whatever has focus (§2.27): after a click on a canvas,
+  // an editor, or a field inside a closed shadow root.
+  if (action.text !== undefined && action.text !== '') {
+    await page.keyboard.type(action.text);
+    if (action.key === undefined) return;
+  }
   const key = action.key ?? action.value ?? '';
-  if (!key) throw new Error('keyboard action requires a key');
-  await page.keyboard.press(key);
+  if (!key) throw new Error('keyboard action requires a "key" to press or a "text" to type');
+  await page.keyboard.press(normaliseKeyName(key));
+}
+
+/** Key names a step or a model writes, folded, mapped to Playwright's (§2.6). */
+const KEY_NAMES: Readonly<Record<string, string>> = {
+  ctrl: 'Control', control: 'Control', ctl: 'Control',
+  cmd: 'Meta', command: 'Meta', meta: 'Meta', win: 'Meta', windows: 'Meta', super: 'Meta',
+  alt: 'Alt', option: 'Alt', opt: 'Alt',
+  shift: 'Shift',
+  esc: 'Escape', escape: 'Escape',
+  enter: 'Enter', return: 'Enter',
+  tab: 'Tab',
+  space: 'Space', spacebar: 'Space',
+  backspace: 'Backspace', bksp: 'Backspace',
+  del: 'Delete', delete: 'Delete',
+  ins: 'Insert', insert: 'Insert',
+  home: 'Home', end: 'End',
+  pgup: 'PageUp', pageup: 'PageUp', pgdn: 'PageDown', pgdown: 'PageDown', pagedown: 'PageDown',
+  up: 'ArrowUp', arrowup: 'ArrowUp', down: 'ArrowDown', arrowdown: 'ArrowDown',
+  left: 'ArrowLeft', arrowleft: 'ArrowLeft', right: 'ArrowRight', arrowright: 'ArrowRight',
+  capslock: 'CapsLock', contextmenu: 'ContextMenu',
+};
+
+/**
+ * Playwright's spelling of a key or chord: `END` → `End`, `CTRL+A` →
+ * `Control+A`, `esc` → `Escape`, `f5` → `F5`. Playwright's key names are
+ * case-sensitive and the survey's model wrote `END` and `CTRL`, which threw
+ * "Unknown key" twice. A part this table does not know is kept as written, so
+ * Playwright still reports a truly unknown key in its own words. A single
+ * character keeps its case: `a` and `A` are different keys to press.
+ */
+export function normaliseKeyName(key: string): string {
+  if (key.length === 1) return key;
+  // "+" separates a chord, except a "+" that IS the key ("Control++").
+  const parts = key.split(/\+(?!$)/);
+  return parts
+    .map((part) => {
+      if (part.length <= 1) return part;
+      const folded = part.trim().toLowerCase().replace(/[\s_-]/g, '');
+      const named = KEY_NAMES[folded];
+      if (named !== undefined) return named;
+      if (/^f([1-9]|1[0-9]|2[0-4])$/.test(folded)) return folded.toUpperCase();
+      return part.trim();
+    })
+    .join('+');
 }
 
 function requireSelector(action: AIAction): string {
@@ -2073,9 +2762,28 @@ function requireSelector(action: AIAction): string {
 async function executeCount(root: Page | FrameLocator, action: AIAction): Promise<string> {
   const selector = requireSelector(action);
   logger.subAction(`count ${selector} → ${action.as ?? '(unnamed)'}`);
-  const count = await root.locator(selector).count();
+  // VISIBLE matches, unless the step asked for hidden ones too
+  // (SPEC-web-survey-fixes.md §2.4). "How many books are shown" on a list a
+  // filter hides rather than removes counted 8 before and after filtering.
+  // Options are the exception: the options of a closed <select> are never
+  // "visible", and "how many options does the list have" means all of them.
+  const matches = root.locator(selector);
+  const total = await matches.count();
+  let count = total;
+  if (!action.includeHidden && total > 0) {
+    const visible = await matches.locator('visible=true').count();
+    const onlyOptions = visible === 0
+      && await matches.evaluateAll(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (els: any[]) => els.every((el) => el.tagName === 'OPTION' || el.tagName === 'OPTGROUP'),
+      ).catch(() => false);
+    if (!onlyOptions) count = visible;
+  }
   const result = String(count);
-  logger.info(`count: ${count} elements matching "${selector}" → variable "${action.as ?? '(unnamed)'}"`);
+  logger.info(
+    `count: ${count} ${action.includeHidden ? '' : 'visible '}elements matching "${selector}"`
+      + `${count !== total ? ` (${total} including hidden)` : ''} → variable "${action.as ?? '(unnamed)'}"`,
+  );
   return result;
 }
 
@@ -2118,6 +2826,18 @@ function extractValueInPage(el: any, attribute?: string): string {
     return typeof el.getAttribute === 'function' ? (el.getAttribute(attribute) ?? '') : '';
   }
   if (typeof el.value === 'string') return el.value;
+  // Text that is not text: a container's <script> source, <style> rules and
+  // <template> markup are all in textContent, and a read of a whole panel
+  // once captured a page's TOTP script along with its credentials
+  // (SPEC-web-survey-fixes.md §2.11). Read a copy without them. An element
+  // without any reads exactly as before.
+  const notText = 'script,style,template,noscript';
+  if (typeof el.querySelector === 'function' && el.querySelector(notText)) {
+    const copy = el.cloneNode(true);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    copy.querySelectorAll(notText).forEach((n: any) => n.remove());
+    return (copy.textContent ?? '').trim();
+  }
   return (el.textContent ?? '').trim();
 }
 
@@ -2279,6 +2999,14 @@ async function executeReadMultiple(
             : '';
         }
         if (typeof e.value === 'string') return e.value;
+        // Without script, style and template text, as in extractValueInPage.
+        const notText = 'script,style,template,noscript';
+        if (typeof e.querySelector === 'function' && e.querySelector(notText)) {
+          const copy = e.cloneNode(true);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          copy.querySelectorAll(notText).forEach((n: any) => n.remove());
+          return (copy.textContent ?? '').trim();
+        }
         return (e.textContent ?? '').trim();
       });
     },

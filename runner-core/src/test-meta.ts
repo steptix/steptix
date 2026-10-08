@@ -98,6 +98,42 @@ export function parseParameters(text: string): SectionMap {
 }
 
 /**
+ * The test's `## Context` section, as written and trimmed, or undefined when
+ * the file has none (docs/specs/SPEC-web-survey-fixes.md §2.46). Free text,
+ * not bullets: everything from the heading to the next level-1 or level-2
+ * heading, deeper headings included, the same span `src/parser/markdown.ts`
+ * keeps. A `#` line inside a fenced code block is code, not a heading.
+ */
+export function parseContext(text: string): string | undefined {
+  const lines = text.split(/\r?\n/);
+  const kept: string[] = [];
+  let inSection = false;
+  let fence: string | null = null;
+
+  for (const raw of lines) {
+    const fenceMatch = /^\s*(```|~~~)/.exec(raw);
+    if (fenceMatch) {
+      if (fence === null) fence = fenceMatch[1]!;
+      else if (fenceMatch[1] === fence) fence = null;
+      if (inSection) kept.push(raw);
+      continue;
+    }
+    if (fence === null) {
+      const heading = /^(#{1,6})\s+(\S.*?)\s*#*\s*$/.exec(raw);
+      if (heading && heading[1]!.length <= 2) {
+        if (inSection) break;
+        if (heading[1]!.length === 2 && heading[2]!.toLowerCase() === 'context') inSection = true;
+        continue;
+      }
+    }
+    if (inSection) kept.push(raw);
+  }
+
+  const context = kept.join('\n').trim();
+  return context === '' ? undefined : context;
+}
+
+/**
  * Resolve a value like `$GITHUB_USERNAME` or a literal string. Variables
  * not present in `env` are returned unchanged so the user gets a clear
  * downstream error rather than a silent empty string.

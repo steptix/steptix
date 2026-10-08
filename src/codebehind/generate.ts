@@ -67,8 +67,13 @@ import { CODE, COMMENT, TEMPLATE, matchForward, scan, type StringToken } from '.
  * line is part of phase 3, not a cleanup.
  *
  * TODO(phase 3): remove `'readTable'` when `tables.read` lands (§9.2).
+ *
+ * `dialog` is here because its answer lives in the runtime's dialog guard
+ * (src/browser/dialogs.ts), which a generated entry has no handle on. Code
+ * that subscribed to `page.on('dialog')` itself would race the guard for the
+ * same dialog, and the loser throws (docs/specs/SPEC-web-survey-fixes.md §2.1).
  */
-const FRAMEWORK_ACTIONS: ReadonlySet<AIAction['action']> = new Set(['prompt', 'readTable']);
+const FRAMEWORK_ACTIONS: ReadonlySet<AIAction['action']> = new Set(['prompt', 'readTable', 'dialog']);
 
 /**
  * Steps whose text opens with a bracket token.

@@ -50,6 +50,7 @@ Every other line is sent to the executing model together with:
 - the current URL, the viewport size and device class, the open tabs and
   browsers, and the outcome of earlier steps;
 - every `context/**/*.md` file in the project, verbatim;
+- the test's own `## Context` section, verbatim, after the project's files;
 - a screenshot, only when `ai.sendScreenshots` is on in `steptix.config.json`
   (it is off by default, so assume the model works from the DOM).
 
@@ -104,6 +105,9 @@ timeout: 120s
 Anything between the title and the first `##` heading is description. The
 parser ignores it, so explain intent here rather than inside a step.
 
+## Context
+The account menu is the avatar in the top right corner, `#user-menu`.
+
 ## Config
 - baseUrl: https://app.example.test
 - viewport: desktop
@@ -129,6 +133,7 @@ parser ignores it, so explain intent here rather than inside a step.
 | `# Title` | The test name. One H1. |
 | `## Config` | Per-test settings, as `- key: value` bullets. |
 | `## Parameters` | Named inputs, as `- name: value` bullets, used as `{{name}}`. |
+| `## Context` | Free text the AI is given with every step of this test. See below. |
 | `## Steps` | The instructions. The heading must be exactly this; `## Steps (happy path)` yields a test with no steps. |
 | `## Hooks` | Setup and teardown lines (CLI runner only, see §8). |
 | `## Outputs` | Skill files only: the variables a skill hands back. |
@@ -136,6 +141,45 @@ parser ignores it, so explain intent here rather than inside a step.
 Any other `##` heading, and everything under it, is ignored. That makes extra
 prose sections safe and makes a misspelled `## Step` heading a silent failure.
 The order of `## Config` and `## Parameters` does not matter.
+
+### `## Context`
+
+`## Context` is what the AI should know for the whole test: how the app
+behaves, what may appear on the page, and where things are. It is sent,
+word for word, with every step, after the project's `context/**/*.md` files,
+so put a note that applies to every test of a project in a context file and a
+note about this test here. Unlike the description under the title, the AI
+sees it.
+
+Write anything the steps would otherwise have to repeat, including selectors
+and frame ids. The framework holds no knowledge of any site, so the test file
+is where that knowledge goes:
+
+```markdown
+# Pay for the basket
+
+## Context
+- The page shows ads, and sometimes a full-screen one. Close any ad or
+  overlay that covers what you need (its ✕ or Close button), or scroll past
+  it, then carry on. An ad is not a failure.
+- The payment form is inside the iframe `#card-frame`. The card number field
+  is `[data-test=card-number]`.
+- Saving shows a toast that disappears after three seconds; a check about it
+  should read it straight away.
+
+## Config
+- baseUrl: https://shop.example.test
+
+## Steps
+1. Navigate to /basket
+2. Click Checkout
+3. Type "4242 4242 4242 4242" into the card number field
+4. Click Pay and verify the page says "Payment received"
+```
+
+Everything from the heading to the next `#` or `##` heading is kept,
+including lists, code and `###` subheadings. `{{placeholders}}` in it are
+not substituted.
 
 ### Step lines
 
@@ -180,6 +224,71 @@ YAML number is dropped without a warning.
 
 Unrecognised keys are stored and never read, with no warning. A `## Config`
 key is not a test variable; declare inputs under `## Parameters`.
+
+### Ads and other third-party content
+
+Ads, cookie banners and chat widgets can cover what a step needs to click.
+There are two ways to deal with them, and they suit different projects.
+
+**Tell the AI how to handle them, in `## Context`.** The page loads as a real
+visitor sees it, ads included, and the AI closes or scrolls past what gets in
+the way. Use this when the ads are part of what you are testing, or when you
+do not know in advance where they come from:
+
+```markdown
+# Search the catalogue
+
+## Context
+- The page shows ads, and sometimes a full-screen one when a page opens.
+  Close it with its Close or ✕ button before doing anything else. If two are
+  stacked, close the top one first.
+- A cookie banner may cover the bottom of the page. Click "Accept" on it.
+
+## Config
+- baseUrl: https://catalogue.example.test
+
+## Steps
+1. Navigate to /search
+2. Type "lamp" into the search field and press Enter
+3. Verify at least one result mentions "lamp"
+```
+
+**Stop them loading, with `browser.blockAds`.** List the domains in the
+project's `steptix.config.json`. The browser cannot reach any of them, or any
+subdomain of them: requests fail as if the domain did not exist, so their ads
+never appear. Every test in the project gets it, at no cost per step:
+
+```json
+{
+  "browser": {
+    "blockAds": [
+      "doubleclick.net",
+      "googlesyndication.com",
+      "adservice.google.com"
+    ]
+  }
+}
+```
+
+- **Steptix has no list of its own.** It blocks exactly the domains you name,
+  and nothing when the key is absent or `[]`.
+- **Write bare host names.** `"doubleclick.net"` blocks `doubleclick.net`
+  and `securepubads.g.doubleclick.net`, but not `notdoubleclick.net`. Do not
+  write `https://`, a path or a `*`: the config refuses to load and names the
+  entry.
+- **Finding the domains.** Open the page in a browser, look at the Network
+  tab of the developer tools, and note the domains the ads are loaded from.
+  An ad's iframe `src` shows it too.
+- **It is not only for ads.** Any third-party content a test does not need
+  can be blocked the same way, such as a chat widget's domain.
+- **When not to use it.** If the app under test integrates with one of those
+  services (it shows its own ads, or reports purchases to an ad network),
+  blocking it changes what the app does. Leave the domain off the list.
+- **Not for a browser you attach to.** A browser reached through `cdp` is
+  your own, so nothing is blocked there.
+
+Both can be used together: block the ad networks you know about, and keep a
+line in `## Context` for anything that still gets through.
 
 ## 3. Step vocabulary
 

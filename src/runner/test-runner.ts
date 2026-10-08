@@ -69,6 +69,7 @@ import {
 import { resolveHooks, type ResolvedHooks } from './hooks.js';
 import { runInteractiveRepl } from './interactive-repl.js';
 import { loadContextFiles } from '../context/loader.js';
+import { withTestContext } from '../context/test-context.js';
 import { controlLineDefines } from '../parser/control-line.js';
 import {
   bindVariable,
@@ -118,6 +119,7 @@ import { lastRunStaleMemberRow, writeLastRun, type LastRunStep } from '../codebe
 import { writeRecording } from '../codebehind/recording.js';
 import { envDataSecretValues, interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { captureScreenshot } from '../browser/screenshot.js';
+import { gotoWithDiagnosis } from '../browser/navigate-diagnosis.js';
 import {
   maskRecordSecrets,
   redact,
@@ -391,10 +393,12 @@ export interface RunTestExtras {
 export async function runTest(
   instance: TestInstance,
   config: Config,
-  contextContent: string,
+  projectContext: string,
   extras: RunTestExtras = {},
 ): Promise<TestReport> {
   const { test, resolvedParameters, dataRowIndex } = instance;
+  // The project's context files, then this test's own `## Context` (§2.46).
+  const contextContent = withTestContext(projectContext, test.context);
   const startTime = Date.now();
 
   logger.testStart(
@@ -672,7 +676,7 @@ export async function runTest(
     try {
       if (baseUrl) {
         logger.info(`Navigating to base URL: ${baseUrl}`);
-        await launched.page.goto(baseUrl, {
+        await gotoWithDiagnosis(launched.page, baseUrl, {
           waitUntil: 'domcontentloaded',
           timeout: 30_000,
         });

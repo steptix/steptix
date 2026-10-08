@@ -496,6 +496,7 @@ function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
     sections: sections.sectionDefs,
     rawSteps: sections.rawSteps,
     ...(sections.dataRows && { dataRows: sections.dataRows }),
+    ...(sections.context !== undefined && { context: sections.context }),
     hooks: sections.hooks,
     hookToolCalls: {
       before: sections.hooks.before.map(() => null),
@@ -638,6 +639,8 @@ interface ParsedSections {
   /** Rows from a table under `## Steps` — absent, never empty, when the file
    *  has none. See `ParsedTest.dataRows`. */
   dataRows?: Array<Record<string, string>>;
+  /** `## Context`, verbatim and trimmed. Absent when the file has none. */
+  context?: string;
 }
 
 function parseSections(rawContent: string, filePath: string): {
@@ -669,7 +672,11 @@ function parseSections(rawContent: string, filePath: string): {
     after: [],
   };
 
-  let currentSection: 'config' | 'parameters' | 'outputs' | 'steps' | 'hooks' | null = null;
+  let currentSection: 'config' | 'parameters' | 'outputs' | 'steps' | 'hooks' | 'context' | null = null;
+  /** `## Context` as written: whatever the author tells the AI about this
+   *  test (SPEC-web-survey-fixes.md §2.46). Every token is kept verbatim,
+   *  deeper headings included, until the next `##`. */
+  const contextParts: string[] = [];
   /**
    * Inside a depth->=4 heading's ignored region within `## Steps`
    * (contract §5 rule 4a). The raw line scan drops the same items, and the
@@ -683,6 +690,10 @@ function parseSections(rawContent: string, filePath: string): {
       const headingToken = token as Tokens.Heading;
       const text = headingToken.text.trim();
       stepsIgnored = headingToken.depth >= 4 && text !== '';
+      if (currentSection === 'context' && headingToken.depth >= 3) {
+        contextParts.push(token.raw);
+        continue;
+      }
 
       if (headingToken.depth === 1) {
         title = text;
@@ -699,10 +710,17 @@ function parseSections(rawContent: string, filePath: string): {
           currentSection = 'steps';
         } else if (lower === 'hooks') {
           currentSection = 'hooks';
+        } else if (lower === 'context') {
+          currentSection = 'context';
         } else {
           currentSection = null;
         }
       }
+      continue;
+    }
+
+    if (currentSection === 'context') {
+      contextParts.push(token.raw);
       continue;
     }
 
@@ -1009,6 +1027,7 @@ function parseSections(rawContent: string, filePath: string): {
       sectionDefs: sectionMap,
       hooks,
       ...(scan.dataTable && { dataRows: scan.dataTable.rows }),
+      ...(contextParts.join('').trim() !== '' && { context: contextParts.join('').trim() }),
     },
     frontmatter,
     title,

@@ -197,6 +197,8 @@ export interface McpStepRequest {
   };
   parameters?: Record<string, string>;
   dataSources?: Record<string, string>;
+  /** The test's own `## Context` (SPEC-web-survey-fixes.md §2.46). */
+  testContext?: string;
   skillsDir?: string;
   toolsDir?: string;
   testFilePath?: string;

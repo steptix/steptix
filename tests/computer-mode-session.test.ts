@@ -204,6 +204,7 @@ vi.mock('../src/browser/screenshot.js', () => ({
 }));
 
 import { SessionManager, type RunEvent } from '../src/server/session-manager.js';
+import { loadContextFiles } from '../src/context/loader.js';
 import { FakeDesktopAdapter } from '../src/desktop/fake-adapter.js';
 import {
   acquireComputerLock,
@@ -1194,6 +1195,88 @@ describe('browser.launchArgs reaches the launch from the project (§5.10)', () =
 
     expect(launchBrowserMock).toHaveBeenCalledTimes(1);
     expect(launchConfig().launchArgs).toEqual(['--disable-print-preview']);
+  });
+});
+
+// SPEC-web-survey-fixes.md §2.23: the survey's project set `blockAds`, and the
+// server path launched with the server's `browser` section, so no run of it
+// ever blocked an ad.
+describe('browser.blockAds reaches the launch from the project', () => {
+  it('the project setting is passed to launchBrowser', async () => {
+    const manager = makeManager();
+    const testFilePath = writeProject({ browser: { blockAds: ['ads.example'] } });
+
+    await manager.executeSteps('s-ads', { steps: ['Click Print'], testFilePath });
+
+    expect(launchConfig().blockAds).toEqual(['ads.example']);
+  });
+
+  it('a project that says nothing keeps the server setting', async () => {
+    const manager = makeManager({
+      ...baseConfig,
+      browser: { ...baseConfig.browser, blockAds: ['server.example'] },
+    } as Config);
+    const testFilePath = writeProject({ desktop: { enabled: true } });
+
+    await manager.executeSteps('s-ads-server', { steps: ['Click Print'], testFilePath });
+
+    expect(launchConfig().blockAds).toEqual(['server.example']);
+  });
+
+  it('a project can block nothing where the server blocks some', async () => {
+    const manager = makeManager({
+      ...baseConfig,
+      browser: { ...baseConfig.browser, blockAds: ['server.example'] },
+    } as Config);
+    const testFilePath = writeProject({ browser: { blockAds: [] } });
+
+    await manager.executeSteps('s-ads-off', { steps: ['Click Print'], testFilePath });
+
+    expect(launchConfig().blockAds).toEqual([]);
+  });
+});
+
+// SPEC-web-survey-fixes.md §2.45: context was loaded once per session from
+// the SERVER's `tests.contextDir`, so a project's own context files never
+// reached the model on this path.
+describe("the project's context files reach the model", () => {
+  // The loader is mocked for the whole file; here it answers with the folder
+  // it was asked for, so the test sees which folder the server chose and that
+  // the answer is what the step loop is handed.
+  beforeEach(() => {
+    vi.mocked(loadContextFiles).mockImplementation(async (dir: string) => ({
+      files: [],
+      combined: `context from ${path.resolve(dir)}`,
+    }));
+  });
+  afterEach(() => {
+    vi.mocked(loadContextFiles).mockImplementation(async () => ({ files: [], combined: '' }));
+  });
+
+  function contextOf(call = 0): string {
+    return (executeStepMock.mock.calls[call] as unknown as any[])[3].contextContent;
+  }
+
+  it("hands every step the project's context folder, not the server's", async () => {
+    const manager = makeManager();
+    const testFilePath = writeProject({ tests: { contextDir: './notes' } });
+    const root = path.dirname(path.dirname(testFilePath));
+
+    await manager.executeSteps('s-context', { steps: ['Click the heading'], testFilePath });
+
+    expect(contextOf()).toBe(`context from ${path.resolve(root, 'notes')}`);
+  });
+
+  it("a session reused for another project gets that project's context", async () => {
+    const manager = makeManager();
+    const first = writeProject({ tests: { contextDir: './notes' } });
+    const second = writeProject({ tests: { contextDir: './notes' } });
+
+    await manager.executeSteps('s-context-2', { steps: ['Click the heading'], testFilePath: first });
+    await manager.executeSteps('s-context-2', { steps: ['Click the heading'], testFilePath: second });
+
+    expect(contextOf(0)).toBe(`context from ${path.resolve(path.dirname(path.dirname(first)), 'notes')}`);
+    expect(contextOf(1)).toBe(`context from ${path.resolve(path.dirname(path.dirname(second)), 'notes')}`);
   });
 });
 

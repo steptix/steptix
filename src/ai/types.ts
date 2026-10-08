@@ -18,6 +18,11 @@ export type ActionType =
   // Drag `selector` onto `target` (both CSS selectors, same frame). Record
   // Steps records drags, so the runtime has to perform them.
   | 'drag'
+  // Decide how the NEXT browser dialog (alert, confirm, prompt) is answered
+  // (docs/specs/SPEC-web-survey-fixes.md §2.1). Nothing happens on the page:
+  // a dialog blocks the page until it is answered, so the answer has to be
+  // set before the click that opens it, in the same turn.
+  | 'dialog'
   | 'upload'
   | 'hover'
   | 'wait'
@@ -137,6 +142,32 @@ export interface AIAction {
    * in the same frame as `selector`, with the same visible-first rule.
    */
   target?: string;
+  /**
+   * `drag` only: which side of the target to let go on, for a list that
+   * decides before/after by where the pointer is (SPEC-web-survey-fixes.md
+   * §2.36). Omitted means the target's centre.
+   */
+  position?: 'above' | 'below' | 'left' | 'right';
+  /** `click` only: 2 for a double-click. Omitted means one click. */
+  clickCount?: 1 | 2;
+  /** `click` only: the mouse button. Omitted means left. */
+  button?: 'left' | 'right' | 'middle';
+  /**
+   * `click` only: milliseconds to hold the button down before releasing, for
+   * a press-and-hold (SPEC-web-survey-fixes.md §2.24). Omitted means an
+   * ordinary click.
+   */
+  holdMs?: number;
+  /**
+   * `select` only, on a `<select multiple>`: every option to select, each
+   * matched by value and then by label. A single-select ignores it.
+   */
+  values?: string[];
+  /** `count` only: count hidden matches too. Omitted counts visible matches. */
+  includeHidden?: boolean;
+  /** `dialog`: the text a prompt dialog is answered with. `keyboard`: text typed
+   *  into whatever has focus (SPEC-web-survey-fixes.md §2.27). */
+  text?: string;
   /** Text to type, option value to select, or condition to wait for */
   value?: string;
   /** URL to navigate to */

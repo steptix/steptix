@@ -574,6 +574,31 @@ describe('API Server', () => {
     });
   });
 
+  // SPEC-web-survey-fixes.md §2.46: the client sends the test's ## Context,
+  // and every step of the batch gets it.
+  describe("the test's ## Context", () => {
+    it('reaches every step of the batch', async () => {
+      const res = await api('POST', '/sessions/ctx-ok/steps', {
+        steps: ['Click Buy', 'Click Pay'],
+        testContext: 'The payment form is in the iframe `#card-frame`.',
+      });
+      expect(res.status).toBe(200);
+      const calls = vi.mocked(executeStepMock).mock.calls.slice(-2);
+      expect(calls).toHaveLength(2);
+      for (const call of calls) {
+        expect((call[3] as { contextContent: string }).contextContent).toContain(
+          'The payment form is in the iframe `#card-frame`.',
+        );
+      }
+    });
+
+    it('is refused when it is not text', async () => {
+      const res = await api('POST', '/sessions/ctx-bad/steps', { steps: ['Click Buy'], testContext: ['not', 'text'] });
+      expect(res.status).toBe(400);
+      expect(String(res.body.error)).toMatch(/testContext/);
+    });
+  });
+
   describe('GET /sessions/:id', () => {
     it('returns session state for an active session', async () => {
       // Create a session first

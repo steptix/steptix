@@ -696,6 +696,7 @@ const ROUTES: Record<ActionType, { route: Route; fields: Record<string, unknown>
   forward: { route: 'executeAction', fields: {} },
   reload: { route: 'executeAction', fields: {} },
   drag: { route: 'executeAction', fields: { selector: '#card', target: '#bin' } },
+  dialog: { route: 'executeAction', fields: { value: 'accept' } },
   hover: { route: 'executeAction', fields: { selector: '#agree' } },
   wait: { route: 'executeAction', fields: { waitType: 'selector', condition: '#agree' } },
   scroll: { route: 'executeAction', fields: { to: 'top' } },

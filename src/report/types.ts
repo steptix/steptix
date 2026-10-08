@@ -494,11 +494,12 @@ export interface StepResult {
    * result holds: the assertion code generations of an attempt that failed
    * (only the attempt that decided the step keeps its {@link assertions}), and
    * those of an assertion whose code never ran to a verdict because generating
-   * or running it threw. Not rendered — the report shows the turns and the
-   * deciding attempt's assertions — but counted wherever a step's calls are
-   * (`getAllAiInteractions`: the report's model summary, the scoreboard's
-   * `calls` and tokens, docs/specs/SPEC-scoreboard.md §7.1). Absent when there
-   * were none.
+   * or running it threw. Rendered under the step as "Model replies this step
+   * did not use", each with what the model said, so an unusable reply can be
+   * read rather than guessed at (docs/specs/SPEC-web-survey-fixes.md §2.49),
+   * and counted wherever a step's calls are (`getAllAiInteractions`: the
+   * report's model summary, the scoreboard's `calls` and tokens,
+   * docs/specs/SPEC-scoreboard.md §7.1). Absent when there were none.
    */
   discardedAiInteractions?: AiInteraction[];
   /**

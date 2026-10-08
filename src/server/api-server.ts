@@ -711,6 +711,16 @@ export function createApiServer(
         }
         if (Object.keys(sources).length > 0) request.dataSources = sources;
       }
+      // The test's own `## Context` (SPEC-web-survey-fixes.md §2.46). Copied
+      // here explicitly: a field the type has and this route does not copy is
+      // dropped at runtime without a word.
+      if (body.testContext !== undefined) {
+        if (typeof body.testContext !== 'string') {
+          res.status(400).json({ error: '"testContext" must be a string: the text of the test\'s ## Context section' });
+          return;
+        }
+        if (body.testContext.trim() !== '') request.testContext = body.testContext;
+      }
       if (body.breakpoints !== undefined && Array.isArray(body.breakpoints)) {
         request.breakpoints = body.breakpoints as number[];
       }
