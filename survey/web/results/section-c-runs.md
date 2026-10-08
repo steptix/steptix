@@ -197,7 +197,7 @@ which are about compiled code-behind, had nothing to act on in either run.
 
 ### Findings: what the framework does not support, or gets wrong
 
-Fixed during the survey, with a spec section each: §2.1–§2.42. Still open:
+Fixed during the survey, with a spec section each: §2.1–§2.50. Raised as issues: steptix/steptix#20, #21, #24, #25 and #26. Still open:
 
 1. **Acting faster than a model turn.** "Click Stop as soon as the bar reaches
    75%" only works because one turn can now chain a threshold `wait` and a

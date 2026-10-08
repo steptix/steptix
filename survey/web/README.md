@@ -24,6 +24,8 @@ Or open the folder in VS Code and run a file from Steptix.
   there to find out, so a failure can be filed under the rubric's categories.
 - `tests/section-c/attachments/`: files the upload steps use.
 - `context/public-sites.md`: what the model is told about every site.
+- `results/section-c-runs.md`: every section C run side by side, with what
+  failed and why. Reports themselves go to `reports/`, which is gitignored.
 
 ## Recording a result
 
