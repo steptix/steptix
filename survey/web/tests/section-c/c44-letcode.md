@@ -20,9 +20,11 @@ closed shadow roots.
   person would, then carry on with the step.
 - On the workspace page an "Unlock more content" wall can cover everything,
   with a single "View a short ad" button and no close button. Click
-  "View a short ad". The ad that opens has a countdown, and its CLOSE button
-  sits under the ad until the countdown ends: wait about 30 seconds after
-  starting it, then click CLOSE. After that the site stays open for the day.
+  "View a short ad", then close the ad that opens. After that the site stays
+  open for the day.
+- Several ads can be stacked on top of each other. A full-screen ad with a
+  "Close" button at its top right sits above everything else, including that
+  wall: close it first.
 - Other ads have a Close or ✕ button. A banner anchored to the bottom of the
   window has a ˅ button that collapses it; use it when the banner covers what
   you need.
