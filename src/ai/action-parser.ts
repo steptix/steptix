@@ -191,6 +191,11 @@ export const ACTION_TYPE_ALIASES: Readonly<Record<string, ActionType>> = {
   pressAndHold: 'click',
   clickAndHold: 'click',
   holdClick: 'click',
+  // §2.41: clearing a field is typing nothing into it; ALIAS_DEFAULTS sets the empty value.
+  clear: 'type',
+  clearField: 'type',
+  clearInput: 'type',
+  clearText: 'type',
   // §2.1. The six spellings the survey's runs sent for "answer the dialog".
   acceptDialog: 'dialog',
   acceptAlert: 'dialog',
@@ -286,6 +291,10 @@ const ALIAS_DEFAULTS: ReadonlyMap<string, Partial<AIAction>> = new Map<string, P
   ['pressandhold', { holdMs: DEFAULT_HOLD_MS }],
   ['clickandhold', { holdMs: DEFAULT_HOLD_MS }],
   ['holdclick', { holdMs: DEFAULT_HOLD_MS }],
+  ['clear', { value: '' }],
+  ['clearfield', { value: '' }],
+  ['clearinput', { value: '' }],
+  ['cleartext', { value: '' }],
   ['acceptdialog', { value: 'accept' }],
   ['acceptalert', { value: 'accept' }],
   ['acceptconfirm', { value: 'accept' }],

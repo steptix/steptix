@@ -1009,3 +1009,59 @@ describe('§2.39 a step that leaves the choice open is not a question', () => {
     expect(text).toMatch(/tick two skills/);
   });
 });
+
+describe('§2.40 a value from an unset environment variable is not typed', () => {
+  const values = { bookstore_user: '$DEMOQA_USERNAME', price: '$5', site: 'demoqa' };
+  const ctx = { known: new Set(Object.keys(values)), values };
+
+  it('refuses a turn that names a placeholder still holding $NAME', async () => {
+    const { checkTurnReferences } = await import('../src/runner/placeholder-substitution.js');
+    const refusal = checkTurnReferences(
+      [{ action: 'type', selector: '#userName', value: '{{bookstore_user}}', description: 'Enter the user name' }],
+      ctx,
+    );
+    expect(refusal).toMatch(/still holds "\$DEMOQA_USERNAME"/);
+    expect(refusal).toMatch(/Set DEMOQA_USERNAME in the project's \.env/);
+  });
+
+  it('refuses the literal too, and a check that expects it', async () => {
+    const { checkTurnReferences } = await import('../src/runner/placeholder-substitution.js');
+    expect(checkTurnReferences(
+      [{ action: 'type', selector: '#userName', value: '$DEMOQA_USERNAME', description: 'Enter the user name' }],
+      ctx,
+    )).toMatch(/`\{\{bookstore_user\}\}`/);
+    expect(checkTurnReferences(
+      [{ action: 'assert', against: 'dom', condition: 'user name label', expected: '{{bookstore_user}}', description: 'User name shown' }],
+      ctx,
+    )).toMatch(/DEMOQA_USERNAME is not set/);
+  });
+
+  it('leaves resolved values and $-amounts alone', async () => {
+    const { checkTurnReferences } = await import('../src/runner/placeholder-substitution.js');
+    expect(checkTurnReferences(
+      [
+        { action: 'type', selector: '#q', value: '{{site}}', description: 'Search' },
+        { action: 'type', selector: '#amount', value: '{{price}}', description: 'Enter the price' },
+      ],
+      ctx,
+    )).toBeUndefined();
+  });
+});
+
+describe('§2.41 clearing a field', () => {
+  it('maps clear and its spellings onto type with an empty value', () => {
+    expect(one({ action: 'clear', selector: '#name' })).toMatchObject({ action: 'type', value: '' });
+    expect(one({ action: 'clearField', selector: '#name' })).toMatchObject({ action: 'type', value: '' });
+    expect(one({ action: 'clear_input', selector: '#name' })).toMatchObject({ action: 'type', value: '' });
+  });
+
+  it('empties a field that holds text', async () => {
+    const page = await pageWith('<input id="name" value="Koushik Chatterjee">');
+    try {
+      await executeAction(page, one({ action: 'clear', selector: '#name' }));
+      expect(await page.inputValue('#name')).toBe('');
+    } finally {
+      await page.close();
+    }
+  });
+});

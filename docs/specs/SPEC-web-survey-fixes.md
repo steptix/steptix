@@ -53,6 +53,8 @@ in the test files, not here.
 | 2.37 | A navigation timeout does not say whether the site is up | 39 | "page.goto: Timeout 30000ms exceeded" and nothing else. the-internet.herokuapp.com answered curl and Firefox in under a second, while Chromium and Edge hung on it every time, and the bare timeout read as "the site is down" | On a navigation timeout, ask the URL once from outside the browser and add which it is: the site answers (name the status and time, and the `--disable-http2` launch arg that fixed this site) or it does not answer at all |
 | 2.38 | "The page says X" is checked by equality on the wrong element | 45 | The check generated for "Verify the page says the confirm returned true" read the value span (`true`) and compared it for equality with the whole sentence, so it failed; §2.25's hint rescued it on the second attempt in every run | The assertion prompt says "says/shows/displays/contains" passes by containment, exact equality only for "equals/exactly/only", and that the element read must hold all of the expected text, with an innermost-element example |
 | 2.39 | A step that leaves the choice open made the model ask | 56 | "Pick an experience level and tick two skills" returned a `prompt` action asking which level and which skills, and the step failed waiting for an answer | Rule 7 says a step that leaves a choice open is not unclear: choose any valid option and name it in the description; ask only when the step names something the page does not have |
+| 2.40 | A value from an unset environment variable is typed into the page | 41 | `bookstore_user: $DEMOQA_USERNAME` with no such variable stays the literal `$DEMOQA_USERNAME`, with a warning in the run result. The model typed it into the Book Store login, and in one run a check then "found" `$DEMOQA_USERNAME` on the page and passed the section: a false pass | A turn that names a placeholder still holding a bare `$NAME`, or types that literal, is refused before anything runs, naming the variable to set |
+| 2.41 | No way to clear a field | 44 | The model sent `clear`, which is not an action, and the turn was refused; the retry selected the text and pressed Backspace | `clear`, `clearField`, `clearInput` and `clearText` map to `type` with an empty value |
 
 ## 2. Fixes
 
@@ -500,6 +502,12 @@ with no Steptix settings timed out at 30 s, and so did Edge and
 `curl --http2` in under 1 s. So it is Chromium's HTTP/2 to that host from
 this network, not the site and not ad blocking.
 
+HTTP/1.1 is not the whole story. In the run after the switch, one navigation
+to `/shadowdom` still got no page in 30 s; the message said the site answered
+outside the browser in 712 ms, and the retry loaded it. The site is
+intermittently slow for Chromium either way, and the message now says so
+instead of a bare timeout.
+
 ### 2.38 "Says" checks read by containment
 
 **Fix.** The assertion-code prompt gains one requirement: text the page
@@ -518,6 +526,29 @@ cannot determine what to do", and adds that a step leaving a choice open
 ("pick an experience level", "tick two skills", "choose any product") is not
 unclear: choose any valid option and name it in `description`. Ask only when
 the step names something the page does not have, or contradicts the page.
+
+### 2.40 Refuse a value nobody resolved
+
+**Fix.** `checkTurnReferences` gets the run's parameter values as well as
+their names. A `{{name}}` in any field of any action whose value is still a
+bare `$NAME` (a leading `$` and an identifier) refuses the turn before any
+action runs: `… uses {{bookstore_user}} in "value", which still holds
+"$DEMOQA_USERNAME": the environment variable DEMOQA_USERNAME is not set …`.
+So does typing that literal into a typed field (`value`, `url`, `key`, a
+file path), which is the model copying the value instead of naming the
+placeholder. `$5` and other values that are not an identifier pass.
+
+A leading `$` in `## Parameters` or a data row is always read as an
+environment variable and left literal only when it is unset, so an author
+cannot have meant `$DEMOQA_USERNAME` as text. The check lives in the
+server's step loop rather than the client that assembles the run, because the
+MCP client can be an older build than the server.
+
+### 2.41 Clearing is typing nothing
+
+**Fix.** `clear`, `clearField`, `clearInput` and `clearText` are aliases
+of `type`, and `ALIAS_DEFAULTS` gives them `value: ""`, so the field is
+cleared and filled with nothing — what "Clear the text box" asks for.
 
 ## 3. Failures caused by the test files or the sites
 

@@ -587,6 +587,27 @@ export interface TurnReferenceContext {
    *  `${…}` naming something in `known` is refused either way: that one is a
    *  `{{…}}` spelled with the wrong braces. */
   envData?: EnvDataContext | undefined;
+  /** What each name in `known` holds, so a value nobody resolved — a
+   *  parameter still reading `$DEMOQA_USERNAME` because that variable is not
+   *  set — is refused instead of typed into the page
+   *  (SPEC-web-survey-fixes.md §2.40). */
+  values?: Readonly<Record<string, string>> | undefined;
+}
+
+/**
+ * A value that is still a `$NAME` reference. `## Parameters` and data rows read
+ * a leading `$` as an environment variable and leave it literal only when the
+ * variable is unset, so an author cannot have meant it as text.
+ */
+const UNRESOLVED_ENV_VALUE = /^\$[A-Za-z_][A-Za-z0-9_]*$/;
+
+function unresolvedEnvRefusal(where: string, field: string, name: string, value: string): string {
+  return (
+    `${where}uses \`{{${name}}}\` in "${field}", which still holds "${value}": the environment ` +
+    `variable ${value.slice(1)} is not set, so nothing resolved it. Set ${value.slice(1)} in the ` +
+    `project's .env (or the environment) and run again — typing "${value}" into the page would ` +
+    `only fail somewhere further on.`
+  );
 }
 
 /**
@@ -630,6 +651,15 @@ function checkOneString(
     );
   }
 
+  if (TYPED_FIELDS.has(field) && ctx.values) {
+    // The model copied the literal instead of naming the placeholder.
+    const typed = text.trim();
+    const owner = UNRESOLVED_ENV_VALUE.test(typed)
+      ? Object.keys(ctx.values).find((k) => ctx.values![k] === typed)
+      : undefined;
+    if (owner !== undefined) return unresolvedEnvRefusal(where, field, owner, typed);
+  }
+
   const { placeholders, envRefs } = collectReferences(text);
   for (const { name, raw } of placeholders) {
     const canonical = `{{${name}}}`;
@@ -639,7 +669,13 @@ function checkOneString(
       const key = ctx.known.has(name) ? name : (nearMatch(name, ctx.known) ?? name);
       return `${where}wrote \`${raw}\` in "${field}". ${NO_SPACES_SENTENCE(key)}`;
     }
-    if (ctx.known.has(name)) continue;
+    if (ctx.known.has(name)) {
+      const value = ctx.values?.[name];
+      if (value !== undefined && UNRESOLVED_ENV_VALUE.test(value)) {
+        return unresolvedEnvRefusal(where, field, name, value);
+      }
+      continue;
+    }
     const near = nearMatch(name, ctx.known);
     if (near !== undefined) {
       return (

@@ -3018,6 +3018,7 @@ async function executeStepAttempt(
       ? undefined
       : checkTurnReferences(aiResponse.actions, {
           known: new Set(Object.keys(opts.resolvedParameters ?? {})),
+          values: opts.resolvedParameters,
           definedLater,
           ...(opts.envData !== undefined && { envData: opts.envData }),
         });
