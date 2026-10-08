@@ -6,6 +6,7 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { BrowserConfig } from '../config/types.js';
 import { formatViewport } from '../config/viewport.js';
 import { logger } from '../utils/logger.js';
+import { loopbackFetch } from './loopback-fetch.js';
 
 /**
  * How much bigger the headed OS window is than the page inside it, when
@@ -1279,10 +1280,14 @@ async function formatTabList(pages: ReadonlyArray<Page>): Promise<string> {
  * Verify Chrome is reachable on the given CDP port before attempting to
  * connect. Throws an actionable error telling the user how to start Chrome
  * if it isn't. The optional `fetchFn` parameter exists for unit testing.
+ *
+ * `loopbackFetch`, not the global `fetch`: the port may be one the OS picked
+ * for a browser `start_cdp_browser` launched, and `fetch` refuses the Fetch
+ * standard's bad ports outright (loopback-fetch.ts).
  */
 export async function preflightCdpPort(
   port: number,
-  fetchFn: typeof fetch = fetch,
+  fetchFn: typeof fetch = loopbackFetch,
 ): Promise<void> {
   const url = `http://localhost:${port}/json/version`;
   const ac = new AbortController();

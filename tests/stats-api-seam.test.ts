@@ -185,6 +185,7 @@ import { flushStatsWrites, readStatsLines } from '../src/stats/store.js';
 import type { StatsActionLine, StatsLine, StatsRunLine, StatsStepLine } from '../src/stats/types.js';
 import type { UserRootDeps } from '../src/env/user-root.js';
 import { stepAnchor } from '../src/report/anchors.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 const API_KEY = 'stats-seam-key';
 
@@ -237,7 +238,7 @@ function testConfig(): Config {
 
 async function listenOnRandomPort(app: Express): Promise<{ server: Server; baseUrl: string }> {
   const started = createServer(app);
-  await new Promise<void>((resolve) => started.listen(0, '127.0.0.1', () => resolve()));
+  await listenFetchable(started, '127.0.0.1');
   const addr = started.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
   return { server: started, baseUrl: `http://127.0.0.1:${port}` };

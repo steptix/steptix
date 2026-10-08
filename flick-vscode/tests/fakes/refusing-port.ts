@@ -6,10 +6,15 @@
  * it gets a genuine ECONNREFUSED. Unlike a port a server just let go of, it
  * stays in use until `release()`, so the OS cannot hand it to another
  * listener mid-test and turn the refusal into somebody else's answer.
+ *
+ * That local port is the OS's pick, like a `listen(0)`, so it is drawn again
+ * when it is one `fetch` refuses outright ("bad port") instead of with
+ * ECONNREFUSED — tests/listen-fetchable.cjs at the repo root.
  */
 
 import * as net from 'node:net';
 import { once } from 'node:events';
+import { bindFetchablePort, listenFetchable } from '../../../tests/listen-fetchable.cjs';
 
 export interface RefusingPort {
   readonly url: string;
@@ -23,11 +28,19 @@ export async function refusingPort(): Promise<RefusingPort> {
     socket.on('error', () => undefined);
     accepted.add(socket);
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const client = net.connect((server.address() as net.AddressInfo).port, '127.0.0.1');
-  client.on('error', () => undefined);
-  await once(client, 'connect');
-  const port = client.localPort!;
+  const serverPort = await listenFetchable(server, '127.0.0.1');
+  let client!: net.Socket;
+  const port = await bindFetchablePort({
+    bind: async () => {
+      client = net.connect(serverPort, '127.0.0.1');
+      client.on('error', () => undefined);
+      await once(client, 'connect');
+      return client.localPort!;
+    },
+    unbind: async () => {
+      client.destroy();
+    },
+  });
   return {
     url: `http://127.0.0.1:${port}`,
     port,

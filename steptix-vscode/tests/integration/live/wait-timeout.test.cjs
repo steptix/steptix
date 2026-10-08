@@ -36,6 +36,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
 const vscode = require('vscode');
+const { listenFetchable } = require('../../../../tests/listen-fetchable.cjs');
 
 const EXT_ID = 'pkent.steptix-vscode';
 
@@ -171,7 +172,7 @@ describe('Steptix live wait timeout-hint + abort-aware waits (issue 022)', funct
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(FIXTURE_HTML);
     });
-    await new Promise((resolve) => fixtureServer.listen(0, '127.0.0.1', resolve));
+    await listenFetchable(fixtureServer, '127.0.0.1');
     fixtureUrl = `http://127.0.0.1:${fixtureServer.address().port}/`;
     console.log('[live] wait fixture served at', fixtureUrl);
 

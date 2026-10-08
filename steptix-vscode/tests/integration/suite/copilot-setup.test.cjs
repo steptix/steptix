@@ -15,9 +15,9 @@
  */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const net = require('node:net');
 const path = require('node:path');
 const vscode = require('vscode');
+const { freeFetchablePort } = require('../../../../tests/listen-fetchable.cjs');
 const { FakeLm } = require('../fakes/fake-lm.cjs');
 
 const EXT_ID = 'pkent.steptix-vscode';
@@ -41,16 +41,9 @@ function readOutputLog() {
   return fs.readFileSync(file, 'utf-8');
 }
 
-/** A port nothing is listening on right now. */
+/** A port nothing is listening on right now, and one `fetch` accepts. */
 function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.once('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
+  return freeFetchablePort();
 }
 
 const read = (file) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null);

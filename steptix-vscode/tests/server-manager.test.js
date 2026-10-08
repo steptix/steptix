@@ -16,6 +16,7 @@ import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { bindFetchablePort, listenFetchable } from '../../tests/listen-fetchable.cjs';
 import {
   AutoStartGuard,
   compareVersions,
@@ -52,9 +53,9 @@ async function stub(handler) {
     req.resume(); // drain, so keep-alive survives for the next probe
     handler(req, res);
   });
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = await listenFetchable(server, '127.0.0.1');
   return {
-    url: `http://127.0.0.1:${server.address().port}`,
+    url: `http://127.0.0.1:${port}`,
     close: () => new Promise((r) => server.close(() => r())),
   };
 }
@@ -64,7 +65,9 @@ async function stub(handler) {
  * end of a client connection to a throwaway server. Nothing listens on that
  * port, so a probe gets a genuine ECONNREFUSED — and unlike a port a stub just
  * let go of, it stays in use until `release()`, so another listener cannot be
- * handed it mid-test and answer in its place.
+ * handed it mid-test and answer in its place. That local port is the OS's pick,
+ * like a `listen(0)`, so it is drawn again when it is one `fetch` refuses
+ * outright ("bad port") instead of with ECONNREFUSED.
  */
 async function refusingPort() {
   const accepted = new Set();
@@ -72,13 +75,22 @@ async function refusingPort() {
     socket.on('error', () => {});
     accepted.add(socket);
   });
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  const client = connect(server.address().port, '127.0.0.1');
-  client.on('error', () => {});
-  await once(client, 'connect');
+  const serverPort = await listenFetchable(server, '127.0.0.1');
+  let client;
+  const port = await bindFetchablePort({
+    bind: async () => {
+      client = connect(serverPort, '127.0.0.1');
+      client.on('error', () => {});
+      await once(client, 'connect');
+      return client.localPort;
+    },
+    unbind: async () => {
+      client.destroy();
+    },
+  });
   return {
-    url: `http://127.0.0.1:${client.localPort}`,
-    port: client.localPort,
+    url: `http://127.0.0.1:${port}`,
+    port,
     release: async () => {
       client.destroy();
       for (const socket of accepted) socket.destroy();

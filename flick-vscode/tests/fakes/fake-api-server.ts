@@ -4,6 +4,7 @@
 // screenshot decoding all run for real.
 
 import * as http from 'node:http';
+import { listenFetchable } from '../../../tests/listen-fetchable.cjs';
 
 /** A 1x1 transparent PNG — small but a genuine decodable image. */
 export const TINY_PNG =
@@ -55,13 +56,7 @@ export class FakeApiServer {
 
   async start(): Promise<void> {
     this.server = http.createServer((req, res) => this.handle(req, res));
-    await new Promise<void>((resolve) => {
-      this.server!.listen(0, '127.0.0.1', () => {
-        const addr = this.server!.address();
-        this.boundPort = typeof addr === 'object' && addr ? addr.port : 0;
-        resolve();
-      });
-    });
+    this.boundPort = await listenFetchable(this.server, '127.0.0.1');
   }
 
   async stop(): Promise<void> {

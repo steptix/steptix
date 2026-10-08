@@ -17,6 +17,7 @@ import { actionSelector, classifyOutcome, classifySelectorForm } from '../src/st
 import { executeAction, type ActionTargeting } from '../src/browser/actions.js';
 import type { AIAction } from '../src/ai/types.js';
 import type { SubActionResult } from '../src/report/types.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 /**
  * A sub-action as the step executor records it. An error defaults to coming
@@ -394,7 +395,7 @@ describe('classifyOutcome against a live Chromium page', () => {
     browser = await chromium.launch({ headless: true });
     // Accepts and never answers: a real navigation timeout.
     hang = http.createServer(() => { /* never respond */ });
-    await new Promise<void>((resolve) => hang.listen(0, '127.0.0.1', () => resolve()));
+    await listenFetchable(hang, '127.0.0.1');
     hangUrl = `http://127.0.0.1:${(hang.address() as { port: number }).port}/`;
   }, 60_000);
 

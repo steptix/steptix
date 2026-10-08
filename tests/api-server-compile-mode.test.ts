@@ -329,6 +329,7 @@ import { logger } from '../src/utils/logger.js';
 import { SKIPPED_BY_RETURN_REFUSAL } from '../src/codebehind/live-compile.js';
 import { readRecording, recordingDirFor } from '../src/codebehind/recording.js';
 import { compileLock, compileLockKey } from '../src/server/compile-lock.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 const API_KEY = 'sk-compile-mode';
 const cfg: Config = {
@@ -354,7 +355,7 @@ let sessionSeq = 0;
 beforeAll(async () => {
   const { app } = createApiServer(cfg);
   server = createServer(app);
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  await listenFetchable(server, '127.0.0.1');
   const addr = server.address();
   if (typeof addr === 'object' && addr !== null) baseUrl = `http://127.0.0.1:${addr.port}`;
 

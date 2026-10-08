@@ -312,6 +312,7 @@ import { readRecording } from '../src/codebehind/recording.js';
 import { buildCodeBehindRegistry } from '../src/codebehind/loader.js';
 import { isConditionCode } from '../src/codebehind/execute.js';
 import { validateCodeBehindSource } from '../src/codebehind/writer.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 const API_KEY = 'sk-loops-compile';
 const cfg: Config = {
@@ -344,7 +345,7 @@ let baseUrl: string;
 beforeAll(async () => {
   const { app } = createApiServer(cfg);
   server = createServer(app);
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  await listenFetchable(server, '127.0.0.1');
   const addr = server.address();
   if (typeof addr === 'object' && addr !== null) baseUrl = `http://127.0.0.1:${addr.port}`;
   tmpDir = await fs.mkdtemp(path.join(repoRoot, 'tests', '.tmp-loops-compile-'));

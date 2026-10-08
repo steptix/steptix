@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { promises as fsp } from 'node:fs';
 import type { Config } from '../src/config/types.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 // ---------------------------------------------------------------------------
 // Mocks. The registry and discovery are stubbed so no browser is spawned and
@@ -193,7 +194,7 @@ let baseUrl: string;
 
 async function listenOnRandomPort(app: Express): Promise<{ server: Server; baseUrl: string }> {
   const started = createServer(app);
-  await new Promise<void>((resolve) => started.listen(0, '127.0.0.1', () => resolve()));
+  await listenFetchable(started, '127.0.0.1');
   const addr = started.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
   return { server: started, baseUrl: `http://127.0.0.1:${port}` };

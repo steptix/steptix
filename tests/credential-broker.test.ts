@@ -23,6 +23,7 @@ import { BitwardenVault, DenyingApproval, WindowsDialogApproval, createLoginBrok
 import { isRealPasswordField, scanForLogin } from '../src/credentials/login-fields.js';
 import { itemsCoveringHost, pageIsFillable, uriCoversHost } from '../src/credentials/domain-match.js';
 import { VaultError, type ApprovalProvider, type SignInResult, type VaultItem, type VaultProvider } from '../src/credentials/types.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 /**
  * Vitest's per-test default is 5 seconds, and the gate-order suites below each
@@ -191,7 +192,7 @@ beforeAll(async () => {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(body);
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listenFetchable(server, '127.0.0.1');
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
   origin = `http://127.0.0.1:${port}`;

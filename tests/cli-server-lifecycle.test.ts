@@ -7,6 +7,7 @@ import { statusCommand, formatUptime } from '../src/cli/commands/status.js';
 import { stopCommand } from '../src/cli/commands/stop.js';
 import { nonNegativeInt } from '../src/cli/parse-args.js';
 import { HEALTH_SERVICE_ID } from '../src/server/health.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 // ---------------------------------------------------------------------------
 // Stub server harness
@@ -33,7 +34,7 @@ async function startStub(handler: Handler): Promise<string> {
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => handler(req, res, Buffer.concat(chunks).toString()));
   });
-  await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', () => resolve()));
+  await listenFetchable(server!, '127.0.0.1');
   const addr = server.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
   return `http://127.0.0.1:${port}`;
