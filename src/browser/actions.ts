@@ -16,6 +16,7 @@ import {
 import { logger } from '../utils/logger.js';
 import { resolveUploadPaths, uploadPathsOf, type UploadPathContext } from './upload-paths.js';
 import { armDialog, describeDialogs, takeUnreportedDefaultAnswers } from './dialogs.js';
+import { gotoWithDiagnosis } from './navigate-diagnosis.js';
 
 /**
  * Resolves the locator root for an action.
@@ -1263,7 +1264,7 @@ async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): 
     }
   }
 
-  const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  const response = await gotoWithDiagnosis(page, url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   // The main document's status, so the step loop can tell a 404 from the page
   // the step asked for (§2.35). Null for a same-document or about: navigation.
   return response?.status();

@@ -162,6 +162,7 @@ import type { ToolStepOutcome } from '../tools/types.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { captureScreenshot } from '../browser/screenshot.js';
+import { gotoWithDiagnosis } from '../browser/navigate-diagnosis.js';
 import {
   capturePageContent,
   type CapturedPageContent,
@@ -3463,7 +3464,7 @@ export class SessionManager {
       try {
         if (sessionConfig?.baseUrl) {
           logger.info(`Session "${sessionId}": navigating to base URL ${sessionConfig.baseUrl}`);
-          await launched.page.goto(sessionConfig.baseUrl, {
+          await gotoWithDiagnosis(launched.page, sessionConfig.baseUrl, {
             waitUntil: 'domcontentloaded',
             timeout: 30_000,
           });

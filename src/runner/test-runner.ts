@@ -118,6 +118,7 @@ import { lastRunStaleMemberRow, writeLastRun, type LastRunStep } from '../codebe
 import { writeRecording } from '../codebehind/recording.js';
 import { envDataSecretValues, interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { captureScreenshot } from '../browser/screenshot.js';
+import { gotoWithDiagnosis } from '../browser/navigate-diagnosis.js';
 import {
   maskRecordSecrets,
   redact,
@@ -672,7 +673,7 @@ export async function runTest(
     try {
       if (baseUrl) {
         logger.info(`Navigating to base URL: ${baseUrl}`);
-        await launched.page.goto(baseUrl, {
+        await gotoWithDiagnosis(launched.page, baseUrl, {
           waitUntil: 'domcontentloaded',
           timeout: 30_000,
         });

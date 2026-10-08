@@ -929,3 +929,83 @@ describe('§2.36 dropping on one side of the target', () => {
     }
   });
 });
+
+describe('§2.37 a navigation that never gets a page says whether the site is up', () => {
+  it('names a stall between the browser and a site that answers other clients', async () => {
+    const http = await import('node:http');
+    const { gotoWithDiagnosis } = await import('../src/browser/navigate-diagnosis.js');
+    // Answers Node's fetch, never answers Chromium: the shape the survey's
+    // herokuapp site had over HTTP/2.
+    const server = http.createServer((req, res) => {
+      if (/Chrome/.test(req.headers['user-agent'] ?? '')) return;
+      res.end('<p>up</p>');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as { port: number };
+    const page = await context.newPage();
+    try {
+      const err = await gotoWithDiagnosis(page, `http://127.0.0.1:${port}/`, { timeout: 2_000 }).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(/Timeout 2000ms exceeded/);
+      expect((err as Error).message).toMatch(/answers outside the browser \(HTTP 200 in \d+ ms\)/);
+      expect((err as Error).message).toMatch(/--disable-http2/);
+    } finally {
+      await page.close();
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('says the site is down when nothing answers it', async () => {
+    const { diagnoseNavigationTimeout } = await import('../src/browser/navigate-diagnosis.js');
+    const timeout = Object.assign(new Error('page.goto: Timeout 30000ms exceeded.'), { name: 'TimeoutError' });
+    const note = await diagnoseNavigationTimeout('https://survey.test/', timeout, async () => ({ ok: false, reason: 'ECONNREFUSED' }));
+    expect(note).toMatch(/does not answer outside the browser either \(ECONNREFUSED\)/);
+  });
+
+  it('adds nothing to other failures or to URLs it cannot ask', async () => {
+    const { diagnoseNavigationTimeout } = await import('../src/browser/navigate-diagnosis.js');
+    const probe = vi.fn(async () => ({ ok: true as const, status: 200, ms: 1 }));
+    const timeout = Object.assign(new Error('page.goto: Timeout 30000ms exceeded.'), { name: 'TimeoutError' });
+    expect(await diagnoseNavigationTimeout('https://survey.test/', new Error('net::ERR_NAME_NOT_RESOLVED'), probe)).toBeNull();
+    expect(await diagnoseNavigationTimeout('about:blank', timeout, probe)).toBeNull();
+    expect(probe).not.toHaveBeenCalled();
+  });
+});
+
+describe('§2.38 "the page says" checks read by containment', () => {
+  it('tells the check writer to contain, and to read the element holding the whole text', async () => {
+    const { buildAssertionCodePrompt } = await import('../src/ai/prompts.js');
+    const msg = buildAssertionCodePrompt('Confirm result', 'confirm explanation text', 'You clicked OK, confirm returned true.', '<p></p>', null);
+    const text = typeof msg.content === 'string' ? msg.content : '';
+    expect(text).toMatch(/CONTAINS the expected text/);
+    expect(text).toMatch(/exact equality only when the condition says "equals"/);
+    expect(text).toMatch(/innermost one that does/);
+    // The example has to survive the template literal as runnable code.
+    expect(text).toContain(String.raw`t.replace(/\s+/g, ' ')`);
+  });
+
+  it('the innermost-element example finds the sentence around a value span', async () => {
+    const page = await pageWith('<p id="confirmexplanation">You clicked OK, confirm returned <span id="confirmreturn">true</span>.</p>');
+    try {
+      const id = await page.evaluate((expected) => {
+        const norm = (t: string) => t.replace(/\s+/g, ' ').trim();
+        const doc = (globalThis as any).document;
+        const all = Array.from(doc.querySelectorAll('body *')) as any[];
+        return all.filter((el) => norm(el.textContent ?? '').includes(norm(expected))).pop()?.id;
+      }, 'You clicked OK, confirm returned true.');
+      expect(id).toBe('confirmexplanation');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('§2.39 a step that leaves the choice open is not a question', () => {
+  it('tells the model to choose rather than ask', async () => {
+    const { buildSystemPrompt, contentBlocksToText } = await import('../src/ai/prompts.js');
+    const text = contentBlocksToText(buildSystemPrompt(''));
+    expect(text).toMatch(/A step that leaves a choice OPEN is not unclear/);
+    expect(text).toMatch(/tick two skills/);
+  });
+});

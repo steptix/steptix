@@ -50,6 +50,9 @@ in the test files, not here.
 | 2.34 | Exact role names miss icon buttons | 62 | An icon font draws its glyph with CSS `::before` content, and that counts in the accessible name. PrimeFaces' Dismiss button is named "<glyph> Dismiss", so `role=button[name="Dismiss"]` matched nothing on an open dialog, twice | When an exact `role=…[name="…"]` matches nothing, retry it as `name=/^W*…W*$/i` and keep that only if it finds something |
 | 2.35 | A navigation to a 404 passed | 62 | "Navigate to input.xhtml" was sent to `/pages/input.xhtml`, which answered 404 Not Found; the navigate succeeded because a page loaded, and the next step had no field to type into and asked for clarification | A navigate reports the document's HTTP status; a 4xx or 5xx fails it (retryably) unless the step mentions an error or a status code |
 | 2.36 | A drag cannot say which side to drop on | 72 | "Drag Item 1 below Item 3" let go on Item 3's centre. A jQuery UI sortable decides before or after by which half the pointer is in, so Item 1 landed before Item 3 | `position` on `drag` (`above`, `below`, `left`, `right`) lets go at 20% or 80% of the target's height or width |
+| 2.37 | A navigation timeout does not say whether the site is up | 39 | "page.goto: Timeout 30000ms exceeded" and nothing else. the-internet.herokuapp.com answered curl and Firefox in under a second, while Chromium and Edge hung on it every time, and the bare timeout read as "the site is down" | On a navigation timeout, ask the URL once from outside the browser and add which it is: the site answers (name the status and time, and the `--disable-http2` launch arg that fixed this site) or it does not answer at all |
+| 2.38 | "The page says X" is checked by equality on the wrong element | 45 | The check generated for "Verify the page says the confirm returned true" read the value span (`true`) and compared it for equality with the whole sentence, so it failed; §2.25's hint rescued it on the second attempt in every run | The assertion prompt says "says/shows/displays/contains" passes by containment, exact equality only for "equals/exactly/only", and that the element read must hold all of the expected text, with an innermost-element example |
+| 2.39 | A step that leaves the choice open made the model ask | 56 | "Pick an experience level and tick two skills" returned a `prompt` action asking which level and which skills, and the step failed waiting for an answer | Rule 7 says a step that leaves a choice open is not unclear: choose any valid option and name it in the description; ask only when the step names something the page does not have |
 
 ## 2. Fixes
 
@@ -474,13 +477,55 @@ a drag. `executeDrag` lets go at 20% (above/left) or 80% (below/right) of the
 target's box on that axis, and at the centre otherwise. Rule 16b tells the model
 to use it for reordering.
 
+### 2.37 Say why a navigation got no page
+
+**Fix.** `gotoWithDiagnosis` (src/browser/navigate-diagnosis.ts) wraps
+`page.goto` for a navigate action and for the base-URL navigation at launch,
+on both the server and the CLI runner. When `goto` throws a timeout for an
+http(s) URL, it GETs the URL once from Node with a 10 s ceiling and appends one
+sentence to the error:
+
+- the site answered: `The site answers outside the browser (HTTP 200 in 764
+  ms) but the browser got no page …`, naming `"launchArgs":
+  ["--disable-http2"]` as the fix that worked here;
+- it did not: `The site does not answer outside the browser either
+  (ECONNREFUSED), so it is down or unreachable from this machine.`
+
+Any other failure, and any non-http URL, is rethrown untouched, and the probe
+is not made.
+
+Measured on the-internet.herokuapp.com, 2026-10-08: plain Playwright Chromium
+with no Steptix settings timed out at 30 s, and so did Edge and
+`--disable-quic`; `--disable-http2` loaded it in 5 s, Firefox in 6 s, and
+`curl --http2` in under 1 s. So it is Chromium's HTTP/2 to that host from
+this network, not the site and not ad blocking.
+
+### 2.38 "Says" checks read by containment
+
+**Fix.** The assertion-code prompt gains one requirement: text the page
+"says", "shows", "displays" or "contains" passes when the element's text,
+whitespace collapsed, contains the expected text, and exact equality is for
+conditions that say "equals", "exactly" or "only". The element read must hold
+all of the expected text — a value span inside the sentence is too small —
+and when none picked does, take the innermost element whose text contains it.
+The prompt gives that search as code, and a test runs the example against the
+eviltester markup to show it picks the `<p>`, not the `<span>`.
+
+### 2.39 An open choice is not a question
+
+**Fix.** Rule 7 of the system prompt keeps "return a prompt action when you
+cannot determine what to do", and adds that a step leaving a choice open
+("pick an experience level", "tick two skills", "choose any product") is not
+unclear: choose any valid option and name it in `description`. Ask only when
+the step names something the page does not have, or contradicts the page.
+
 ## 3. Failures caused by the test files or the sites
 
 These are fixed in the test files.
 
 | # | What was wrong | Fix in the test file |
 |---|----------------|----------------------|
-| 39 | The site never finishes loading in any browser | Left as is. It is recorded as blocked by the site |
+| 39 | Chromium's HTTP/2 connection to the site stalls from this network; curl and Firefox get the page (§2.37) | The survey project sets `"launchArgs": ["--disable-http2"]` under `browser`, so every survey site is reached over HTTP/1.1 |
 | 40 | The table offers 3, 5, 10 and All per page, not 25 | Show All entries |
 | 41 | DemoQA's checkbox tree has no "expand all" button any more | Expand Home, then the folders, with the toggle next to each name |
 | 47 | Formy's Places autocomplete fills only the address field | Verify the address field instead of the city |
@@ -503,6 +548,6 @@ These are fixed in the test files.
 - **Test 42, "click Stop as soon as the bar reaches 75%".** A model turn takes
   seconds. §2.13 makes a `wait` then `click` sequence in one turn possible,
   and that is the fix within reach. Acting faster than one turn is not.
-- **Test 45, the assertion that read "Password:" instead of the value.**
-  Generated assertion code picked the wrong element. It needs a separate look
-  at how assertion code locates values.
+- **Test 45's wrong-element checks** are no longer out of scope: §2.25 tells
+  the retry where the expected text is, and §2.38 tells the first attempt to
+  read an element that holds all of it.
