@@ -9,6 +9,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import http from 'node:http';
+import { listenFetchable } from '../tests/listen-fetchable.cjs';
 import { chromium } from 'playwright';
 import { loadConfig } from '../src/config/loader.js';
 import { AiClient } from '../src/ai/client.js';
@@ -38,8 +39,7 @@ async function main(): Promise<void> {
   if (process.env['AI_API_KEY']) config.ai.apiKey = process.env['AI_API_KEY'];
 
   const server = http.createServer((_q, res) => { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(FIXTURE_HTML); });
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
-  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/`;
+  const url = `http://127.0.0.1:${await listenFetchable(server, '127.0.0.1')}/`;
 
   const browser = await chromium.launch();
   const page = await browser.newPage();

@@ -170,6 +170,7 @@ import { createApiServer } from '../src/server/api-server.js';
 import { getBuildInfo } from '../src/utils/version.js';
 import { IdleMonitor } from '../src/server/idle-monitor.js';
 import { executeStep as executeStepMock } from '../src/runner/step-executor.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 /** The mock factory's fast implementation, captured before any test swaps it
  *  out, so a suite that installs a slow/failing step can put it back. */
@@ -242,9 +243,7 @@ let baseUrl: string;
 /** Boot an express app on a random port and return it with its base URL. */
 async function listenOnRandomPort(app: Express): Promise<{ server: Server; baseUrl: string }> {
   const started = createServer(app);
-  await new Promise<void>((resolve) => {
-    started.listen(0, '127.0.0.1', () => resolve());
-  });
+  await listenFetchable(started, '127.0.0.1');
   const addr = started.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
   return { server: started, baseUrl: `http://127.0.0.1:${port}` };

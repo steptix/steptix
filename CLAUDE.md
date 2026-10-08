@@ -218,6 +218,13 @@ and on any developer's machine.
 - **Let the server pick its port.** Have the child bind port 0 and report the
   port it got; `tests/fixture-server.ts` does this for the SecureBank app.
   Never close a port-0 listener and hand its number on.
+- **Bind with `listenFetchable(server, host)`** from `tests/listen-fetchable.cjs`
+  (every package can load it), not a bare `listen(0)`. It draws again when the
+  OS hands out a port `fetch` and Chromium refuse ("bad port"). The one
+  exception to the rule above is its `freeFetchablePort()`, for a process that
+  cannot bind 0 and report back (a port setting, a CLI flag); it races, so
+  never use it for a server in the test's own process. `npm run lint` and CI
+  run `scripts/check-listen-fetchable.mjs`, which fails on a bare one.
 - **Give each run its own scratch directory** with `fs.mkdtemp`. Put it under
   `tests/` when package self-resolution needs an in-repo path. Remove it
   recursively with `maxRetries`.

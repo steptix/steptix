@@ -198,6 +198,7 @@ import { createApiServer } from '../src/server/api-server.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { compileTest } from '../src/codebehind/compile.js';
 import type { SessionManager } from '../src/server/session-manager.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 const compileTestMock = vi.mocked(compileTest);
 
@@ -264,7 +265,7 @@ function testFile(name: string): string {
 
 async function listenOnRandomPort(app: Express): Promise<{ server: Server; baseUrl: string }> {
   const started = createServer(app);
-  await new Promise<void>((resolve) => { started.listen(0, '127.0.0.1', () => resolve()); });
+  await listenFetchable(started, '127.0.0.1');
   const addr = started.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
   return { server: started, baseUrl: `http://127.0.0.1:${port}` };

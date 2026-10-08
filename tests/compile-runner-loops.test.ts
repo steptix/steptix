@@ -242,6 +242,7 @@ vi.mock('../src/utils/logger.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 const API_KEY = 'sk-compile-loops';
 const cfg: Config = {
@@ -267,7 +268,7 @@ let baseUrl: string;
 beforeAll(async () => {
   const { app } = createApiServer(cfg);
   server = createServer(app);
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  await listenFetchable(server, '127.0.0.1');
   const addr = server.address();
   if (typeof addr === 'object' && addr !== null) baseUrl = `http://127.0.0.1:${addr.port}`;
   await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

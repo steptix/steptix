@@ -67,6 +67,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
 const vscode = require('vscode');
+const { listenFetchable } = require('../../../../tests/listen-fetchable.cjs');
 const { readEnvValue, resolveCredential, serverApiKey } = require('./credentials.cjs');
 
 const PROFILE = 'focus-live';
@@ -255,7 +256,7 @@ describe('Steptix live — CDP tab focus (stories/cdp-tab-focus.md)', function (
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<!doctype html><html><head><title>${title}</title></head><body><h1>${title}</h1></body></html>`);
     });
-    await new Promise((resolve) => fixtureServer.listen(0, '127.0.0.1', resolve));
+    await listenFetchable(fixtureServer, '127.0.0.1');
     fixtureBase = `http://127.0.0.1:${fixtureServer.address().port}`;
 
     // A dedicated profile, launched through the same route an agent uses.

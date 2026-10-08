@@ -151,6 +151,7 @@ import {
   RECORD_STEPS_NO_MODEL_MESSAGE,
   RECORD_STEPS_RUN_EXECUTING_MESSAGE,
 } from '../src/server/session-manager.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 const API_KEY = 'record-steps-key';
 const SECRET = 'Sup3r-Secret-Value!';
@@ -214,7 +215,7 @@ beforeAll(async () => {
     res.setHeader('Content-Type', 'text/html');
     res.end(body);
   });
-  await new Promise<void>((resolve) => pageServer.listen(0, '127.0.0.1', () => resolve()));
+  await listenFetchable(pageServer, '127.0.0.1');
   const addr = pageServer.address();
   origin = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
   projectRoot = mkdtempSync(path.join(tmpdir(), 'steptix-record-steps-'));
@@ -255,7 +256,7 @@ let sessionManager: ReturnType<typeof createApiServer>['sessionManager'];
 
 async function listen(app: Express): Promise<void> {
   server = createServer(app);
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  await listenFetchable(server, '127.0.0.1');
   const addr = server.address();
   baseUrl = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
 }

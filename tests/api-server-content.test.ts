@@ -189,6 +189,7 @@ import {
   expandDomSubtree,
   PageCaptureError,
 } from '../src/browser/dom-cleaner.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 const captureText = vi.mocked(captureVisibleText);
 const captureDom = vi.mocked(captureDomSnapshot);
@@ -211,7 +212,7 @@ let tmpRoot: string;
 
 async function listenOnRandomPort(app: Express): Promise<{ server: Server; baseUrl: string }> {
   const started = createServer(app);
-  await new Promise<void>((resolve) => { started.listen(0, '127.0.0.1', () => resolve()); });
+  await listenFetchable(started, '127.0.0.1');
   const addr = started.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
   return { server: started, baseUrl: `http://127.0.0.1:${port}` };

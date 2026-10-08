@@ -30,6 +30,7 @@ import {
   untilPageRecording,
   watchStatus,
 } from './record-toolbar-cdp.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 /** Every page listens to everything it can, the way apps with keyboard
  *  shortcuts and "click outside to close" do — registered by the PAGE, after
@@ -143,7 +144,7 @@ beforeAll(async () => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.end(body);
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  await listenFetchable(server, '127.0.0.1');
   const addr = server.address();
   origin = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
   browser = await chromium.launch({ headless: true });

@@ -198,6 +198,7 @@ import { createMcpServer } from '../src/mcp/server.js';
 import { createApiClient } from '../src/mcp/api-client.js';
 import { resolveProject } from '../src/mcp/project.js';
 import { resetRegistry } from '../src/mcp/registry.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 const API_KEY = 'sk-mcp-seam-test';
 
@@ -234,7 +235,7 @@ beforeAll(async () => {
 
   const { app } = createApiServer(cfg);
   server = createServer(app);
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  await listenFetchable(server, '127.0.0.1');
   const addr = server.address();
   if (typeof addr !== 'object' || addr === null) throw new Error('no port');
   const baseUrl = `http://127.0.0.1:${addr.port}`;

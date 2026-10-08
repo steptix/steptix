@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { probeHealth, HEALTH_SERVICE_ID } from '../src/server/health.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 // ---------------------------------------------------------------------------
 // `probeHealth` grew an optional AbortSignal so the MCP server can cut short a
@@ -28,7 +29,7 @@ async function startSilentServer(): Promise<string> {
   server = createServer(() => {
     // deliberately no response
   });
-  await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+  await listenFetchable(server!, '127.0.0.1');
   const address = server.address();
   if (typeof address === 'string' || address === null) throw new Error('no port');
   return `http://127.0.0.1:${address.port}`;
@@ -51,7 +52,7 @@ async function startHealthyServer(): Promise<string> {
       }),
     );
   });
-  await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+  await listenFetchable(server!, '127.0.0.1');
   const address = server.address();
   if (typeof address === 'string' || address === null) throw new Error('no port');
   return `http://127.0.0.1:${address.port}`;

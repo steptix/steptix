@@ -21,12 +21,12 @@ import fs from 'node:fs/promises';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import net from 'node:net';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, execFileSync, execSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { freeFetchablePort } from '../tests/listen-fetchable.cjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 if (!process.argv[3]) throw new Error('Usage: node scripts/verify-runtime.mjs <installer.exe> <newer installer.exe>');
@@ -166,12 +166,11 @@ async function until(label, predicate, timeoutMs) {
   throw new Error(`Timed out after ${timeoutMs / 1000}s waiting for: ${label}`);
 }
 
-async function freePort() {
-  const probe = net.createServer();
-  await new Promise((resolve) => probe.listen(0, '127.0.0.1', resolve));
-  const { port } = probe.address();
-  await new Promise((resolve) => probe.close(resolve));
-  return port;
+/** A port nothing listens on right now, and one `fetch` accepts: the server
+ *  started on it is probed with `fetch`, which refuses the Fetch standard's
+ *  bad ports (tests/listen-fetchable.cjs). */
+function freePort() {
+  return freeFetchablePort();
 }
 
 async function listFiles(dir) {

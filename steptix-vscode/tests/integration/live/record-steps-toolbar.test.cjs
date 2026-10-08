@@ -33,6 +33,7 @@ const http = require('node:http');
 const path = require('node:path');
 const vscode = require('vscode');
 const L = require('./record-steps-live.cjs');
+const { listenFetchable } = require('../../../../tests/listen-fetchable.cjs');
 
 const FIXTURE = `# Toolbar
 
@@ -82,7 +83,6 @@ describe('Steptix live — the Record Steps toolbar in the page', function () {
       .getConfiguration('steptix')
       .update('recordSteps.browserToolbar', undefined, vscode.ConfigurationTarget.Global);
 
-    const port = await L.freePort();
     strictServer = http.createServer((req, res) => {
       if ((req.url ?? '').split('?')[0] === '/strict.html') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': STRICT_CSP });
@@ -92,7 +92,7 @@ describe('Steptix live — the Record Steps toolbar in the page', function () {
         res.end();
       }
     });
-    await new Promise((resolve) => strictServer.listen(port, '127.0.0.1', resolve));
+    const port = await listenFetchable(strictServer, '127.0.0.1');
     strictOrigin = `http://127.0.0.1:${port}`;
     L.say(`project ${project.dir}, recording browser DevTools on :${project.cdpPort}, strict page ${strictOrigin}/strict.html`);
   });

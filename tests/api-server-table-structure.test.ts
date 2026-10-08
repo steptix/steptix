@@ -248,6 +248,7 @@ vi.mock('../src/report/generator.js', () => ({
 
 import { createApiServer } from '../src/server/api-server.js';
 import { logger } from '../src/utils/logger.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 const API_KEY = 'table-structure-key';
 
@@ -294,7 +295,7 @@ function testConfig(): Config {
 
 async function listenOnRandomPort(app: Express): Promise<{ server: Server; baseUrl: string }> {
   const started = createServer(app);
-  await new Promise<void>((resolve) => { started.listen(0, '127.0.0.1', () => resolve()); });
+  await listenFetchable(started, '127.0.0.1');
   const addr = started.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
   return { server: started, baseUrl: `http://127.0.0.1:${port}` };
