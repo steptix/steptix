@@ -17,6 +17,7 @@ import { installNoticeRecorder } from '../src/browser/notices.js';
 import { captureDomSnapshot, findInDom, formatFindResults } from '../src/browser/dom-cleaner.js';
 import { describeWhereExpectedIs, expectedFragments } from '../src/browser/locate-text.js';
 import type { AIAction } from '../src/ai/types.js';
+import { listenFetchable } from './listen-fetchable.cjs';
 
 let browser: Browser;
 let context: BrowserContext;
@@ -997,8 +998,7 @@ describe('§2.37 a navigation that never gets a page says whether the site is up
       if (/Chrome/.test(req.headers['user-agent'] ?? '')) return;
       res.end('<p>up</p>');
     });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const { port } = server.address() as { port: number };
+    const port = await listenFetchable(server, '127.0.0.1');
     const page = await context.newPage();
     try {
       const err = await gotoWithDiagnosis(page, `http://127.0.0.1:${port}/`, { timeout: 2_000 }).catch((e: Error) => e);
