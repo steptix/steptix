@@ -191,20 +191,12 @@ not a platform-specific gap that a test works around.
   compare `fs.realpathSync` forms when a path is read back through
   `realpath` or `process.cwd()`.
 
-To check on Linux from this machine, use WSL Ubuntu. Node 24 is in
-`~/.local/node/bin` there (not on the default PATH), and `~/steptix-linux` is
-a test clone of the Windows checkout with its own Linux `node_modules`:
-
-```bash
-wsl.exe -e bash -lc 'export PATH=$HOME/.local/node/bin:$PATH; cd ~/steptix-linux && git fetch -q && git checkout -f origin/<branch> && npm test'
-```
-
-Its `origin` is the Windows checkout, so to test an uncommitted change, run
-`git diff HEAD > patch` there and `git apply` in the clone. Run `npm ci` in
-each of the five projects if the branch changed dependencies. WSL has no
-Playwright browser, so ignore the root suite's real-browser tests there (they
-fail with `browserType.launch: Executable doesn't exist`) and judge Linux on
-everything else.
+To check Linux from Windows, use WSL: a clone inside the WSL filesystem with
+its own `node_modules`, since a Windows tree holds the Windows builds of native
+packages such as esbuild. Set it up as [CONTRIBUTING.md](CONTRIBUTING.md#set-up)
+says, Google Chrome and the browser libraries included, and run the suites
+there. The live suite runs there too, with VS Code and the browsers drawing on
+the Windows desktop through WSLg.
 
 ## Unit tests are not timed and share nothing
 
