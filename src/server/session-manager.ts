@@ -100,6 +100,7 @@ import {
 } from '../runner/control-runtime.js';
 import { controlLineDefines, parseControlLine } from '../parser/control-line.js';
 import { loadContextFiles } from '../context/loader.js';
+import { withTestContext } from '../context/test-context.js';
 import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { runSetStep } from '../runner/set-step-runner.js';
@@ -291,6 +292,14 @@ export interface StepRequest {
    * just the CLI parse path. Paths are static (no `${envName}` interpolation).
    */
   dataSources?: Record<string, string>;
+  /**
+   * The test's own `## Context`, forwarded by the client from the editor
+   * buffer (the server cannot read the file: the buffer may be unsaved). Sent
+   * to the AI with every step of the batch, after the project's context files
+   * (docs/specs/SPEC-web-survey-fixes.md §2.46). Carries whatever the author
+   * wrote, selectors and frame ids included.
+   */
+  testContext?: string;
   /**
    * Reserved for future breakpoint pause/resume support. Currently logged and
    * ignored — the run executes to completion.
@@ -2441,6 +2450,18 @@ export class SessionManager {
   }
 
   /**
+   * The context files of the project a batch belongs to: `tests.contextDir`
+   * resolved against that project's root, or the server's own when the test
+   * has no project (§2.45).
+   */
+  private async loadProjectContext(bundle: ProjectBundle): Promise<string> {
+    const dir = bundle.projectRoot
+      ? pathResolve(bundle.projectRoot, bundle.config.tests.contextDir)
+      : pathResolve(this.config.tests.contextDir);
+    return (await loadContextFiles(dir)).combined;
+  }
+
+  /**
    * Resolve a pending run-control wait for `sessionId` with the supplied
    * mode. Called by the HTTP `POST /sessions/:id/run-control` handler.
    * Returns `true` if a paused run actually picked the mode up, `false`
@@ -3491,11 +3512,8 @@ export class SessionManager {
       const aiClient = new AiClient(aiConfig, tokenTracker);
       const apiResponseStore = new ApiResponseStore();
 
-      // Load context files once per session
-      const context = await loadContextFiles(this.config.tests.contextDir);
-      if (context.files.length > 0) {
-        logger.info(`Session "${sessionId}": loaded ${context.files.length} context file(s)`);
-      }
+      // Context is loaded per batch, from the test's project (§2.45); nothing
+      // runs a step before the first batch sets it.
 
       // (baseUrl navigation lives in `launcher` above — it needs a page.)
 
@@ -3530,7 +3548,7 @@ export class SessionManager {
         tokenTracker,
         apiResponseStore,
         csrfTokens: {},
-        contextContent: context.combined,
+        contextContent: '',
         queueTail: Promise.resolve(),
         pendingRunControl: null,
         pendingDebuggerAck: null,
@@ -3956,6 +3974,13 @@ export class SessionManager {
     // surface, §5.1 item 1) and by `computerContextFor` below. NOT off
     // `runConfig`: that is the server's config with four values re-sourced.
     session.desktopConfig = projectConfig.desktop ?? this.config.desktop;
+    // What the AI is told about the app, from THIS test's project
+    // (`tests.contextDir`), re-read every batch so an edit is picked up and a
+    // session reused for another project's test gets that project's context.
+    // It was loaded once at session creation from the SERVER's config, so a
+    // project's context folder never reached the model on this path
+    // (SPEC-web-survey-fixes.md §2.45).
+    session.contextContent = withTestContext(await this.loadProjectContext(projectBundle), request.testContext);
 
     // A NEW RUN STARTS ON THE SURFACE ITS FILE SAYS (SPEC-use-computer.md
     // §4.5). Before anything reads `session.surface` — the launch gate and the

@@ -349,6 +349,8 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
     ...(sourceLines !== null && { sourceLines }),
     ...(sections !== null && { sections }),
     ...(dataSources !== null && { dataSources }),
+    // The test's own `## Context`, for every step (SPEC-web-survey-fixes.md §2.46).
+    ...(parsed.context !== undefined && { testContext: parsed.context }),
     ...(Object.keys(config).length > 0 && { config }),
     ...(Object.keys(parameters).length > 0 && { parameters }),
     // Omitted when the caller set nothing, so a plain run does not look like a

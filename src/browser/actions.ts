@@ -882,15 +882,7 @@ async function executeClick(
   }
 
   const target = matches.locator('visible=true').first();
-  try {
-    await press(target);
-  } catch (err) {
-    if (!isAdInterception(err)) throw err;
-    const hidden = await hideAds(page);
-    if (hidden === 0) throw err;
-    logger.warn(`An ad covered "${selector}" — hid ${hidden} ad element(s) and clicked again`);
-    await press(target);
-  }
+  await press(target);
 }
 
 /**
@@ -945,49 +937,6 @@ async function standInForHiddenToggle(root: Page | FrameLocator, matches: Locato
   return null;
 }
 
-/** Markup that says an element is an ad (§2.5). */
-const AD_MARKUP = /adsbygoogle|aswift_|googleads|google_ads|doubleclick|googlesyndication|title="Advertisement"|aria-label="Advertisement"/i;
-
-/** Was this click blocked by an ad sitting over the target? */
-function isAdInterception(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  return /intercepts pointer events/.test(message) && AD_MARKUP.test(message);
-}
-
-/** The containers ads are served in, hidden by {@link hideAds}. */
-const AD_SELECTORS = [
-  'ins.adsbygoogle',
-  'iframe[id^="aswift_"]',
-  'iframe[id^="google_ads_iframe"]',
-  'div[id^="google_ads_iframe"]',
-  'iframe[src*="googleads"]',
-  'iframe[src*="doubleclick"]',
-  'iframe[src*="googlesyndication"]',
-  'iframe[title="Advertisement"]',
-  '[aria-label="Advertisement"]',
-].join(',');
-
-/**
- * Hide every ad container in the page and in its frames, and return how many
- * were hidden. Hidden, not removed: an ad script that still holds a reference
- * keeps working, it just stops covering the page.
- */
-async function hideAds(page: Page): Promise<number> {
-  let hidden = 0;
-  for (const frame of page.frames()) {
-    hidden += await frame
-      .evaluate((selectors) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const doc = (globalThis as any).document;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const found: any[] = Array.from(doc.querySelectorAll(selectors));
-        for (const el of found) el.style.setProperty('display', 'none', 'important');
-        return found.length;
-      }, AD_SELECTORS)
-      .catch(() => 0);
-  }
-  return hidden;
-}
 
 /**
  * Inputs whose value cannot be empty, so `clear()` (a `fill('')`) throws
@@ -1442,23 +1391,14 @@ async function executeDrag(
     return;
   }
   // A click refuses to press through something laid over its target; a drag
-  // by mouse coordinates does not, so an ad frame that slid over the source
-  // took the press and the drag "succeeded" with nothing moved (§2.22). Put
-  // the pointer on the source and ask whether the source felt it — at the
-  // moment of pressing, since side-rail ads reposition after a scroll. Hide
-  // ads in the way, as a click does (§2.5). Anything else in the way goes to
-  // `dragTo`, whose actionability check names what intercepts the pointer.
-  let startX = from.x + from.width / 2;
-  let startY = from.y + from.height / 2;
-  let reached = await pointerReaches(page, source, startX, startY);
-  if (!reached && (await hideAds(page)) > 0) {
-    const again = await source.boundingBox({ timeout }).catch(() => null);
-    if (again !== null && inView(again)) {
-      startX = again.x + again.width / 2;
-      startY = again.y + again.height / 2;
-      reached = await pointerReaches(page, source, startX, startY);
-    }
-  }
+  // by mouse coordinates does not, so anything that slid over the source — an
+  // overlay, a banner, an ad frame — took the press and the drag "succeeded"
+  // with nothing moved (§2.22). Put the pointer on the source and ask whether
+  // the source felt it. If not, `dragTo`'s actionability check names what
+  // intercepts the pointer, so the failure says what is in the way.
+  const startX = from.x + from.width / 2;
+  const startY = from.y + from.height / 2;
+  const reached = await pointerReaches(page, source, startX, startY);
   if (!reached) {
     await source.dragTo(destination, { timeout });
     return;

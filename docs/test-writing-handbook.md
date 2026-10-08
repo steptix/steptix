@@ -50,6 +50,7 @@ Every other line is sent to the executing model together with:
 - the current URL, the viewport size and device class, the open tabs and
   browsers, and the outcome of earlier steps;
 - every `context/**/*.md` file in the project, verbatim;
+- the test's own `## Context` section, verbatim, after the project's files;
 - a screenshot, only when `ai.sendScreenshots` is on in `steptix.config.json`
   (it is off by default, so assume the model works from the DOM).
 
@@ -104,6 +105,9 @@ timeout: 120s
 Anything between the title and the first `##` heading is description. The
 parser ignores it, so explain intent here rather than inside a step.
 
+## Context
+The account menu is the avatar in the top right corner, `#user-menu`.
+
 ## Config
 - baseUrl: https://app.example.test
 - viewport: desktop
@@ -129,6 +133,7 @@ parser ignores it, so explain intent here rather than inside a step.
 | `# Title` | The test name. One H1. |
 | `## Config` | Per-test settings, as `- key: value` bullets. |
 | `## Parameters` | Named inputs, as `- name: value` bullets, used as `{{name}}`. |
+| `## Context` | Free text the AI is given with every step of this test. See below. |
 | `## Steps` | The instructions. The heading must be exactly this; `## Steps (happy path)` yields a test with no steps. |
 | `## Hooks` | Setup and teardown lines (CLI runner only, see §8). |
 | `## Outputs` | Skill files only: the variables a skill hands back. |
@@ -136,6 +141,45 @@ parser ignores it, so explain intent here rather than inside a step.
 Any other `##` heading, and everything under it, is ignored. That makes extra
 prose sections safe and makes a misspelled `## Step` heading a silent failure.
 The order of `## Config` and `## Parameters` does not matter.
+
+### `## Context`
+
+`## Context` is what the AI should know for the whole test: how the app
+behaves, what may appear on the page, and where things are. It is sent,
+word for word, with every step, after the project's `context/**/*.md` files,
+so put a note that applies to every test of a project in a context file and a
+note about this test here. Unlike the description under the title, the AI
+sees it.
+
+Write anything the steps would otherwise have to repeat, including selectors
+and frame ids. The framework holds no knowledge of any site, so the test file
+is where that knowledge goes:
+
+```markdown
+# Pay for the basket
+
+## Context
+- The page shows ads, and sometimes a full-screen one. Close any ad or
+  overlay that covers what you need (its ✕ or Close button), or scroll past
+  it, then carry on. An ad is not a failure.
+- The payment form is inside the iframe `#card-frame`. The card number field
+  is `[data-test=card-number]`.
+- Saving shows a toast that disappears after three seconds; a check about it
+  should read it straight away.
+
+## Config
+- baseUrl: https://shop.example.test
+
+## Steps
+1. Navigate to /basket
+2. Click Checkout
+3. Type "4242 4242 4242 4242" into the card number field
+4. Click Pay and verify the page says "Payment received"
+```
+
+Everything from the heading to the next `#` or `##` heading is kept,
+including lists, code and `###` subheadings. `{{placeholders}}` in it are
+not substituted.
 
 ### Step lines
 

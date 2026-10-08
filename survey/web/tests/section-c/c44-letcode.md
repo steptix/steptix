@@ -15,6 +15,11 @@ buttons, single and multiple selects, all three JS dialog types,
 nested iframes three deep, tab switching, summing a table column, open and
 closed shadow roots.
 
+## Context
+- The workspace shows ads, sometimes full screen right after clicking a card's
+  "Play Sandbox" link. Close any ad that covers the page with its Close or ✕
+  button, then carry on. An ad is not a failure.
+
 ## Config
 - baseUrl: https://letcode.in/test
 

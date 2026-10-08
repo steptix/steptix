@@ -13,6 +13,11 @@ printed on its Test Login page.
 searchable table, drag and drop onto a target, tooltips that only exist on
 hover, elements added and removed by clicks.
 
+## Context
+- The site shows Google ads, and now and then a full-screen one that covers the
+  whole page after a navigation. Close it with its Close or ✕ button, then
+  carry on with the step. An ad is not a failure.
+
 ## Config
 - baseUrl: https://practice.expandtesting.com/
 

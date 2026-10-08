@@ -195,6 +195,15 @@ export interface ParsedTest {
   /** Resolved parameter key-value pairs */
   parameters: Record<string, string>;
   /**
+   * `## Context` as the author wrote it, trimmed: what the AI should know
+   * for every step of this test — the app's quirks, what to expect on the
+   * page, and any selectors or frame ids the author wants used. Sent with
+   * each step after the project's context files
+   * (docs/specs/SPEC-web-survey-fixes.md §2.46). Absent when the file has
+   * no `## Context`.
+   */
+  context?: string;
+  /**
    * Rows from a data table placed directly under `## Steps`: the run executes
    * once per row, with the row's columns laid over `parameters`
    * (stories/data-driven-rows.md, part A). The external equivalent is

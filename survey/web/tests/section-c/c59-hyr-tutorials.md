@@ -13,6 +13,11 @@ adds text fields after a delay.
 different page, several windows opened at once, the three alert types,
 fields added after a delay.
 
+## Context
+- The pages show ads, including a banner anchored to the bottom of the window
+  that can sit over the button you need. Close it with its ✕, or scroll the
+  button into the middle of the window, then click. An ad is not a failure.
+
 ## Config
 - baseUrl: https://www.hyrtutorials.com/p/
 

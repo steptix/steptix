@@ -146,6 +146,14 @@ describe('assembleTestFile — goldens', () => {
     expect(overridden.request.config?.baseUrl).toBe('https://prod.example.com');
   });
 
+  it("sends the test's ## Context as testContext (SPEC-web-survey-fixes.md §2.46)", async () => {
+    const run = await assemble('context.md');
+    expect(run.request.testContext).toBe(
+      'The order form is inside the iframe `#order-frame`. Close any banner that covers it.',
+    );
+    expect((await assemble('simple.md')).request.testContext).toBeUndefined();
+  });
+
   it('sends sections keyed by match text, without rawSteps, on a null prototype', async () => {
     const run = await assemble('sections.md');
     const sections = run.request.sections!;

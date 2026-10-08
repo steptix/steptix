@@ -69,6 +69,7 @@ import {
 import { resolveHooks, type ResolvedHooks } from './hooks.js';
 import { runInteractiveRepl } from './interactive-repl.js';
 import { loadContextFiles } from '../context/loader.js';
+import { withTestContext } from '../context/test-context.js';
 import { controlLineDefines } from '../parser/control-line.js';
 import {
   bindVariable,
@@ -392,10 +393,12 @@ export interface RunTestExtras {
 export async function runTest(
   instance: TestInstance,
   config: Config,
-  contextContent: string,
+  projectContext: string,
   extras: RunTestExtras = {},
 ): Promise<TestReport> {
   const { test, resolvedParameters, dataRowIndex } = instance;
+  // The project's context files, then this test's own `## Context` (§2.46).
+  const contextContent = withTestContext(projectContext, test.context);
   const startTime = Date.now();
 
   logger.testStart(

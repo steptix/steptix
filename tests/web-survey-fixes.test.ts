@@ -124,28 +124,22 @@ describe('§2.4 count counts what is shown', () => {
 });
 
 describe('§2.5 ads that block clicks', () => {
-  it('hides an ad sitting over the target and clicks again', async () => {
-    const page = await pageWith(`
-      <button id="go" style="position:absolute;top:40px;left:40px;width:200px;height:40px">Register</button>
-      <p id="out"></p>
-      <ins class="adsbygoogle" style="position:fixed;top:0;left:0;width:100%;height:200px;display:block;z-index:9">
-        <iframe id="aswift_1" title="Advertisement" style="width:100%;height:200px;border:0"></iframe>
-      </ins>
-      <script>document.getElementById('go').onclick = () => document.getElementById('out').textContent = 'clicked';</script>`);
-    const result = await executeAction(page, act({ action: 'click', selector: '#go' }), undefined, undefined);
-    expect(result.success).toBe(true);
-    expect(await page.textContent('#out')).toBe('clicked');
-    await page.close();
-  }, 30_000);
-
-  it('still fails a click blocked by something that is not an ad', async () => {
+  // The framework hides nothing on its own (§2.47): an ad is the test's to
+  // deal with, through its ## Context or a step. What it owes the author is a
+  // failure that says what is in the way.
+  it('fails a covered click, names what covers it, and leaves the page alone', async () => {
     const page = await pageWith(`
       <button id="go" style="position:absolute;top:40px;left:40px">Register</button>
       <div id="modal" style="position:fixed;inset:0;z-index:9;background:#0003"></div>`);
-    const result = await executeAction(page, act({ action: 'click', selector: '#go' }));
-    expect(result.success).toBe(false);
-    expect(await page.locator('#modal').isVisible()).toBe(true);
-    await page.close();
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: '#go' }));
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/intercepts pointer events/);
+      expect(result.error).toMatch(/modal/);
+      expect(await page.locator('#modal').isVisible()).toBe(true);
+    } finally {
+      await page.close();
+    }
   }, 30_000);
 
   it('recognises ad hosts by suffix, and nothing else', () => {
@@ -550,12 +544,12 @@ describe('§2.21 a threshold wait keeps going while the value moves', () => {
   });
 });
 
-describe('§2.22 a drag whose source an ad covers', () => {
-  it('hides the ad and drags, rather than pressing on the ad', async () => {
+describe('§2.22 a drag whose source something covers', () => {
+  it('does not press on the cover: it fails naming what is in the way', async () => {
     const page = await pageWith(`
       <div id="red" draggable="true" style="width: 60px; height: 60px; background: red"></div>
       <div id="target" style="width: 120px; height: 120px; border: 3px solid #333; margin-top: 40px"></div>
-      <iframe id="aswift_1" title="Advertisement" style="position: fixed; left: 0; top: 0; width: 200px; height: 80px; border: 0"></iframe>
+      <div id="banner" style="position: fixed; left: 0; top: 0; width: 200px; height: 80px; background: #eee"></div>
       <script>
         document.querySelector('#red').addEventListener('dragstart', (e) => e.dataTransfer.setData('text', 'red'));
         const target = document.querySelector('#target');
@@ -567,13 +561,14 @@ describe('§2.22 a drag whose source an ad covers', () => {
       </script>`);
     try {
       const result = await executeAction(page, act({ action: 'drag', selector: '#red', target: '#target' }));
-      expect(result.success).toBe(true);
-      expect(await page.locator('#target #red').count()).toBe(1);
-      expect(await page.locator('#aswift_1').isVisible()).toBe(false);
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/intercepts pointer events/);
+      expect(await page.locator('#target #red').count()).toBe(0);
+      expect(await page.locator('#banner').isVisible()).toBe(true);
     } finally {
       await page.close();
     }
-  });
+  }, 30_000);
 });
 
 describe('§2.24 press and hold', () => {

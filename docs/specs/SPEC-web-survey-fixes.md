@@ -18,7 +18,7 @@ in the test files, not here.
 | 2.2 | No double-click or right-click | 41, 49, 60 (3) | `click` always does one left click. The model sent `doubleClick`, was refused, then declared the step impossible | `clickCount` and `button` on `click`, with the parser mapping `doubleClick`, `rightClick` and similar names onto them |
 | 2.3 | Typing does not fire key events | 53, 58 (2) | `type` uses Playwright's `fill`, which fires only `input`. Filters that listen for `keyup` never react | After `fill`, press `End` on the field, which fires `keydown` and `keyup` without changing the text |
 | 2.4 | `count` counts hidden elements | 53 | `count` counts every match, so a filtered list counts the same before and after | Count visible matches by default. `includeHidden: true` keeps the old behaviour |
-| 2.5 | Ads block clicks | 44, 59 (2) | A Google ad iframe that covers the target makes the click time out after 10 s | When the element blocking the click is an ad, hide the page's ad frames and retry once. An opt-in `browser.blockAds` stops ad requests at the network |
+| 2.5 | Ads block clicks | 44, 59 (2) | A Google ad iframe that covers the target makes the click time out after 10 s | When the element blocking the click is an ad, hide the page's ad frames and retry once. An opt-in `browser.blockAds` stops ad requests at the network **Superseded by §2.47:** the ad hiding is removed. |
 | 2.6 | Key names are case-sensitive | 62, 71 (2) | `keyboard.press("END")` and `press("CTRL+A")` throw "Unknown key" | Map key names to Playwright's spelling, including chords such as `ctrl+a` and `Control+A` |
 | 2.7 | `type` breaks on colour, date and range inputs | 46 | `type` clears first. Clearing `<input type=color>` fills `""`, which is a malformed value | Skip the clear on inputs that cannot be empty, and normalise colour values to `#rrggbb` |
 | 2.8 | Multi-selects take one value | 50, 56 (2) | `select` passes one string, so `"Red, Green"` matches no option | When the `<select>` is `multiple`, accept a list (`values`) or a comma-separated `value`, matched by value, then by label |
@@ -35,7 +35,7 @@ in the test files, not here.
 | 2.19 | A drag whose target starts below the screen | 40 | `drag` scrolled the source into view, which leaves it at the viewport's bottom edge. The target was still below, so the drag fell back to `dragTo`, which scrolls mid-drag. Chromium drops an HTML5 drag that scrolls, so both circle drags "succeeded" and moved nothing | Before pressing, scroll so source and target are centred on screen together when they fit |
 | 2.20 | Typing into a field something covers | 42 | `type` uses `fill`, which types into a field even when another element covers it. The overlapped-element page clears the field on `input` when its centre is covered, so the text vanished | Before typing, when the field is not what the browser hits at its centre, scroll it into view centred, then at the start, then at the end, stopping at the first that uncovers it |
 | 2.21 | A threshold wait with a fixed timeout | 42 | A numeric attribute wait (§2.13) fails after 10 s. The progress bar reached 75% after 8, 18 and 22 s on three runs, so the wait timed out on a slow run and the retry clicked Stop at 87% by eye | While the value keeps moving towards the limit, push the deadline out by the timeout each time, up to the 10-minute cap. A value that stands still or moves away still fails after the timeout |
-| 2.22 | A drag pressed through an ad | 40 | A drag presses at the source's coordinates without checking what is there. The circles page has side-rail Google ad frames that reposition after a scroll, and about one drag in five pressed on one: no `mousedown` reached the page, the drag "succeeded", and the red circle stayed put | Move the pointer onto the source first and check the source received the `mousemove`. If not, hide the page's ads (as §2.5 does for a click) and try once more; if something else covers it, fall back to `dragTo`, whose actionability check reports what intercepts the pointer |
+| 2.22 | A drag pressed through an ad | 40 | A drag presses at the source's coordinates without checking what is there. The circles page has side-rail Google ad frames that reposition after a scroll, and about one drag in five pressed on one: no `mousedown` reached the page, the drag "succeeded", and the red circle stayed put | Move the pointer onto the source first and check the source received the `mousemove`. If not, hide the page's ads (as §2.5 does for a click) and try once more; if something else covers it, fall back to `dragTo`, whose actionability check reports what intercepts the pointer **Superseded by §2.47:** the ad hiding is removed. |
 | 2.23 | `browser.blockAds` ignored on the server | every survey run | On the server path, `browser.*` comes from the server's own config except for a listed few keys, and `blockAds` was not one of them. The survey project set it, and no session ever blocked an ad. A Google vignette covered test 40's last steps | Read `blockAds` off the session's project config at launch, as `launchArgs` already is |
 | 2.24 | No press-and-hold | 44 | There was no way to hold a button down. LetCode's "Click and Hold" button only reacts to a press of about two seconds, and `click` releases at once | `holdMs` on `click` (Playwright's `delay` between press and release), with `longPress`, `pressAndHold`, `clickAndHold` and similar names mapped onto it at 2 s |
 | 2.25 | A failed check does not say where the expected text is | 45 | An assertion that reads the wrong element fails with "expected X, got Y", and the retry is shown only that, so it reads the same element again. The form results page repeats the empty form above the results; both attempts read the empty textarea ("Comments...") | On a failed DOM assertion, find the smallest visible elements whose text contains the expected value (or a part of it) and add their CSS paths to the failure |
@@ -58,6 +58,9 @@ in the test files, not here.
 | 2.42 | §2.34's rewrite broke on an apostrophe | 70 | The glyph-tolerant name for `role=combobox[name="I'm the only traveler"]` put a bare `'` in the regex. It parsed on its own, so the rewrite was kept, but Playwright's `>>` splitter read the `'` as an open string and the click's own `>> visible=true >> nth=0` made the selector unparsable; the retry recovered | Write `'` and `"` in the rewritten pattern as `'` and `"` |
 | 2.43 | A required-field asterisk fails a label check | 70 | "Verify a return date field is shown" expected "Return date" and read "Return date *"; the asterisk is the form's required marker. It failed on attempt 1 and §2.25's hint rescued it | A failed DOM check passes when the text read equals the expected text once whitespace is collapsed and `*`, `:`, bullets and bars are stripped from both ends. Nothing inside the text is ignored, so "Not Done" still fails "Done" |
 | 2.44 | Prompt examples copied from tested sites | 44, 45, 50, 56, 62, and the fixture app | Ten examples added with these fixes used ids and text from the sites under test (`#open-shadow`/`#fname`, `#copy`, `'Checked'`, "tick two skills", "confirm returned true", Red and Green in `#colors`), and four older ones used the fixture app and a Telerik grid (`demo@securebank.com`, "Transaction Dispute", `#RadGrid1_ctl00__7`). On those pages the model was shown the answer | Every example uses invented names (`#host`/`#field`, `#item`, `#grid_row_7`, "Ada", "Order 12 was placed."). CLAUDE.md now forbids site-specific selectors and text anywhere in the framework |
+| 2.45 | A project's context files never reached the model on the server | every survey run | Context was loaded once per session from the server's own `tests.contextDir`, so the survey's `context/public-sites.md` (close ads and overlays) was replaced by the repo's sample API docs | Load context on every batch from the test's project |
+| 2.46 | No way for a test to tell the AI what it needs | 40, 44, 59 and any test | Only the project's context files reached the AI, and the description under the title is not sent | A `## Context` section, sent word for word with every step after the project's context; selectors and frame ids welcome |
+| 2.47 | Ads hidden by hardcoded Google selectors | 40, 44, 59 | §2.5 and §2.22 recognised and hid ads by a fixed list of Google ad markup and CSS selectors, which breaks the no-site-specific-code rule and missed other ad networks | Removed. Ads are handled by the test's `## Context` or a step; a covered click or drag fails naming what is in the way |
 
 ## 2. Fixes
 
@@ -582,6 +585,56 @@ each still teaches the same pattern (a shadow root's host and field, a frame's
 document, an open choice, containment). Results on 44, 45, 50, 56 and 62 from
 runs C and D were measured with the copied examples in place, so they are
 reruns' business to confirm.
+
+### 2.45 A project's context files reached no model on the server
+
+**Fix.** The session manager loaded `tests.contextDir` once, when a session
+was created, from the SERVER's own config, so every survey run was handed the
+repo's sample API docs (`fixtures/context/apis/*.md`) and never the survey's
+`context/public-sites.md`, which tells the AI to close ads and overlays. The
+context is now loaded on every batch from the test's project bundle:
+`tests.contextDir` resolved against the project root, or the server's own when
+the test has no project. A session reused for another project's test gets that
+project's context, and an edit to a context file is picked up on the next
+batch.
+
+### 2.46 A test can tell the AI what it needs to know
+
+**Fix.** A test file may carry a `## Context` section: free text, kept word for
+word from the heading to the next `#` or `##` heading (lists, code and `###`
+subheadings included), and sent to the AI with every step of the test after the
+project's context files, under a heading that says it is the test author's.
+It is for whatever the whole test needs: how the app behaves, what may appear
+(ads, overlays, toasts), and any selectors or frame ids the author wants used.
+That last point is what keeps site knowledge out of the framework: it belongs
+in the test, and this is the place for it.
+
+- `src/parser/markdown.ts` keeps the section as `ParsedTest.context`; the CLI
+  runner and the Electron runner add it with `withTestContext`
+  (`src/context/test-context.ts`).
+- On the server path the client sends it as `testContext` on the step request,
+  because the server cannot read a buffer the editor has not saved: the MCP
+  client from the full parser, the VS Code extension from runner-core's
+  `parseContext`, which `tests/test-context.test.ts` holds to the same answer
+  as the full parser. The route copies the field explicitly and refuses one
+  that is not a string.
+- `{{placeholders}}` in the section are not substituted.
+- Documented in `docs/test-writing-handbook.md` and
+  `docs/ai-test-authoring-guide.md`.
+
+### 2.47 The framework no longer hides ads
+
+**Fix.** §2.5's retry on an ad-covered click and §2.22's ad hiding before a
+drag are removed. Both recognised an ad by Google's markup (`adsbygoogle`,
+`aswift_`, `google_ads_iframe`, `doubleclick`, `googlesyndication`) and hid it
+with a fixed list of CSS selectors: a third party's selectors hardcoded in the
+framework, which missed every other ad network. An ad is now the test's to
+handle, the way a user would, through `## Context` (§2.46) or a step. What the
+framework keeps is generic: a click or drag that something covers fails, and
+Playwright's message names the element in the way; a drag still checks that the
+pointer reaches its source before pressing. `browser.blockAds`, which stops
+requests to a list of ad-network domains when a project turns it on, is
+unchanged.
 
 ## 3. Failures caused by the test files or the sites
 
