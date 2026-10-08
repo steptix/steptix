@@ -1342,7 +1342,9 @@ const MEASUREMENT_TIMEOUT_MS = 2_000;
  * Two recoveries, each for one measured failure and each narrow on purpose:
  *  - a styled checkbox or radio whose `<input>` is hidden gets its label or a
  *    visible ancestor clicked instead, because a hidden input never becomes
- *    clickable and the click would only time out;
+ *    clickable and the click would only time out. Not one hidden with what is
+ *    around it — a collapsed section, a closed menu: that click waits as any
+ *    other, and its failure says to open the container first;
  *  - a click blocked by an AD gets the page's ads hidden and one more try.
  *    Only ad markup counts: a real overlay still fails the click, which is
  *    what tells the author the page is in the way.
@@ -1374,7 +1376,11 @@ async function executeClick(
   }
 
   const target = matches.locator('visible=true').first();
-  await press(target);
+  try {
+    await press(target);
+  } catch (err) {
+    throw await explainEnclosedToggle(selector, matches, err);
+  }
 }
 
 /**
@@ -1382,7 +1388,9 @@ async function executeClick(
  * element a person would click instead: its `<label for>`, the `<label>` it
  * sits in, or the nearest of its three closest ancestors that is visible.
  * `null` when the selector matches something else, matches nothing yet (the
- * normal click then waits for it), or has a visible match.
+ * normal click then waits for it), or has a visible match — and no ancestor
+ * when the toggle is hidden with what is around it (§2.10), because then the
+ * nearest visible ancestor is a section's frame, not the toggle's box.
  */
 async function standInForHiddenToggle(root: Page | FrameLocator, matches: Locator): Promise<Locator | null> {
   try {
@@ -1390,28 +1398,24 @@ async function standInForHiddenToggle(root: Page | FrameLocator, matches: Locato
     if (total === 0) return null;
     if ((await matches.locator('visible=true').count()) > 0) return null;
     const input = matches.first();
-    const id = await input.evaluate(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (el: any) => {
-        const toggle = el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio');
-        return toggle ? String(el.id ?? '') : null;
-      },
-      undefined,
-      { timeout: MEASUREMENT_TIMEOUT_MS },
-    );
-    if (id === null) return null;
+    const toggle = await hiddenToggleOf(input);
+    if (toggle === null) return null;
     const candidates: Locator[] = [];
     // From the ROOT, which is the input's own frame. A chained XPath that
     // starts with // is relative to the element in Playwright, so it would
     // only ever search inside the input.
-    if (id !== '') {
-      const quoted = id.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    if (toggle.id !== '') {
+      const quoted = toggle.id.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
       candidates.push(root.locator(`label[for="${quoted}"]`));
     }
     candidates.push(input.locator('xpath=ancestor::label[1]'));
-    // Never <body> or <html>: clicking the page itself "succeeds" and does nothing.
-    for (let depth = 1; depth <= 3; depth++) {
-      candidates.push(input.locator(`xpath=ancestor::*[not(self::body) and not(self::html)][${depth}]`));
+    if (toggle.enclosed) {
+      logger.debug(`hidden ${toggle.type} inside something hidden — its ancestors do not stand in for it`);
+    } else {
+      // Never <body> or <html>: clicking the page itself "succeeds" and does nothing.
+      for (let depth = 1; depth <= 3; depth++) {
+        candidates.push(input.locator(`xpath=ancestor::*[not(self::body) and not(self::html)][${depth}]`));
+      }
     }
     for (const candidate of candidates) {
       const first = candidate.first();
@@ -1427,6 +1431,139 @@ async function standInForHiddenToggle(root: Page | FrameLocator, matches: Locato
     // Anything unexpected leaves the ordinary click to report what is wrong.
   }
   return null;
+}
+
+/** What a click needs to know about a hidden checkbox or radio (§2.10). */
+export interface HiddenToggle {
+  /** `checkbox` or `radio`. */
+  type: string;
+  /** The input's id; '' when it has none. */
+  id: string;
+  /**
+   * Hidden with what is around it — a collapsed section, a closed menu, an
+   * inactive tab — rather than alone behind a box or label drawn in its
+   * place. True when its own `<label>` is hidden too, or when the outermost
+   * hidden element around it holds anything but the input.
+   */
+  enclosed: boolean;
+  /** What to open to show it, outermost first, named the way `find` names
+   *  collapsed sections (§2.28). Empty when the page names none. */
+  collapsedUnder: string[];
+}
+
+/**
+ * {@link HiddenToggle} for `input`, or `null` when it is not a checkbox or
+ * radio. It does not ask whether the input is hidden; the caller knows.
+ */
+export async function hiddenToggleOf(input: Locator): Promise<HiddenToggle | null> {
+  return input.evaluate(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el: any) => {
+      if (el.tagName !== 'INPUT' || (el.type !== 'checkbox' && el.type !== 'radio')) return null;
+      const w = globalThis as any;
+      const body = w.document.body;
+      const oneLine = (v: unknown): string => String(v ?? '').replace(/\s+/g, ' ').trim().substring(0, 60);
+      const rendered = (node: any): boolean => typeof node.checkVisibility === 'function'
+        ? node.checkVisibility({ visibilityProperty: true })
+        : node.getClientRects().length > 0 && w.getComputedStyle(node).visibility === 'visible';
+      const inert = new Set(['SCRIPT', 'STYLE', 'TEMPLATE', 'NOSCRIPT']);
+      // Anything in `box` but the input, the wrappers it sits in, and hidden
+      // form fields: text, a label, a drawn box, another control.
+      const holdsMore = (box: any): boolean => {
+        for (const other of Array.from(box.querySelectorAll('*')) as any[]) {
+          if (other.contains(el) || inert.has(other.tagName)) continue;
+          if (other.tagName === 'INPUT' && other.type === 'hidden') continue;
+          return true;
+        }
+        const texts = w.document.createTreeWalker(box, 4 /* NodeFilter.SHOW_TEXT */);
+        for (let t = texts.nextNode(); t !== null; t = texts.nextNode()) {
+          if (!inert.has(t.parentElement?.tagName) && t.data.trim() !== '') return true;
+        }
+        return false;
+      };
+
+      // A styled toggle hides its input and shows its label in its place. A
+      // label too small to click still says the control is on screen.
+      const labels = Array.from(el.labels ?? []) as any[];
+      const labelHidden = labels.length > 0 && !labels.some(rendered);
+      // The outermost hidden element around the input: the input itself, or a
+      // wrapper of its own, when it is hidden alone.
+      let outer = el;
+      for (let cur = el.parentElement; cur && cur !== body; cur = cur.parentElement) {
+        if (w.getComputedStyle(cur).display === 'contents') continue;
+        if (rendered(cur)) break;
+        outer = cur;
+      }
+
+      // What a person opens: each container that hides the input and holds
+      // more than it, named as §2.28 names one — by what controls it (an
+      // accordion header's or a tab's `aria-controls`), what labels it, a
+      // closed <details>' summary, else the text beside it in its parent.
+      const nameOf = (box: any): string => {
+        if (box.tagName === 'DETAILS') return oneLine(box.querySelector(':scope > summary')?.textContent);
+        if (box.id) {
+          const opener = w.document.querySelector(`[aria-controls~="${w.CSS.escape(box.id)}"]`);
+          if (oneLine(opener?.textContent)) return oneLine(opener.textContent);
+        }
+        const labelledBy = String(box.getAttribute('aria-labelledby') ?? '').split(/\s+/)
+          .map((ref: string) => (ref ? oneLine(w.document.getElementById(ref)?.textContent) : ''))
+          .filter((name: string) => name !== '');
+        if (labelledBy.length > 0) return oneLine(labelledBy.join(' '));
+        if (box.getAttribute('aria-label')) return oneLine(box.getAttribute('aria-label'));
+        for (const sibling of Array.from(box.parentElement?.children ?? []) as any[]) {
+          if (sibling !== box && oneLine(sibling.textContent)) return oneLine(sibling.textContent);
+        }
+        return '';
+      };
+      const collapsedUnder: string[] = [];
+      for (let child = el, cur = el.parentElement; cur && cur !== body; child = cur, cur = cur.parentElement) {
+        const cs = w.getComputedStyle(cur);
+        const closed = cs.display === 'none'
+          || cur.hidden
+          || cs.contentVisibility === 'hidden'
+          // Inherited, so only where it starts.
+          || (cs.visibility === 'hidden'
+            && (cur.parentElement === null || w.getComputedStyle(cur.parentElement).visibility !== 'hidden'))
+          || (cur.tagName === 'DETAILS' && !cur.open && child.tagName !== 'SUMMARY');
+        if (!closed || !holdsMore(cur)) continue;
+        const name = nameOf(cur);
+        if (name !== '' && !collapsedUnder.includes(name)) collapsedUnder.unshift(name);
+      }
+
+      return {
+        type: String(el.type),
+        id: String(el.id ?? ''),
+        enclosed: labelHidden || (outer !== el && holdsMore(outer)),
+        collapsedUnder,
+      };
+    },
+    undefined,
+    { timeout: MEASUREMENT_TIMEOUT_MS },
+  );
+}
+
+/**
+ * The error for a click that failed on a checkbox or radio hidden inside
+ * something hidden: what to open first, ahead of Playwright's own message.
+ * Any other failure comes back as it was.
+ */
+async function explainEnclosedToggle(selector: string, matches: Locator, err: unknown): Promise<unknown> {
+  try {
+    if ((await matches.count()) === 0 || (await matches.locator('visible=true').count()) > 0) return err;
+    const toggle = await hiddenToggleOf(matches.first());
+    if (toggle === null || !toggle.enclosed) return err;
+    const where = toggle.collapsedUnder.length === 0
+      ? 'inside something hidden, such as a collapsed section, a closed menu or an inactive tab. Open that first'
+      : `inside collapsed: ${toggle.collapsedUnder.join(' › ')}. `
+        + (toggle.collapsedUnder.length > 1 ? 'Open those first, outermost first' : 'Open it first');
+    const cause = err instanceof Error ? err.message : String(err);
+    return new Error(
+      `"${selector}" is a ${toggle.type} ${where}, then click the ${toggle.type}; `
+        + `while it is hidden there is nothing on screen to click.\n${cause}`,
+    );
+  } catch {
+    return err;
+  }
 }
 
 

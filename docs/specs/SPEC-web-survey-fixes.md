@@ -23,7 +23,7 @@ in the test files, not here.
 | 2.7 | `type` breaks on colour, date and range inputs | 46 | `type` clears first. Clearing `<input type=color>` fills `""`, which is a malformed value | Skip the clear on inputs that cannot be empty, and normalise colour values to `#rrggbb` |
 | 2.8 | Multi-selects take one value | 50, 56 (2) | `select` passes one string, so `"Red, Green"` matches no option | When the `<select>` is `multiple`, accept a list (`values`) or a comma-separated `value`, matched by value, then by label |
 | 2.9 | Drag is a single jump | 52, 72 (2) | `dragTo` jumps from source to target, which jQuery UI's draggable and sortable ignore | Drag with the mouse in steps: press, nudge past the drag threshold, glide to the target, release |
-| 2.10 | Hidden checkbox inputs cannot be clicked | 62 | A click on a styled checkbox's hidden `<input>` waits for it to become visible, then times out | When the only match is a hidden checkbox or radio, click its `<label for>` or its nearest visible ancestor |
+| 2.10 | Hidden checkbox inputs cannot be clicked | 62 | A click on a styled checkbox's hidden `<input>` waits for it to become visible, then times out | When the only match is a hidden checkbox or radio, click its `<label for>` or its nearest visible ancestor. The ancestor only when the input is hidden alone: one hidden with its container (a collapsed section, a closed menu) fails and says to open the container (issue 32) |
 | 2.11 | Text reads include script source | 64 | `read` takes `textContent`, so reading a container also captured its `<script>` | Drop `<script>`, `<style>` and `<template>` text from element reads |
 | 2.12 | Wrong "no value" warnings | every run that captures a value | The MCP run result warns that `{{x}}` "will reach the AI literally" when an earlier `[as: x]` step fills it | Treat names captured by earlier steps as defined |
 | 2.13 | Waits cannot compare numbers | 42 | A `wait` on an attribute matches one exact value, so `aria-valuenow=75` misses a bar that steps past 75 | Accept `>=`, `<=`, `>` and `<` in attribute waits |
@@ -202,6 +202,57 @@ for real mouse movement.
 `<input type=checkbox|radio>`, it clicks the first visible of: the
 `<label for=id>`, the enclosing `<label>`, or one of the input's nearest three
 ancestors. This is what a person does with a PrimeFaces or Material checkbox.
+
+**Only for an input hidden alone.** A stand-in is right when the page hides
+the input and draws a box or a label in its place. It is wrong when the
+checkbox is hidden because its container is: a collapsed accordion, a closed
+dropdown, an inactive tab. The label is hidden with it, so the search climbed
+past the container to the first visible ancestor and clicked its middle. That
+landed on a heading, another control or empty space, and the click reported
+success with the box unticked (steptix/steptix#32, found in the review of PR #27).
+
+So the ancestors are tried only when the input is hidden alone. It is not
+when either of these holds:
+
+- it has a `<label>`, and none of its labels is rendered;
+- the outermost hidden element around it holds anything but the input: text,
+  a label, a drawn box, another control. A wrapper holding only the input
+  (and hidden form fields) still counts as the input hidden alone, whether it
+  is `display: none` or not.
+
+Rendered means `checkVisibility({ visibilityProperty: true })`: not
+`display: none` or inside it, not in a closed `<details>` or a
+`content-visibility: hidden` subtree, and `visibility: visible`. A label that
+is rendered but too small to click still says the control is on screen.
+
+A visible label is clicked either way, because clicking a label sets its own
+input wherever the input sits. When nothing stands in, the click waits for a
+visible match as any click does, so a step that opens the panel just before
+still works. When that wait times out, the error starts with what to open,
+named the way `find` names collapsed sections (§2.28). The name comes from
+the control whose `aria-controls` names the container, else the container's
+`aria-labelledby` or `aria-label`, else a closed `<details>`' summary, else
+the text beside the container in its parent:
+
+```
+"#gift" is a checkbox inside collapsed: Delivery options. Open it first, then
+click the checkbox; while it is hidden there is nothing on screen to click.
+```
+
+followed by Playwright's own message. With no name to give, it says "inside
+something hidden, such as a collapsed section, a closed menu or an inactive
+tab".
+
+One case still looks like a styled toggle: a checkbox with no `<label>`,
+alone in a hidden container. Nothing in the markup tells that container from
+a wrapper hidden behind a drawn box, so its ancestors are still tried.
+
+**Tests.** Real Chromium: the issue's markup (a checkbox and its label in a
+`display: none` panel under a heading that opens it) fails the click with the
+message above, and a page-side listener records no click at all. A label in a
+closed `<details>`, and a label-less widget in a closed menu, count as
+enclosed; a wrapper holding only the input does not; a visible label still
+ticks an input hidden beside others.
 
 ### 2.11 Text reads skip script source
 
@@ -442,7 +493,9 @@ action.
 
 **Fix.** In `standInForHiddenToggle`, a candidate (label or ancestor) must be
 visible **and** have a bounding box of at least 4×4 px. The 1 px clip wrapper is
-skipped, and the next ancestor, the toggle's container, takes the click.
+skipped, and the next ancestor, the toggle's container, takes the click. The
+wrapper is rendered, so the input counts as hidden alone (§2.10) and its
+ancestors are tried.
 
 ### 2.33 Notifications are remembered
 
