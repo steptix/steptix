@@ -168,7 +168,7 @@ named in the notes so a flaky test is not hidden.
 | 67 | Quotes to Scrape | **pass** | **pass** | **pass** | **pass** | |
 | 68 | Scrape This Site | **pass** | **pass** | **pass** | **pass** | Two "assertion response missing code" retries (§2.14 recovers them) |
 | 69 | httpbin form | **pass** | **pass** | **pass** | **pass** | |
-| 70 | DummyTicket | fail | fail | **pass** | **pass** | §2.34's rewrite of "I'm the only traveler" was unparsable once the click added its filters; fixed in §2.42 |
+| 70 | DummyTicket | fail | fail | **pass** | **pass** | §2.34's rewrite of "I'm the only traveler" was unparsable once the click added its filters; fixed in §2.42, and the rerun on `28d49b00` passed that step first time. The same rerun's "Return date *" check led to §2.43 |
 | 71 | W3Schools Tryit | fail | **pass** | **pass** | **pass** | The If step and the step after it still report `unknown` |
 | 72 | jQuery UI | fail | fail | **pass** | **pass** | |
 
