@@ -4417,7 +4417,9 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
       try {
         assertionCode = parseAssertionCode(codeCompletion.text);
       } catch (parseErr) {
-        lastErr = `Could not parse assertion code: ${String(parseErr)}`;
+        // Quote the start of what the model said, so the failure can be read
+        // from the log and the run result, not only from the report (§2.49).
+        lastErr = `Could not parse assertion code: ${String(parseErr)}. The model replied: ${quoteReply(codeCompletion.text)}`;
         unreadableReply = codeCompletion.text;
         continue;
       }
@@ -4475,6 +4477,18 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
 }
 
 /** Run assertion JS code, optionally polling until pass or timeout. */
+/** How much of an unusable reply a failure message quotes (§2.49). */
+const REPLY_QUOTE_CHARS = 300;
+
+/** The start of a model reply, on one line, quoted for a failure message. */
+export function quoteReply(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (flat === '') return '(an empty reply)';
+  return flat.length > REPLY_QUOTE_CHARS
+    ? `"${flat.slice(0, REPLY_QUOTE_CHARS)}…" (${flat.length} characters)`
+    : `"${flat}"`;
+}
+
 /** Marks that sit around a label without being part of it (§2.43). */
 const LABEL_MARKS = /^[\s*:•·|]+|[\s*:•·|]+$/g;
 

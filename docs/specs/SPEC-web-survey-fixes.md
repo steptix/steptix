@@ -62,6 +62,7 @@ in the test files, not here.
 | 2.46 | No way for a test to tell the AI what it needs | 40, 44, 59 and any test | Only the project's context files reached the AI, and the description under the title is not sent | A `## Context` section, sent word for word with every step after the project's context; selectors and frame ids welcome |
 | 2.47 | Ads hidden by hardcoded Google selectors | 40, 44, 59 | §2.5 and §2.22 recognised and hid ads by a fixed list of Google ad markup and CSS selectors, which breaks the no-site-specific-code rule and missed other ad networks | Removed. Ads are handled by the test's `## Context` or a step; a covered click or drag fails naming what is in the way |
 | 2.48 | The AI could not see what a page adds outside `<body>` | 40, 44 | The snapshot walked `document.body` only. Google's full-screen and anchored ads are appended to `<html>` beside `<body>`, so their Close buttons never reached the AI; told by `## Context` to close ads, it waited and stalled | Walk every child of `<html>` but `<head>`, frames included |
+| 2.49 | An unusable model reply left no trace | 40 | 'Assertion code response missing code field' failed c40's 'Verify that 3 equals 3' on two of three runs; the replies were counted but not shown, so the cause was a guess | The report shows unused and replaced replies in full; the failure message quotes the start of the last one |
 
 ## 2. Fixes
 
@@ -657,6 +658,22 @@ test builds that layout — an overlay appended to `<html>` holding a frame with
 a Close button, beside a frame inside `<body>` — and checks both frames land
 under their own `<iframe>` and that the Close button can be clicked through its
 frame path; it fails with the body-only walk.
+
+### 2.49 Replies Steptix could not use are shown
+
+**Fix.** A check whose code the model never delivered in a readable form failed
+with "Assertion code response missing code field", and nothing showed what the
+model had said: the calls were kept on the step (`discardedAiInteractions`) and
+on the check (`supersededAiInteractions`) for counting, but deliberately not
+rendered. c40's "Verify that 3 equals 3" failed this way on two of three runs,
+and the cause could only be guessed.
+
+- The report shows, under the step, "Model replies this step did not use (N)"
+  with each call's request and reply, and under a check that recovered,
+  "Earlier code replies, replaced (N)".
+- The failure message quotes the start of the last unusable reply (300
+  characters, on one line, with its full length), so the run log, the CLI and
+  the MCP result carry it too: `… The model replied: "Yes, 3 equals 3."`.
 
 ## 3. Failures caused by the test files or the sites
 
