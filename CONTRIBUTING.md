@@ -11,16 +11,31 @@ how to send it.
 
 ## Set up
 
-You need Git and Node.js 22.21 or later. The repo is five npm projects (the
-framework at the root, `runner-core/`, `steptix-vscode/`, `flick-vscode/` and
-`fixtures/tools/`), and one command installs them all, plus Playwright's
-Chromium:
+You need Git, Node.js 22.21 or later, and Google Chrome. The repo is five npm
+projects (the framework at the root, `runner-core/`, `steptix-vscode/`,
+`flick-vscode/` and `fixtures/tools/`), and one command installs them all,
+plus Playwright's Chromium:
 
 ```bash
 git clone https://github.com/steptix/steptix.git
 cd steptix
 npm run setup
 ```
+
+You need both browsers. Steptix runs tests in your installed Google Chrome,
+not in Playwright's Chromium, and so do the unit tests that launch a browser
+through it; the rest launch Playwright's Chromium directly.
+
+On Linux, the browsers also need system libraries. On the Ubuntu and Debian
+releases Playwright supports, this installs them:
+
+```bash
+sudo npx playwright install-deps chromium
+```
+
+On any other distribution, `ldd` on the browser binary names what is missing.
+The VS Code that the integration suite downloads also loads libxkbfile and
+libsecret.
 
 No keys or `.env` files are needed for the unit and integration suites.
 
