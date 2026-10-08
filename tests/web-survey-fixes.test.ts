@@ -817,13 +817,14 @@ describe('§2.33 notifications that close are remembered', () => {
         <div role="status" id="still">Connected</div>
         <button id="b" onclick="
           const t = document.createElement('div');
-          t.className = 'ui-growl-item';
+          t.className = 'pop';
+          t.setAttribute('role', 'alert');
           t.textContent = 'Checked';
           document.body.appendChild(t);
           setTimeout(() => t.remove(), 50);
         ">Tick</button></body></html>`);
       await page.click('#b');
-      await page.waitForFunction(() => !document.querySelector('.ui-growl-item'));
+      await page.waitForFunction(() => !document.querySelector('.pop'));
       const snap = await captureDomSnapshot(page);
       expect(snap).toContain('Notifications that appeared and have since closed');
       expect(snap).toMatch(/- "Checked" \(\d+ s ago\)/);
@@ -833,6 +834,53 @@ describe('§2.33 notifications that close are remembered', () => {
     } finally {
       await own.close();
     }
+  });
+});
+
+describe('§2.50 notifications are what the page marks as live regions', () => {
+  async function noticesAfter(body: string, act: string): Promise<string[]> {
+    const own = await browser.newContext();
+    await installNoticeRecorder(own);
+    const page = await own.newPage();
+    try {
+      await page.setContent(`<!doctype html><html><body>${body}</body></html>`);
+      await page.evaluate(act);
+      await page.waitForFunction(() => document.body.dataset['done'] === '1');
+      return await page.evaluate(() => (window as unknown as { __steptixNotices: Array<{ text: string }> })
+        .__steptixNotices.map((n) => n.text));
+    } finally {
+      await own.close();
+    }
+  }
+
+  it('records a message added to a container that is already a live region', async () => {
+    const texts = await noticesAfter('<div id="box" aria-live="polite"></div>', `
+      const m = document.createElement('div'); m.className = 'msg'; m.textContent = 'Order saved';
+      document.getElementById('box').appendChild(m);
+      requestAnimationFrame(() => { m.remove(); document.body.dataset.done = '1'; });`);
+    expect(texts).toContain('Order saved');
+  });
+
+  it('records role="status", role="log" and <output>, and ignores aria-live="off"', async () => {
+    const texts = await noticesAfter('', `
+      for (const [tag, attr, val, text] of [['div', 'role', 'status', 'Uploaded'], ['div', 'role', 'log', 'Ada joined'],
+          ['output', null, null, 'Total 12'], ['div', 'aria-live', 'off', 'Ticking clock']]) {
+        const el = document.createElement(tag); if (attr) el.setAttribute(attr, val); el.textContent = text;
+        document.body.appendChild(el);
+      }
+      requestAnimationFrame(() => { document.body.dataset.done = '1'; });`);
+    expect(texts).toEqual(expect.arrayContaining(['Uploaded', 'Ada joined', 'Total 12']));
+    expect(texts).not.toContain('Ticking clock');
+  });
+
+  it('does not guess from class names: a message with no live-region marking is not recorded', async () => {
+    const texts = await noticesAfter('', `
+      for (const cls of ['toast', 'snackbar', 'notification', 'flash-message']) {
+        const el = document.createElement('div'); el.className = cls; el.textContent = 'Saved by ' + cls;
+        document.body.appendChild(el);
+      }
+      requestAnimationFrame(() => { document.body.dataset.done = '1'; });`);
+    expect(texts).toEqual([]);
   });
 });
 

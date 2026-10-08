@@ -63,6 +63,7 @@ in the test files, not here.
 | 2.47 | Ads hidden by hardcoded Google selectors | 40, 44, 59 | §2.5 and §2.22 recognised and hid ads by a fixed list of Google ad markup and CSS selectors, which breaks the no-site-specific-code rule and missed other ad networks | Removed. Ads are handled by the test's `## Context` or a step; a covered click or drag fails naming what is in the way |
 | 2.48 | The AI could not see what a page adds outside `<body>` | 40, 44 | The snapshot walked `document.body` only. Google's full-screen and anchored ads are appended to `<html>` beside `<body>`, so their Close buttons never reached the AI; told by `## Context` to close ads, it waited and stalled | Walk every child of `<html>` but `<head>`, frames included |
 | 2.49 | An unusable model reply left no trace | 40 | 'Assertion code response missing code field' failed c40's 'Verify that 3 equals 3' on two of three runs; the replies were counted but not shown, so the cause was a guess | The report shows unused and replaced replies in full; the failure message quotes the start of the last one |
+| 2.50 | Notifications recognised by class-name guesses | 62 | §2.33 recorded an element as a notification if its class contained toast, growl, snackbar or notification. Those are library vocabulary, one of them PrimeFaces' own, so the list suited the sites it came from and missed any other name (`flash-message`) | Only WAI-ARIA live regions count: `role` alert, status or log, an `aria-live` other than off, or `<output>`. Leafground's notification is marked that way and is still recorded |
 
 ## 2. Fixes
 
@@ -447,9 +448,9 @@ skipped, and the next ancestor, the toggle's container, takes the click.
 **Fix.** `installNoticeRecorder` (notices.ts) adds an init script to every
 launched or attached context, and runs it in the pages already open. It keeps
 `window.__steptixNotices`, up to 20 `{ text, at }` records with a WeakRef to
-the element, newest last. It records any element matching `role="alert"`,
-`role="status"`, `aria-live`, or a class containing toast, growl, snackbar or
-notification, both when it is added and when its text changes. The same text
+the element, newest last. It records any element the page marks as a live region
+(§2.50 replaced an earlier class-name list), both when it is added and when
+its text changes. The same text
 within 3 s is recorded once. `captureDomSnapshot` appends a comment listing
 records from the last 60 s whose element is gone, hidden or now says something
 else, with their age. A notification still on screen is in the snapshot itself.
@@ -674,6 +675,37 @@ and the cause could only be guessed.
 - The failure message quotes the start of the last unusable reply (300
   characters, on one line, with its full length), so the run log, the CLI and
   the MCP result carry it too: `… The model replied: "Yes, 3 equals 3."`.
+
+### 2.50 Notifications are what the page marks as live regions
+
+**Problem.** §2.33 decided what counts as a notification partly by class
+name: anything whose class contained toast, growl, snackbar or notification.
+Those words are libraries' own vocabulary. "growl" is PrimeFaces' name, taken
+from the one site where the problem showed up, which is exactly the
+site-shaped guess the framework must not make. The list also missed any
+library that picked another word (`flash-message`, `alert-bubble`), and
+could catch elements that only share the word (a "notification settings"
+panel).
+
+**Fix.** The recorder reads only what the page itself declares in WAI-ARIA,
+the web standard every page uses to say "announce this to the user": a live
+region. An element counts if it has `role` alert, status or log (roles that
+are live by definition), an `aria-live` other than `off`, or is an
+`<output>` element (implicit role status). A message added inside an element
+that is already a live region counts too, because the recorder looks up from
+whatever changed to the live region around it. No class name is read.
+
+Leafground was checked live: its notification container carries
+`aria-live="polite"` and each message `role="alert"`, so "Checked" is
+still recorded and listed once it has closed. A page that shows a message
+without marking it is not announcing it to screen readers either. Steptix does
+not guess at those: a test can still check the message while it is on screen,
+and steptix/steptix#24 collects ways for a test author to handle such pages.
+
+Tests: a message appended to an existing `aria-live` container is recorded;
+`role="status"`, `role="log"` and `<output>` are recorded and
+`aria-live="off"` is not; elements classed toast, snackbar, notification and
+flash-message with no live-region marking are not recorded.
 
 ## 3. Failures caused by the test files or the sites
 

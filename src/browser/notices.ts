@@ -1,13 +1,22 @@
 /**
- * Notifications that close by themselves — toasts, growls, snackbars — kept
- * long enough to be checked (docs/specs/SPEC-web-survey-fixes.md §2.33).
+ * Notifications that close by themselves kept long enough to be checked
+ * (docs/specs/SPEC-web-survey-fixes.md §2.33, §2.50).
  *
- * One model turn takes several seconds, and a PrimeFaces growl closes after
- * six: "Verify a message confirms the Ajax checkbox was checked" read the page
- * after the message had gone, and failed a step whose click had worked. A
- * person glancing at the screen would have seen it. So the page records the
- * text of every notification-like element as it appears, the snapshot lists
+ * One model turn takes several seconds, and a notification in the web survey
+ * closed after six: "Verify a message confirms the Ajax checkbox was checked"
+ * read the page after the message had gone, and failed a step whose click had
+ * worked. A person glancing at the screen would have seen it. So the page
+ * records the text of every notification as it appears, the snapshot lists
  * the ones that have since closed, and assertion code can read the list.
+ *
+ * A notification is what the page itself declares to be one, in the terms
+ * WAI-ARIA gives every page for "announce this to the user": a live region.
+ * That is `role="alert"`, `role="status"` or `role="log"`, an `aria-live`
+ * other than "off", or an `<output>` element, whose implicit role is status.
+ * Class names are not read: each library names its own, and a list of them
+ * only suits the sites it was taken from. A page that shows a message without
+ * marking it does not announce it to a screen reader either; a test can still
+ * check such a message while it is on screen.
  *
  * Read-only: an observer and an array, nothing on the page is changed.
  */
@@ -25,8 +34,10 @@ export const NOTICE_RECORDER_SCRIPT = `(() => {
   if (window.__steptixNotices) return;
   var list = [];
   Object.defineProperty(window, '__steptixNotices', { value: list });
-  var SEL = '[role="alert"],[role="status"],[aria-live="assertive"],[aria-live="polite"],'
-    + '[class*="toast" i],[class*="growl" i],[class*="snackbar" i],[class*="notification" i]';
+  // WAI-ARIA live regions: the roles that are live by definition, an explicit
+  // aria-live, and <output> (implicit role status). No class names.
+  var SEL = '[role~="alert"],[role~="status"],[role~="log"],'
+    + '[aria-live]:not([aria-live="off" i]),output';
   function record(el) {
     var text = String(el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
     if (!text || text.length > 300) return;
@@ -99,7 +110,7 @@ export async function noticeNote(page: Page): Promise<string> {
   const closed = await closedNotices(page);
   if (closed.length === 0) return '';
   const lines = closed.map((n) => `- "${n.text.replace(/-->/g, '--&gt;')}" (${n.ageSeconds} s ago)`);
-  return '\n<!-- Notifications that appeared and have since closed (toasts, growls, alerts). Each is also '
+  return '\n<!-- Notifications that appeared and have since closed (alerts and status messages). Each is also '
     + 'readable in the page as window.__steptixNotices (text, at). A check about a message that '
     + 'may already have gone can read it there.\n'
     + `${lines.join('\n')}\n-->`;
