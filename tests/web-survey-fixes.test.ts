@@ -1396,11 +1396,108 @@ describe('§2.43 label marks around a checked text', () => {
     const { sameTextIgnoringMarks } = await import('../src/runner/step-executor.js');
     expect(sameTextIgnoringMarks('Return date *', 'Return date')).toBe(true);
     expect(sameTextIgnoringMarks('Total:', 'Total')).toBe(true);
-    expect(sameTextIgnoringMarks('  Name  ', 'Name')).toBe(true);
+    expect(sameTextIgnoringMarks('  Name *  ', 'Name')).toBe(true);
     expect(sameTextIgnoringMarks('Not Done', 'Done')).toBe(false);
     expect(sameTextIgnoringMarks('Return date (optional)', 'Return date')).toBe(false);
     expect(sameTextIgnoringMarks('*', '')).toBe(false);
     expect(sameTextIgnoringMarks('anything', undefined)).toBe(false);
+  });
+
+  it('strips marks from what the page shows only, and only when there is one to strip (#35)', async () => {
+    const { sameTextIgnoringMarks } = await import('../src/runner/step-executor.js');
+    // The expected text keeps its asterisk: a check for it needs it on the page.
+    expect(sameTextIgnoringMarks('Email', 'Email *')).toBe(false);
+    expect(sameTextIgnoringMarks('Total', 'Total:')).toBe(false);
+    // No mark around the page's text: the check failed for another reason.
+    expect(sameTextIgnoringMarks('Pending', 'Pending')).toBe(false);
+    expect(sameTextIgnoringMarks('  Name  ', 'Name')).toBe(false);
+  });
+
+  it('knows a check that wants its text absent (#35)', async () => {
+    const { isNegativeCheck } = await import('../src/runner/step-executor.js');
+    expect(isNegativeCheck('order status is not Pending', 'Pending')).toBe(true);
+    expect(isNegativeCheck('the banner no longer shows Saved', 'Saved')).toBe(true);
+    expect(isNegativeCheck("status isn't Pending", 'Pending')).toBe(true);
+    expect(isNegativeCheck('the label doesn’t say Draft', 'Draft')).toBe(true);
+    expect(isNegativeCheck('Email label shown without an asterisk', 'Email')).toBe(true);
+    expect(isNegativeCheck('return date field label\nReturn date field is shown', 'Return date')).toBe(false);
+    // The expected text's own words are not the check's wording.
+    expect(isNegativeCheck('the option reads Do not disturb', 'Do not disturb')).toBe(false);
+    expect(isNegativeCheck('the notes heading', 'Notes')).toBe(false);
+  });
+
+  /** Run one check step on a real page, with the check code the model "wrote". */
+  async function runCheck(html: string, step: string, check: Record<string, unknown>, code: string) {
+    const { executeStep } = await import('../src/runner/step-executor.js');
+    const { DEFAULT_BROWSER_DIMENSIONS } = await import('../src/config/browser-dimensions.js');
+    const page = await pageWith(html);
+    try {
+      const stepReply = JSON.stringify({ actions: [{ action: 'assert', against: 'dom', ...check }], reasoning: 'Check the text.' });
+      const codeReply = JSON.stringify({ code });
+      const isCodeRequest = (messages: Array<{ content: unknown }>) =>
+        messages.some((m) => JSON.stringify(m.content).includes('evaluates the following assertion'));
+      const aiClient = {
+        complete: vi.fn((messages: Array<{ content: unknown }>) =>
+          Promise.resolve({ text: isCodeRequest(messages) ? codeReply : stepReply, model: 'test' })),
+      };
+      return await executeStep(1, 1, step, {
+        page,
+        config: {
+          ai: { gatewayUrl: '', model: 'test', maxInputTokens: 1000, streamResponses: false },
+          browser: { headed: false, viewport: { ...DEFAULT_BROWSER_DIMENSIONS }, windowSize: { ...DEFAULT_BROWSER_DIMENSIONS }, slowMo: 0, browser: 'chromium', fullPageScreenshots: false },
+          tests: { dir: '.', contextDir: '.', pattern: '**/*.md' },
+          execution: { timeout: 30000, retries: 0, screenshotOnFailure: false, promptOnAmbiguity: false, maxTurns: 3 },
+          reports: { outputDir: '.', includeScreenshots: false, includeDomSnapshots: false, includeAiReasoning: false, embedScreenshots: true },
+          api: { specsDir: '.', requestTimeout: 5000, redactSensitive: false },
+        } as never,
+        aiClient: aiClient as never,
+        contextContent: '',
+        testName: 'test',
+        conversationHistory: [],
+        csrfTokens: {},
+      });
+    } finally {
+      await page.close();
+    }
+  }
+
+  /** Check code that compares the label's text exactly, as a model writes it. */
+  const exactLabel = (selector: string, want: string) =>
+    `(() => { const t = document.querySelector('${selector}').textContent.replace(/\\s+/g, ' ').trim(); return { pass: t === '${want}', actual: t }; })()`;
+
+  it('passes a label check whose page text carries a required-field asterisk', async () => {
+    const result = await runCheck(
+      '<label for="ret">Return date *</label><input id="ret" required>',
+      'Verify a return date field is shown',
+      { condition: 'return date field label', expected: 'Return date', description: 'Return date field is shown' },
+      exactLabel('label', 'Return date'),
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe('passed');
+  });
+
+  it('fails a check for the asterisk when the page has lost it (#35)', async () => {
+    const result = await runCheck(
+      '<label for="email">Email</label><input id="email">',
+      'Verify the Email label shows the required asterisk',
+      { condition: 'Email label shows the required asterisk', expected: 'Email *', description: 'Email label is marked required' },
+      exactLabel('label', 'Email *'),
+    );
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('got "Email"');
+  });
+
+  it('fails a negative check when the page shows the text, marks or not (#35)', async () => {
+    for (const shown of ['Pending', '• Pending']) {
+      const result = await runCheck(
+        `<p id="status">${shown}</p>`,
+        'Verify the order status is not Pending',
+        { condition: 'order status is not Pending', expected: 'Pending', description: 'Order status is not Pending' },
+        "(() => { const t = document.querySelector('#status').textContent.trim(); return { pass: !t.includes('Pending'), actual: t }; })()",
+      );
+      expect(result.status, shown).toBe('failed');
+      expect(result.error, shown).toContain(`got "${shown}"`);
+    }
   });
 });
 

@@ -56,7 +56,7 @@ in the test files, not here.
 | 2.40 | A value from an unset environment variable is typed into the page | 41 | `bookstore_user: $DEMOQA_USERNAME` with no such variable stays the literal `$DEMOQA_USERNAME`, with a warning in the run result. The model typed it into the Book Store login, and in one run a check then "found" `$DEMOQA_USERNAME` on the page and passed the section: a false pass | A turn that names a placeholder still holding a bare `$NAME`, or types that literal, is refused before anything runs, naming the variable to set |
 | 2.41 | No way to clear a field | 44 | The model sent `clear`, which is not an action, and the turn was refused; the retry selected the text and pressed Backspace | `clear`, `clearField`, `clearInput` and `clearText` map to `type` with an empty value |
 | 2.42 | §2.34's rewrite broke on an apostrophe | 70 | The glyph-tolerant name for `role=combobox[name="I'm the only traveler"]` put a bare `'` in the regex. It parsed on its own, so the rewrite was kept, but Playwright's `>>` splitter read the `'` as an open string and the click's own `>> visible=true >> nth=0` made the selector unparsable; the retry recovered | Write `'` and `"` in the rewritten pattern as `'` and `"` |
-| 2.43 | A required-field asterisk fails a label check | 70 | "Verify a return date field is shown" expected "Return date" and read "Return date *"; the asterisk is the form's required marker. It failed on attempt 1 and §2.25's hint rescued it | A failed DOM check passes when the text read equals the expected text once whitespace is collapsed and `*`, `:`, bullets and bars are stripped from both ends. Nothing inside the text is ignored, so "Not Done" still fails "Done" |
+| 2.43 | A required-field asterisk fails a label check | 70 | "Verify a return date field is shown" expected "Return date" and read "Return date *"; the asterisk is the form's required marker. It failed on attempt 1 and §2.25's hint rescued it | A failed DOM check passes when the page's text, with `*`, `:`, bullets and bars stripped from its ends, equals the expected text as written. The page's text must have had such a mark, and a negative check ("is not", "no longer") never passes this way. Nothing inside the text is ignored, so "Not Done" still fails "Done" |
 | 2.44 | Prompt examples copied from tested sites | 44, 45, 50, 56, 62, and the fixture app | Ten examples added with these fixes used ids and text from the sites under test (`#open-shadow`/`#fname`, `#copy`, `'Checked'`, "tick two skills", "confirm returned true", Red and Green in `#colors`), and four older ones used the fixture app and a Telerik grid (`demo@securebank.com`, "Transaction Dispute", `#RadGrid1_ctl00__7`). On those pages the model was shown the answer | Every example uses invented names (`#host`/`#field`, `#item`, `#grid_row_7`, "Ada", "Order 12 was placed."). CLAUDE.md now forbids site-specific selectors and text anywhere in the framework |
 | 2.45 | A project's context files never reached the model on the server | every survey run | Context was loaded once per session from the server's own `tests.contextDir`, so the survey's `context/public-sites.md` (close ads and overlays) was replaced by the repo's sample API docs | Load context on every batch from the test's project |
 | 2.46 | No way for a test to tell the AI what it needs | 40, 44, 59 and any test | Only the project's context files reached the AI, and the description under the title is not sent | A `## Context` section, sent word for word with every step after the project's context; selectors and frame ids welcome |
@@ -648,12 +648,27 @@ survive the filters it appends.
 ### 2.43 Label marks are not part of a label
 
 **Fix.** `evaluateAssertion` checks a failed DOM or API result once more
-with `sameTextIgnoringMarks(actual, expected)`: collapse whitespace, strip
-`*`, `:`, `•`, `·` and `|` from both ends of each, and compare for
-equality. A match passes the check, with a debug line saying so. This is
-deliberately narrower than containment (§2.38 asks the model for containment
-where the step means it): marks inside the text, extra words and an empty
-expectation never match.
+with `sameTextIgnoringMarks(actual, expected)`: collapse whitespace on both,
+strip `*`, `:`, `•`, `·` and `|` from both ends of what the page shows, and
+compare it for equality with the expected text. A match passes the check,
+with a debug line saying so. This is deliberately narrower than containment
+(§2.38 asks the model for containment where the step means it): marks inside
+the text, extra words and an empty expectation never match.
+
+It overrides the check code's own verdict, so it applies only where a label
+mark is the one thing in the way (issue 35):
+
+- **Marks come off the page's text, never the expected text.** A check
+  written to see `Email *` is about the asterisk, and still fails on `Email`.
+- **The page's text must have a mark to strip.** A check that read exactly
+  the expected text and still failed, failed for another reason — a negative
+  check, a hidden element — so its failure stands. Whitespace alone is not a
+  mark.
+- **A negative check keeps its failure.** `isNegativeCheck` reads the
+  condition and description, with the expected text taken out, for "not",
+  "no", "nothing", "never", "none", "without", "cannot" and any "n't". "Verify
+  the status is not Pending" fails on `• Pending` as on `Pending`, while a
+  label that reads "Do not disturb" is still checked as a label.
 
 ### 2.44 Prompt examples name nothing real
 

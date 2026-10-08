@@ -4445,8 +4445,15 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
 
   // A required-field asterisk or a label's colon is not part of the label: the
   // check for "Return date" read "Return date *" and failed (§2.43). Only the
-  // marks around the text are ignored, so "Done" against "Not Done" still fails.
-  if (!evalResult.pass && p.against !== 'predicate' && sameTextIgnoringMarks(evalResult.actual, p.expected)) {
+  // marks around what the page shows are ignored, so "Done" against "Not Done"
+  // still fails, an expected "Email *" still needs its asterisk, and a check
+  // that wants the text NOT to be there keeps its failure.
+  if (
+    !evalResult.pass
+    && p.against !== 'predicate'
+    && sameTextIgnoringMarks(evalResult.actual, p.expected)
+    && !isNegativeCheck(`${p.condition}\n${p.description}`, p.expected)
+  ) {
     logger.debug(`"${evalResult.actual}" is "${p.expected}" with label marks around it — passing`);
     evalResult = { ...evalResult, pass: true };
   }
@@ -4493,16 +4500,40 @@ export function quoteReply(text: string): string {
 const LABEL_MARKS = /^[\s*:•·|]+|[\s*:•·|]+$/g;
 
 /**
- * Whether what a check read is the expected text once whitespace is collapsed
- * and required-field and label marks (`*`, `:`, bullets) are stripped from
- * both ends. Nothing inside the text is ignored, and an empty expectation
- * never matches this way.
+ * Whether what a check read is the expected text with label marks around it:
+ * whitespace collapsed on both sides, and required-field and label marks
+ * (`*`, `:`, bullets, bars) stripped from the ends of what the PAGE shows.
+ *
+ * The expected text keeps its marks, so a check written to see `Email *` still
+ * fails on `Email`. The page's text must have had a mark to strip: a check
+ * that read exactly the expected text and still failed, failed for some other
+ * reason — a negative check, a hidden element — and that verdict stands.
+ * Nothing inside the text is ignored, and an empty expectation never matches.
  */
 export function sameTextIgnoringMarks(actual: string, expected: string | undefined): boolean {
   if (expected === undefined) return false;
-  const norm = (s: string) => s.replace(/\s+/g, ' ').replace(LABEL_MARKS, '').trim();
-  const want = norm(expected);
-  return want !== '' && norm(actual) === want;
+  const collapse = (s: string) => s.replace(/\s+/g, ' ').trim();
+  const want = collapse(expected);
+  const shown = collapse(actual);
+  const unmarked = shown.replace(LABEL_MARKS, '');
+  return want !== '' && unmarked !== shown && unmarked === want;
+}
+
+/** Words that make a check pass when its text is NOT there. */
+const NEGATION = /\b(?:not|no|nothing|never|none|without|cannot)\b|n['’]t\b/i;
+
+/**
+ * Whether a check's wording asks for something to be absent ("is not
+ * Pending", "no longer shows", "doesn't say"). Such a check fails because the
+ * page shows the expected text, so marks around it are no reason to pass it.
+ * The expected text itself is left out of the scan: a label that reads "Do
+ * not disturb" is not a negative check.
+ */
+export function isNegativeCheck(wording: string, expected: string | undefined): boolean {
+  let text = wording.toLowerCase();
+  const want = expected?.trim().toLowerCase() ?? '';
+  if (want !== '') text = text.split(want).join(' ');
+  return NEGATION.test(text);
 }
 
 async function runAssertionCode(
