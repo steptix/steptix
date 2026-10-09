@@ -9,13 +9,13 @@ import { scanStepSpans } from '../src/parser/markdown.js';
  * classification table that runner-core and both extensions assert against.
  *
  * The server does not import runner-core — it hand-mirrors the `## Steps`
- * span scan in `src/parser/markdown.ts` (issues/035, contract §1). Nothing in
+ * span scan in `src/parser/markdown.ts` (steptix/steptix#49, contract §1). Nothing in
  * the type system links the two, so this file is the link: both sides are
  * held to `fixtures/sections/classification.json`, and a divergence surfaces
  * as a failing row here instead of as a test file that executes one way from
  * the CLI and another way through Steptix.
  *
- * This is step 6 of issues/035, banked early because sections are the first
+ * This is step 6 of the consolidation plan in steptix/steptix#49, banked early because sections are the first
  * feature where the two scanners disagreeing changes *what runs* rather than
  * merely how a line is painted.
  */

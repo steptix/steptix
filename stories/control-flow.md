@@ -162,9 +162,9 @@ ignores them by design, and the CLI's marked-based parser folds a nested list
 into the parent item's text (`classifyReading` in
 [src/parser/markdown.ts](../src/parser/markdown.ts)). A block with indented
 sub-steps would today reach the model as one long prose step. Making nesting
-real would mean a new line kind in every one of the six step-line parsers
-[issue 035](../issues/035-step-line-span-parser-duplicated-six-times.md)
-counts, plus painting, breakpoints, renumbering and go-to-definition for nested
+real would mean a new line kind in every one of the step-line parsers
+[#49](https://github.com/steptix/steptix/issues/49)
+lists, plus painting, breakpoints, renumbering and go-to-definition for nested
 lines. The sections story weighed block syntaxes and chose `###` for the same
 reasons ([stories/test-script-sections.md](test-script-sections.md), "Why
 bare-name + `###`").

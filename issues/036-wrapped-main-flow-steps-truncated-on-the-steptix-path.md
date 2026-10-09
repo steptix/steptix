@@ -10,8 +10,8 @@ and [testbench-monaco/src/extension/run-controller.ts](../testbench-monaco/src/e
 **Deliberate counterpart:**
 [src/parser/markdown.ts](../src/parser/markdown.ts) — the CLI runs each step
 through `marked`, which folds a wrapped list item into one step.
-**Related:** [035](035-step-line-span-parser-duplicated-six-times.md) (the same
-copies); the inline-sections contract
+**Related:** [#49](https://github.com/steptix/steptix/issues/49) (the same
+copies, and the plan to consolidate them); the inline-sections contract
 [§3.2](../stories/test-script-sections-contract.md), whose wrapped-item rule
 covers section **bodies** and explicitly scopes this one out.
 **Opened:** 2026-07-23
@@ -80,11 +80,11 @@ detection, just a decision about what to do with what is already detected.
    `extractSteps`. Makes wrapped steps work everywhere, and is the only option
    the author would actually want — but it means a hand-written copy of
    markdown's block grammar in the client, which is exactly the drift
-   [035](035-step-line-span-parser-duplicated-six-times.md) is about. Only
-   sane if it lands *as part of* 035's consolidation, in one place.
+   [#49](https://github.com/steptix/steptix/issues/49) is about. Only
+   sane if it lands *as part of* #49's consolidation, in one place.
 
 ## Revisit when
 
-- 035 is picked up (option 3 becomes cheap at that point), or
+- [#49](https://github.com/steptix/steptix/issues/49)'s consolidation is picked up (option 3 becomes cheap at that point), or
 - a user reports a step "not doing all of what it says", which is how this
   will present.

@@ -149,7 +149,7 @@ them (`/^\s*\d+\./`). Normalizing that is out of scope; the mirrored parity
 fixtures must avoid indented numbered items so the snapshot tests pin the
 *new* rules, not the pre-existing divergence. The duplication itself is
 tracked as
-[issues/035](../../../issues/035-step-line-span-parser-duplicated-six-times.md)
+[#49](https://github.com/steptix/steptix/issues/49)
 — if that consolidation lands first, this spec's "all copies in lockstep"
 work collapses to runner-core + the host anchor file + the server mirror.
 
