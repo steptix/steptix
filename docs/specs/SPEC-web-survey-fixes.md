@@ -47,7 +47,7 @@ in the test files, not here.
 | 2.31 | Checks cannot see inside an iframe | 63 | Assertion code runs with `page.evaluate` in the top document, so `document.querySelector('#checkBox6')` never finds a checkbox inside `#myFrame3`. The click into the frame worked; the check that it was ticked said "element not found", twice | An assert with `frame` runs its code inside that frame; both prompts say how to reach frame content |
 | 2.32 | The hidden-toggle stand-in clicked a 1 px wrapper | 62 | §2.10 clicks the nearest visible ancestor of a hidden checkbox input. PrimeFaces wraps the input in a 1×1 px `ui-helper-hidden-accessible` div, which Playwright counts as visible and the real checkbox box covers, so the click timed out on "intercepts pointer events" | A stand-in must also have a box of at least 4×4 px |
 | 2.33 | Notifications close before they are checked | 62 | A PrimeFaces growl closes after six seconds and a model turn takes several, so "Verify a message confirms the Ajax checkbox was checked" read a page whose message had gone | The page records toast-like notifications as they appear; the snapshot lists the ones that have closed, and assertion code can read `window.__steptixNotices` |
-| 2.34 | Exact role names miss icon buttons | 62 | An icon font draws its glyph with CSS `::before` content, and that counts in the accessible name. PrimeFaces' Dismiss button is named "<glyph> Dismiss", so `role=button[name="Dismiss"]` matched nothing on an open dialog, twice | When an exact `role=…[name="…"]` matches nothing, retry it as `name=/^W*…W*$/i` and keep that only if it finds something |
+| 2.34 | Exact role names miss icon buttons | 62 | An icon font draws its glyph with CSS `::before` content, and that counts in the accessible name. PrimeFaces' Dismiss button is named "<glyph> Dismiss", so `role=button[name="Dismiss"]` matched nothing on an open dialog, twice | When an exact `role=…[name="…"]` matches nothing, act on the one visible element of that role whose visible text, or else whose name with case and symbols aside, is the name; refuse when several are (a plural action takes them all), and list the role's names when none is (issue 26) |
 | 2.35 | A navigation to a 404 passed | 62 | "Navigate to input.xhtml" was sent to `/pages/input.xhtml`, which answered 404 Not Found; the navigate succeeded because a page loaded, and the next step had no field to type into and asked for clarification | A navigate reports the document's HTTP status; a 4xx or 5xx fails it (retryably) unless the step mentions an error or a status code |
 | 2.36 | A drag cannot say which side to drop on | 72 | "Drag Item 1 below Item 3" let go on Item 3's centre. A jQuery UI sortable decides before or after by which half the pointer is in, so Item 1 landed before Item 3 | `position` on `drag` (`above`, `below`, `left`, `right`) lets go at 20% or 80% of the target's height or width |
 | 2.37 | A navigation timeout does not say whether the site is up | 39 | "page.goto: Timeout 30000ms exceeded" and nothing else. the-internet.herokuapp.com answered curl and Firefox in under a second, while Chromium and Edge hung on it every time, and the bare timeout read as "the site is down" | On a navigation timeout, ask the URL once from outside the browser and add which it is: the site answers (with its status and time) or it does not answer at all. The message names the symptom only, not a browser flag |
@@ -458,16 +458,85 @@ else, with their age. A notification still on screen is in the snapshot itself.
 The assertion code prompt shows reading `window.__steptixNotices` for a
 message that may have closed. Nothing on the page changes.
 
-### 2.34 Role names tolerate an icon glyph
+### 2.34 Role names match what a person sees
+
+The accessible name `name=` matches includes text a person does not see as
+text: an icon font's `::before` glyph, an `<img>`'s alt, an SVG's `<title>`.
+The model writes the visible text it reads in the snapshot. The first fix
+allowed symbols around the name, which covered icon fonts but not image or
+SVG icons, whose alt text and titles are words, and it clicked the first of
+"✔ Save" and "✖ Save" without saying so. Issue 26 replaced it with this.
 
 **Fix.** Before acting, `executeAction` passes the selector through
-`tolerateRoleName`. If it contains an exact role name, and the selector as
-written matches nothing, each `role=X[name="Y"]` is rewritten to
-`role=X[name=/^W*YW*$/i]` (Y regex-escaped, inner spaces as `s+`). The
-rewrite is used only when it matches. It still anchors the whole name, so
-"Dismiss all" is not "Dismiss". A selector that matched as written is never
-touched, and one the rewrite cannot help is kept as written, so the failure
-quotes what the model sent.
+`resolveRoleName`. It applies to each `>>` segment of the form
+`role=X[name="Y"]` (more attributes may follow; a name with an `i`/`s` flag or
+a regex is left alone). For each such segment that matches nothing inside what
+came before it:
+
+1. **Exact name.** A selector with a visible match is never touched. An
+   exact match nobody can see, such as a zero-size duplicate, does not count
+   for a singular action, which only ever acts on a visible one. When nothing
+   matches, the name as written gets up to 1 s to appear first. The fallback
+   runs before the action's own wait, so without that pause an element still
+   rendering would lose to one already on screen that only reads the same: a
+   row's "✖ Remove" taking the click meant for the dialog's Remove. Issue 26
+   asked for no waiting of its own; this pause is the exception, and it only
+   costs time when the exact name misses.
+2. **Visible text.** Read the `innerText` of the visible elements of role X
+   and compare it with Y, ignoring case and runs of spaces. When none equals
+   it, compare again with symbols dropped from both ends of each, for a glyph
+   written into the DOM as a character. That second pass needs a letter or
+   digit in Y, so "×" never matches "✖". The whole text must match: "Dismiss"
+   never reaches "Dismiss all" or "Dismiss 3".
+3. **Accessible name.** When no visible text matches, the visible elements of
+   role X whose accessible name is Y with case and non-word characters around
+   it ignored. A field named by its `<label>` has no text of its own, so this
+   is what finds `role=textbox[name="Email"]` for "Email *", and an icon
+   button's mis-cased `aria-label`. The rule step 2 replaced did this for every
+   element, and dropping it broke both.
+
+   For steps 2 and 3:
+   - One match: the segment is replaced by the role narrowed to that
+     element's own text, `role=X >> visible=true >> internal:has-text=/^…$/i`,
+     kept only when it picks out that element and nothing else. Playwright
+     re-resolves a locator on every retry while it waits for the element to
+     be actionable, so a position would move to another element when one
+     appears before it; the element's own text does not move. Only when the
+     filter cannot single it out (its text holds a hidden child that
+     `innerText` leaves out) is it pinned by position,
+     `role=X >> visible=true >> nth=<i>`. The run log says which element was
+     used and its name.
+   - Several, for a singular action: the action does not run. It fails with
+     `matchCount` set to the number and lists each one's accessible name,
+     with the first as an example to retry with
+     (`e.g. role=button[name="approve Save"]`). A name the snapshot could not
+     read is said to be unreadable, not missing. The example is rebuilt from
+     the selector's segments, so a `$` in a page's name stays as it is.
+   - Several, for a plural action (`count`, `read` with `multiple`,
+     `readTable`): all of them. The selector is the role filtered by the
+     text, and is used only when it matches exactly as many elements as step 2
+     found. A plural action also keeps any exact match as written, hidden or
+     not, since it counts what it matched.
+4. **None.** The selector runs as written, so Playwright's wait still covers
+   an element that has not appeared yet. If it ends with no match, the error
+   starts with the visible elements of role X in that scope (up to 20), each
+   with its accessible name and, where different, what it reads. Each
+   element's name and text are read together, so a page still re-rendering
+   cannot pair one element's name with another's text.
+
+Names come from the element's aria snapshot. It uses the standard role,
+`innerText`, the accessible name and the model's name, and nothing about any
+site or icon library. A frame-scoped action searches only inside that frame.
+Known limit: visually hidden helper text is part of `innerText`, so
+`<span class="sr-only">Close menu</span>×` reads "Close menu ×". The snapshot
+shows the same, so the model and the fallback agree.
+
+**Compiled steps.** Nothing replays this fallback: a compiled entry calls
+Playwright with whatever selector it was written with. So when a compile run
+measures an action that fell back, `targeting.roleNameFallback` records the
+selector acted on. The code prompt explains it, and `entryFaults` and
+`staticEntryComplaint` refuse an entry that uses the selector as written
+(check `unmatched-role-name`), pointing it at `resolvedSelector` instead.
 
 ### 2.35 Error pages are not where the step was going
 
@@ -570,6 +639,11 @@ selector splitter to pair, so the selector survives whatever is appended to
 it. A test clicks a glyph button named "I'm the only traveler" through
 `executeAction` — the path that appends the visibility filter — and fails
 without the escape.
+
+Since issue 26, §2.34 still builds regexes — the text filter that pins an
+element and the accessible-name pattern — and writes `'`, `"` and `>` in
+them as hex escapes for the same reason. The test stays: the click must still
+survive the filters it appends.
 
 ### 2.43 Label marks are not part of a label
 

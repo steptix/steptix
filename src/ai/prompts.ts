@@ -1628,6 +1628,9 @@ function targetingLegend(actions: TranscriptAction[]): string {
     (actions.some((a) => (a.targeting?.kinds?.length ?? 0) > 0)
       ? `- \`kinds\` — on a \`read\` or \`count\`: the kinds of element it matched, each as its tag name and class names (\`span.account-name\`). A selector that would also match another kind reads something else.\n`
       : '') +
+    (actions.some((a) => a.targeting?.roleNameFallback !== undefined)
+      ? `- \`roleNameFallback\` — the action's selector names a role whose name matched NOTHING exactly, so the runtime acted on this selector instead: the role narrowed by the element's visible text, or by its name with case and symbols around it ignored. The transcript's selector is not usable as written — it matches nothing on replay. Use \`resolvedSelector\` when there is one.\n`
+      : '') +
     `\n` +
     `An \`upload\` action also carries \`upload.via\`: \`"input"\` means the files were set straight onto an \`<input type="file">\`, \`"chooser"\` means a control was clicked and the picker it opened was answered. Write whichever shape the transcript shows.\n\n` +
     `An action with no \`targeting\` was not measured. Nothing follows from its absence.\n\n`

@@ -724,7 +724,8 @@ export interface EntryFault {
     | 'unwaited-navigation'
     | 'context-value-as-variable'
     | 'chained-assertion'
-    | 'tab-identifier';
+    | 'tab-identifier'
+    | 'unmatched-role-name';
   complaint: string;
   /** The recorded selector, for a `read` fault. */
   selector?: string;
@@ -768,6 +769,7 @@ export function entryFaults(
     ['context-value-as-variable', contextValueAsVariableComplaint(code, ctx.variables)],
     ['chained-assertion', chainedAssertionComplaint(code)],
     ['tab-identifier', tabIdentifierComplaint(code, actions, ctx.secrets)],
+    ['unmatched-role-name', unmatchedRoleNameComplaint(code, actions, ctx.substitute)],
   ];
   for (const [check, complaint] of found) {
     if (complaint !== undefined) out.push({ check, complaint });
@@ -1012,6 +1014,7 @@ export function staticEntryComplaint(
 ): string | undefined {
   return (
     ambiguousSelectorComplaint(code, actions, substitute) ??
+    unmatchedRoleNameComplaint(code, actions, substitute) ??
     literalUploadPathComplaint(code, actions)
   );
 }
@@ -1095,6 +1098,43 @@ export function ambiguousSelectorComplaint(
         ? `Use the verified resolvedSelector ${JSON.stringify(resolved)}`
         : `Scope it to an ancestor that makes it unique`) +
       `, or reproduce the runtime's tolerance with .locator('visible=true').first().`
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Why this entry must not be written as it stands: it uses a selector whose
+ * role name matched nothing exactly in the recorded run, so the runtime acted
+ * on what `targeting.roleNameFallback` names instead
+ * (SPEC-web-survey-fixes.md §2.34). Nothing replays that fallback, so the
+ * selector as written matches nothing the moment the entry runs — any use of
+ * it, narrowed or not, which is why this does not ask whether the use is bare.
+ */
+export function unmatchedRoleNameComplaint(
+  code: string,
+  actions: RecordedAction[],
+  substitute?: ((text: string) => string) | undefined,
+): string | undefined {
+  let strings: StringToken[] | undefined;
+  for (const action of actions) {
+    const selector = action.selector;
+    const fallback = action.targeting?.roleNameFallback;
+    if (selector === undefined || fallback === undefined) continue;
+    strings ??= scan(code).strings;
+    const substituted = substitute?.(selector);
+    const spellings =
+      substituted !== undefined && substituted !== selector ? [selector, substituted] : [selector];
+    if (!strings.some((token) => spellings.includes(token.value))) continue;
+
+    const resolved = action.targeting?.resolvedSelector;
+    return (
+      `The entry uses ${JSON.stringify(selector)}, but nothing had that name in this run — the runtime ` +
+      `found the element by what it shows, as ${JSON.stringify(fallback)}, and nothing replays that, so ` +
+      `the selector as written matches nothing. ` +
+      (resolved !== undefined
+        ? `Use the verified resolvedSelector ${JSON.stringify(resolved)}.`
+        : `Locate the element the way the runtime did.`)
     );
   }
   return undefined;
