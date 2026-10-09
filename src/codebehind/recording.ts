@@ -330,9 +330,14 @@ export async function writeRecording(testFilePath: string, input: RecordingInput
  * compiler's rule too: it refuses a clean code run as "ran as code" and takes
  * the healed pass for its repair.
  *
- * When no pass is usable evidence: the first that passed (a step that only
- * ever ran as code), else the first row of all (a step that never passed is
- * recorded as it first failed or was skipped).
+ * When no pass is usable evidence: the first with a transcript that worked —
+ * a pass that ended on a list read proving nothing about its selector, which
+ * the compile then refuses rather than generate from (`unprovenListRead`,
+ * issue #48) — else the first that passed (a step that only ever ran as
+ * code), else the first row of all (a step that never passed is recorded as
+ * it first failed or was skipped). That middle rank is load-bearing: ranked
+ * with the clean code runs, a healed pass whose list came back empty lost to
+ * pass 1's empty transcript, and the compile wrote `ai: true` over the entry.
  *
  * Hook rows and interactive rows are dropped, as both writers always did.
  * Returned in the order each index first appears, which is the run's order,
@@ -345,7 +350,8 @@ export async function writeRecording(testFilePath: string, input: RecordingInput
 export function evidenceRows(steps: readonly StepResult[]): StepResult[] {
   const firstSeen: number[] = [];
   const chosen = new Map<number, StepResult>();
-  const rank = (r: StepResult): number => (isEvidencePass(r) ? 2 : r.status === 'passed' ? 1 : 0);
+  const rank = (r: StepResult): number =>
+    isEvidencePass(r) ? 3 : ranWithTranscript(r) ? 2 : r.status === 'passed' ? 1 : 0;
   for (const result of steps) {
     if (result.hookScope || result.interactiveAdHoc || result.interactiveChild) continue;
     const held = chosen.get(result.index);
@@ -372,9 +378,14 @@ export function evidenceRows(steps: readonly StepResult[]): StepResult[] {
  * compiled from the second.
  */
 export function isEvidencePass(result: StepResult): boolean {
+  return ranWithTranscript(result) && unprovenListRead(result) === undefined;
+}
+
+/** It worked — passed, or failed as its text says — and ran under AI. */
+function ranWithTranscript(result: StepResult): boolean {
   const worked = result.status === 'passed' || result.deliberate === true;
   const transcript = result.fromCodeBehind !== true || result.codeBehindStale !== undefined;
-  return worked && transcript && unprovenListRead(result) === undefined;
+  return worked && transcript;
 }
 
 /**

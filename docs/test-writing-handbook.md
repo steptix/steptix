@@ -401,8 +401,9 @@ Say precisely what to read:
   then reads again with a better selector or keeps the list, since an empty
   list can be the right answer. That costs one more model call, and only for
   such a list. A read the model changes is shown again, for as long as the
-  step has turns left. It never fails the step: with no turn left, the step
-  ends on the list as it came back, and the report marks the step
+  step has turns left. It never fails the step: with no turn left, or when
+  the model's answer is anything but keeping the list or reading it again,
+  the step ends on the list as it came back, and the report marks the step
   **⚠ list not checked**. A count of 0 is treated the same way.
 - Asking for part of a text ("just the digits after Account number:") makes
   the model add a regular expression. That read **fails the step** if the

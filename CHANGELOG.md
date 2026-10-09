@@ -28,7 +28,11 @@ run's read, the code-behind kept the wrong list.
 - **A list never fails the step.** A read the model changes is shown again,
   for as long as the step has turns left. With no turn left — the step's last
   turn, or a `return` — the step ends on the list as it came back and
-  passes, and the report marks it **⚠ list not checked**.
+  passes, and the report marks it **⚠ list not checked**. A turn added only to
+  show the model its list runs nothing but a keep or a read again. Any other
+  answer, a read again that fails, or a model call that fails there ends the
+  step where it stood, passed and marked the same way, instead of failing a
+  step that was done.
 - **Only a read that proves its selector is compiled.** A read the model
   replaced is left out of what Run & Compile writes. A step that ended on a
   list that came back empty, or a count of 0, is not compiled at all, even

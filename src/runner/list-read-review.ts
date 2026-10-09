@@ -20,9 +20,11 @@
  * The model then reads again with a better selector, which replaces the read,
  * or keeps it. Neither outcome is a failure — an empty list and a row of cells
  * with different classes are both real answers — so this only ever asks, in
- * the turns the step has left. A step that ends on one with no turn left to
- * show it (its last turn, or a `return` in the same turn) ends on it as read,
- * and the report says the model never saw it.
+ * the turns the step has left. A turn added only to ask runs nothing but those
+ * two answers (`isReviewAnswer`): anything else, or a read again that fails,
+ * ends the step where it stood. So does having no turn left to show the read
+ * (its last turn, or a `return` in the same turn). The step then ends on the
+ * read as it came back, and the report says the model never answered it.
  *
  * What the compile may use is decided here too. A read that a later action
  * stored over is not the step's read, so the transcript leaves it out
@@ -37,6 +39,7 @@
 import type { AIAction } from '../ai/types.js';
 import type { ActionExecutionResult, MatchGroup } from '../browser/actions.js';
 import type { StepResult, SubActionResult } from '../report/types.js';
+import { isSecretParameterName } from '../utils/secrets.js';
 
 /** Why a list read is shown to the model. */
 export type ListReadConcernKind = 'empty' | 'mixed';
@@ -68,7 +71,9 @@ export function isListRead(action: AIAction): boolean {
  * The concern about a list read that succeeded, or undefined when there is
  * none — not a list read, a list of one kind, or a page that could not say
  * what it matched. `mask` hides the run's secrets in the line, which quotes
- * page text and the selector.
+ * page text and the selector. A list stored under a secret-looking name is
+ * described without its values: the mask holds such a list whole, as the
+ * text it was stored as, and the line would quote its items one by one.
  */
 export function listReadConcern(
   action: AIAction,
@@ -80,6 +85,7 @@ export function listReadConcern(
   const selector = `\`${action.selector ?? ''}\``;
   const groups = result.listMatches?.groups;
   const counting = action.action === 'count';
+  const samples = !isSecretParameterName(name);
 
   const stored = counting ? Number(result.capturedValue) : (result.capturedValues ?? []).length;
   if (stored === 0) {
@@ -89,7 +95,7 @@ export function listReadConcern(
       const hidden = result.listMatches!.hidden!;
       why = `${selector} matched ${elements(hidden)}, none of them visible, and a count counts only visible ones.`;
     } else if (!counting && matched > 0 && typeof action.pattern === 'string') {
-      why = `${selector} matched ${elements(matched)} — ${describeGroups(groups!)} — `
+      why = `${selector} matched ${elements(matched)} — ${describeGroups(groups!, samples)} — `
         + `and the pattern /${action.pattern}/ kept none of them.`;
     } else {
       why = `${selector} matched nothing on this page.`;
@@ -105,15 +111,16 @@ export function listReadConcern(
     return {
       kind: 'mixed',
       name,
-      text: mask(`${what}: ${selector} matched ${elements(total)} — ${describeGroups(groups)}.`),
+      text: mask(`${what}: ${selector} matched ${elements(total)} — ${describeGroups(groups, samples)}.`),
     };
   }
   return undefined;
 }
 
-/** `span.name ×3 ("Ada", "Ben", "Cy"); span.code ×3 ("A-1", …)`. */
-function describeGroups(groups: MatchGroup[]): string {
+/** `span.name ×3 ("Ada", "Ben", "Cy"); span.code ×3 ("A-1", …)`, or without the values. */
+function describeGroups(groups: MatchGroup[], withSamples: boolean): string {
   const shown = groups.slice(0, KINDS_SHOWN).map((g) => {
+    if (!withSamples) return `${g.kind} ×${g.count}`;
     const samples = g.samples.map((s) => JSON.stringify(cut(s)));
     if (g.count > g.samples.length) samples.push('…');
     return `${g.kind} ×${g.count}${samples.length > 0 ? ` (${samples.join(', ')})` : ''}`;
@@ -147,12 +154,27 @@ export function sameListRead(a: AIAction, b: AIAction): boolean {
 }
 
 /**
- * The variable an action stores into, if any: its `as`, except on `openPage`,
- * where `as` labels the tab (`AIAction.as`). A later store of the same name
+ * What a turn added only to show the model its list reads may run: keeping
+ * them (`noop`), or reading a list again. Anything else ends that turn, and
+ * the step, where it stood (src/runner/step-executor.ts, `reviewOnly`).
+ */
+export function isReviewAnswer(action: AIAction): boolean {
+  return action.action === 'noop' || isListRead(action);
+}
+
+/**
+ * The actions that store what they found into `as` (`storeCapture`,
+ * src/runner/store-capture.ts). On any other action `as` stores nothing: it
+ * labels a tab (`openPage`) or a browser, or a model added it to a `noop`.
+ */
+const STORING_ACTIONS: ReadonlySet<string> = new Set(['read', 'count', 'readTable']);
+
+/**
+ * The variable an action stores into, if any. A later store of the same name
  * replaces what an earlier one stored.
  */
 export function storedName(action: AIAction): string | undefined {
-  return typeof action.as === 'string' && action.as !== '' && action.action !== 'openPage'
+  return typeof action.as === 'string' && action.as !== '' && STORING_ACTIONS.has(action.action)
     ? action.as
     : undefined;
 }
@@ -222,7 +244,7 @@ export function unprovenListRead(result: StepResult | undefined): UnprovenListRe
       return {
         kind: 'unchecked',
         name,
-        reason: `the step ended on its read of {{${name}}} on the recording run before the model could check what it matched`,
+        reason: `the step ended on its read of {{${name}}} on the recording run without the model checking what it matched`,
       };
     }
   }
@@ -231,9 +253,10 @@ export function unprovenListRead(result: StepResult | undefined): UnprovenListRe
 
 /**
  * The name of a list read the step ended on that the model never answered —
- * empty or mixed, it had no turn left to be shown, or its attempt failed first
- * and the retry never read it again — or undefined when there is none. What
- * the report flags on the step.
+ * empty or mixed, it had no turn left to be shown, the turn that showed it
+ * ended without a keep or a read again, or its attempt failed first and the
+ * retry never read it again — or undefined when there is none. What the
+ * report flags on the step.
  */
 export function uncheckedListRead(result: StepResult | undefined): string | undefined {
   const sub = standingReviews(result).find((s) => unanswered(s.listReview!));

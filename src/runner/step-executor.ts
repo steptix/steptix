@@ -68,7 +68,7 @@ import {
 } from './placeholder-substitution.js';
 import { decideConditionLocally, type LocalDecision } from './literal-decision.js';
 import { storeCapture } from './store-capture.js';
-import { listReadConcern, sameListRead, storedName, type ListReadConcern } from './list-read-review.js';
+import { isReviewAnswer, listReadConcern, sameListRead, storedName, type ListReadConcern } from './list-read-review.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import {
   isReturnClaim,
@@ -2586,6 +2586,12 @@ async function executeStepAttempt(
   /** What the next turn's prompt shows, and the reads it shows. */
   let listReadLines: string[] = [];
   let listReadsShown = new Map<string, SubActionResult>();
+  /**
+   * The next turn exists only to show the model its list reads: the model had
+   * said the step was done (9b). Such a turn is the step's epilogue, not more
+   * of the step, and it can never fail it — see `reviewOnly` below.
+   */
+  let nextTurnReviewOnly = false;
   let stallCount = 0;
   const STALL_LIMIT = 2;
 
@@ -2654,6 +2660,18 @@ async function executeStepAttempt(
   try {
   for (let currentTurn = 1; currentTurn <= maxTurns; currentTurn++) {
     completedTurns = currentTurn;
+    /**
+     * This turn was added only to show the model its list reads, after it had
+     * said the step was done (9b). The step passed as far as the step goes, so
+     * nothing here may fail it (steptix/steptix#48, decision 1): the model may
+     * keep a read (`noop`) or read again (a list read, `isReviewAnswer`), and
+     * anything else — another action, a question, a failed read, a call that
+     * failed or did not parse — ends the step where it stood. The reads it was
+     * shown then stay unanswered (`pending`): the report flags them and the
+     * compile does not use them.
+     */
+    const reviewOnly = nextTurnReviewOnly;
+    nextTurnReviewOnly = false;
 
     // Abort check — bail before doing any work on this turn if the run was
     // stopped, so a multi-turn step stops spawning AI calls. Throwing unwinds
@@ -2749,7 +2767,7 @@ async function executeStepAttempt(
     // (or whatever triggered the wait) likely didn't register. Bail out instead
     // of burning more turns.
     const pageFingerprint = `${currentUrl}\n${domSnapshot}`;
-    if (currentTurn > 1 && lastActionWasWait) {
+    if (currentTurn > 1 && lastActionWasWait && !reviewOnly) {
       const unchanged = pageFingerprint === prevPageFingerprint;
       const networkIdle = tracker.isIdle();
       if (unchanged && networkIdle) {
@@ -2865,7 +2883,7 @@ async function executeStepAttempt(
         // was the widest surface a secret reached (decision 2).
         stepValues ?? { parameters: [] },
         promptAuthored,
-        listReadLines,
+        listReadLines.map((line) => redact(line, secretsNow())),
       );
     }
     listReadLines = [];
@@ -2876,9 +2894,28 @@ async function executeStepAttempt(
     ];
 
     // 6. Get the AI action plan
-    const completion = await traceOp(`ai.complete (turn ${currentTurn})`, () => aiClient.complete(messages, opts.signal));
+    let completion: Awaited<ReturnType<typeof aiClient.complete>>;
+    let aiResponse: ReturnType<typeof parseAIResponse>;
+    try {
+      completion = await traceOp(`ai.complete (turn ${currentTurn})`, () => aiClient.complete(messages, opts.signal));
+      aiResponse = parseAIResponse(completion.text);
+    } catch (err) {
+      // A call that failed, or a reply that did not parse, fails a turn of the
+      // step. It ends a review turn instead, with the reads unanswered — a
+      // Stop still stops.
+      const aborted = opts.signal?.aborted === true
+        || (err instanceof Error && err.name === 'AbortError');
+      if (!reviewOnly || aborted) throw err;
+      logger.warn(
+        `Step ${stepIndex}: the turn showing the model its list reads failed (${err instanceof Error ? err.message : String(err)}) — the step ends where it stood`,
+      );
+      if (inFlightTurn && (inFlightTurn.aiInteractions.length > 0 || inFlightTurn.subActions.length > 0)) {
+        allTurns.push(inFlightTurn);
+      }
+      inFlightTurn = undefined;
+      break;
+    }
     const rawResponse = completion.text;
-    let aiResponse = parseAIResponse(rawResponse);
 
     turnAiInteractions.push({
       purpose: 'action-plan',
@@ -2895,6 +2932,17 @@ async function executeStepAttempt(
     lastAiResponse = aiResponse;
 
     logger.debug(`AI reasoning (turn ${currentTurn}): ${aiResponse.reasoning}`);
+
+    if (reviewOnly && !aiResponse.actions.every(isReviewAnswer)) {
+      logger.warn(
+        `Step ${stepIndex}: asked about its list reads, the model answered with ${aiResponse.actions.map((a) => a.action).join(', ') || 'nothing'} — not run; the step ends where it stood`,
+      );
+      if (inFlightTurn && (inFlightTurn.aiInteractions.length > 0 || inFlightTurn.subActions.length > 0)) {
+        allTurns.push(inFlightTurn);
+      }
+      inFlightTurn = undefined;
+      break;
+    }
 
     // 7. Handle prompt actions (ambiguity resolution)
     const promptAction = aiResponse.actions.find((a) => a.action === 'prompt');
@@ -3945,9 +3993,11 @@ async function executeStepAttempt(
       // Anything stored under a name already under review replaces that read,
       // so only the later one can reach the code-behind. A new concern waits
       // for the turn's end, which shows it to the model — unless the model was
-      // shown exactly this read and read it the same way again: that keeps it.
-      const stored = storedName(action);
-      if (result.success && stored !== undefined) {
+      // shown exactly this read, read it the same way again and got what it was
+      // shown: that keeps it. The same read with a different result (a list
+      // that loaded late) is a result the model has not seen.
+      const stored = result.success ? storedName(action) : undefined;
+      if (stored !== undefined) {
         const sub = turnSubActions[turnSubActions.length - 1]!;
         const earlier = reviewedReads.get(stored);
         if (earlier?.listReview !== undefined) {
@@ -3958,7 +4008,9 @@ async function executeStepAttempt(
         const concern = listReadConcern(action, result, (text) => redact(text, secretsNow()));
         if (concern !== undefined) {
           const shown = listReadsShown.get(stored);
-          const kept = shown !== undefined && sameListRead(shown.action, emitted);
+          const kept = shown !== undefined
+            && sameListRead(shown.action, emitted)
+            && shown.listReview?.text === concern.text;
           sub.listReview = { kind: concern.kind, text: concern.text, outcome: kept ? 'kept' : 'pending' };
           reviewedReads.set(stored, sub);
           if (kept) {
@@ -4078,6 +4130,13 @@ async function executeStepAttempt(
     });
     inFlightTurn = undefined;
 
+    if (turnFailed && reviewOnly) {
+      // Only a list read can have failed here (`isReviewAnswer`): the step
+      // ends where it stood, with the reads it was shown unanswered.
+      logger.warn(`Step ${stepIndex}: a read again of its list failed (${turnError ?? 'no error'}) — the step ends where it stood`);
+      break;
+    }
+
     if (turnFailed) {
       // The turn is finalised above before this throws, so a deliberate failure's
       // `fail` sub-action is in the report like any other.
@@ -4117,6 +4176,7 @@ async function executeStepAttempt(
     // (REEVAL_WHEN_UNSTATED), and the last turn ends as it always did rather
     // than failing a step on a re-evaluation the model never asked for.
     const inferredReeval =
+      !reviewOnly &&
       !aiResponse.needs_reeval &&
       aiResponse.reevalUnstated === true &&
       !inferredReevalUsed &&
@@ -4138,10 +4198,11 @@ async function executeStepAttempt(
     // which the report flags and the compile will not use.
     if (turnListConcerns.size > 0) {
       const concerns = [...turnListConcerns.values()];
-      const nextTurnAnyway = aiResponse.needs_reeval === true || inferredReeval;
+      // A review turn's own `needs_reeval` asks for nothing: the step is done.
+      const nextTurnAnyway = !reviewOnly && (aiResponse.needs_reeval === true || inferredReeval);
       if (currentTurn < maxTurns) {
         if (!nextTurnAnyway) {
-          aiResponse.needs_reeval = true;
+          nextTurnReviewOnly = true;
           logger.info(`Turn ${currentTurn}: showing the model the list read${concerns.length === 1 ? '' : 's'} before the step ends`);
         }
         listReadLines = concerns.map((c) => c.concern.text);
@@ -4154,7 +4215,13 @@ async function executeStepAttempt(
       }
     }
 
-    // 9c. Check needs_reeval: if false/absent, the step is complete after this turn
+    // 9c. A turn added only to show list reads comes next, or the review is
+    // over: either way the step's own `needs_reeval` and turn cap no longer
+    // apply — the step had finished.
+    if (nextTurnReviewOnly) continue;
+    if (reviewOnly) break;
+
+    // Check needs_reeval: if false/absent, the step is complete after this turn
     if (!aiResponse.needs_reeval && !inferredReeval) {
       break;
     }

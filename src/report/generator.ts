@@ -672,7 +672,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   const unchecked = step.status === 'passed' ? uncheckedListRead(step) : undefined;
   const listBadge = unchecked !== undefined
     ? `<span class="badge badge-skip" title="${escapeHtml(
-      `The step ended on its read of {{${unchecked}}} before the model could check what it matched. It is kept as read, and not compiled.`,
+      `The step ended on its read of {{${unchecked}}} without the model checking what it matched. It is kept as read, and not compiled.`,
     )}">⚠ list not checked</span>`
     : '';
 
@@ -1336,7 +1336,7 @@ function describeListReview(review: NonNullable<SubActionResult['listReview']>):
       ? 'shown to the model, which replaced it with a later read'
       : review.outcome === 'unseen'
         ? 'never shown to the model: the step ended on it with no turn left'
-        : 'not answered by the model before the attempt ended';
+        : 'not answered by the model';
   return `list read ${how} — ${review.text}`;
 }
 
