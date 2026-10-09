@@ -15,6 +15,7 @@ import type { Config } from '../src/config/types.js';
 import type { ParsedTest, TestInstance } from '../src/parser/types.js';
 import type { StepResult } from '../src/report/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
+import { setIsTTY } from './tty.js';
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -993,7 +994,14 @@ describe('a For each pass does not inherit the last row', () => {
       { orders: '[{"_row":"1","id":"A"},{"_row":"2","id":"B"}]' },
       'rebind-loop-root.md',
     );
-    const report = await runTest(inst, makeConfig(), '');
+    // `[input:]` asks a person at the terminal (#47).
+    const restoreStdin = setIsTTY(process.stdin, true);
+    let report: Awaited<ReturnType<typeof runTest>>;
+    try {
+      report = await runTest(inst, makeConfig(), '');
+    } finally {
+      restoreStdin();
+    }
 
     expect(report.status).toBe('failed');
     const failed = report.steps.find((s) => s.status === 'failed')!;

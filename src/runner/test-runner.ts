@@ -449,6 +449,22 @@ export async function runTest(
    * caught auth error.
    */
   const keyless = !aiConfigured(config.ai) || !aiAllowed;
+  /**
+   * Nobody can answer this run at its console: stdin is not a terminal (CI, a
+   * script, a scheduled job). Every question this runner asks — the AI's
+   * clarification, `[input:]`, `[interactive]` — reads its answer from
+   * `process.stdin` via `readline`, and on a stdin with no one behind it that
+   * read never settles. The browser keeps the process alive, and the test
+   * timeout is only checked between steps, so the run waited forever
+   * (steptix/steptix#47). Unattended, each of those fails its step instead —
+   * the AI's question through the executor's `nonInteractive` path, the same
+   * one the server takes (issues/014).
+   *
+   * stdin, not stdout: the answer is read from stdin, so `steptix run | tee
+   * log` at a terminal can still be answered. The failure handoff below needs
+   * both, because its REPL also has to be seen.
+   */
+  const unattended = !process.stdin.isTTY;
 
   const baseUrl = test.config.baseUrl;
   const conversationHistory: string[] = [];
@@ -1214,6 +1230,7 @@ export async function runTest(
             // fail the hook scope, so it does not abort the run — see the
             // `!result.tolerated` on the scope's own failure check below.
             ...(hookFailureTail && { failureTail: hookFailureTail }),
+            ...(unattended && { nonInteractive: true }),
             // The scope and the line's place in it ride along: `hookScope` and
             // `hookIndex` are stamped below, after the step recorded its lines.
             // And the line as the author wrote it, `${…}` intact: `raw` had its
@@ -2125,6 +2142,23 @@ export async function runTest(
               `"${redact(maskRecordSecrets(aiOutcome.value ?? ''), secretsNow())}"`,
           );
         }
+      } else if ((inputStep || interactiveStep) && unattended) {
+        // A step that exists to ask a person, on a run nobody can answer
+        // (steptix/steptix#47). Failed, not skipped: an `[input:]` value the
+        // steps after it read would be missing, and an `[interactive]` pause
+        // that quietly passed would report checks nobody made.
+        const asked = inputStep
+          ? `[input: ${inputStep.variable}] asks for "${inputStep.promptText}"`
+          : '[interactive] pauses for a person to take control';
+        stepResult = {
+          index: i + 1,
+          instruction,
+          status: 'failed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          error: `${asked}, but this run has no terminal to answer it (stdin is not a TTY)`,
+        };
       } else if (inputStep) {
         const stepStartTime = Date.now();
         // §5.9: a run waiting for a person holds no mouse lock.
@@ -2284,6 +2318,7 @@ export async function runTest(
           // This step's own tail, read at one seam over a step that has finally
           // failed (stories/step-failure-outcomes.md, decision 4).
           ...(failureTail && { failureTail }),
+          ...(unattended && { nonInteractive: true }),
           stats: statsFor(),
         },
         // Authored: the executor applies the `[output:]` enrichment to it too,
@@ -2397,6 +2432,7 @@ export async function runTest(
           // This step's own tail (decision 4). Never both: `failureTail` is
           // null whenever a claim was read off the line.
           ...(failureTail && { failureTail }),
+          ...(unattended && { nonInteractive: true }),
           stats: statsFor(),
         },
         rawInstruction);
@@ -2524,7 +2560,10 @@ export async function runTest(
         const canEnterRepl =
           config.execution.interactiveOnFailure &&
           config.browser.headed &&
-          Boolean(process.stdout.isTTY);
+          Boolean(process.stdout.isTTY) &&
+          // The REPL reads its commands from stdin: seen but unanswerable,
+          // it would wait forever just as a question would (#47).
+          !unattended;
 
         if (canEnterRepl) {
           humanIntervened = true;

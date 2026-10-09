@@ -16,6 +16,7 @@ import type { Config } from '../src/config/types.js';
 import type { ParsedTest, TestInstance } from '../src/parser/types.js';
 import type { StepResult, TestReport } from '../src/report/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
+import { setIsTTY } from './tty.js';
 
 // ─── Mock the full dependency surface that runTest pulls in ────────────────
 
@@ -198,15 +199,14 @@ function passingResult(index: number, instruction: string): StepResult {
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe('test-runner runnerControl handling', () => {
-  /** process.stdout's own `isTTY` as it was before this block forced it —
-   *  undefined when the stream had none (a piped worker's usual state). */
-  let savedIsTTY: PropertyDescriptor | undefined;
+  /** Put the streams' own `isTTY` back, so the describes below run with the
+   *  TTY state the worker really has rather than this block's forced `true`. */
+  let restoreStdout: () => void;
+  let restoreStdin: () => void;
 
   afterEach(() => {
-    // Put it back, so the describes below run with the TTY state the worker
-    // really has rather than this block's forced `true`.
-    if (savedIsTTY) Object.defineProperty(process.stdout, 'isTTY', savedIsTTY);
-    else delete (process.stdout as { isTTY?: boolean }).isTTY;
+    restoreStdin();
+    restoreStdout();
   });
 
   beforeEach(() => {
@@ -233,10 +233,11 @@ describe('test-runner runnerControl handling', () => {
     });
     diagnoseFailureMock.mockResolvedValue(null);
 
-    // Default: stdout.isTTY treated as true so the failure-REPL path COULD
-    // engage if the guard didn't fire. We force this for the re-entry test.
-    savedIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
-    Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true });
+    // Default: a TTY on both ends, so the failure-REPL path COULD engage if
+    // the guard didn't fire — it is seen on stdout and answered on stdin
+    // (#47). We force this for the re-entry test.
+    restoreStdout = setIsTTY(process.stdout, true);
+    restoreStdin = setIsTTY(process.stdin, true);
   });
 
   it('runnerControl.exit short-circuits to bail and does NOT enter the failure-handoff REPL', async () => {
@@ -603,11 +604,18 @@ describe('test-runner — captured `as` values reach the report', () => {
     });
     executeStepMock.mockResolvedValueOnce(passingResult(2, 'step two'));
 
-    const report = await runTest(
-      makeInstance(['[interactive] debug this', 'step two']),
-      makeConfig(),
-      '',
-    );
+    // A planned pause needs a person at the terminal to pause for (#47).
+    const restoreStdin = setIsTTY(process.stdin, true);
+    let report: TestReport;
+    try {
+      report = await runTest(
+        makeInstance(['[interactive] debug this', 'step two']),
+        makeConfig(),
+        '',
+      );
+    } finally {
+      restoreStdin();
+    }
 
     // Parent row (the "Interactive mode: ..." banner) aggregates the
     // child's capture — this is the row the bug dropped `outputs` from.
@@ -938,5 +946,134 @@ describe('test-runner — secrets stay out of what the run writes (stories/secre
     } finally {
       stepLine.mockRestore();
     }
+  });
+});
+
+describe('test-runner — a run nobody can answer (steptix/steptix#47)', () => {
+  // Every question the CLI asks reads `process.stdin`. With no terminal behind
+  // it (CI, a script, a scheduled job) that read never settles and the run
+  // waited forever — past its own `timeout:`, which is only checked between
+  // steps. Each case sets stdin's TTY state itself, because a vitest worker
+  // has whatever the shell that started it had.
+  let restoreStdin: () => void = () => {};
+
+  beforeEach(() => {
+    executeStepMock.mockReset();
+    executeBranchedStepMock.mockReset();
+    runInteractiveReplMock.mockReset();
+    launchBrowserMock.mockReset();
+    closeBrowserMock.mockReset();
+    resolveHooksMock.mockReset();
+    diagnoseFailureMock.mockReset();
+
+    launchBrowserMock.mockResolvedValue(makeSession());
+    closeBrowserMock.mockResolvedValue(undefined);
+    resolveHooksMock.mockResolvedValue({
+      before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
+    });
+    diagnoseFailureMock.mockResolvedValue(null);
+  });
+
+  afterEach(() => restoreStdin());
+
+  it('asks the executor to fail an AI question fast when stdin is not a terminal', async () => {
+    restoreStdin = setIsTTY(process.stdin, false);
+    executeStepMock.mockResolvedValueOnce(passingResult(1, 'step one'));
+
+    await runTest(makeInstance(['step one']), makeConfig(), '');
+
+    // `nonInteractive` is the executor's existing fail-fast path for a
+    // clarification (issues/014, tests/clarification-noninteractive.test.ts):
+    // the step fails with the question as its error instead of reading stdin.
+    expect(executeStepMock.mock.calls[0]![3]).toMatchObject({ nonInteractive: true });
+  });
+
+  it('still lets a person at a terminal answer the question', async () => {
+    restoreStdin = setIsTTY(process.stdin, true);
+    executeStepMock.mockResolvedValueOnce(passingResult(1, 'step one'));
+
+    await runTest(makeInstance(['step one']), makeConfig(), '');
+
+    expect(executeStepMock.mock.calls[0]![3]).not.toHaveProperty('nonInteractive');
+  });
+
+  it('marks an [output:] step and a hook step the same way', async () => {
+    restoreStdin = setIsTTY(process.stdin, false);
+    // The `toolCalls` / `sourceSkills` slots the loop indexes by position: one
+    // null per line, since this is a prose hook.
+    const slots = { before: [null], beforeEach: [], afterEach: [], after: [] };
+    resolveHooksMock.mockResolvedValue({
+      before: ['dismiss the banner'], beforeEach: [], afterEach: [], after: [], hasAny: true,
+      toolCalls: slots,
+      sourceSkills: slots,
+    });
+    executeStepMock.mockImplementation(async (index: number, _n: number, instruction: string) =>
+      passingResult(index, instruction));
+
+    await runTest(makeInstance(['[output: total] Read the total']), makeConfig(), '');
+
+    expect(executeStepMock).toHaveBeenCalledTimes(2);
+    for (const call of executeStepMock.mock.calls) {
+      expect(call[3]).toMatchObject({ nonInteractive: true });
+    }
+  });
+
+  it('fails an [input:] step instead of waiting, and runs nothing after it', async () => {
+    restoreStdin = setIsTTY(process.stdin, false);
+
+    const report = await runTest(
+      makeInstance(['[input: code] Enter the code from the email', 'step two']),
+      makeConfig(),
+      '',
+    );
+
+    expect(report.status).toBe('failed');
+    expect(report.steps[0]).toMatchObject({
+      status: 'failed',
+      error:
+        '[input: code] asks for "Enter the code from the email", but this run has no ' +
+        'terminal to answer it (stdin is not a TTY)',
+    });
+    expect(executeStepMock).not.toHaveBeenCalled();
+  });
+
+  it('fails a planned [interactive] step instead of opening a REPL nobody can type into', async () => {
+    restoreStdin = setIsTTY(process.stdin, false);
+
+    const report = await runTest(
+      makeInstance(['[interactive] look around', 'step two']),
+      makeConfig(),
+      '',
+    );
+
+    expect(report.status).toBe('failed');
+    expect(report.steps[0]!.error).toBe(
+      '[interactive] pauses for a person to take control, but this run has no ' +
+        'terminal to answer it (stdin is not a TTY)',
+    );
+    expect(runInteractiveReplMock).not.toHaveBeenCalled();
+    expect(executeStepMock).not.toHaveBeenCalled();
+  });
+
+  it('does not open the failure REPL on a terminal it can be seen on but not answered from', async () => {
+    restoreStdin = setIsTTY(process.stdin, false);
+    const restoreStdout = setIsTTY(process.stdout, true);
+    executeStepMock.mockResolvedValueOnce({
+      ...passingResult(1, 'step one'),
+      status: 'failed',
+      error: 'no such button',
+    });
+    const config = makeConfig({ interactiveOnFailure: true });
+    config.browser = { ...config.browser, headed: true };
+
+    let report: TestReport;
+    try {
+      report = await runTest(makeInstance(['step one']), config, '');
+    } finally {
+      restoreStdout();
+    }
+
+    expect(report.status).toBe('failed');
+    expect(runInteractiveReplMock).not.toHaveBeenCalled();
   });
 });
