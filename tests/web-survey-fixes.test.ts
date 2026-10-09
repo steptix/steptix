@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
-import { executeAction, normaliseColour, normaliseKeyName, resolveRoleName, scrollToFitBoth, waitForThreshold } from '../src/browser/actions.js';
+import { executeAction, hiddenToggleOf, normaliseColour, normaliseKeyName, resolveRoleName, scrollToFitBoth, waitForThreshold } from '../src/browser/actions.js';
 import { parseAIResponse, parseAssertionCode } from '../src/ai/action-parser.js';
 import { installDialogGuard } from '../src/browser/manager.js';
 import { dialogRecords, disarmDialog } from '../src/browser/dialogs.js';
@@ -270,6 +270,97 @@ describe('§2.10 styled checkboxes and radios', () => {
     expect(result.success).toBe(true);
     expect(await page.isChecked('#basic')).toBe(true);
     await page.close();
+  });
+
+  it('clicks nothing beside a checkbox hidden in a closed panel, and says to open the panel', async () => {
+    // Issue 32. The label is hidden with the checkbox, so the stand-in used to
+    // climb past the panel to the <section> and click its middle: the
+    // heading, which opened the panel, and the click reported success. Like
+    // any click on something hidden, this one waits out its 10 s first.
+    const page = await pageWith(`
+      <section>
+        <h3 id="hdr" onclick="togglePanel()">Delivery options</h3>
+        <div id="panel" style="display:none">
+          <input type="checkbox" id="gift"> <label for="gift">Gift wrap</label>
+        </div>
+      </section>
+      <script>
+        function togglePanel() {
+          const p = document.getElementById('panel');
+          p.style.display = p.style.display === 'none' ? 'block' : 'none';
+        }
+        window.clicked = [];
+        document.addEventListener('click', (e) => window.clicked.push(e.target.id || e.target.tagName), true);
+      </script>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: '#gift' }));
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/^"#gift" is a checkbox inside collapsed: Delivery options\. Open it first, then click the checkbox;/);
+      expect(await page.evaluate(() => (window as unknown as { clicked: string[] }).clicked)).toEqual([]);
+      expect(await page.isChecked('#gift')).toBe(false);
+      expect(await page.isHidden('#panel')).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('tells a toggle hidden with its container from one hidden alone', async () => {
+    const page = await pageWith(`
+      <details><summary>Delivery options</summary>
+        <input type="checkbox" id="gift"> <label for="gift">Gift wrap</label>
+      </details>
+      <button aria-controls="menu">Filters</button>
+      <div id="menu" hidden>
+        <div class="chk"><div style="display:none"><input type="checkbox" id="red" aria-label="Red"></div><span class="box"></span><span>Red</span></div>
+      </div>
+      <div style="visibility:hidden" aria-label="Sort">
+        <ul><li><label><input type="checkbox" id="asc"> Ascending</label></li></ul>
+      </div>
+      <button role="tab" id="tab-2">Wrapping</button>
+      <div role="tabpanel" aria-labelledby="tab-2" hidden>
+        <input type="radio" name="wrap" id="paper"> <label for="paper">Paper</label>
+      </div>
+      <div class="chk" id="box" style="width:20px;height:20px;border:1px solid">
+        <div style="display:none"><input type="checkbox" id="basic" aria-label="Basic"></div>
+      </div>
+      <input type="checkbox" id="ajax" style="display:none"><label for="ajax">Ajax</label>`);
+    try {
+      // Its label is in the closed <details> with it.
+      expect(await hiddenToggleOf(page.locator('#gift')))
+        .toEqual({ type: 'checkbox', id: 'gift', enclosed: true, collapsedUnder: ['Delivery options'] });
+      // No label, but the hidden menu holds the drawn box and the text too;
+      // named by the button that controls it. Its own wrapper is not named.
+      expect(await hiddenToggleOf(page.locator('#red')))
+        .toEqual({ type: 'checkbox', id: 'red', enclosed: true, collapsedUnder: ['Filters'] });
+      // `visibility: hidden` is inherited: named once, where it starts.
+      expect(await hiddenToggleOf(page.locator('#asc')))
+        .toEqual({ type: 'checkbox', id: 'asc', enclosed: true, collapsedUnder: ['Sort'] });
+      // An inactive tab, named by the tab that labels it.
+      expect(await hiddenToggleOf(page.locator('#paper')))
+        .toEqual({ type: 'radio', id: 'paper', enclosed: true, collapsedUnder: ['Wrapping'] });
+      // Hidden alone: a wrapper holding nothing but the input, or the input itself.
+      expect(await hiddenToggleOf(page.locator('#basic'))).toMatchObject({ enclosed: false });
+      expect(await hiddenToggleOf(page.locator('#ajax'))).toMatchObject({ enclosed: false });
+      expect(await hiddenToggleOf(page.locator('#box'))).toBeNull();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('still clicks a visible label for a checkbox hidden with others', async () => {
+    // A label sets its own input wherever that sits, so a visible one stands
+    // in even when the input's hidden container holds more than it.
+    const page = await pageWith(`
+      <div hidden><input type="checkbox" id="a"><input type="checkbox" id="b"></div>
+      <label for="a">Show the menu</label>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: '#a' }));
+      expect(result.success).toBe(true);
+      expect(await page.isChecked('#a')).toBe(true);
+      expect(await page.isChecked('#b')).toBe(false);
+    } finally {
+      await page.close();
+    }
   });
 });
 
