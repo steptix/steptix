@@ -101,13 +101,20 @@ export interface SubActionResult {
   /**
    * A list read that came back empty or held more than one kind of element,
    * which the step showed the model before it could end on it
-   * (src/runner/list-read-review.ts). `text` is what the model was shown.
-   * `outcome`: `pending` until the model answers, then `kept` — it took no
-   * new read, or read the same way again — or `replaced` by a later read of
-   * the same name. Only a `kept` one is compiled into the code-behind. Absent
-   * on every other sub-action.
+   * (src/runner/list-read-review.ts). `kind` says which; `text` is what the
+   * model was shown. `outcome`: `pending` until the model answers, then
+   * `kept` — it took no new read, or read the same way again — or `replaced`
+   * by a later read of the same name. `unseen` when the step ended on it with
+   * no turn left to show it (its last turn, or a `return`); `pending` stays
+   * when the attempt failed first. The compile uses none of them except a
+   * `mixed` read the model kept (`unprovenListRead`). Absent on every other
+   * sub-action.
    */
-  listReview?: { text: string; outcome: 'pending' | 'kept' | 'replaced' };
+  listReview?: {
+    kind: 'empty' | 'mixed';
+    text: string;
+    outcome: 'pending' | 'kept' | 'replaced' | 'unseen';
+  };
   /** Page URL at the time the screenshot was captured */
   pageUrl?: string;
   /**

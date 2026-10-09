@@ -1,5 +1,6 @@
 /**
- * A list read the step cannot end on unseen (issue #28).
+ * A list read the model looks at before the step ends on it
+ * (steptix/steptix#48, which #28 was merged into).
  *
  * When a step reads every match of a selector, or counts them, the model
  * picks the selector and Steptix stores whatever it matched. A selector that
@@ -17,17 +18,25 @@
  *    digit; docs/specs/SPEC-codebehind-robustness.md §6.6).
  *
  * The model then reads again with a better selector, which replaces the read,
- * or keeps it. Neither outcome is a failure in itself — an empty list and a
- * row of cells with different classes are both real answers — so this only
- * asks. What the step loop refuses is a step that ENDS on one the model has
- * not seen, and only a read the model kept is compiled
- * (`listReadCompiles`, src/codebehind/recording.ts).
+ * or keeps it. Neither outcome is a failure — an empty list and a row of cells
+ * with different classes are both real answers — so this only ever asks, in
+ * the turns the step has left. A step that ends on one with no turn left to
+ * show it (its last turn, or a `return` in the same turn) ends on it as read,
+ * and the report says the model never saw it.
+ *
+ * What the compile may use is decided here too. A read that a later action
+ * stored over is not the step's read, so the transcript leaves it out
+ * (`supersededListReads`). A step that ends on a list that came back empty,
+ * or on one the model never saw, is no evidence for its selector — on a page
+ * with no items every selector matches nothing — so the compile writes no
+ * entry for it and compiles it from a run that found something
+ * (`unprovenListRead`).
  *
  * Nothing here knows a site: the line is built from what the page answered.
  */
 import type { AIAction } from '../ai/types.js';
 import type { ActionExecutionResult, MatchGroup } from '../browser/actions.js';
-import type { SubActionResult } from '../report/types.js';
+import type { StepResult, SubActionResult } from '../report/types.js';
 
 /** Why a list read is shown to the model. */
 export type ListReadConcernKind = 'empty' | 'mixed';
@@ -138,20 +147,87 @@ export function sameListRead(a: AIAction, b: AIAction): boolean {
 }
 
 /**
- * The step's error when it would end on a list read the model has not seen
- * and there is no turn left to show it.
+ * The variable an action stores into, if any: its `as`, except on `openPage`,
+ * where `as` labels the tab (`AIAction.as`). A later store of the same name
+ * replaces what an earlier one stored.
  */
-export function unseenListReadError(concerns: ListReadConcern[]): string {
-  const lines = concerns.map((c) => c.text).join(' ');
-  return `The step would end on a list read that came back empty or mixed, with no turn left to look at it: ${lines} `
-    + 'Read it with a selector that matches only what the step asks for. If that is the answer, keep it when the read is shown to you.';
+export function storedName(action: AIAction): string | undefined {
+  return typeof action.as === 'string' && action.as !== '' && action.action !== 'openPage'
+    ? action.as
+    : undefined;
 }
 
 /**
- * Whether the compile may use this sub-action: anything but a list read that
- * was shown to the model and not kept — replaced by a later read, or never
- * answered because the attempt failed first.
+ * The reviewed list reads a later action stored over, in a step's
+ * sub-actions in run order. Storing a name replaces what it held, so the
+ * value the step ended with came from the later action, and the earlier read
+ * is not the step's read: one the model replaced when it was shown it, or one
+ * an attempt that failed left behind and the retry read again. A step's turns
+ * hold every attempt's, which is why this looks across them.
+ *
+ * Reads that were never reviewed are left alone, as they were before reviews
+ * existed.
  */
-export function listReadCompiles(sub: SubActionResult): boolean {
-  return sub.listReview === undefined || sub.listReview.outcome === 'kept';
+export function supersededListReads(subs: readonly SubActionResult[]): Set<SubActionResult> {
+  const superseded = new Set<SubActionResult>();
+  const latest = new Map<string, SubActionResult>();
+  for (const sub of subs) {
+    const name = storedName(sub.action);
+    if (sub.error !== undefined || name === undefined) continue;
+    const earlier = latest.get(name);
+    if (earlier?.listReview !== undefined) superseded.add(earlier);
+    latest.set(name, sub);
+  }
+  return superseded;
+}
+
+/** Why a step's list read gives the compile nothing to stand on. */
+export interface UnprovenListRead {
+  /**
+   * `empty` — the step stored a list that came back empty, or a count of 0;
+   * `unchecked` — it stored a list the model never saw.
+   */
+  kind: 'empty' | 'unchecked';
+  /** The name the read stored. */
+  name: string;
+  /** The compile's line about the step, said of the run it compiles from. */
+  reason: string;
+}
+
+/**
+ * Why the compile cannot use this step's run, or undefined when it can: the
+ * step ended on a list read that came back empty — kept by the model or not —
+ * or on one the model never answered.
+ *
+ * Empty because a read that finds nothing proves nothing about its selector:
+ * on a page with no items, a selector one level too deep and the right one
+ * both match nothing, and compiled, either would pass on that page for good.
+ * Never answered because nobody looked at what it matched. The step stays
+ * under AI with no entry, which the next compile takes again, rather than an
+ * `ai: true` entry, which every later compile would leave alone.
+ */
+export function unprovenListRead(result: StepResult | undefined): UnprovenListRead | undefined {
+  const subs = (result?.turns ?? []).flatMap((t) => t.subActions);
+  const superseded = supersededListReads(subs);
+  for (const sub of subs) {
+    const review = sub.listReview;
+    if (review === undefined || sub.error !== undefined || superseded.has(sub)) continue;
+    const name = sub.action.as ?? '';
+    if (review.kind === 'empty') {
+      const what = sub.action.action === 'count' ? 'counted 0' : 'came back empty';
+      return {
+        kind: 'empty',
+        name,
+        reason: `{{${name}}} ${what} on the recording run, and a read that finds nothing proves nothing about its selector`,
+      };
+    }
+    if (review.outcome === 'pending' || review.outcome === 'unseen') {
+      return {
+        kind: 'unchecked',
+        name,
+        reason: `the step ended on its read of {{${name}}} on the recording run before the model could check what it matched`,
+      };
+    }
+  }
+  return undefined;
 }

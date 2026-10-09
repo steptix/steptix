@@ -7,6 +7,7 @@ import { getAllAiInteractions, isHealedStep } from './types.js';
 import { stepAnchor } from './anchors.js';
 import { getReportTemplate } from './template.js';
 import { toDataUri } from '../browser/screenshot.js';
+import { unprovenListRead } from '../runner/list-read-review.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -665,6 +666,15 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     : step.status.toUpperCase();
   const duration = formatDuration(step.durationMs);
   const retryBadge = step.retried ? '<span class="badge badge-skip">Retried</span>' : '';
+  // A step that passed on a list read the model never saw — it ended with no
+  // turn left to show it (src/runner/list-read-review.ts). Said on the step,
+  // not only under the read, because the step body is folded.
+  const unchecked = step.status === 'passed' ? unprovenListRead(step) : undefined;
+  const listBadge = unchecked?.kind === 'unchecked'
+    ? `<span class="badge badge-skip" title="${escapeHtml(
+      `The step ended on its read of {{${unchecked.name}}} before the model could check what it matched. It is kept as read, and not compiled.`,
+    )}">⚠ list not checked</span>`
+    : '';
 
   // Render turns chronologically
   const hasMultipleAttempts = new Set(step.turns.map((t) => t.attemptNumber)).size > 1;
@@ -854,6 +864,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     ${originBadge}
     ${tabBadge}
     ${retryBadge}
+    ${listBadge}
     <span class="step-duration">${duration}</span>
     <span class="badge ${statusClass}">${statusIcon} ${statusLabel}</span>
     <span class="step-chevron">▼</span>
@@ -1323,7 +1334,9 @@ function describeListReview(review: NonNullable<SubActionResult['listReview']>):
     ? 'shown to the model, which kept it'
     : review.outcome === 'replaced'
       ? 'shown to the model, which replaced it with a later read'
-      : 'not answered by the model before the step ended';
+      : review.outcome === 'unseen'
+        ? 'never shown to the model: the step ended on it with no turn left'
+        : 'not answered by the model before the attempt ended';
   return `list read ${how} — ${review.text}`;
 }
 

@@ -5,7 +5,7 @@ import type { ActionTargeting } from '../browser/actions.js';
 import type { ObservedRequest } from '../browser/page-state.js';
 import type { AssertionResult, StepResult, StepStatus, SubActionResult } from '../report/types.js';
 import { logger } from '../utils/logger.js';
-import { listReadCompiles } from '../runner/list-read-review.js';
+import { supersededListReads, unprovenListRead } from '../runner/list-read-review.js';
 import {
   isSecretName,
   secretValues,
@@ -364,11 +364,17 @@ export function evidenceRows(steps: readonly StepResult[]): StepResult[] {
  * It passed (or failed as its own text says: `deliberate`), and it has a
  * transcript: it ran under AI, which a clean code run did not — unless its
  * entry threw first and the step healed under AI (`codeBehindStale`).
+ *
+ * And its list reads prove their selectors: a pass that ended on a list that
+ * came back empty, or on one the model never saw, is no evidence for the
+ * selector that read it (`unprovenListRead`, issue #48). So a loop body
+ * whose first pass read an empty list and whose second read three items is
+ * compiled from the second.
  */
 export function isEvidencePass(result: StepResult): boolean {
   const worked = result.status === 'passed' || result.deliberate === true;
   const transcript = result.fromCodeBehind !== true || result.codeBehindStale !== undefined;
-  return worked && transcript;
+  return worked && transcript && unprovenListRead(result) === undefined;
 }
 
 /**
@@ -803,10 +809,13 @@ export async function readRecording(testFilePath: string): Promise<Recording | n
  * refused — which also carries an `error` — stays dropped.
  *
  * So is a list read the step showed the model because it came back empty or
- * mixed, unless the model kept it (src/runner/list-read-review.ts): one it
- * replaced with a better read, or one an attempt failed before it answered,
- * was not the step's read, and a step that only reads is compiled straight
- * from what this returns (docs/specs/SPEC-codebehind-robustness.md §6.6).
+ * mixed, once a later action stored over its name (`supersededListReads`,
+ * src/runner/list-read-review.ts): one the model replaced with a better read,
+ * or one an attempt that failed left behind and the retry read again, was not
+ * the step's read, and a step that only reads is compiled straight from what
+ * this returns (docs/specs/SPEC-codebehind-robustness.md §6.6). A step whose
+ * own read came back empty, or was never seen, is kept whole here, for the
+ * recording; the compile refuses it (`unprovenListRead`).
  *
  * Lives in this module rather than in `candidate.ts`, which re-exports it,
  * only because every ordinary run already loads this file while `candidate.ts`
@@ -815,12 +824,12 @@ export async function readRecording(testFilePath: string): Promise<Recording | n
  */
 export function actionsOf(result: StepResult | undefined): RecordedAction[] {
   const keepFail = result?.deliberate === true;
-  return (result?.turns ?? [])
-    .flatMap((t) => t.subActions)
+  const subs = (result?.turns ?? []).flatMap((t) => t.subActions);
+  // A list read a later action stored over was not this step's read (issue #48).
+  const superseded = supersededListReads(subs);
+  return subs
     .filter((sa) => !sa.error || (keepFail && sa.action.action === 'fail'))
-    // A list read the model was shown and did not keep was not this step's
-    // read: replaced by a later one, or never answered (issue #28).
-    .filter(listReadCompiles)
+    .filter((sa) => !superseded.has(sa))
     .map((sa) => {
       // Here and not later, for `targeting`'s reason: a URL can carry a
       // secret, and the recording redacts what this returns.

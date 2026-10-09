@@ -68,7 +68,7 @@ import {
 } from './placeholder-substitution.js';
 import { decideConditionLocally, type LocalDecision } from './literal-decision.js';
 import { storeCapture } from './store-capture.js';
-import { listReadConcern, sameListRead, unseenListReadError, type ListReadConcern } from './list-read-review.js';
+import { listReadConcern, sameListRead, storedName, type ListReadConcern } from './list-read-review.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import {
   isReturnClaim,
@@ -2580,14 +2580,12 @@ async function executeStepAttempt(
   // time would repeat a "Click Next" until the turn cap.
   let inferredReevalUsed = false;
   // A list read that came back empty or mixed is shown to the model before
-  // the step can end on it (src/runner/list-read-review.ts, issue #28).
+  // the step can end on it (src/runner/list-read-review.ts, issue #48).
   /** The latest read under review, per stored name, so a later read of the name replaces it. */
   const reviewedReads = new Map<string, SubActionResult>();
   /** What the next turn's prompt shows, and the reads it shows. */
   let listReadLines: string[] = [];
   let listReadsShown = new Map<string, SubActionResult>();
-  /** The one turn per attempt the step may add only to show them. */
-  let listReviewTurnUsed = false;
   let stallCount = 0;
   const STALL_LIMIT = 2;
 
@@ -3944,28 +3942,29 @@ async function executeStepAttempt(
       });
 
       // A list read that came back empty or mixed (src/runner/list-read-review.ts).
-      // A read stored under a name already under review replaces that read,
+      // Anything stored under a name already under review replaces that read,
       // so only the later one can reach the code-behind. A new concern waits
       // for the turn's end, which shows it to the model — unless the model was
       // shown exactly this read and read it the same way again: that keeps it.
-      if (result.success && typeof action.as === 'string') {
+      const stored = storedName(action);
+      if (result.success && stored !== undefined) {
         const sub = turnSubActions[turnSubActions.length - 1]!;
-        const earlier = reviewedReads.get(action.as);
+        const earlier = reviewedReads.get(stored);
         if (earlier?.listReview !== undefined) {
           earlier.listReview.outcome = 'replaced';
-          reviewedReads.delete(action.as);
-          turnListConcerns.delete(action.as);
+          reviewedReads.delete(stored);
+          turnListConcerns.delete(stored);
         }
         const concern = listReadConcern(action, result, (text) => redact(text, secretsNow()));
         if (concern !== undefined) {
-          const shown = listReadsShown.get(action.as);
+          const shown = listReadsShown.get(stored);
           const kept = shown !== undefined && sameListRead(shown.action, emitted);
-          sub.listReview = { text: concern.text, outcome: kept ? 'kept' : 'pending' };
-          reviewedReads.set(action.as, sub);
+          sub.listReview = { kind: concern.kind, text: concern.text, outcome: kept ? 'kept' : 'pending' };
+          reviewedReads.set(stored, sub);
           if (kept) {
-            logger.info(`Step ${stepIndex}: the model read ${action.as} the same way again — keeping it: ${concern.text}`);
+            logger.info(`Step ${stepIndex}: the model read ${stored} the same way again — keeping it: ${concern.text}`);
           } else {
-            turnListConcerns.set(action.as, { concern, sub, action });
+            turnListConcerns.set(stored, { concern, sub, action });
             logger.warn(`Step ${stepIndex}: ${concern.text}`);
           }
         }
@@ -4102,9 +4101,10 @@ async function executeStepAttempt(
     // that asked for another turn after ending the flow would be asking to act
     // inside a flow that no longer exists.
     if (flowControlSignal) {
-      // Nothing is shown after a return, so this turn's list reads stand as
-      // they did before reads were reviewed at all.
-      for (const { sub } of turnListConcerns.values()) delete sub.listReview;
+      // Nothing is shown after a return, so the step ends on this turn's list
+      // reads as they came back: unseen, which the report flags and the
+      // compile will not use (`unprovenListRead`).
+      for (const { sub } of turnListConcerns.values()) sub.listReview!.outcome = 'unseen';
       break;
     }
 
@@ -4131,34 +4131,26 @@ async function executeStepAttempt(
 
     // 9b. A list read this turn that came back empty or mixed is shown to the
     // model before the step can end on it (src/runner/list-read-review.ts):
-    // in the next turn when there is one anyway, else in one turn added for
-    // it — once per attempt. With neither, the step fails rather than end on
-    // a list nobody has looked at, and the retry is told what it matched.
+    // in the next turn when there is one anyway, else in a turn added for it,
+    // for as long as the step has turns left. A read the model changes is
+    // shown again. It is never a failure — an empty list is a real answer —
+    // so on the last turn the step ends on the read as it came back: unseen,
+    // which the report flags and the compile will not use.
     if (turnListConcerns.size > 0) {
       const concerns = [...turnListConcerns.values()];
       const nextTurnAnyway = aiResponse.needs_reeval === true || inferredReeval;
-      if (currentTurn < maxTurns && (nextTurnAnyway || !listReviewTurnUsed)) {
+      if (currentTurn < maxTurns) {
         if (!nextTurnAnyway) {
-          listReviewTurnUsed = true;
           aiResponse.needs_reeval = true;
           logger.info(`Turn ${currentTurn}: showing the model the list read${concerns.length === 1 ? '' : 's'} before the step ends`);
         }
         listReadLines = concerns.map((c) => c.concern.text);
         listReadsShown = new Map(concerns.map((c) => [c.concern.name, c.sub]));
       } else {
-        const unseen = unseenListReadError(concerns.map((c) => c.concern));
-        logger.error(`Step ${stepIndex}: ${unseen}`);
-        for (const { concern, action } of concerns) {
-          collectedFailures.push({
-            selector: action.selector ?? '',
-            error: concern.text,
-            actionType: action.action,
-            startUrl: attemptStartUrl,
-            failureUrl: page.url(),
-            navigated: page.url() !== attemptStartUrl,
-          });
+        for (const { concern, sub } of concerns) {
+          sub.listReview!.outcome = 'unseen';
+          logger.warn(`Step ${stepIndex}: no turn left to show the model ${concern.name}; the step ends on it as read: ${concern.text}`);
         }
-        throw new StepFailureError(unseen, collectedFailures, allTurns);
       }
     }
 

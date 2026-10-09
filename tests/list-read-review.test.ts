@@ -1,7 +1,9 @@
 /**
- * A step that reads a list cannot end on one that came back empty or mixed
- * before the model has seen it, and a read the model replaced is never
- * compiled (issue #28; src/runner/list-read-review.ts).
+ * A step that reads a list does not end on one that came back empty or mixed
+ * before the model has seen it, while it has a turn to show it in, and never
+ * fails for it; the compile uses only a read that proves its selector
+ * (steptix/steptix#48, which #28 was merged into;
+ * src/runner/list-read-review.ts).
  *
  * Found on `templates/init/tests/control-flow.md` step 11, "Read the name of
  * every account in the Your accounts panel [store as: accounts]": the model's
@@ -16,13 +18,16 @@
  *  - the line the model is shown, for an empty read, a mixed read, a pattern
  *    that kept nothing and a count of hidden elements;
  *  - the real step loop (`executeStep`, real Chromium, a scripted model): an
- *    empty or mixed read gets exactly one extra turn carrying that line; a
- *    read of one kind gets none; the model can correct the read or keep it;
- *    a step that would end on a changed read still empty fails, and the retry
- *    is told why;
- *  - the compile: `actionsOf` and `entryFromRecording` over the step's result
- *    write only the read the model stood by;
- *  - the report says what happened to a read that was shown.
+ *    empty or mixed read is shown to the model in the next turn, and a changed
+ *    read again, for as long as the step has turns; a read of one kind is not
+ *    shown; the model can correct the read or keep it; with no turn left —
+ *    the last one, or a `return` — the step ends on the read as it came back,
+ *    and passes;
+ *  - the compile: `actionsOf` keeps only the step's own read, across attempts;
+ *    a step that ended on an empty read, or on one the model never saw, is no
+ *    evidence, and both compilers write no entry for it — while a loop pass
+ *    that read items still compiles;
+ *  - the report says what happened to a read, and flags one the model never saw.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
@@ -37,11 +42,16 @@ import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { executeAction } from '../src/browser/actions.js';
 import { formatListReadsSection } from '../src/ai/prompts.js';
 import { executeStep } from '../src/runner/step-executor.js';
-import { listReadConcern } from '../src/runner/list-read-review.js';
-import { actionsOf } from '../src/codebehind/recording.js';
+import { listReadConcern, unprovenListRead } from '../src/runner/list-read-review.js';
+import { parseFlowControlStep } from '../src/parser/flow-control-step.js';
+import { parseTestFile } from '../src/parser/markdown.js';
+import { actionsOf, evidenceRows, isEvidencePass } from '../src/codebehind/recording.js';
 import { entryFromRecording } from '../src/codebehind/generate.js';
+import { compileTest, type CompileEvent, type CompileRunner } from '../src/codebehind/compile.js';
+import { generationRefusal, LiveCompiler, type LiveCompileEvent } from '../src/codebehind/live-compile.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import { renderReport } from '../src/report/generator.js';
+import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ORIGIN = 'http://list-read-review.test';
@@ -239,8 +249,9 @@ function scriptedClient(responses: string[]): { client: AiClient; requests: Chat
   return { client, requests };
 }
 
-function plan(action: Record<string, unknown>, needsReeval = false): string {
-  return JSON.stringify({ actions: [action], reasoning: 'scripted', needs_reeval: needsReeval });
+function plan(action: Record<string, unknown> | Record<string, unknown>[], needsReeval = false): string {
+  const actions = Array.isArray(action) ? action : [action];
+  return JSON.stringify({ actions, reasoning: 'scripted', needs_reeval: needsReeval });
 }
 
 const NOOP = plan({ action: 'noop', description: 'The list is what the step asks for' });
@@ -255,27 +266,29 @@ function textOf(messages: ChatMessage[]): string {
     .join('\n');
 }
 
-function configWith(retries: number): Config {
+function configWith(retries: number, maxTurns = 5): Config {
   return {
     ...DEFAULT_CONFIG,
     ai: { ...DEFAULT_CONFIG.ai, sendScreenshots: false },
     browser: { ...DEFAULT_CONFIG.browser, headed: false, captureScreenshotsPerAction: false },
-    execution: { ...DEFAULT_CONFIG.execution, retries, maxTurns: 5, promptOnAmbiguity: false },
+    execution: { ...DEFAULT_CONFIG.execution, retries, maxTurns, promptOnAmbiguity: false },
   };
 }
 
 /** The real `executeStep` on the fixture page, as a compile run calls it. */
 async function runStep(
   responses: string[],
-  opts: { retries?: number; instruction?: string } = {},
+  opts: { retries?: number; maxTurns?: number; instruction?: string } = {},
 ): Promise<{ result: StepResult; requests: ChatMessage[][]; params: Record<string, string> }> {
   const page = await pageWith();
   try {
     const { client, requests } = scriptedClient(responses);
     const params: Record<string, string> = {};
-    const result = await executeStep(1, 1, opts.instruction ?? STEP, {
+    const instruction = opts.instruction ?? STEP;
+    const claim = parseFlowControlStep(instruction);
+    const result = await executeStep(1, 1, instruction, {
       page,
-      config: configWith(opts.retries ?? 0),
+      config: configWith(opts.retries ?? 0, opts.maxTurns),
       aiClient: client,
       contextContent: '',
       testName: 'list-read-review',
@@ -285,6 +298,8 @@ async function runStep(
       resolvedParameters: params,
       // A compile run: measured, so the recording carries what §6.6 compiles.
       captureStepContext: true,
+      // What every runner computes off the authored line first.
+      ...(claim !== undefined && { flowControlClaim: claim }),
     });
     return { result, requests, params };
   } finally {
@@ -297,13 +312,8 @@ function readsOf(result: StepResult): SubActionResult[] {
   return result.turns.flatMap((t) => t.subActions).filter((s) => s.action.action === 'read' || s.action.action === 'count');
 }
 
-function bindingFor(source: string): CodeBehindBinding {
-  return {
-    file: path.resolve(path.sep, 'nowhere', 'x.steps.ts'),
-    source,
-    occurrence: 0,
-    scope: { renames: {}, inputs: {} },
-  };
+function bindingFor(source: string, file = path.resolve(path.sep, 'nowhere', 'x.steps.ts')): CodeBehindBinding {
+  return { file, source, occurrence: 0, scope: { renames: {}, inputs: {} } };
 }
 
 /** What §6.6 compiles from the step's result: the entry, and the reads it is written from. */
@@ -314,8 +324,11 @@ function compiled(result: StepResult, params: Record<string, string>, source = S
   return { selectors: reads.map((a) => a.selector), entry };
 }
 
+const EMPTY_REASON =
+  '{{accounts}} came back empty on the recording run, and a read that finds nothing proves nothing about its selector';
+
 describe('the step loop shows the model an empty or mixed list read before the step ends', () => {
-  it('gives a read that matched nothing exactly one more turn, which corrects it — and compiles only the correction', async () => {
+  it('gives a read that matched nothing one more turn, which corrects it — and compiles only the correction', async () => {
     const { result, requests, params } = await runStep([plan(readOf(NOTHING)), plan(readOf(RIGHT))]);
     expect(result.status).toBe('passed');
     expect(requests).toHaveLength(2);
@@ -327,11 +340,14 @@ describe('the step loop shows the model an empty or mixed list read before the s
 
     const [wrong, right] = readsOf(result);
     expect(wrong!.listReview).toEqual({
+      kind: 'empty',
       text: `accounts is empty: \`${NOTHING}\` matched nothing on this page.`,
       outcome: 'replaced',
     });
     expect(right!.listReview).toBeUndefined();
 
+    expect(unprovenListRead(result)).toBeUndefined();
+    expect(isEvidencePass(result)).toBe(true);
     const { selectors, entry } = compiled(result, params);
     expect(selectors).toEqual([RIGHT]);
     expect(entry).toContain(`selector: '${RIGHT}'`);
@@ -359,19 +375,18 @@ describe('the step loop shows the model an empty or mixed list read before the s
     expect(compiled(result, params).selectors).toEqual([RIGHT]);
   });
 
-  it('passes with [] when the model keeps an empty list, and compiles the read it kept', async () => {
+  it('passes with [] when the model keeps an empty list, and gives the compile nothing to stand on', async () => {
     const { result, requests, params } = await runStep([plan(readOf(NOTHING)), NOOP]);
     expect(result.status).toBe('passed');
     expect(requests).toHaveLength(2);
     expect(params.accounts).toBe('[]');
     expect(readsOf(result)[0]!.listReview?.outcome).toBe('kept');
-    // The transcript is the read and the noop that kept it: still a step
-    // that only reads, so §6.6 writes it from the recording.
+    // The recording keeps what happened: the read, and the noop that kept it.
     expect(actionsOf(result).map((a) => a.action)).toEqual(['read', 'noop']);
-    const { selectors, entry } = compiled(result, params);
-    expect(selectors).toEqual([NOTHING]);
-    expect(entry).toContain('fromRecording: true');
-    expect(entry).toContain(`selector: '${NOTHING}'`);
+    // The compile does not use it. On a page with no accounts the right
+    // selector matches nothing too, so this read proves nothing about its own.
+    expect(unprovenListRead(result)).toEqual({ kind: 'empty', name: 'accounts', reason: EMPTY_REASON });
+    expect(isEvidencePass(result)).toBe(false);
   });
 
   it('keeps a read the model reads the same way again, without a third turn', async () => {
@@ -381,9 +396,10 @@ describe('the step loop shows the model an empty or mixed list read before the s
     expect(params.accounts).toBe('[]');
     expect(readsOf(result).map((s) => s.listReview?.outcome)).toEqual(['replaced', 'kept']);
     expect(compiled(result, params).selectors).toEqual([NOTHING]);
+    expect(unprovenListRead(result)?.kind).toBe('empty');
   });
 
-  it('shows the list in a turn the model asked for anyway, and keeps the added turn for later', async () => {
+  it('shows the list in a turn the model asked for anyway', async () => {
     const { result, requests, params } = await runStep([
       plan(readOf(NOTHING), true),
       plan(readOf(NOTHING_EITHER)),
@@ -398,31 +414,100 @@ describe('the step loop shows the model an empty or mixed list read before the s
     expect(readsOf(result).map((s) => s.listReview?.outcome)).toEqual(['replaced', 'kept']);
   });
 
-  it('fails a step that would end on a changed read still empty, and compiles neither read', async () => {
-    const { result, requests, params } = await runStep([plan(readOf(NOTHING)), plan(readOf(NOTHING_EITHER))]);
-    expect(result.status).toBe('failed');
-    expect(requests).toHaveLength(2);
-    expect(result.error).toContain('with no turn left to look at it');
-    expect(result.error).toContain(`\`${NOTHING_EITHER}\` matched nothing on this page.`);
-    expect(readsOf(result).map((s) => s.listReview?.outcome)).toEqual(['replaced', 'pending']);
-    expect(compiled(result, params).selectors).toEqual([]);
+  it('shows a changed read that is still empty again, for as long as the step has turns', async () => {
+    // Before steptix/steptix#48's decision one added turn was all a step got,
+    // and this failed the step on its second empty read.
+    const { result, requests, params } = await runStep([
+      plan(readOf(NOTHING)),
+      plan(readOf(NOTHING_EITHER)),
+      plan(readOf(RIGHT)),
+    ]);
+    expect(result.status).toBe('passed');
+    expect(requests).toHaveLength(3);
+    expect(textOf(requests[1]!)).toContain(`\`${NOTHING}\` matched nothing`);
+    expect(textOf(requests[2]!)).toContain(`\`${NOTHING_EITHER}\` matched nothing`);
+    expect(params.accounts).toBe(NAMES);
+    expect(readsOf(result).map((s) => s.listReview?.outcome)).toEqual(['replaced', 'replaced', undefined]);
+    expect(unprovenListRead(result)).toBeUndefined();
+    expect(compiled(result, params).selectors).toEqual([RIGHT]);
   });
 
-  it('tells the retry what the selector matched, and compiles only the retry\'s read', async () => {
+  it('never fails a step for its list: with no turn left it ends on the read as it came back', async () => {
+    // Two turns: the read in turn 1 is shown in turn 2, and the read the
+    // model changes it to in turn 2 has no turn to be shown in.
     const { result, requests, params } = await runStep(
-      [plan(readOf(NOTHING)), plan(readOf(NOTHING_EITHER)), plan(readOf(RIGHT))],
+      [plan(readOf(NOTHING)), plan(readOf(NOTHING_EITHER))],
+      { maxTurns: 2 },
+    );
+    expect(result.status).toBe('passed');
+    expect(result.retried).toBe(false);
+    expect(requests).toHaveLength(2);
+    expect(params.accounts).toBe('[]');
+    expect(readsOf(result).map((s) => s.listReview?.outcome)).toEqual(['replaced', 'unseen']);
+    expect(unprovenListRead(result)?.kind).toBe('empty');
+  });
+
+  it('ends on a mixed read the model never saw as read, and the compile will not use it', async () => {
+    const { result, requests, params } = await runStep([plan(readOf(OVER_BROAD))], { maxTurns: 1 });
+    expect(result.status).toBe('passed');
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(params.accounts!)).toHaveLength(6);
+    expect(readsOf(result)[0]!.listReview?.outcome).toBe('unseen');
+    expect(unprovenListRead(result)).toEqual({
+      kind: 'unchecked',
+      name: 'accounts',
+      reason: 'the step ended on its read of {{accounts}} on the recording run before the model could check what it matched',
+    });
+    expect(isEvidencePass(result)).toBe(false);
+  });
+
+  it('ends on a list read the step returned after as read, unseen', async () => {
+    const instruction = 'If the Your accounts panel lists no accounts then return';
+    const { result, requests, params } = await runStep(
+      [plan([readOf(NOTHING), { action: 'return', description: 'The panel lists no accounts' }])],
+      { instruction },
+    );
+    expect(result.status).toBe('passed');
+    expect(result.flowControl?.kind).toBe('return');
+    expect(requests).toHaveLength(1);
+    expect(params.accounts).toBe('[]');
+    expect(readsOf(result)[0]!.listReview?.outcome).toBe('unseen');
+    expect(unprovenListRead(result)?.kind).toBe('empty');
+  });
+
+  it('compiles only the retry\'s read when an attempt failed before the model answered', async () => {
+    // Attempt 1 reads nothing and is shown it, and its next turn fails on
+    // something else. The retry reads the names, which stores over the first
+    // attempt's read: that read was never the step's.
+    const { result, requests, params } = await runStep(
+      [plan(readOf(NOTHING)), plan({ action: 'click', selector: '#account-list ]]', description: 'Open the list' }), plan(readOf(RIGHT))],
       { retries: 1 },
     );
     expect(result.status).toBe('passed');
+    expect(result.retried).toBe(true);
     expect(requests).toHaveLength(3);
-    const retry = textOf(requests[2]!);
-    expect(retry).toContain(NOTHING_EITHER);
-    expect(retry).toContain('matched nothing on this page');
     expect(params.accounts).toBe(NAMES);
+    expect(readsOf(result).map((s) => s.listReview?.outcome)).toEqual(['pending', undefined]);
+    expect(unprovenListRead(result)).toBeUndefined();
     const { selectors, entry } = compiled(result, params);
     expect(selectors).toEqual([RIGHT]);
     expect(entry).not.toContain(NOTHING);
-    expect(entry).not.toContain(NOTHING_EITHER);
+  });
+
+  it('gives the compile nothing when the step kept a value an attempt that failed never resolved', async () => {
+    // The retry does not read again: the step ends on attempt 1's empty read,
+    // which the model never answered. Before this, the transcript dropped
+    // that read and kept the noop, so a compile would have written a step
+    // that stores nothing at all.
+    const { result, params } = await runStep(
+      [plan(readOf(NOTHING)), plan({ action: 'click', selector: '#account-list ]]', description: 'Open the list' }), NOOP],
+      { retries: 1 },
+    );
+    expect(result.status).toBe('passed');
+    expect(params.accounts).toBe('[]');
+    expect(readsOf(result).map((s) => s.listReview?.outcome)).toEqual(['pending']);
+    expect(actionsOf(result).map((a) => a.action)).toEqual(['read', 'noop']);
+    expect(unprovenListRead(result)).toEqual({ kind: 'empty', name: 'accounts', reason: EMPTY_REASON });
   });
 
   it('shows a count of 0 too, and the recount replaces it', async () => {
@@ -436,27 +521,191 @@ describe('the step loop shows the model an empty or mixed list read before the s
     expect(textOf(requests[1]!)).toContain('account_count is 0: `#account-list > li.account-card` matched nothing on this page.');
     expect(params.account_count).toBe('3');
     expect(readsOf(result).map((s) => s.listReview?.outcome)).toEqual(['replaced', undefined]);
+    expect(unprovenListRead(result)).toBeUndefined();
   });
 
-  it('says in the report what happened to a read the model was shown', async () => {
+  it('gives the compile nothing for a count of 0 the model kept', async () => {
+    const instruction = 'Count the accounts in the Your accounts panel [store as: account_count]';
+    const { result, params } = await runStep(
+      [plan({ action: 'count', selector: '#account-list > li.account-card', as: 'account_count', description: 'Count the accounts' }), NOOP],
+      { instruction },
+    );
+    expect(result.status).toBe('passed');
+    expect(params.account_count).toBe('0');
+    expect(unprovenListRead(result)).toEqual({
+      kind: 'empty',
+      name: 'account_count',
+      reason: '{{account_count}} counted 0 on the recording run, and a read that finds nothing proves nothing about its selector',
+    });
+  });
+});
+
+// ── The report ───────────────────────────────────────────────────────────────
+
+function reportOf(result: StepResult): TestReport {
+  return {
+    testName: 'list-read-review',
+    filePath: path.resolve(path.sep, 'p', 'tests', 'accounts.md'),
+    tags: [],
+    status: 'passed',
+    steps: [result],
+    totalSteps: 1,
+    passedSteps: 1,
+    failedSteps: 0,
+    totalSubActions: 2,
+    durationMs: 1,
+    tokensUsed: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    date: new Date(0).toISOString(),
+  };
+}
+
+describe('the report', () => {
+  it('says what happened to a read the model was shown', async () => {
     const { result } = await runStep([plan(readOf(OVER_BROAD)), plan(readOf(RIGHT))]);
-    const report: TestReport = {
-      testName: 'list-read-review',
-      filePath: path.resolve(path.sep, 'p', 'tests', 'accounts.md'),
-      tags: [],
-      status: 'passed',
-      steps: [result],
-      totalSteps: 1,
-      passedSteps: 1,
-      failedSteps: 0,
-      totalSubActions: 2,
-      durationMs: 1,
-      tokensUsed: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      date: new Date(0).toISOString(),
-    };
-    const html = renderReport(report);
+    const html = renderReport(reportOf(result));
     expect(html).toContain('list read shown to the model, which replaced it with a later read — accounts holds 6 values');
+    expect(html).not.toContain('list not checked');
+  });
+
+  it('flags a step that ended on a list the model never saw, and not one it kept', async () => {
+    const unseen = renderReport(reportOf((await runStep([plan(readOf(OVER_BROAD))], { maxTurns: 1 })).result));
+    expect(unseen).toContain('⚠ list not checked');
+    expect(unseen).toContain(
+      'list read never shown to the model: the step ended on it with no turn left — accounts holds 6 values',
+    );
+
+    const kept = renderReport(reportOf((await runStep([plan(readOf(NOTHING)), NOOP])).result));
+    expect(kept).toContain('list read shown to the model, which kept it — accounts is empty');
+    expect(kept).not.toContain('list not checked');
+  });
+});
+
+// ── The compile ──────────────────────────────────────────────────────────────
+
+let scratch: string;
+beforeAll(async () => {
+  scratch = await makeScratchBase('list-read-review');
+});
+afterAll(async () => {
+  await removeScratchBase(scratch);
+});
+
+/** A model the compilers may ask only to review: anything else fails the test. */
+function reviewOnlyClient(): { client: AiClient; prompts: string[] } {
+  const prompts: string[] = [];
+  const client = {
+    complete: async (messages: ChatMessage[]) => {
+      const last = textOf(messages.slice(-1));
+      prompts.push(last);
+      const file = /## The file, as generated\s*```ts\n([\s\S]*?)```/.exec(last)?.[1];
+      if (/Review a generated Playwright code-behind file/.test(last) && file !== undefined) {
+        return { text: JSON.stringify({ file }), model: 'scripted' };
+      }
+      throw new Error(`the compile asked the model something this test did not script: ${last.slice(0, 120)}`);
+    },
+  } as unknown as AiClient;
+  return { client, prompts };
+}
+
+describe('the compile writes no entry for a step that ended on a list read proving nothing', () => {
+  it('Run & Compile names the step not attempted, asks the model nothing and writes nothing', async () => {
+    const { result: kept } = await runStep([plan(readOf(NOTHING)), NOOP]);
+    const dir = await fs.mkdtemp(path.join(scratch, 'boxed-'));
+    const md = path.join(dir, 'accounts.md');
+    await fs.writeFile(md, `# Accounts\n\n## Steps\n1. ${STEP}\n`, 'utf-8');
+    const { client, prompts } = reviewOnlyClient();
+    const events: CompileEvent[] = [];
+    const runner: CompileRunner = async (request) => {
+      if (request.purpose === 'record') return { status: 'passed', steps: [kept], resolvedParameters: {}, tokensUsed: 0 };
+      throw new Error('nothing was compiled, so nothing should be replayed');
+    };
+
+    const compile = await compileTest({
+      test: await parseTestFile(md),
+      config: configWith(0),
+      contextContent: '',
+      aiClient: client,
+      runner,
+      onEvent: (e) => events.push(e),
+    });
+
+    expect(prompts).toEqual([]);
+    expect(compile.status).toBe('partial');
+    expect(compile.summary.compiled).toBe(0);
+    expect(compile.summary.notAttempted).toEqual([1]);
+    expect(compile.files).toEqual({});
+    // No `ai: true` entry either: nothing tested whether the step can be code.
+    await expect(fs.access(path.join(dir, 'accounts.steps.ts'))).rejects.toThrow();
+    expect(events).toContainEqual(expect.objectContaining({ kind: 'step', step: 1, message: EMPTY_REASON }));
+    const done = events.find((e) => e.kind === 'done') as { message: string } | undefined;
+    expect(done?.message).toContain('step 1 read an empty list on the recording run, which proves nothing about the selector');
+    expect(done?.message).toContain('Compile again after a run where the list has items.');
+  });
+
+  it('takes a loop body\'s evidence from the pass that read items, not the first pass', async () => {
+    const { result: empty } = await runStep([plan(readOf(NOTHING)), NOOP]);
+    const { result: right } = await runStep([plan(readOf(RIGHT))]);
+    // Both are rows of step 1, as a `For each` body's passes are.
+    expect(evidenceRows([empty, right])).toEqual([right]);
+    expect(evidenceRows([empty, right])[0]).toBe(right);
+    // No pass proved anything: the first passing row stays, for the recording,
+    // and the compile refuses it.
+    expect(evidenceRows([empty, { ...empty }])[0]).toBe(empty);
+  });
+
+  it('compile-as-you-go writes no entry for the empty pass, and the entry from a pass that read items', async () => {
+    const { result: empty } = await runStep([plan(readOf(NOTHING)), NOOP]);
+    const { result: right, params } = await runStep([plan(readOf(RIGHT))]);
+    const dir = await fs.mkdtemp(path.join(scratch, 'live-'));
+    const stepsFile = path.join(dir, 'accounts.steps.ts');
+    const binding = bindingFor(STEP, stepsFile);
+    const compilerFor = (events: LiveCompileEvent[], client: AiClient): LiveCompiler =>
+      new LiveCompiler({
+        mode: 'run',
+        testFilePath: path.join(dir, 'accounts.md'),
+        aiClient: client,
+        contextContent: '',
+        testName: 'accounts.md',
+        plan: [{ text: STEP, inScope: true, line: 5 }],
+        emit: (e) => events.push(e),
+        note: () => {},
+      });
+
+    // One pass, empty: not attempted, nothing generated, nothing written.
+    const alone: LiveCompileEvent[] = [];
+    const first = reviewOnlyClient();
+    const once = compilerFor(alone, first.client);
+    once.offer({ index: 0, binding, result: empty, resolvedParameters: { accounts: '[]' } });
+    const onceOut = await once.finish({ tokensUsed: 0 });
+    expect(first.prompts).toEqual([]);
+    expect(onceOut.summary.notAttempted).toEqual([1]);
+    expect(onceOut.files[stepsFile] ?? '').not.toContain('account');
+    expect(alone).toContainEqual(expect.objectContaining({ type: 'compile:step', step: 1, message: EMPTY_REASON }));
+
+    // Two passes of one loop body: the second read the names, so the entry is
+    // written from it and the first pass owes nothing.
+    const second = reviewOnlyClient();
+    const twice = compilerFor([], second.client);
+    twice.offer({ index: 0, binding, result: empty, resolvedParameters: { accounts: '[]' } });
+    twice.offer({ index: 0, binding, result: right, resolvedParameters: params });
+    const twiceOut = await twice.finish({ tokensUsed: 0 });
+    expect(twiceOut.summary.notAttempted ?? []).toEqual([]);
+    const file = twiceOut.files[stepsFile] ?? '';
+    expect(file).toContain('fromRecording: true');
+    expect(file).toContain('span:first-of-type');
+    expect(file).not.toContain(NOTHING);
+  });
+
+  it('is the live compiler\'s last reason, after every fact about the step itself', () => {
+    const unproven = { kind: 'empty' as const, name: 'accounts', reason: EMPTY_REASON };
+    const binding = bindingFor(STEP);
+    expect(generationRefusal({ binding, text: STEP, status: 'passed', unprovenListRead: unproven })).toBe(EMPTY_REASON);
+    expect(generationRefusal({ binding, text: STEP, status: 'failed', unprovenListRead: unproven }))
+      .toBe('the step did not pass');
+    expect(generationRefusal({ binding, text: STEP, status: 'passed', fromCodeBehind: true, unprovenListRead: unproven }))
+      .toBe('the step ran as code');
+    expect(generationRefusal({ binding, text: STEP, status: 'passed' })).toBeUndefined();
   });
 });

@@ -25,14 +25,20 @@ run's read, the code-behind kept the wrong list.
   few values of each. The model reads again with a better selector, which
   replaces the read, or answers `noop` to keep it. An empty list can be the
   right answer. A read that finds one kind of element costs nothing extra.
-- **At most one turn per attempt is added for this.** If the model changes
-  the read and the new one is still empty or mixed, the attempt fails rather
-  than pass on a list nobody has looked at, and the retry is told what the
-  selector matched.
-- **Only a read the model kept is compiled.** A read it replaced, or one an
-  attempt failed before it answered, is left out of what Run & Compile
-  writes. The report says, under each such read, whether the model kept it
-  or replaced it.
+- **A list never fails the step.** A read the model changes is shown again,
+  for as long as the step has turns left. With no turn left — the step's last
+  turn, or a `return` — the step ends on the list as it came back and
+  passes, and the report marks it **⚠ list not checked**.
+- **Only a read that proves its selector is compiled.** A read the model
+  replaced is left out of what Run & Compile writes. A step that ended on a
+  list that came back empty, or a count of 0, is not compiled at all, even
+  when the model kept it: on a page with no items every selector matches
+  nothing, so the read says nothing about its own. Nor is a step that ended on
+  a list the model never saw. Such a step gets no entry and is named as not
+  attempted, with the reason, and the next compile takes it again — after a
+  run where the list has items, it compiles. A loop body compiles from the
+  first pass that read something. A step whose list is always empty stays
+  under AI. The report says, under each reviewed read, what became of it.
 
 ### Fixed — compiled code-behind holds up on replay
 

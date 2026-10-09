@@ -52,6 +52,7 @@ import { readLastRun, type LastRunStep } from './last-run.js';
 import { entryTextIn } from './writer.js';
 import type { CodeBehindBinding } from './loader.js';
 import { codeBehindFileKey as fileKey, recordingDirFor } from './recording.js';
+import { unprovenListRead, type UnprovenListRead } from '../runner/list-read-review.js';
 import { evidenceKey, evidenceKeyOf, reviewCandidate, type EntryEvidence } from './review.js';
 import type { CompileStatus, CompileSummary } from './compile.js';
 
@@ -447,6 +448,11 @@ export function endedAsWrittenReason(subject: 'run' | 'replay', step: number): s
  *   answer. This is the default selection ("no entry, or flagged stale")
  *   falling out of run behaviour for free.
  * - **`ai: true`** — the author's opt-out. Deleting the entry undoes it.
+ * - **a list read that proves nothing** — the step ended on a list that came
+ *   back empty, where any selector matches nothing, or on one the model never
+ *   saw (`unprovenListRead`, src/runner/list-read-review.ts; issue #48). No
+ *   entry, which the next compile takes again — never `ai: true`. Asked last:
+ *   every reason above is a fact about the step whatever it read.
  */
 export function generationRefusal(input: {
   binding?: CodeBehindBinding | undefined;
@@ -466,6 +472,8 @@ export function generationRefusal(input: {
   /** Why a `skipped` step never ran — see {@link LiveStepInput.skipped}.
    *  Absent reads as a return, the one cause there was before decisions. */
   skipped?: 'return' | 'decision' | undefined;
+  /** `unprovenListRead` of the step's result. */
+  unprovenListRead?: UnprovenListRead | undefined;
 }): string | undefined {
   // `[skill` / `[tool` calls only — `[input:]`, `[output:]` and
   // `[interactive]` DO reach generation and are declined there, with the
@@ -558,6 +566,7 @@ export function generationRefusal(input: {
   // An entry that threw and healed under AI produced a transcript and is
   // flagged stale — exactly the case a recompile exists for.
   if (input.fromCodeBehind === true && !input.codeBehindStale) return 'the step ran as code';
+  if (input.unprovenListRead !== undefined) return input.unprovenListRead.reason;
   return undefined;
 }
 
@@ -624,6 +633,15 @@ export class LiveCompiler {
    * author reads has to say which.
    */
   private readonly toleratedFailures: { number: number; key: string }[] = [];
+  /**
+   * Steps that ended on a list read proving nothing about its selector — an
+   * empty list, or one the model never saw (`unprovenListRead`, issue #48).
+   *
+   * The same (number, key) pairs and the same netting as `toleratedFailures`:
+   * a loop body whose first pass read an empty list and whose second read
+   * items compiles from the second, and owes nothing.
+   */
+  private readonly unprovenReads: { number: number; key: string }[] = [];
   /**
    * Entry keys this compile has already queued — the per-key dedupe the boxed
    * pipeline gets from `selectSteps` (compile.ts), which keeps a `keys` Set
@@ -1061,6 +1079,7 @@ export class LiveCompiler {
       this.offerDecisionSkip(input, at, text);
       return;
     }
+    const unproven = unprovenListRead(input.result);
     const refusal = generationRefusal({
       binding: input.binding,
       text,
@@ -1071,6 +1090,7 @@ export class LiveCompiler {
       codeBehindStale: input.result.codeBehindStale,
       surface: input.result.surface,
       skipped: input.skipped,
+      unprovenListRead: unproven,
     });
     if (refusal !== undefined) {
       // Both "ran as code" reasons: the entry ran, so the step is one this
@@ -1102,6 +1122,11 @@ export class LiveCompiler {
       // binding is there — `generationRefusal` decides `!input.binding` first.
       if (refusal === TOLERATED_FAILURE_REFUSAL) {
         this.toleratedFailures.push({ number: at + 1, key: entryKeyOf(input.binding!) });
+        this.stepEvent('generate', { index: at, number: at + 1, text, hasEntry: false, isAiEntry: false }, refusal);
+      }
+      // And a step whose list read proved nothing, on the same terms (issue #48).
+      if (unproven !== undefined && refusal === unproven.reason) {
+        this.unprovenReads.push({ number: at + 1, key: entryKeyOf(input.binding!) });
         this.stepEvent('generate', { index: at, number: at + 1, text, hasEntry: false, isAiEntry: false }, refusal);
       }
       logger.debug(`Compile-as-you-go skipped step ${input.index + 1}: ${refusal}`);
@@ -1893,6 +1918,11 @@ export class LiveCompiler {
     const toleratedOwed = this.toleratedFailures
       .filter((s) => !this.writtenKeys.has(s.key))
       .map((s) => s.number);
+    // So does a step whose list read proved nothing (issue #48), unless another
+    // inlining of the same entry read items and compiled it.
+    const unprovenOwed = this.unprovenReads
+      .filter((s) => !this.writtenKeys.has(s.key))
+      .map((s) => s.number);
     // A step the run decided against owes an entry on the same terms
     // (stories/codebehind-loops-and-conditions.md, decision 12; issue 053): a
     // body line one pass skipped and another compiled owes nothing.
@@ -1917,6 +1947,7 @@ export class LiveCompiler {
         ...this.skippedByStop,
         ...skippedByReturnOwed,
         ...toleratedOwed,
+        ...unprovenOwed,
         ...skippedByDecisionOwed,
       ]),
     ].sort((a, b) => a - b);
@@ -1964,6 +1995,7 @@ export class LiveCompiler {
       && !final.aborted
       && skippedByReturnOwed.length === 0
       && toleratedOwed.length === 0
+      && unprovenOwed.length === 0
       // …and an untaken branch: a file whose only uncompiled steps sit in it
       // is not "already compiled" (decision 12).
       && skippedByDecisionOwed.length === 0;

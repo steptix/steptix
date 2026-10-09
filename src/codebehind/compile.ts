@@ -73,6 +73,7 @@ import {
 } from '../parser/interpolate-env-data.js';
 import { bindVariable, clearDottedKeys, loadDataFile, placeholderRoot } from '../parser/parameters.js';
 import { evidenceRows, recordingDirFor, writeReplayFailure, type RecordedAction } from './recording.js';
+import { unprovenListRead, type UnprovenListRead } from '../runner/list-read-review.js';
 import {
   inheritLoopBindings,
   isSecretParameterName,
@@ -693,7 +694,27 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   const neverAsked = selection.order.filter(
     (s) => s.kind === 'condition' && observationsFor(s.index).length === 0,
   );
-  const noEvidence = new Set([...skippedInRecording, ...toleratedInRecording, ...neverAsked]);
+  // A step that ENDED on a list read proving nothing about its selector — one
+  // that came back empty, where every selector matches nothing, or one the
+  // model never saw (src/runner/list-read-review.ts, issue #48) — is no
+  // evidence on the same terms: dropped, named not attempted, and given no
+  // entry, so the next compile takes it again. Never `ai: true`, which every
+  // later compile would leave alone. The evidence row is already the first
+  // pass whose reads did prove something (`isEvidencePass`), so this is a step
+  // no pass of which did.
+  const unprovenInRecording = new Map<CompileStep, UnprovenListRead>();
+  for (const s of stepKinds) {
+    const row = record.steps[s.index];
+    if (row === undefined || (row.status !== 'passed' && row.deliberate !== true)) continue;
+    const unproven = unprovenListRead(row);
+    if (unproven !== undefined) unprovenInRecording.set(s, unproven);
+  }
+  const noEvidence = new Set([
+    ...skippedInRecording,
+    ...toleratedInRecording,
+    ...neverAsked,
+    ...unprovenInRecording.keys(),
+  ]);
   /** What the recording's skip cause is read off: each skipped step's first
    *  row, and a never-asked condition's own row — skipped too, by the same
    *  decision or return that skipped the structure it opens. */
@@ -708,24 +729,33 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     for (const step of neverAsked) {
       stepEvent('select', step, neverAskedReason(recordedAt(step.index)));
     }
+    for (const [step, unproven] of unprovenInRecording) {
+      stepEvent('select', step, unproven.reason);
+    }
     notAttempted = [
       ...new Set([...notAttempted, ...[...noEvidence].map((s) => s.number)]),
     ].sort((a, b) => a - b);
     const attemptable = selection.order.filter((s) => !noEvidence.has(s));
     if (attemptable.length === 0) {
-      // Every selected step was behind the return, or failed and was tolerated:
-      // nothing to generate, and `partial` rather than `green`, which would say
-      // "already compiled" about work that has not started.
+      // Every selected step was behind the return, failed and was tolerated, or
+      // ended on a list read that proves nothing: nothing to generate, and
+      // `partial` rather than `green`, which would say "already compiled" about
+      // work that has not started.
       //
-      // A clause per cause, each over ITS OWN steps, because the two are opposite
-      // facts: a step behind a return never ran, a tolerated one ran and failed.
-      // Told in one list, an author sent to "run the test so they execute" over a
-      // step that DID execute looks for the wrong thing.
+      // A clause per cause, each over ITS OWN steps, because they are different
+      // facts: a step behind a return never ran, a tolerated one ran and failed,
+      // and one that read an empty list ran and passed. Told in one list, an
+      // author sent to "run the test so they execute" over a step that DID
+      // execute looks for the wrong thing.
       const toleratedNumbers = toleratedInRecording.map((s) => s.number);
+      const unproven = [...unprovenInRecording];
+      const emptyNumbers = unproven.filter(([, u]) => u.kind === 'empty').map(([s]) => s.number);
+      const uncheckedNumbers = unproven.filter(([, u]) => u.kind === 'unchecked').map(([s]) => s.number);
       // Everything else in `notAttempted`: the skipped rows, plus the post-prefix
       // steps of a recording that stopped — neither ran, so one sentence covers
       // both.
-      const didNotRun = notAttempted.filter((n) => !toleratedNumbers.includes(n));
+      const ranAndRefused = new Set([...toleratedNumbers, ...emptyNumbers, ...uncheckedNumbers]);
+      const didNotRun = notAttempted.filter((n) => !ranAndRefused.has(n));
       const cause = [
         didNotRun.length > 0
           ? `${listSteps(didNotRun)} did not run on the recording run` +
@@ -735,13 +765,23 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
           ? `${listSteps(toleratedNumbers)} failed on the recording run and was tolerated ` +
             '(otherwise continue)'
           : '',
+        emptyNumbers.length > 0
+          ? `${listSteps(emptyNumbers)} read an empty list on the recording run, which proves nothing about the selector`
+          : '',
+        uncheckedNumbers.length > 0
+          ? `${listSteps(uncheckedNumbers)} ended on a list read the model never checked`
+          : '',
       ]
         .filter((c) => c !== '')
         .join(', and ');
       const next =
         didNotRun.length > 0
           ? 'Run the test so they execute, then compile again.'
-          : 'Make it pass, then compile again.';
+          : toleratedNumbers.length > 0
+            ? 'Make it pass, then compile again.'
+            : emptyNumbers.length > 0
+              ? 'Compile again after a run where the list has items.'
+              : 'Run it again, then compile again.';
       return finish(
         'partial',
         {
