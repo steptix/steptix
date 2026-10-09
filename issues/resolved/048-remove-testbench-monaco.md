@@ -2,7 +2,7 @@
 
 **Status:** resolved — tree deleted 2026-08-19
 **Area:** `testbench-monaco/` (whole tree, 50 tracked files); [CLAUDE.md](../../CLAUDE.md) §"TestBench: two extension variants"
-**Related:** [017 — monaco integration tests silently no-op](017-testbench-monaco-integration-tests-dont-run.md); [035 — step-line-span parser duplicated six times](../035-step-line-span-parser-duplicated-six-times.md); [013 — secret masking duplicated and divergent](../013-secret-masking-duplicated-and-divergent.md)
+**Related:** [017 — monaco integration tests silently no-op](017-testbench-monaco-integration-tests-dont-run.md); [035 — step-line-span parser duplicated six times](https://github.com/steptix/steptix/issues/49) (now tracked as #49); [013 — secret masking duplicated and divergent](../013-secret-masking-duplicated-and-divergent.md)
 **Opened:** 2026-08-19
 
 ## Summary
@@ -49,7 +49,7 @@ runner too — it was the last silent pass"*. Every hardening pass, every
 runner-core contract change, has to be applied twice.
 
 **It is one of the duplicate copies.** Monaco carries its own `sections.ts`
-span-scanner copy, one of the six [035](../035-step-line-span-parser-duplicated-six-times.md)
+span-scanner copy, one of the six [035](https://github.com/steptix/steptix/issues/49) (now #49)
 counts, guarded by a bespoke `tests/sections-copy-parity.test.js`. Deleting the
 tree removes a copy and its guard together.
 

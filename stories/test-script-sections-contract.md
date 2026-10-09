@@ -24,7 +24,7 @@ Inline sections cross four packages that share **no compiled types**:
   [session-manager.ts](../src/server/session-manager.ts) and the `## Steps`
   span scanner in [markdown.ts](../src/parser/markdown.ts)
 - the two VS Code extensions, plus five hand-maintained copies of the span
-  scanner (tracked as [issues/035](../issues/035-step-line-span-parser-duplicated-six-times.md))
+  scanner (tracked as [#49](https://github.com/steptix/steptix/issues/49))
 
 So the wire shape for `sections` is written out **twice** with nothing linking
 the copies, and the match rule is implemented **six times**. Every one of those

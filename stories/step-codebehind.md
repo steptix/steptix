@@ -154,7 +154,7 @@ bodies, skill bodies), accessed through `matchInput`
 contract's `rawSteps?.[i] ?? steps[i]` fallback on the server path, where
 incoming steps are already raw form. Code-behind binding MUST reuse that
 accessor — it must not add a seventh hand-rolled scanner
-([issue 035](../issues/035-step-line-span-parser-duplicated-six-times.md)).
+([#49](https://github.com/steptix/steptix/issues/49)).
 Unlike section-call matching, comparison is **case-sensitive** exact
 equality after trimming: an edited step should miss and regenerate, not
 fuzzily match.
@@ -412,7 +412,7 @@ New code:
   ([src/parser/section-match.ts](../src/parser/section-match.ts)) with
   per-frame-instance occurrence counting, unmatched-entry warnings. Produces
   a registry passed into step options like `stepCache`. No new step/section
-  scanner of any kind (issue 035).
+  scanner of any kind (#49).
 - `src/codebehind/writer.ts` — tokenizer, span replace / append / create,
   esbuild validation with restore-on-failure.
 - `src/ai/prompts.ts` — `buildStepCodePrompt` (precedent:
