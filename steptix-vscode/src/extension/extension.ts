@@ -27,6 +27,16 @@ import {
 import { SteptixRunnerView } from './runner-view.js';
 import { RunController, defaultApiClientFactory } from './run-controller.js';
 import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
+import {
+  bindingFor,
+  isCheckCurrent,
+  isDifferentFile,
+  isSameOrInside,
+  readFileIdentity,
+  type Binding,
+  type FileCheck,
+  type FileIdentity,
+} from './controller-binding-core.js';
 import { registerCommands } from './commands/index.js';
 import type { SkillRunTarget } from './skill-run-targets.js';
 import { CodeBehindDiffs } from './codebehind-diff.js';
@@ -91,6 +101,17 @@ function rowsComparisonKey(msg: HostRowsMsg): string {
   );
 }
 
+/** The on-disk identity of a `file:` document; null for any other scheme,
+ *  which is read as "unknown", never as "a different file". */
+function fileIdentityOf(uri: vscode.Uri): FileIdentity | null {
+  return uri.scheme === 'file' ? readFileIdentity(uri.fsPath) : null;
+}
+
+/** The last segment of a URI's path, for a log line. */
+function fileName(uri: vscode.Uri): string {
+  return uri.path.slice(uri.path.lastIndexOf('/') + 1);
+}
+
 class RunControllerRegistry implements vscode.Disposable {
   private readonly controllers = new Map<string, RunController>();
   /** Detached, HEADLESS controllers used only by batch (flask / Test Explorer)
@@ -98,6 +119,19 @@ class RunControllerRegistry implements vscode.Disposable {
    *  flask run never touches the editor surface, and so it can run concurrently
    *  with an interactive run of the same file. */
   private readonly batchControllers = new Map<string, RunController>();
+  /**
+   * The file on disk each controller's document belongs to — what tells the
+   * same file opened again from a different file renamed onto its path
+   * (issue 50, controller-binding-core.ts) — and the document and version it
+   * was last checked for, so a lookup that changes nothing skips the `stat`.
+   */
+  private readonly fileChecks = new WeakMap<RunController, FileCheck<vscode.TextDocument>>();
+  /**
+   * The session close a retired controller owes, by URI — handed to the next
+   * controller for that URI, which runs it before its own first close of the
+   * same session id (`retire`).
+   */
+  private readonly pendingSessionCloses = new Map<string, () => Promise<void>>();
   private clientFactory: ApiClientFactory = defaultApiClientFactory;
   /** Mirror of the last value pushed to the `steptix.running` context
    *  key. VS Code doesn't expose context keys for read, so this is the
@@ -232,10 +266,32 @@ class RunControllerRegistry implements vscode.Disposable {
     this.editSub = vscode.workspace.onDidChangeTextDocument((event) =>
       this.moveRememberedMarks(event),
     );
+    this.fileSubs = [
+      // The same file opened again: point its controllers at the new
+      // document now, not at the next lookup, so a run in flight or parked
+      // reads what the editor shows from here on (`bind`).
+      vscode.workspace.onDidOpenTextDocument((document) => this.bindReopened(document)),
+      // Renames and deletes made in VS Code (the Explorer, a refactoring, a
+      // WorkspaceEdit) say exactly which file went where.
+      vscode.workspace.onDidRenameFiles((event) => {
+        for (const { oldUri, newUri } of event.files) {
+          this.retireUnder(oldUri, `was renamed to ${fileName(newUri)}`);
+          // Whatever was left at the destination belonged to a file that
+          // lived there before — the rename overwrote it, or it moved away
+          // where VS Code did not see it.
+          this.retireUnder(newUri, `was replaced by ${fileName(oldUri)}`);
+        }
+      }),
+      vscode.workspace.onDidDeleteFiles((event) => {
+        for (const uri of event.files) this.retireUnder(uri, 'was deleted');
+      }),
+    ];
   }
 
   /** Disposed with the registry; see `moveRememberedMarks`. */
   private readonly editSub: vscode.Disposable;
+  /** Disposed with the registry; see the constructor. */
+  private readonly fileSubs: vscode.Disposable[];
 
   /**
    * Move `toleratedLines` and `guardMarks` with an edit, the way the tracker
@@ -471,19 +527,30 @@ class RunControllerRegistry implements vscode.Disposable {
     for (const controller of this.allControllers()) controller.stop();
     this.controllers.clear();
     this.batchControllers.clear();
+    this.pendingSessionCloses.clear();
   }
 
   /**
    * Get-or-create the controller for a document. Returns undefined if the
    * document isn't inside a workspace folder (STX030 case).
+   *
+   * A cached controller is pointed at `document` when that is the same file
+   * in a new document object, and replaced when a different file is at its
+   * path now (`bind`, issue 50).
    */
   get(document: vscode.TextDocument): RunController | undefined {
     const key = document.uri.toString();
     const existing = this.controllers.get(key);
-    if (existing) return existing;
+    if (existing) {
+      if (this.bind(existing, document, true) !== 'replace') return existing;
+      this.retire(key, existing, 'is a different file now', { closeNow: false });
+    }
     const folder = workspaceFolderFor(document.uri);
     if (!folder) return undefined;
 
+    // The new controller takes over whatever close the last one owed.
+    const previousSessionClose = this.pendingSessionCloses.get(key);
+    this.pendingSessionCloses.delete(key);
     const post = this.makePostCallback(document.uri);
     const controller = new RunController(
       document,
@@ -521,8 +588,10 @@ class RunControllerRegistry implements vscode.Disposable {
         // by design, and an attach from an earlier editor run covers them
         // anyway if its breakpoints hit.
         onServerReady: (info) => this.autoAttachForStepsBreakpoints({ ...info, folder }),
+        previousSessionClose,
       },
     );
+    this.recordFileCheck(controller, document, fileIdentityOf(document.uri));
     controller.attachCompileTailSignals(this.compileTailSignals);
     // What the gutter shows right now. A run that narrows an axis seeds the
     // rows it did NOT select from these, so an unselected row keeps the mark
@@ -568,7 +637,13 @@ class RunControllerRegistry implements vscode.Disposable {
   getBatchController(document: vscode.TextDocument): RunController | undefined {
     const key = document.uri.toString();
     const existing = this.batchControllers.get(key);
-    if (existing) return existing;
+    if (existing) {
+      // Never replaced, whatever file is at the path now: its run counter is
+      // the `::run-N` above, and a replacement would count from 1 again.
+      // Nothing else carries over — each run is a new session.
+      this.bind(existing, document, false);
+      return existing;
+    }
     const folder = workspaceFolderFor(document.uri);
     if (!folder) return undefined;
     const controller = new RunController(
@@ -584,8 +659,156 @@ class RunControllerRegistry implements vscode.Disposable {
       // same pre-run check and auto-start.
       { healthProbe: this.healthProbe, spawnServer: this.spawnServer, logPath: this.serverLogPath, keepAliveIntervalMs: this.keepAliveIntervalMs, autoStartGuard: this.autoStartGuard },
     );
+    // Recorded for batch controllers too: a batch run in flight must keep its
+    // document when a different file lands on its path (`bindingFor`).
+    this.recordFileCheck(controller, document, fileIdentityOf(document.uri));
     this.batchControllers.set(key, controller);
     return controller;
+  }
+
+  /**
+   * Point a cached controller at `document` when it is the same file in a new
+   * document object, and say when it must be replaced instead because a
+   * different file is at its path now (issue 50, controller-binding-core.ts).
+   * Only editor controllers are `replaceable`; see `getBatchController`.
+   */
+  private bind(
+    controller: RunController,
+    document: vscode.TextDocument,
+    replaceable: boolean,
+  ): Binding {
+    const check = this.fileChecks.get(controller);
+    if (isCheckCurrent(check, controller.document, document)) return 'keep';
+    const recorded = check?.identity ?? null;
+    const current = fileIdentityOf(document.uri);
+    const binding = bindingFor({
+      sameDocument: controller.document === document,
+      recorded,
+      current,
+      inFlight: controller.isInFlight,
+      replaceable,
+    });
+    if (binding === 'replace') return binding;
+    // In flight on a file replaced under it: it keeps its document and the
+    // identity it started with, and is checked again once the run has ended.
+    if (binding === 'keep' && isDifferentFile(recorded, current)) return binding;
+    if (binding === 'rebind') controller.rebind(document);
+    // An identity that could not be read now (the file briefly gone) keeps
+    // the one it had; one unknown until now is learned.
+    this.recordFileCheck(controller, document, current ?? recorded);
+    return binding;
+  }
+
+  private recordFileCheck(
+    controller: RunController,
+    document: vscode.TextDocument,
+    identity: FileIdentity | null,
+  ): void {
+    this.fileChecks.set(controller, { identity, document, version: document.version });
+  }
+
+  /** `bind` as soon as a document opens, for both kinds of controller. */
+  private bindReopened(document: vscode.TextDocument): void {
+    const key = document.uri.toString();
+    const editor = this.controllers.get(key);
+    if (editor && editor.document !== document && this.bind(editor, document, true) === 'replace') {
+      this.retire(key, editor, 'is a different file now', { closeNow: false });
+    }
+    const batch = this.batchControllers.get(key);
+    if (batch && batch.document !== document) this.bind(batch, document, false);
+  }
+
+  /** `retire` every editor controller for `target` or a file inside it — a
+   *  folder renamed or deleted takes its tests with it. */
+  private retireUnder(target: vscode.Uri, why: string): void {
+    const targetKey = target.toString();
+    for (const [key, controller] of [...this.controllers]) {
+      if (!isSameOrInside(key, targetKey)) continue;
+      // The recorder follows a rename itself (StepRecorder.followRename), and
+      // the recording lives on this controller.
+      if (controller.isRecording) continue;
+      this.retire(
+        key,
+        controller,
+        key === targetKey ? why : `is inside ${fileName(target)}, which ${why}`,
+        { closeNow: true },
+      );
+    }
+  }
+
+  /**
+   * Take an editor controller out of the registry for good: its file was
+   * renamed or deleted in VS Code, or a different file is at its path now.
+   * Whatever file is at the path next gets a fresh controller, which starts
+   * in a new session.
+   *
+   * What it held ends here, and the output channel says so:
+   * - A run in flight is stopped and a run parked at a breakpoint is ended.
+   *   Neither could be followed to the new name: the server session is named
+   *   after the old path, every mark the run paints lands on the old URI,
+   *   which no editor shows any more, and Stop and Continue on the toolbar act
+   *   on the file the editor does show.
+   * - Its server session is closed — through this controller, which knows
+   *   which server its last run used. `closeNow` for a rename or delete made
+   *   in VS Code, so the old file's browser does not stay open with nothing
+   *   left to reach it. Otherwise (a different file found at the path, which
+   *   can be just a `git checkout` rewriting it) at the next run of that
+   *   path, which starts in a new session anyway: closing the browser at the
+   *   checkout would be the surprise. Either way the next controller for the
+   *   URI runs the close before its own close of that session id, so an old
+   *   close still in flight cannot land after a new session opened there.
+   *
+   * Never called for a recording (`retireUnder`, and `bindingFor` keeps a
+   * controller with one in flight).
+   */
+  private retire(
+    key: string,
+    controller: RunController,
+    why: string,
+    opts: { closeNow: boolean },
+  ): void {
+    if (this.controllers.get(key) !== controller) return;
+    const uri = controller.document.uri;
+    // Read before `resetFrameState` forgets the skill files the run entered.
+    const touched = controller.touchedFileUris;
+    const done: string[] = [];
+    if (controller.isRunning) done.push('stopped its run');
+    else if (controller.isParkedAtPause) done.push('ended its paused run');
+
+    this.controllers.delete(key);
+    this.frameSubs.get(key)?.dispose();
+    this.frameSubs.delete(key);
+    this.scopeSubs.get(key)?.dispose();
+    this.scopeSubs.delete(key);
+    controller.stop();
+    controller.resetFrameState();
+    this.clearStepPaused(uri);
+    this.tracker.setBreakpointStop(uri, null);
+    for (const file of touched) this.tracker.markRunningStopped(file);
+    this.clearSkillDebugIfOwnedBy(key);
+
+    if (controller.mayHoldSession) {
+      let closing: Promise<void> | undefined;
+      const close = () => (closing ??= controller.closeSession().catch(() => undefined));
+      this.pendingSessionCloses.set(key, close);
+      if (opts.closeNow) {
+        void close().then(() => {
+          // Nobody took it over: nothing left to wait for.
+          if (this.pendingSessionCloses.get(key) === close) this.pendingSessionCloses.delete(key);
+        });
+        done.push('closed its session');
+      } else {
+        done.push('its next run starts in a new session');
+      }
+    }
+    if (done.length > 0) {
+      getOutputChannel().appendLine(
+        `[${new Date().toISOString().slice(11, 23)}] ${fileName(uri)} ${why}: ${done.join(' and ')}`,
+      );
+    }
+    this.anyFrameStackEmitter.fire();
+    this.anyScopeEmitter.fire();
+    this.refreshRunningContext();
   }
 
   /** The currently-running controller, if any. The Call Stack view reads
@@ -1799,6 +2022,7 @@ class RunControllerRegistry implements vscode.Disposable {
     this.compileTailSignals.dispose();
     this.trackerSub.dispose();
     this.editSub.dispose();
+    for (const sub of this.fileSubs) sub.dispose();
     this.discardControllers();
     for (const sub of this.frameSubs.values()) sub.dispose();
     this.frameSubs.clear();
