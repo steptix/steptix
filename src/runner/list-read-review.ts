@@ -207,11 +207,8 @@ export interface UnprovenListRead {
  * `ai: true` entry, which every later compile would leave alone.
  */
 export function unprovenListRead(result: StepResult | undefined): UnprovenListRead | undefined {
-  const subs = (result?.turns ?? []).flatMap((t) => t.subActions);
-  const superseded = supersededListReads(subs);
-  for (const sub of subs) {
-    const review = sub.listReview;
-    if (review === undefined || sub.error !== undefined || superseded.has(sub)) continue;
+  for (const sub of standingReviews(result)) {
+    const review = sub.listReview!;
     const name = sub.action.as ?? '';
     if (review.kind === 'empty') {
       const what = sub.action.action === 'count' ? 'counted 0' : 'came back empty';
@@ -221,7 +218,7 @@ export function unprovenListRead(result: StepResult | undefined): UnprovenListRe
         reason: `{{${name}}} ${what} on the recording run, and a read that finds nothing proves nothing about its selector`,
       };
     }
-    if (review.outcome === 'pending' || review.outcome === 'unseen') {
+    if (unanswered(review)) {
       return {
         kind: 'unchecked',
         name,
@@ -230,4 +227,26 @@ export function unprovenListRead(result: StepResult | undefined): UnprovenListRe
     }
   }
   return undefined;
+}
+
+/**
+ * The name of a list read the step ended on that the model never answered —
+ * empty or mixed, it had no turn left to be shown, or its attempt failed first
+ * and the retry never read it again — or undefined when there is none. What
+ * the report flags on the step.
+ */
+export function uncheckedListRead(result: StepResult | undefined): string | undefined {
+  const sub = standingReviews(result).find((s) => unanswered(s.listReview!));
+  return sub?.action.as;
+}
+
+/** The reviewed list reads a step ended on: every one no later action stored over. */
+function standingReviews(result: StepResult | undefined): SubActionResult[] {
+  const subs = (result?.turns ?? []).flatMap((t) => t.subActions);
+  const superseded = supersededListReads(subs);
+  return subs.filter((s) => s.listReview !== undefined && s.error === undefined && !superseded.has(s));
+}
+
+function unanswered(review: NonNullable<SubActionResult['listReview']>): boolean {
+  return review.outcome === 'pending' || review.outcome === 'unseen';
 }

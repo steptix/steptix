@@ -42,7 +42,7 @@ import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { executeAction } from '../src/browser/actions.js';
 import { formatListReadsSection } from '../src/ai/prompts.js';
 import { executeStep } from '../src/runner/step-executor.js';
-import { listReadConcern, unprovenListRead } from '../src/runner/list-read-review.js';
+import { listReadConcern, uncheckedListRead, unprovenListRead } from '../src/runner/list-read-review.js';
 import { parseFlowControlStep } from '../src/parser/flow-control-step.js';
 import { parseTestFile } from '../src/parser/markdown.js';
 import { actionsOf, evidenceRows, isEvidencePass } from '../src/codebehind/recording.js';
@@ -508,6 +508,8 @@ describe('the step loop shows the model an empty or mixed list read before the s
     expect(readsOf(result).map((s) => s.listReview?.outcome)).toEqual(['pending']);
     expect(actionsOf(result).map((a) => a.action)).toEqual(['read', 'noop']);
     expect(unprovenListRead(result)).toEqual({ kind: 'empty', name: 'accounts', reason: EMPTY_REASON });
+    // …and the report flags it: the model never answered the read the step kept.
+    expect(uncheckedListRead(result)).toBe('accounts');
   });
 
   it('shows a count of 0 too, and the recount replaces it', async () => {
@@ -569,16 +571,29 @@ describe('the report', () => {
     expect(html).not.toContain('list not checked');
   });
 
-  it('flags a step that ended on a list the model never saw, and not one it kept', async () => {
-    const unseen = renderReport(reportOf((await runStep([plan(readOf(OVER_BROAD))], { maxTurns: 1 })).result));
-    expect(unseen).toContain('⚠ list not checked');
-    expect(unseen).toContain(
+  it('flags a step that ended on a list the model never saw, empty or mixed, and not one it kept', async () => {
+    const mixed = (await runStep([plan(readOf(OVER_BROAD))], { maxTurns: 1 })).result;
+    expect(uncheckedListRead(mixed)).toBe('accounts');
+    const mixedHtml = renderReport(reportOf(mixed));
+    expect(mixedHtml).toContain('⚠ list not checked');
+    expect(mixedHtml).toContain(
       'list read never shown to the model: the step ended on it with no turn left — accounts holds 6 values',
     );
 
-    const kept = renderReport(reportOf((await runStep([plan(readOf(NOTHING)), NOOP])).result));
-    expect(kept).toContain('list read shown to the model, which kept it — accounts is empty');
-    expect(kept).not.toContain('list not checked');
+    // Empty and unseen: the compile's reason is that it came back empty, but
+    // the step is still flagged, since nobody looked at it.
+    const empty = (await runStep([plan(readOf(NOTHING))], { maxTurns: 1 })).result;
+    expect(unprovenListRead(empty)?.kind).toBe('empty');
+    expect(uncheckedListRead(empty)).toBe('accounts');
+    const emptyHtml = renderReport(reportOf(empty));
+    expect(emptyHtml).toContain('⚠ list not checked');
+    expect(emptyHtml).toContain('list read never shown to the model: the step ended on it with no turn left — accounts is empty');
+
+    const kept = (await runStep([plan(readOf(NOTHING)), NOOP])).result;
+    expect(uncheckedListRead(kept)).toBeUndefined();
+    const keptHtml = renderReport(reportOf(kept));
+    expect(keptHtml).toContain('list read shown to the model, which kept it — accounts is empty');
+    expect(keptHtml).not.toContain('list not checked');
   });
 });
 

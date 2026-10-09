@@ -7,7 +7,7 @@ import { getAllAiInteractions, isHealedStep } from './types.js';
 import { stepAnchor } from './anchors.js';
 import { getReportTemplate } from './template.js';
 import { toDataUri } from '../browser/screenshot.js';
-import { unprovenListRead } from '../runner/list-read-review.js';
+import { uncheckedListRead } from '../runner/list-read-review.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -666,13 +666,13 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     : step.status.toUpperCase();
   const duration = formatDuration(step.durationMs);
   const retryBadge = step.retried ? '<span class="badge badge-skip">Retried</span>' : '';
-  // A step that passed on a list read the model never saw — it ended with no
-  // turn left to show it (src/runner/list-read-review.ts). Said on the step,
-  // not only under the read, because the step body is folded.
-  const unchecked = step.status === 'passed' ? unprovenListRead(step) : undefined;
-  const listBadge = unchecked?.kind === 'unchecked'
+  // A step that passed on a list read the model never saw, empty or mixed —
+  // it ended with no turn left to show it (src/runner/list-read-review.ts).
+  // Said on the step, not only under the read, because the step body is folded.
+  const unchecked = step.status === 'passed' ? uncheckedListRead(step) : undefined;
+  const listBadge = unchecked !== undefined
     ? `<span class="badge badge-skip" title="${escapeHtml(
-      `The step ended on its read of {{${unchecked.name}}} before the model could check what it matched. It is kept as read, and not compiled.`,
+      `The step ended on its read of {{${unchecked}}} before the model could check what it matched. It is kept as read, and not compiled.`,
     )}">⚠ list not checked</span>`
     : '';
 
