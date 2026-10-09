@@ -1455,6 +1455,16 @@ async function executeType(
   // (SPEC-web-survey-fixes.md §2.27).
   if (!(await isFillable(locator))) {
     await locator.click({ timeout: clearTimeoutMs ?? TYPE_CLEAR_TIMEOUT_MS });
+    // A wrapper or a label is not a field either, and clicking one leaves the
+    // focus on <body>: Ctrl+A would select the page and the text would reach
+    // nothing but the page's shortcuts. Type only where the click put a field.
+    const focus = await focusRefusingText(root);
+    if (focus !== null) {
+      throw new Error(
+        'Element is not an <input>, <textarea> or [contenteditable] element, and clicking it ' +
+        `left the focus on ${focus}, which takes no text, so nothing was typed. Type into the field itself.`,
+      );
+    }
     await page.keyboard.press('ControlOrMeta+A');
     await page.keyboard.type(value);
     return;
@@ -1541,6 +1551,67 @@ async function isFillable(locator: Locator): Promise<boolean> {
     );
   } catch {
     return true;
+  }
+}
+
+/**
+ * After the §2.27 click: where the keyboard's focus is, when that is not
+ * somewhere that takes text — `<body>`, a button, a wrapper. Null when the
+ * focus is in a text input, a textarea, a contenteditable or an EditContext,
+ * inside a closed shadow root or another origin's frame, or when it cannot be
+ * told, so the type goes ahead as before.
+ *
+ * The deep focus, not `document.activeElement`: a canvas editor may focus a
+ * hidden textarea or a contenteditable inside a shadow root, and focus inside
+ * an open shadow root or a frame shows only as its host or its `<iframe>`.
+ * Read from the frame's root element rather than the target, because a click
+ * that swaps a placeholder for an editor detaches the target.
+ */
+async function focusRefusingText(root: Page | FrameLocator): Promise<string | null> {
+  try {
+    return await root.locator(':root').evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (html: any) => {
+        let el = html.ownerDocument.activeElement;
+        for (;;) {
+          if (el == null) return '<body>';
+          if (el.shadowRoot && el.shadowRoot.activeElement) {
+            el = el.shadowRoot.activeElement;
+          } else if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {
+            let inner = null;
+            try {
+              inner = el.contentDocument;
+            } catch {
+              // Another origin's frame.
+            }
+            // Nothing on this page can read another origin's frame, so a
+            // field in one (a payment form's card number) is given the benefit.
+            if (inner == null) return null;
+            el = inner.activeElement;
+          } else {
+            break;
+          }
+        }
+        const tag = String(el.tagName);
+        const untyped = ['checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file', 'color', 'range'];
+        if (tag === 'TEXTAREA' && !el.readOnly) return null;
+        if (tag === 'INPUT' && !el.readOnly && !untyped.includes(String(el.type).toLowerCase())) return null;
+        if (el.isContentEditable || el.editContext) return null;
+        // An element that can carry a shadow root and cannot take the focus
+        // itself (no tabindex), yet holds it: the focus is inside its root. No
+        // script outside can see into a closed root, which is why §2.27 types
+        // on the keyboard at all.
+        const hosts = ['ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DIV', 'FOOTER', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+          'HEADER', 'MAIN', 'NAV', 'P', 'SECTION', 'SPAN'];
+        if (el !== el.ownerDocument.body && el.shadowRoot === null && !el.hasAttribute('tabindex')
+          && (tag.includes('-') || hosts.includes(tag))) return null;
+        return `<${tag.toLowerCase()}${el.id ? ` id="${el.id}"` : ''}>`;
+      },
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    return null;
   }
 }
 

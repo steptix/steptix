@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SecureBank — Open an account</title>
+  <!--
+    A form whose data-testid sits on each field's wrapper, not on its <input>,
+    as component libraries often build them. The wrapper's middle is its hint
+    text, which takes no focus, and `s` outside a field jumps to search.
+    tests/type-into-wrapper.test.ts drives it (steptix/steptix#34): a `type`
+    aimed at a wrapper must fail and type nothing, not click the hint and type
+    into the page.
+  -->
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f7fa; color: #1a1a2e; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 40px; background: #1e3a8a; color: white; }
+    .topbar .brand { font-weight: 700; font-size: 1.1rem; }
+    .topbar input { width: 260px; padding: 6px 10px; border-radius: 6px; border: none; font-size: 0.9rem; }
+    .card { max-width: 540px; margin: 40px auto; background: white; border-radius: 8px; border: 1px solid #e2e8f0; padding: 32px; }
+    h1 { font-size: 1.25rem; margin-bottom: 20px; }
+    h2 { font-size: 1.1rem; margin-bottom: 8px; }
+    .text-field { margin-bottom: 20px; }
+    .text-field__label { display: block; font-weight: 600; font-size: 0.9rem; margin-bottom: 4px; }
+    /* Tall enough that the wrapper's middle is always the hint, whatever the
+       platform's font does to the line breaks. */
+    .text-field__hint { min-height: 72px; color: #64748b; font-size: 0.85rem; line-height: 1.5; padding-bottom: 8px; }
+    .text-field input { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 0.95rem; }
+    #form-error { color: #b91c1c; font-size: 0.9rem; min-height: 1.5em; margin-bottom: 12px; }
+    button { padding: 10px 18px; border-radius: 6px; border: 1px solid #1e3a8a; background: #1e3a8a; color: white; cursor: pointer; font-size: 0.9rem; font-weight: 500; }
+    #confirmation p { color: #475569; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">SecureBank</span>
+    <input type="search" id="site-search" aria-label="Search SecureBank" placeholder="Search (press s)">
+  </header>
+
+  <div class="card">
+    <form id="signup-form" novalidate>
+      <h1>Open an account</h1>
+
+      <div class="text-field" data-testid="email-field">
+        <span class="text-field__label">Email</span>
+        <p class="text-field__hint">We'll send a confirmation link here.
+           Use an address you can open on this device.</p>
+        <input type="email" name="email">
+      </div>
+
+      <div class="text-field">
+        <label class="text-field__label" for="password">Password</label>
+        <input type="password" id="password" name="password">
+      </div>
+
+      <div class="text-field" data-testid="delivery-field">
+        <span class="text-field__label">Card delivery instructions (optional)</span>
+        <p class="text-field__hint">Where the courier should leave your new debit card
+           if nobody answers the door.</p>
+        <input type="text" name="delivery">
+      </div>
+
+      <p id="form-error" role="alert"></p>
+      <button type="submit" id="create-account">Create account</button>
+    </form>
+
+    <div id="confirmation" hidden>
+      <h2>Check your inbox</h2>
+      <p id="confirmation-email"></p>
+      <p id="confirmation-delivery"></p>
+    </div>
+  </div>
+
+  <script>
+    const search = document.getElementById('site-search');
+    const form = document.getElementById('signup-form');
+    const error = document.getElementById('form-error');
+
+    // `s` anywhere but a field jumps to search, as many sites do.
+    document.addEventListener('keydown', (e) => {
+      const t = e.target;
+      const inField = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement
+        || (t instanceof HTMLElement && t.isContentEditable);
+      if (e.key === 's' && !inField && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        search.focus();
+      }
+    });
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const email = form.elements.email.value.trim();
+      const password = form.elements.password.value;
+      const delivery = form.elements.delivery.value.trim();
+      if (email === '') { error.textContent = 'Email is required'; return; }
+      if (password === '') { error.textContent = 'Password is required'; return; }
+      form.hidden = true;
+      document.getElementById('confirmation-email').textContent = `We sent a link to ${email}.`;
+      document.getElementById('confirmation-delivery').textContent =
+        `Card delivery: ${delivery === '' ? 'no instructions' : delivery}`;
+      document.getElementById('confirmation').hidden = false;
+    });
+  </script>
+</body>
+</html>
