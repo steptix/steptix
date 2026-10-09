@@ -935,7 +935,7 @@ export function formatListReadsSection(lines: string[] | undefined): string {
   return `## Lists to check
 A read of every match, or a count, in this step came back empty or matched more than one kind of element. Look at what it matched before the step ends:
 ${lines.map((line) => `- ${line}`).join('\n')}
-If the selector missed what the step means, or caught other elements beside it, read again with a selector that matches only what the step asks for, and the same "as": the new read replaces this one. If this is the answer (the list really is empty, or every kind belongs in it), answer noop with needs_reeval false.
+If the selector missed what the step means, or caught other elements beside it, read it again the same way — a read of every match again, or a count again — with a selector that matches only what the step asks for, and the same "as": the new read replaces this one. If this is the answer (the list really is empty, or every kind belongs in it), answer noop with needs_reeval false.
 
 `;
 }

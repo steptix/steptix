@@ -52,6 +52,7 @@ import { compileTest, outcomeRows, type CompileEvent, type CompileRunner } from 
 import { generationRefusal, LiveCompiler, type LiveCompileEvent } from '../src/codebehind/live-compile.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import { renderReport } from '../src/report/generator.js';
+import { addLogCallback } from '../src/utils/logger.js';
 import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -164,6 +165,8 @@ describe('the line a list read that came back empty or mixed is shown with', () 
         kind: 'empty',
         name: 'accounts',
         text: `accounts is empty: \`${NOTHING}\` matched nothing on this page.`,
+        // Nothing to quote, so the log's line is the same.
+        summary: `accounts is empty: \`${NOTHING}\` matched nothing on this page.`,
       });
     } finally {
       await page.close();
@@ -724,6 +727,118 @@ describe('a turn added only to show the model its lists never fails the step', (
     const lists = second.slice(second.indexOf('## Lists to check'), second.indexOf('## DOM Snapshot'));
     expect(lists).toContain('"***"');
     expect(lists).not.toContain('Savings');
+  });
+
+  it('ends the step where it stood when a read again throws', async () => {
+    // A frame that does not parse throws, where a bad selector fails the read.
+    const { result, requests } = await runStep(
+      [plan(readOf(NOTHING)), plan(readOf(NOTHING_EITHER, { frame: 'iframe[name=x' }))],
+      { retries: 1 },
+    );
+    expect(result.status).toBe('passed');
+    expect(result.retried).toBe(false);
+    expect(requests).toHaveLength(2);
+    expect(readsOf(result)[0]!.listReview?.outcome).toBe('pending');
+    expect(uncheckedListRead(result)).toBe('accounts');
+  });
+
+  it('runs only a read again of a list it showed, read the same kind of way', async () => {
+    // Shown the over-broad `accounts`, the model reads into another name, or
+    // counts into the list's: neither answers the read it was shown.
+    const other = await runStep([plan(readOf(OVER_BROAD)), plan(readOf(RIGHT, { as: 'names' }))]);
+    expect(other.result.status).toBe('passed');
+    expect(other.params.names).toBeUndefined();
+    expect(readsOf(other.result).map((s) => s.listReview?.outcome)).toEqual(['pending']);
+    expect(unprovenListRead(other.result)?.kind).toBe('unchecked');
+
+    const count = { action: 'count', selector: '#account-list > li', as: 'accounts', description: 'Count the accounts' };
+    const counted = await runStep([plan(readOf(OVER_BROAD)), plan(count)]);
+    expect(counted.result.status).toBe('passed');
+    expect(JSON.parse(counted.params.accounts!)).toHaveLength(6);
+    expect(readsOf(counted.result).map((s) => s.action.action)).toEqual(['read']);
+    expect(readsOf(counted.result)[0]!.listReview?.outcome).toBe('pending');
+  });
+
+  it('shows again a list the review answer left alone, and keeps it on a noop', async () => {
+    // Two lists at once: the model reads one again and says nothing of the
+    // other, which is shown again rather than taken as kept.
+    const instruction = 'Read the name of every account [store as: accounts] and count the cards [store as: account_count]';
+    const count = { action: 'count', selector: '#account-list > li.account-card', as: 'account_count', description: 'Count the cards' };
+    const { result, requests, params } = await runStep(
+      [plan([readOf(OVER_BROAD), count]), plan(readOf(RIGHT)), NOOP],
+      { instruction },
+    );
+    expect(result.status).toBe('passed');
+    expect(requests).toHaveLength(3);
+    expect(textOf(requests[2]!)).toContain('account_count is 0');
+    expect(textOf(requests[2]!)).not.toContain('accounts holds 6 values');
+    expect(params.accounts).toBe(NAMES);
+    expect(readsOf(result).map((s) => [s.action.as, s.listReview?.outcome])).toEqual([
+      ['accounts', 'replaced'],
+      ['account_count', 'kept'],
+      ['accounts', undefined],
+    ]);
+  });
+
+  it('ends on a read the same turn changed the page after, without showing it', async () => {
+    // "…then empty the cart": a read again in the next turn would read the
+    // emptied cart and store `[]` over the three items the step read.
+    const body = '<!doctype html><html><body><h1>Cart</h1><ul id="cart">'
+      + '<li class="item">Widget</li><li class="item discounted">Gadget</li><li class="item">Gizmo</li></ul>'
+      + '<button id="empty" onclick="document.getElementById(\'cart\').innerHTML=\'\'">Empty the cart</button></body></html>';
+    const { result, requests, params } = await runStep(
+      [plan([
+        readOf('#cart li', { as: 'items', description: 'Read every cart item' }),
+        { action: 'click', selector: '#empty', description: 'Empty the cart' },
+      ])],
+      { body, instruction: 'Read every item in the cart [store as: items], then empty the cart' },
+    );
+    expect(result.status).toBe('passed');
+    expect(requests).toHaveLength(1);
+    expect(params.items).toBe('["Widget","Gadget","Gizmo"]');
+    expect(readsOf(result)[0]!.listReview?.outcome).toBe('unseen');
+    expect(uncheckedListRead(result)).toBe('items');
+  });
+
+  it('masks a long secret in a value before cutting it, and logs no values at all', async () => {
+    // A secret longer than a quoted value is cut to, and one with line breaks
+    // in it, on a list's page text. Cut or collapsed first, neither matched the
+    // whole value the mask knows, and the line kept its head.
+    const token = `github_pat_${'A1b2C3d4E5'.repeat(8)}`;
+    const key = '-----BEGIN KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n-----END KEY-----';
+    const body = '<!doctype html><html><body><table id="tokens">'
+      + `<tr><td class="label">Deploy key</td><td class="value">${token}</td></tr>`
+      + `<tr><td class="label">Signing key</td><td class="value"><pre>${key}</pre></td></tr></table></body></html>`;
+    const lines: string[] = [];
+    const unhook = addLogCallback((_level, message) => lines.push(message));
+    try {
+      const read = await runStep(
+        [plan(readOf('#tokens td', { as: 'labels', description: 'Read every label' })), NOOP],
+        {
+          body,
+          instruction: 'Read the label of every deploy token [store as: labels]',
+          params: { api_token: token, signing_key: key },
+        },
+      );
+      const counted = await runStep(
+        [plan({ action: 'count', selector: '#tokens td', as: 'cells', description: 'Count the cells' }), NOOP],
+        { body, instruction: 'Count the cells [store as: cells]', params: { api_token: token, signing_key: key } },
+      );
+      for (const { result, requests } of [read, counted]) {
+        const text = readsOf(result)[0]!.listReview!.text;
+        expect(text).toContain('td.value ×2 ("***", "***")');
+        const second = textOf(requests[1]!);
+        const lists = second.slice(second.indexOf('## Lists to check'), second.indexOf('## DOM Snapshot'));
+        expect(lists).not.toContain('A1b2C3d4E5');
+        expect(lists).not.toContain('MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu');
+      }
+      const logged = lines.join('\n');
+      expect(logged).toContain('td.label ×2; td.value ×2');
+      expect(logged).not.toContain('A1b2C3d4E5');
+      expect(logged).not.toContain('Deploy key');
+    } finally {
+      unhook();
+    }
   });
 
   it('masks a secret stored after the line was written, when the line is sent', async () => {

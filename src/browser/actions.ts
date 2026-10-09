@@ -3636,19 +3636,26 @@ async function describeMatches(
 ): Promise<MatchGroup[] | undefined> {
   try {
     const described: Array<[string, string]> = await matches.evaluateAll(
-      (els, max) =>
-        els.slice(0, max as number).map((el): [string, string] => {
+      (els, { max, keep, cap }) => {
+        const seen = new Map<string, number>();
+        return els.slice(0, max).map((el): [string, string] => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const e = el as any;
           const classes = (Array.from(e.classList ?? []) as string[])
             .filter((c) => !/\d/.test(c))
             .sort();
-          // Cut in the page: only the first few of each kind are shown, and a
-          // long text would cross the wire for nothing.
-          const text = String(e.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
-          return [text, [String(e.tagName ?? '').toLowerCase(), ...classes].join('.')];
-        }),
-      limit,
+          const kind = [String(e.tagName ?? '').toLowerCase(), ...classes].join('.');
+          const n = seen.get(kind) ?? 0;
+          seen.set(kind, n + 1);
+          // Only the first few of each kind are shown, so only theirs crosses
+          // the wire — whole: trimmed, never collapsed or cut short here. The
+          // line masks the run's secrets in it before it cuts it, and a secret
+          // cut here would no longer match the value the mask knows. `cap`
+          // only bounds a runaway text.
+          return [n < keep ? String(e.textContent ?? '').trim().slice(0, cap) : '', kind];
+        });
+      },
+      { max: limit, keep: MATCH_SAMPLES, cap: SAMPLE_TEXT_CAP },
     );
     return groupByKind(described);
   } catch {
@@ -3658,6 +3665,8 @@ async function describeMatches(
 
 /** How many values of each kind {@link MatchGroup.samples} keeps. */
 const MATCH_SAMPLES = 3;
+/** The most of one sample's text that crosses the wire from a count. */
+const SAMPLE_TEXT_CAP = 10_000;
 
 /** `[value, kind]` pairs as one group per kind, in the order first met. */
 function groupByKind(pairs: Array<[string, string]>): MatchGroup[] {

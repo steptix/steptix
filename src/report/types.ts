@@ -105,7 +105,8 @@ export interface SubActionResult {
    * model was shown. `outcome`: `pending` until the model answers, then
    * `kept` — it took no new read, or read the same way again — or `replaced`
    * by a later read of the same name. `unseen` when the step ended on it with
-   * no turn left to show it (its last turn, or a `return`); `pending` stays
+   * no turn left to show it (its last turn, or a `return`), or when an action
+   * after it in the same turn changed the page it read; `pending` stays
    * when the model never answered — its attempt failed first, or the turn that
    * showed it the read ended without a keep or a read again. The compile uses
    * none of them except a

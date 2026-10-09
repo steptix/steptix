@@ -2933,7 +2933,7 @@ async function executeStepAttempt(
 
     logger.debug(`AI reasoning (turn ${currentTurn}): ${aiResponse.reasoning}`);
 
-    if (reviewOnly && !aiResponse.actions.every(isReviewAnswer)) {
+    if (reviewOnly && !aiResponse.actions.every((a) => isReviewAnswer(a, listReadsShown))) {
       logger.warn(
         `Step ${stepIndex}: asked about its list reads, the model answered with ${aiResponse.actions.map((a) => a.action).join(', ') || 'nothing'} — not run; the step ends where it stood`,
       );
@@ -3859,7 +3859,15 @@ async function executeStepAttempt(
         await watcher?.ready;
         result = await traceOp(`action.${action.action}: ${action.description}`, async () => {
           if (action.action !== 'readTable') {
-            return executeAction(page, action, baseUrl, opts.signal, execOptions);
+            // In a review turn a read that throws — a frame that does not
+            // parse throws rather than failing — is a read again that failed:
+            // the step ends where it stood (`reviewOnly`). A Stop still stops.
+            return reviewOnly
+              ? executeAction(page, action, baseUrl, opts.signal, execOptions).catch((err: unknown) => {
+                if (opts.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) throw err;
+                return { success: false, error: err instanceof Error ? err.message : String(err) };
+              })
+              : executeAction(page, action, baseUrl, opts.signal, execOptions);
           }
           // Structured table reads carry a structure question of their own
           // (SPEC-structured-table-reads.md §7.10) — at most one model call,
@@ -3996,6 +4004,19 @@ async function executeStepAttempt(
       // shown exactly this read, read it the same way again and got what it was
       // shown: that keeps it. The same read with a different result (a list
       // that loaded late) is a result the model has not seen.
+      // A read is shown to the model on the page it read. An action after it in
+      // this turn that may have changed that page — a click, a navigation, a
+      // tab move — leaves nothing to show it against: a read again would read
+      // a different page and store over the read with it. The step ends on the
+      // read as it came back, unseen, as with no turn left. (An action that
+      // failed changed nothing, and fails the turn.)
+      if (result.success && REEVAL_WHEN_UNSTATED.has(action.action)) {
+        for (const [name, { concern, sub }] of turnListConcerns) {
+          sub.listReview!.outcome = 'unseen';
+          logger.warn(`Step ${stepIndex}: "${action.action}" may have changed the page ${name} was read on — the step ends on it as read: ${concern.summary}`);
+        }
+        turnListConcerns.clear();
+      }
       const stored = result.success ? storedName(action) : undefined;
       if (stored !== undefined) {
         const sub = turnSubActions[turnSubActions.length - 1]!;
@@ -4014,10 +4035,10 @@ async function executeStepAttempt(
           sub.listReview = { kind: concern.kind, text: concern.text, outcome: kept ? 'kept' : 'pending' };
           reviewedReads.set(stored, sub);
           if (kept) {
-            logger.info(`Step ${stepIndex}: the model read ${stored} the same way again — keeping it: ${concern.text}`);
+            logger.info(`Step ${stepIndex}: the model read ${stored} the same way again — keeping it: ${concern.summary}`);
           } else {
             turnListConcerns.set(stored, { concern, sub, action });
-            logger.warn(`Step ${stepIndex}: ${concern.text}`);
+            logger.warn(`Step ${stepIndex}: ${concern.summary}`);
           }
         }
       }
@@ -4150,9 +4171,15 @@ async function executeStepAttempt(
     }
 
     // The list reads this turn's prompt showed the model: one it did not read
-    // again, it kept (src/runner/list-read-review.ts).
-    for (const sub of listReadsShown.values()) {
-      if (sub.listReview?.outcome === 'pending') sub.listReview.outcome = 'kept';
+    // again, it kept (src/runner/list-read-review.ts). In a turn added only to
+    // ask, only a `noop` keeps it — that turn exists for the answer — and one
+    // the answer left alone (it read another of them again) is shown again.
+    const keptByNoop = aiResponse.actions.some((a) => a.action === 'noop');
+    const unanswered: Array<[string, SubActionResult]> = [];
+    for (const [name, sub] of listReadsShown) {
+      if (sub.listReview?.outcome !== 'pending') continue;
+      if (!reviewOnly || keptByNoop) sub.listReview.outcome = 'kept';
+      else unanswered.push([name, sub]);
     }
     listReadsShown = new Map();
 
@@ -4196,21 +4223,23 @@ async function executeStepAttempt(
     // shown again. It is never a failure — an empty list is a real answer —
     // so on the last turn the step ends on the read as it came back: unseen,
     // which the report flags and the compile will not use.
-    if (turnListConcerns.size > 0) {
+    if (turnListConcerns.size > 0 || unanswered.length > 0) {
       const concerns = [...turnListConcerns.values()];
       // A review turn's own `needs_reeval` asks for nothing: the step is done.
       const nextTurnAnyway = !reviewOnly && (aiResponse.needs_reeval === true || inferredReeval);
       if (currentTurn < maxTurns) {
         if (!nextTurnAnyway) {
           nextTurnReviewOnly = true;
-          logger.info(`Turn ${currentTurn}: showing the model the list read${concerns.length === 1 ? '' : 's'} before the step ends`);
+          const n = concerns.length + unanswered.length;
+          logger.info(`Turn ${currentTurn}: showing the model the list read${n === 1 ? '' : 's'} before the step ends`);
         }
-        listReadLines = concerns.map((c) => c.concern.text);
-        listReadsShown = new Map(concerns.map((c) => [c.concern.name, c.sub]));
+        listReadLines = [...concerns.map((c) => c.concern.text), ...unanswered.map(([, sub]) => sub.listReview!.text)];
+        listReadsShown = new Map([...concerns.map((c): [string, SubActionResult] => [c.concern.name, c.sub]), ...unanswered]);
       } else {
+        // The ones shown and not answered stay `pending`: not answered.
         for (const { concern, sub } of concerns) {
           sub.listReview!.outcome = 'unseen';
-          logger.warn(`Step ${stepIndex}: no turn left to show the model ${concern.name}; the step ends on it as read: ${concern.text}`);
+          logger.warn(`Step ${stepIndex}: no turn left to show the model ${concern.name}; the step ends on it as read: ${concern.summary}`);
         }
       }
     }

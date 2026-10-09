@@ -23,7 +23,8 @@
  * the turns the step has left. A turn added only to ask runs nothing but those
  * two answers (`isReviewAnswer`): anything else, or a read again that fails,
  * ends the step where it stood. So does having no turn left to show the read
- * (its last turn, or a `return` in the same turn). The step then ends on the
+ * (its last turn, or a `return` in the same turn), or an action after it in
+ * the same turn that changed the page it read. The step then ends on the
  * read as it came back, and the report says the model never answered it.
  *
  * What the compile may use is decided here too. A read that a later action
@@ -48,8 +49,18 @@ export interface ListReadConcern {
   kind: ListReadConcernKind;
   /** The name the read stored. */
   name: string;
-  /** What the selector matched, in one line: for the model, the log and the report. */
+  /**
+   * What the selector matched, in one line, with the first few values of each
+   * kind: for the model and the report, which show the page text it quotes
+   * anyway (the DOM snapshot).
+   */
   text: string;
+  /**
+   * The same line without the values, for the log. A log line reaches the
+   * console and a server's event stream as it is, and the values are page
+   * text the run's secrets are masked in only as whole values.
+   */
+  summary: string;
 }
 
 /** Kinds named in one line before the rest are summed up. */
@@ -71,9 +82,12 @@ export function isListRead(action: AIAction): boolean {
  * The concern about a list read that succeeded, or undefined when there is
  * none — not a list read, a list of one kind, or a page that could not say
  * what it matched. `mask` hides the run's secrets in the line, which quotes
- * page text and the selector. A list stored under a secret-looking name is
- * described without its values: the mask holds such a list whole, as the
- * text it was stored as, and the line would quote its items one by one.
+ * page text and the selector. It runs on each value before the value is cut
+ * short, since a secret cut in half no longer matches the whole value the
+ * mask knows (as `formatRecordedCapture` in src/ai/prompts.ts does). A list
+ * stored under a secret-looking name is described without its values: the
+ * mask holds such a list whole, as the text it was stored as, and the line
+ * would quote its items one by one.
  */
 export function listReadConcern(
   action: AIAction,
@@ -85,22 +99,26 @@ export function listReadConcern(
   const selector = `\`${action.selector ?? ''}\``;
   const groups = result.listMatches?.groups;
   const counting = action.action === 'count';
-  const samples = !isSecretParameterName(name);
+  /** How a value is quoted: masked whole, then cut — or not at all. */
+  const sample = isSecretParameterName(name) ? undefined : (value: string) => JSON.stringify(cut(mask(value)));
 
   const stored = counting ? Number(result.capturedValue) : (result.capturedValues ?? []).length;
   if (stored === 0) {
     const matched = groups?.reduce((sum, g) => sum + g.count, 0) ?? 0;
-    let why: string;
-    if (counting && (result.listMatches?.hidden ?? 0) > 0) {
-      const hidden = result.listMatches!.hidden!;
-      why = `${selector} matched ${elements(hidden)}, none of them visible, and a count counts only visible ones.`;
-    } else if (!counting && matched > 0 && typeof action.pattern === 'string') {
-      why = `${selector} matched ${elements(matched)} — ${describeGroups(groups!, samples)} — `
-        + `and the pattern /${action.pattern}/ kept none of them.`;
-    } else {
-      why = `${selector} matched nothing on this page.`;
-    }
-    return { kind: 'empty', name, text: mask(`${name} is ${counting ? '0' : 'empty'}: ${why}`) };
+    const line = (quote: typeof sample): string => {
+      let why: string;
+      if (counting && (result.listMatches?.hidden ?? 0) > 0) {
+        const hidden = result.listMatches!.hidden!;
+        why = `${selector} matched ${elements(hidden)}, none of them visible, and a count counts only visible ones.`;
+      } else if (!counting && matched > 0 && typeof action.pattern === 'string') {
+        why = `${selector} matched ${elements(matched)} — ${describeGroups(groups!, quote)} — `
+          + `and the pattern /${action.pattern}/ kept none of them.`;
+      } else {
+        why = `${selector} matched nothing on this page.`;
+      }
+      return mask(`${name} is ${counting ? '0' : 'empty'}: ${why}`);
+    };
+    return { kind: 'empty', name, text: line(sample), summary: line(undefined) };
   }
 
   if (groups !== undefined && groups.length > 1) {
@@ -108,20 +126,18 @@ export function listReadConcern(
     const what = counting
       ? `${name} is ${stored}, counting ${groups.length} kinds of element`
       : `${name} holds ${stored} value${stored === 1 ? '' : 's'} from ${groups.length} kinds of element`;
-    return {
-      kind: 'mixed',
-      name,
-      text: mask(`${what}: ${selector} matched ${elements(total)} — ${describeGroups(groups, samples)}.`),
-    };
+    const line = (quote: typeof sample): string =>
+      mask(`${what}: ${selector} matched ${elements(total)} — ${describeGroups(groups, quote)}.`);
+    return { kind: 'mixed', name, text: line(sample), summary: line(undefined) };
   }
   return undefined;
 }
 
 /** `span.name ×3 ("Ada", "Ben", "Cy"); span.code ×3 ("A-1", …)`, or without the values. */
-function describeGroups(groups: MatchGroup[], withSamples: boolean): string {
+function describeGroups(groups: MatchGroup[], quote: ((value: string) => string) | undefined): string {
   const shown = groups.slice(0, KINDS_SHOWN).map((g) => {
-    if (!withSamples) return `${g.kind} ×${g.count}`;
-    const samples = g.samples.map((s) => JSON.stringify(cut(s)));
+    if (quote === undefined) return `${g.kind} ×${g.count}`;
+    const samples = g.samples.map(quote);
     if (g.count > g.samples.length) samples.push('…');
     return `${g.kind} ×${g.count}${samples.length > 0 ? ` (${samples.join(', ')})` : ''}`;
   });
@@ -155,11 +171,17 @@ export function sameListRead(a: AIAction, b: AIAction): boolean {
 
 /**
  * What a turn added only to show the model its list reads may run: keeping
- * them (`noop`), or reading a list again. Anything else ends that turn, and
- * the step, where it stood (src/runner/step-executor.ts, `reviewOnly`).
+ * them (`noop`), or reading one of them again — the same name, read the same
+ * kind of way (a read of every match for one, a count for a count), as the
+ * prompt asks. Anything else ends that turn, and the step, where it stood
+ * (src/runner/step-executor.ts, `reviewOnly`): a read into another name
+ * would leave the read shown unanswered and store over a value the step may
+ * hold, and a count into a list's name would store a number for a list.
  */
-export function isReviewAnswer(action: AIAction): boolean {
-  return action.action === 'noop' || isListRead(action);
+export function isReviewAnswer(action: AIAction, shown: ReadonlyMap<string, SubActionResult>): boolean {
+  if (action.action === 'noop') return true;
+  if (!isListRead(action)) return false;
+  return shown.get(action.as!)?.action.action === action.action;
 }
 
 /**
