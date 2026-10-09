@@ -14,6 +14,7 @@ import type { ParsedTest, TestInstance } from '../src/parser/types.js';
 import type { StepResult, TestReport } from '../src/report/types.js';
 import type { ResolvedHooks } from '../src/runner/hooks.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
+import { setIsTTY } from './tty.js';
 
 // ─── Harness ────────────────────────────────────────────────────────────────
 
@@ -379,9 +380,10 @@ describe('a tolerated failure mid-run', () => {
 
   it('does NOT enter the failure REPL — and an ordinary failure still does', async () => {
     // The REPL needs a headed, TTY run with `interactiveOnFailure`. Both halves
-    // run under the same conditions, so the contrast is the assertion.
-    const isTty = process.stdout.isTTY;
-    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+    // run under the same conditions, so the contrast is the assertion. A TTY
+    // on both ends: it is seen on stdout and answered on stdin (#47).
+    const restoreStdout = setIsTTY(process.stdout, true);
+    const restoreStdin = setIsTTY(process.stdin, true);
     try {
       const config: Config = {
         ...makeConfig({ interactiveOnFailure: true }),
@@ -396,7 +398,8 @@ describe('a tolerated failure mid-run', () => {
       await runLoop(TOLERATED_DOC, { fail: 2, config });
       expect(replMock).toHaveBeenCalledTimes(1);
     } finally {
-      Object.defineProperty(process.stdout, 'isTTY', { value: isTty, configurable: true });
+      restoreStdin();
+      restoreStdout();
     }
   });
 

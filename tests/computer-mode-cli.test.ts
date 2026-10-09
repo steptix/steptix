@@ -20,6 +20,7 @@ import type { ParsedTest, TestConfig, TestInstance } from '../src/parser/types.j
 import type { StepResult, TestReport } from '../src/report/types.js';
 import type { ExpandedFrame, ExpandedStepOrigin } from '../src/skills/expander.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
+import { setIsTTY } from './tty.js';
 
 const launchBrowserMock = vi.fn();
 const closeBrowserMock = vi.fn();
@@ -402,6 +403,12 @@ describe('the CLI gives the lock back at the end of every runTest (§5.9)', () =
 // ---------------------------------------------------------------------------
 
 describe('a CLI pause for a person gives the lock back (§5.9)', () => {
+  // A person at the terminal: without one, a pause fails its step instead of
+  // waiting (steptix/steptix#47), and there is no wait to give the lock back for.
+  let restoreStdin: () => void;
+  beforeEach(() => { restoreStdin = setIsTTY(process.stdin, true); });
+  afterEach(() => restoreStdin());
+
   const LOCK_ID = 'cli:/tmp/computer-mode-test.md';
   const OTHER_IN_USE = computerLockInUseMessage({
     pid: process.pid,
@@ -959,7 +966,10 @@ describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surf
     'In computer mode a tool line is never handed to the model, because it would act it out on the real screen.';
 
   let toolsDir: string;
+  // One case here pauses at an `[input:]`, which needs a person at the terminal (#47).
+  let restoreStdin: () => void;
   beforeEach(() => {
+    restoreStdin = setIsTTY(process.stdin, true);
     toolsDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-computer-cli-tools-'));
     writeFileSync(
       path.join(toolsDir, 'echo.ts'),
@@ -967,6 +977,7 @@ describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surf
     );
   });
   afterEach(() => {
+    restoreStdin();
     rmSync(toolsDir, { recursive: true, force: true });
   });
 

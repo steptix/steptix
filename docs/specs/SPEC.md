@@ -186,6 +186,8 @@ At step 3, the test pauses and the user sees:
 
 The text after the `[input: name]` prefix is used as the prompt message. If omitted, a default prompt is shown. The step is marked as passed once the user provides a value.
 
+`steptix run` asks only when stdin is a terminal. With no terminal to answer from — CI, a script, a scheduled job — the step fails at once, naming the prompt, and the steps after it do not run. The same goes for `[interactive]` and for a question the AI asks (see [Unattended runs](#unattended-runs)).
+
 #### `[interactive]` — Interactive REPL Mode
 
 Opens an interactive prompt where the user can type free-form natural language instructions that are executed as AI-driven steps in real time. This turns the test into a live exploration session — useful for debugging, investigating page state, or performing ad-hoc actions mid-test.
@@ -225,6 +227,16 @@ REPL commands (all `/`-prefixed):
 | *(any other)* | Executed as a single ad-hoc Flick step.                 |
 
 If any interactive command fails, the overall step is marked as failed. The same REPL is also opened automatically when a step fails after retries — see the `interactiveOnFailure` execution config (env var `INTERACTIVE_ON_FAILURE=true`) for the post-failure handoff. In that mode the REPL banner reads "🛑 Step failed" instead of "🎮 Interactive mode" and the `/resume` menu defaults to the step after the failure.
+
+#### Unattended runs
+
+Every question `steptix run` asks is read from stdin: an `[input:]` value, an `[interactive]` REPL, the post-failure REPL, and the AI's own clarification question (`execution.promptOnAmbiguity`). When stdin is not a terminal, nobody can answer, so none of them waits:
+
+- An AI question fails its step with `AI needs clarification, but this run has no interactive prompt to answer it: <question>` — the same failure a server-driven run reports. A step ending `otherwise continue` tolerates it like any other failure.
+- `[input:]` and `[interactive]` fail their step with a message naming what they asked for.
+- The post-failure REPL is not opened; the run ends as a failure.
+
+A test's `timeout:` is checked between steps and cannot end a step that is waiting for an answer, which is why these fail rather than wait (steptix/steptix#47). Piping only stdout (`steptix run … | tee run.log`) still counts as attended: stdin is the terminal the answer comes from.
 
 ### Inline Sections
 
@@ -579,7 +591,9 @@ Field notes:
 - `browser.headed` defaults to `true`; override with `--headless`.
 - `browser.slowMo` adds a ms delay between actions (for debugging).
 - `browser.browser` is one of `'chromium' | 'firefox' | 'webkit'`.
-- `execution.promptOnAmbiguity` asks the user when the AI is unsure.
+- `execution.promptOnAmbiguity` asks the user when the AI is unsure. With no
+  terminal on stdin the question fails the step instead
+  ([Unattended runs](#unattended-runs)).
 - `execution.defaultHooks` can declare project-level hooks, e.g.
   `"defaultHooks": { "beforeEach": ["[skill: dismiss_obstacles]"] }`.
 - `reports.embedScreenshots` toggles base64 embed vs separate files.

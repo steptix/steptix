@@ -9,6 +9,23 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — an unattended `steptix run` no longer waits forever for an answer
+
+When the AI asked a question under `steptix run` with no terminal on stdin —
+CI, a script, a scheduled job — the run printed `Your answer:` and waited
+for good, past the test's own `timeout:`; one waited 7.6 hours until it was
+killed ([#47](https://github.com/steptix/steptix/issues/47)). Now, when stdin
+is not a terminal:
+
+- **An AI question fails its step** with the question as the error, the way a
+  server-driven run already did. `otherwise continue` tolerates it.
+- **`[input:]` and `[interactive]` fail their step** instead of waiting for
+  someone to type, naming what they asked for.
+- **The post-failure REPL stays shut**, even when stdout is a terminal.
+
+At a terminal nothing changes: the question is asked, and `/repl` still works.
+See [Unattended runs](docs/specs/SPEC.md#unattended-runs).
+
 ### Fixed — compiled code-behind holds up on replay
 
 Run & Compile's code could pass under AI and fail only on a later replay: an
