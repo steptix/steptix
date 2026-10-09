@@ -9,6 +9,44 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — a test closed and reopened, or renamed, runs the text it has now
+
+A test file closed, changed and opened again could run the steps it had when
+its tab closed, and paint the running dot on those steps' old line numbers in
+the editor that showed the new text (#50). The same happened in the Test
+Explorer. Renames made it worse: run `ABC1.md` and `ABC2.md`, rename `ABC2.md`
+to `ABC3.md` and `ABC1.md` to `ABC2.md`, and running `ABC2.md` ran the old
+ABC2's steps, inside the old ABC2's browser session.
+
+The extension kept one run controller per file name, and that controller
+kept the document it was created with. VS Code keeps a closed document
+readable with its last text and opens a new one for the same file next time.
+(extension 0.5.189)
+
+- **The same file, closed and reopened, carries on.** A run reads the
+  document the editor shows. A run in flight keeps running after its tab
+  closes, a run paused at a breakpoint survives the tab closing, and
+  Continue resumes it in the same session. This includes the file being
+  changed on disk while it was closed.
+- **A different file at the same name starts fresh.** A file renamed onto
+  another's name runs its own text in a new session, whether the rename was
+  done in VS Code or outside it (Explorer, terminal, git). The extension
+  tells the two apart by the file's identity on disk, which a rename keeps.
+  A tool that saves by replacing the file gives it a new identity, as does a
+  `git checkout` or a `steptix run` that appends its "Latest runs" line. The
+  next editor run of that file then starts in a new session too. A run in
+  flight when another file lands at its name keeps the steps it started
+  with and starts fresh after it ends; a paused run is ended rather than
+  continued into the other file.
+- **A test renamed or deleted in VS Code lets go of its session.** Its
+  browser session is closed instead of staying open with nothing left to
+  reach it. A run of it in flight is stopped, and a paused run is ended: the
+  session is named after the old file, so neither can carry on under the
+  new name. The output channel says which happened. Renaming a folder does
+  this for every test in it. A recording follows a rename as before.
+- **Test Explorer runs** read the file as it is now. Two runs of one file
+  still get two sessions.
+
 ### Fixed — compiled code-behind holds up on replay
 
 Run & Compile's code could pass under AI and fail only on a later replay: an

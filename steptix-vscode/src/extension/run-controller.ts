@@ -518,6 +518,8 @@ interface RowTableState {
  * run events to a `post` callback (which routes to the sidebar webview).
  */
 export class RunController {
+  /** See `document` and `rebind`. */
+  private boundDocument: vscode.TextDocument;
   private active: AbortController | null = null;
   /** Incremented per run; lets a background post-stop report poll (issue 021)
    *  detect that a newer run started and skip clobbering its report path. */
@@ -917,7 +919,7 @@ export class RunController {
   readonly onFrameStackChange = this.frameStackEmitter.event;
 
   constructor(
-    public readonly document: vscode.TextDocument,
+    document: vscode.TextDocument,
     public readonly workspaceFolder: vscode.WorkspaceFolder,
     private readonly post: (msg: HostToWebviewMsg) => void,
     private readonly clientFactory: ApiClientFactory = defaultApiClientFactory,
@@ -1002,8 +1004,72 @@ export class RunController {
         serverUrl: string;
         log: (line: string) => void;
       }) => Promise<void> | void;
+      /**
+       * Close the session a RETIRED controller left at this path (issue 50:
+       * the file was renamed or deleted, or a different file is here now).
+       * Called by this controller's first-use close, before its own close of
+       * the same session id: the old controller knows which server its last
+       * run used, and an old close still in flight must land before this run
+       * opens a new session there, not after. Memoized by the registry —
+       * calling it again returns the same close — and never rejects.
+       */
+      previousSessionClose?: () => Promise<void>;
     } = {},
-  ) {}
+  ) {
+    this.boundDocument = document;
+  }
+
+  /**
+   * The test document this controller runs.
+   *
+   * Not fixed for the controller's life. VS Code keeps a closed document
+   * readable with its last text and opens a NEW object for the same file
+   * next time, so the registry points the controller at that one (`rebind`)
+   * whenever it sees it — otherwise every later run would send the text the
+   * file had when its tab closed (issue 50).
+   */
+  get document(): vscode.TextDocument {
+    return this.boundDocument;
+  }
+
+  /**
+   * Read `document` from now on: the file at this URI, opened again.
+   *
+   * Everything else is kept — a run in flight, a run parked at a breakpoint,
+   * the session and its server, compile state — just as if the tab had never
+   * closed. A run in flight already sent its steps; what it reads from here
+   * on (a later row's or block's text, a Continue's) comes from the document
+   * the author can see, and the checks that compare remembered text against
+   * the document (`narrowedBodyDrift`) now compare against that one.
+   *
+   * Only for the same URI. The registry rebinds an editor controller only to
+   * the same file (a different one gets a new controller), and a batch
+   * controller to whatever file is at its path while no run is in flight —
+   * each batch run starts its own session (`bindingFor`).
+   */
+  rebind(document: vscode.TextDocument): void {
+    if (document.uri.toString() !== this.boundDocument.uri.toString()) {
+      throw new Error(
+        `RunController.rebind: ${document.uri.toString()} is not ${this.boundDocument.uri.toString()}`,
+      );
+    }
+    this.boundDocument = document;
+  }
+
+  /** Is a run or a recording executing? Not true of a run parked at a
+   *  breakpoint, which has nothing in flight (controller-binding-core.ts:
+   *  a parked run of a file replaced on disk is ended, not kept). */
+  get isInFlight(): boolean {
+    return this.isRunning || this.isRecording;
+  }
+
+  /** Has this controller run or recorded, so the server may still hold the
+   *  interactive session it used? A controller that never did has none to
+   *  close — and closing one anyway would reach for a server nobody asked
+   *  it to start. */
+  get mayHoldSession(): boolean {
+    return this.staleSessionCleared;
+  }
 
   private get healthProbe(): HealthProbe {
     return this.server.healthProbe ?? defaultHealthProbe;
@@ -2891,6 +2957,7 @@ export class RunController {
     const forceFresh = options.forceFreshSession === true;
     if (!options.batchMode && (forceFresh || !this.staleSessionCleared)) {
       this.staleSessionCleared = true;
+      await this.server.previousSessionClose?.();
       try {
         await this.closeSession();
       } catch {
@@ -5677,6 +5744,7 @@ export class RunController {
       // refused as a second config.
       if (!this.staleSessionCleared) {
         this.staleSessionCleared = true;
+        await this.server.previousSessionClose?.();
         await this.closeStaleSession();
       }
 
