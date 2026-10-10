@@ -40,7 +40,7 @@ in the test files, not here.
 | 2.24 | No press-and-hold | 44 | There was no way to hold a button down. LetCode's "Click and Hold" button only reacts to a press of about two seconds, and `click` releases at once | `holdMs` on `click` (Playwright's `delay` between press and release), with `longPress`, `pressAndHold`, `clickAndHold` and similar names mapped onto it at 2 s |
 | 2.25 | A failed check does not say where the expected text is | 45 | An assertion that reads the wrong element fails with "expected X, got Y", and the retry is shown only that, so it reads the same element again. The form results page repeats the empty form above the results; both attempts read the empty textarea ("Comments...") | On a failed DOM assertion, find the smallest visible elements whose text contains the expected value (or a part of it) and add their CSS paths to the failure |
 | 2.26 | Shadow DOM missing from the snapshot | 44 | The snapshot walks `childNodes` only, so an open shadow root's content never appeared. LetCode's first-name field sat in `div#open-shadow`'s root, the snapshot showed the div empty, and the model guessed a selector that matched nothing | Walk each open shadow root before the element's light children, between `<!-- shadow-root (open) -->` markers; tell both prompts how to reach it |
-| 2.27 | No way to type where `fill` cannot | 44 | `type` uses `fill`, which only takes inputs, textareas and contenteditables, and `keyboard` only presses keys. A field inside a CLOSED shadow root cannot be queried by anyone, Playwright included, so there was no way to type into it | When the target is not fillable, `type` clicks it and types on the keyboard. `keyboard` takes `text` to type into whatever has focus |
+| 2.27 | No way to type where `fill` cannot | 44 | `type` uses `fill`, which only takes inputs, textareas and contenteditables, and `keyboard` only presses keys. A field inside a CLOSED shadow root cannot be queried by anyone, Playwright included, so there was no way to type into it | When the target is not fillable, `type` clicks it and types on the keyboard, unless the click left the focus somewhere that takes no text: then it types nothing and fails. `keyboard` takes `text` to type into whatever has focus |
 | 2.28 | `find` does not say a match is hidden | 45 | A sidebar entry two collapsed levels deep shows in the snapshot only as `<ul><!-- hidden --></ul>`. The model could not tell which section held "Dynamic Buttons 01", wandered for 15 turns, then clicked the hidden link until it timed out | Each `find` match that is not rendered says so and names the collapsed sections around it, outermost first; rule 19 says to `find` an unseen menu entry and open those sections first |
 | 2.29 | A text wait ignored its frame | 52 | `wait` with `waitType: text` polled the main page's `document.body.innerText` even when the action named a frame, so it can never see a frame's text. The download dialog inside globalsqa's demo iframe already said "Complete!" and the wait still timed out, twice | Inside a frame, wait for `getByText(condition)` to be visible in that frame |
 | 2.30 | Blocking ads broke a page | 58 | `blockAds` (once §2.23 made it work on the server) routed every request through Playwright to abort the ad ones. On LetCode's sister site testmuai, the jQuery download dialog then stuck at "Starting download…" with a page error. A route that blocks NOTHING breaks it the same way, so the interception's own delay loses a race in the page's start-up | In Chromium, block ad hosts with `--host-resolver-rules` (`MAP <host> ~NOTFOUND`), which needs no interception; route only on Firefox and WebKit |
@@ -384,6 +384,41 @@ and it also covers canvas and editor surfaces. When the check itself cannot run,
 the ordinary path runs and reports what is wrong. `keyboard` takes `text`,
 typed into whatever has focus, before any `key` it also names. Rule 9b
 describes both.
+
+Between the click and `ControlOrMeta+A`, `executeType` checks where the focus
+went ([issue #34](https://github.com/steptix/steptix/issues/34)). A wrapper or
+a label is not fillable either, and clicking one leaves the focus on `<body>`,
+where `ControlOrMeta+A` selects the page and the keys reach nothing but the
+page's shortcuts. The check follows the focus down through open shadow roots
+(`shadowRoot.activeElement`) and same-origin frames
+(`contentDocument.activeElement`): a canvas editor may focus a hidden textarea,
+or a contenteditable inside a shadow root, and `document.activeElement` shows
+only the host or the `<iframe>`. The focus takes text when it ends on:
+
+- an `<input>` that takes typing, or a `<textarea>`, and is not read-only;
+- a contenteditable, or an element with an EditContext, which is how an
+  editor such as Monaco can take text;
+- an element that can carry a shadow root and has no tabindex. It cannot hold
+  the focus itself, so the focus is inside its root, and a closed root is the
+  case this section exists for. A host with a tabindex may hold the focus
+  itself, which nothing outside a closed root can tell apart, so it does not
+  count;
+- an `<iframe>` from another origin, which nothing on the page can read, such
+  as a payment form's card number.
+
+Anywhere else, nothing is pressed or typed, and the action fails with `fill`'s
+words and where the focus went: "Element is not an `<input>`, `<textarea>` or
+`[contenteditable]` element, and clicking it left the focus on `<body>`, which
+takes no text, so nothing was typed. Type into the field itself." The failure
+is retryable, so the model picks another target. The check reads the target's
+frame from its root element, not from the target, because a click that swaps a
+placeholder for an editor detaches the target. When the check cannot run, the
+text is typed as before.
+
+The check asks where the focus is, not whether the click moved it. A page that
+cancels `mousedown` keeps the focus where it was, and if that was another
+field, the text goes there. Requiring the focus to move would refuse the second
+`type` into a canvas editor whose hidden field already has it.
 
 ### 2.28 `find` names the collapsed sections
 

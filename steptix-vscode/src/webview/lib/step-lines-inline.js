@@ -137,7 +137,7 @@ export function countStepLineStatuses(statuses, stepLineIds, notTakenLines) {
  * unterminated block. Only `extractSections` consults it: `extractStepLineIds`
  * has shipped without a frontmatter skip and changing that would move
  * decorations on real files for no benefit here. The asymmetry is deliberate
- * and unifying the two belongs to issues/035.
+ * and unifying the two belongs to steptix/steptix#49.
  */
 function findFrontmatterEnd(lines) {
   let i = 0;

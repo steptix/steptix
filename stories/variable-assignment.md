@@ -279,7 +279,7 @@ Everything below is read out of the current tree.
   `variables-panel.js` in the webview has its own `INPUT_PATTERN` /
   `OUTPUT_PATTERN` / `SKILL_OUT_ALIAS_RE` walk of the `## Steps` span to
   seed rows before a run. Two mirrors of the runtime grammar, in the family
-  [issue 035](../issues/035-step-line-span-parser-duplicated-six-times.md)
+  [#49](https://github.com/steptix/steptix/issues/49)
   documents. The wire contract is `CaptureEvent` in
   `runner-core/src/protocol.ts`: `source: 'capture' | 'toolOutput'`, a
   closed union whose documented back-compat rule is that a consumer must
@@ -569,7 +569,7 @@ change).
 - **A bracket alias** such as `[set: name] "…"`. One spelling.
 - **Consolidating the step-line parsers.** This story adds one runtime regex
   and two editor mirrors and pins them with a parity table; it does not
-  attempt [issue 035](../issues/035-step-line-span-parser-duplicated-six-times.md),
+  attempt [#49](https://github.com/steptix/steptix/issues/49),
   and says plainly that it makes that issue one pattern larger.
 - **Retitling the report box.** See below.
 

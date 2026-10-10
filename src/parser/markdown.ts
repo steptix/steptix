@@ -1292,7 +1292,7 @@ export interface StepSpanScan {
  * Also mirrors the runner-core step-line classifier so server-side parsing
  * agrees with the client's editor-side line model. Kept here (rather than
  * importing runner-core) because the server isn't a runner-core consumer
- * today — see issues/035.
+ * today — see steptix/steptix#49.
  *
  * Exported for direct unit testing: the two-pass alignment is the single most
  * error-prone part of the sections feature, and testing it only through

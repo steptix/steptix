@@ -8,7 +8,7 @@
  * ad over a button, a prompt dialog.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Frame, type Page } from 'playwright';
 import { executeAction, normaliseColour, normaliseKeyName, resolveRoleName, scrollToFitBoth, waitForThreshold } from '../src/browser/actions.js';
 import { parseAIResponse, parseAssertionCode } from '../src/ai/action-parser.js';
 import { installDialogGuard } from '../src/browser/manager.js';
@@ -679,6 +679,118 @@ describe('§2.27 typing where fill cannot', () => {
       const result = await executeAction(page, act({ action: 'type', selector: 'my-web-component', value: 'Tester' }));
       expect(result.success).toBe(true);
       expect(await page.evaluate(() => (window as unknown as { __lname: () => string }).__lname())).toBe('Tester');
+    } finally {
+      await page.close();
+    }
+  });
+
+  // A canvas editor draws the text itself and takes the keys in a hidden
+  // field it focuses on mousedown — a light-DOM textarea here, a
+  // contenteditable inside the editor's own shadow root below.
+  it('types into the hidden textarea a canvas editor focuses when clicked', async () => {
+    const page = await pageWith(`
+      <canvas id="board" width="300" height="80"></canvas>
+      <textarea id="sink" style="position: absolute; left: -1000px; width: 10px; height: 10px"></textarea>
+      <script>
+        document.getElementById('board').addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          document.getElementById('sink').focus();
+        });
+      </script>`);
+    try {
+      const result = await executeAction(page, act({ action: 'type', selector: '#board', value: 'Tester' }));
+      expect(result.success).toBe(true);
+      expect(await page.inputValue('#sink')).toBe('Tester');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('follows the focus into the shadow root of an editor that shows only as its host', async () => {
+    const page = await pageWith(`
+      <x-editor style="display: block; width: 300px"></x-editor>
+      <script>
+        const root = document.querySelector('x-editor').attachShadow({ mode: 'open' });
+        root.innerHTML = '<canvas width="300" height="80"></canvas>'
+          + '<div contenteditable style="position: absolute; left: -1000px; width: 10px; height: 10px"></div>';
+        root.querySelector('canvas').addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          root.querySelector('[contenteditable]').focus();
+        });
+        window.__typed = () => root.querySelector('[contenteditable]').textContent;
+      </script>`);
+    try {
+      const result = await executeAction(page, act({ action: 'type', selector: 'x-editor', value: 'Tester' }));
+      expect(result.success).toBe(true);
+      // document.activeElement is <x-editor>, which takes no text itself.
+      expect(await page.evaluate(() => (window as unknown as { __typed: () => string }).__typed())).toBe('Tester');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('types into an editor surface that takes text through an EditContext', async () => {
+    // Focusable by tabindex and not contenteditable, so only its EditContext
+    // says it takes text.
+    const page = await pageWith(`
+      <div id="surface" tabindex="0" style="width: 300px; height: 80px"></div>
+      <script>
+        const context = new EditContext();
+        document.getElementById('surface').editContext = context;
+        window.__typed = () => context.text;
+      </script>`);
+    try {
+      const result = await executeAction(page, act({ action: 'type', selector: '#surface', value: 'Tester' }));
+      expect(result.success).toBe(true);
+      expect(await page.evaluate(() => (window as unknown as { __typed: () => string }).__typed())).toBe('Tester');
+    } finally {
+      await page.close();
+    }
+  });
+
+  // steptix/steptix#34. The model picked the wrapper, not the field. Clicking its
+  // centre lands on the label text, so the focus stays on <body>: typing there
+  // reached nothing, while Ctrl+A selected the page and every key reached the
+  // page's shortcuts.
+  const wrapped = `
+    <div class="field-wrap" id="wrap" style="width: 300px">
+      <span style="display: block; height: 200px">Email</span>
+      <input id="email" type="email">
+    </div>
+    <script>
+      window.__keydowns = 0;
+      document.addEventListener('keydown', () => { window.__keydowns++; }, true);
+    </script>`;
+  const typedNothing = async (scope: Frame): Promise<{ keydowns: number; selected: string; email: string }> =>
+    scope.evaluate(() => ({
+      keydowns: (window as unknown as { __keydowns: number }).__keydowns,
+      selected: String(window.getSelection()),
+      email: (document.getElementById('email') as HTMLInputElement).value,
+    }));
+
+  it('fails and types nothing when the click leaves the focus on <body>', async () => {
+    const page = await pageWith(wrapped);
+    try {
+      const result = await executeAction(page, act({ action: 'type', selector: '#wrap', value: 'ada@example.test' }));
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Element is not an <input>, <textarea> or [contenteditable] element');
+      expect(result.error).toContain('left the focus on <body>');
+      expect(result.failedSelector).toBe('#wrap');
+      expect(await typedNothing(page.mainFrame())).toEqual({ keydowns: 0, selected: '', email: '' });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('checks the focus in the frame the action names', async () => {
+    const page = await pageWith(`<iframe id="form" srcdoc="${wrapped.replace(/"/g, '&quot;')}"></iframe>`);
+    try {
+      await page.frameLocator('#form').locator('#email').waitFor();
+      const result = await executeAction(page, act({ action: 'type', selector: '#wrap', value: 'ada@example.test', frame: '#form' }));
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('left the focus on <body>');
+      const frame = page.frames().find((f) => f !== page.mainFrame())!;
+      expect(await typedNothing(frame)).toEqual({ keydowns: 0, selected: '', email: '' });
     } finally {
       await page.close();
     }

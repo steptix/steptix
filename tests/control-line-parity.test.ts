@@ -29,7 +29,7 @@ import {
  * corpus and compared field by field.
  *
  * runner-core cannot import `src/`, so the six forms are implemented twice —
- * which is the shape issues/035 already counts six times over for the step
+ * which is the shape steptix/steptix#49 already tracks for the step
  * span scanner, and the shape stories/test-script-sections-contract.md exists
  * because of. What makes drift here expensive is that the two answers are used
  * for different halves of the same promise: the CLI's decides what RUNS, the

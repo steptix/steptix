@@ -1,7 +1,7 @@
 /**
  * Copy-parity for the inline-section line model.
  *
- * The span scanner is hand-maintained in several places (issues/035). This
+ * The span scanner is hand-maintained in several places (steptix/steptix#49). This
  * suite holds this package's copies to the same frozen tables runner-core and
  * the root suite assert against — `fixtures/sections/classification.json` —
  * so a divergence surfaces as a failing row here rather than as a test file
@@ -280,7 +280,7 @@ test("KNOWN GAP: frontmatter with a column-0 `## Steps` desyncs the two spans", 
   //
   // Recorded rather than fixed: giving `extractStepLineIds` a frontmatter
   // skip changes decorations on real documents for a case nobody writes, and
-  // unifying the span scanners is issues/035. Asserted so the gap is a known
+  // unifying the span scanners is steptix/steptix#49. Asserted so the gap is a known
   // quantity instead of a surprise, and so closing it later is a deliberate
   // act that updates this test.
   const text = [
