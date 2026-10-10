@@ -4225,6 +4225,11 @@ async function executeStepAttempt(
         Object.assign(params, storedBeforeReview);
       }
       for (const sub of replacedThisTurn) sub.listReview!.outcome = 'pending';
+      // And what this answer read stands for nothing: it no longer replaces
+      // the reads above, and the compile never uses it.
+      for (const sub of turnSubActions) {
+        if (sub.error === undefined && storedName(sub.action) !== undefined) sub.discarded = true;
+      }
       logger.warn(`Step ${stepIndex}: a read again of its list failed (${turnError ?? 'no error'}) — the step ends where it stood`);
       break;
     }

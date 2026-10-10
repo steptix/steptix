@@ -74,7 +74,7 @@ run's read, the code-behind kept the wrong list.
   kept changing. Entries compiled before this change from a list read that
   came back empty keep passing on `[]`: compile that step again (Compile This
   Step, or `steptix compile --steps N`) after a run where the list has items
-  (extension 0.5.191).
+  (extension 0.5.192).
 
 ### Fixed — a compile no longer deletes the other entries in a code-behind file
 

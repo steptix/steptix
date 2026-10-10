@@ -852,7 +852,8 @@ export function actionsOf(result: StepResult | undefined): RecordedAction[] {
   const superseded = supersededListReads(subs);
   return subs
     .filter((sa) => !sa.error || (keepFail && sa.action.action === 'fail'))
-    .filter((sa) => !superseded.has(sa))
+    // Nor was a read in an answer the step discarded (`discarded`).
+    .filter((sa) => !superseded.has(sa) && sa.discarded !== true)
     .map((sa) => {
       // Here and not later, for `targeting`'s reason: a URL can carry a
       // secret, and the recording redacts what this returns.

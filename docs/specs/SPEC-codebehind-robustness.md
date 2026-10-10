@@ -1092,8 +1092,10 @@ own. §6.2 checks the selector either way.
   theirs from the best of their runs by the same rank (`evidenceRank`), so a
   row that read items compiles the entry an earlier empty row could not.
   Whatever then fails on the replay — on any of those steps — is dropped,
-  written off and repaired as that entry, the repair working from the same
-  run's evidence, never from a row whose list came back empty. A
+  written off and repaired as that entry. The repair is held to the selector
+  of the run the entry was compiled from, never to a row whose list came back
+  empty, and is told what the failing pass captured on the page it failed on.
+  A
   step left out this way whose existing entry broke (it is stale) keeps that
   entry, and the compile's replay runs the step under AI in its own copy of
   the file (`Candidate.materialise`), so the replay proves the steps after it

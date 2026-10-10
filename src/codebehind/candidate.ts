@@ -184,7 +184,7 @@ export class Candidate {
     if (onDisk !== undefined) this.entryText.set(key, onDisk);
     else this.entryText.delete(key);
     // A file the compile created and has now emptied is no proposal at all.
-    if (original === null && listEntries(next).length === 0) {
+    if ((original === null || original.trim() === '') && listEntries(next).length === 0) {
       this.current.delete(binding.file);
       return true;
     }

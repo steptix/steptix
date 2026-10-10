@@ -113,6 +113,14 @@ export interface SubActionResult {
    * `mixed` read the model kept (`unprovenListRead`). Absent on every other
    * sub-action.
    */
+  /**
+   * This read was part of an answer to a turn added only to ask about the
+   * step's lists, and a read again later in that same answer failed: the step
+   * ended where it stood, the values the answer stored were put back
+   * (src/runner/step-executor.ts), and this read stands for nothing — it
+   * replaces no earlier read, and the compile never uses it.
+   */
+  discarded?: true;
   listReview?: {
     kind: 'empty' | 'mixed';
     text: string;

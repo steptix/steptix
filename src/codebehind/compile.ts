@@ -1383,6 +1383,8 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     loopWarnings = round.loopWarnings;
     const ended = round.rows.find((r) => deliberateFailure(r) && recordedDeliberate(r.index - 1));
     if (ended) endedInReplay = { step: ended.index };
+    /** Entries this round proved, apart from earlier rounds'. */
+    const provenThisRound = new Set<string>();
     for (const step of stepsInS()) {
       if (step.kind === 'condition') {
         // Proven when its code decided a visit cleanly and the decisions it made
@@ -1413,6 +1415,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         )
       ) {
         proven.add(step.key!);
+        provenThisRound.add(step.key!);
       }
       const tolerated = ran.find((r) => toleratedFailure(r));
       if (tolerated) {
@@ -1433,11 +1436,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         });
       }
     }
-    // An inlining a return kept from running is no gap when another inlining
-    // of the same entry ran and proved it.
+    // An inlining a return kept from running is no gap when the recording
+    // skipped it too and another inlining of the same entry ran and proved it,
+    // in this round. One the recording ran is a replay that went another way:
+    // still a gap, and the only sign of it, since a return is not a guard.
     unreached = unreached.filter((u) => {
-      const key = steps[u.step - 1]?.key;
-      return key === undefined || !proven.has(key);
+      const s = steps[u.step - 1];
+      if (s?.key === undefined) return true;
+      const recorded = recordedAt(s.index);
+      const recordingSkipped = recorded.length > 0 && recorded.every((r) => r.status === 'skipped');
+      return !(recordingSkipped && provenThisRound.has(s.key));
     });
   };
   const replay = async (round: number): Promise<CompileRunOutcome> => {
@@ -1729,7 +1737,9 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     const failedValues = failedSnapshots.at(failed.result);
     // The entry was compiled from its owner's run — which, for an entry several
     // steps share, may not be the step that failed (a row whose list came back
-    // empty proves nothing, and its read is not the entry's).
+    // empty proves nothing, and its read is not the entry's). Its actions are
+    // what the repair is held to (§6.2); what it must capture is still what
+    // the failing pass captured, on the page it failed on.
     const evidenceRow = record.steps[ownerOf(failed.step).index];
     const repaired =
       failed.step.kind === 'condition'
@@ -3364,11 +3374,11 @@ function recordedCapturesAt(
 ): Record<string, string> | undefined {
   const at = failedRow !== undefined ? replayRows.indexOf(failedRow) : -1;
   const samePass = at >= 0 ? recordedRows[at] : undefined;
-  // A pass whose list read proved nothing is no record of what the step
-  // captures (issue #48): the evidence row's captures stand in for it.
-  const usable = samePass !== undefined && unprovenListRead(samePass) === undefined ? samePass : undefined;
+  // The failing pass's own captures, even an empty list: they are what the
+  // recording saw on the page the replay failed on. Which selector reads them
+  // is the evidence row's business (the repair's `actions`), never this.
   return (
-    recordedCapturesOf(step.binding, usable?.outputs)
+    recordedCapturesOf(step.binding, samePass?.outputs)
     ?? recordedCapturesOf(step.binding, evidenceRow?.outputs)
   );
 }

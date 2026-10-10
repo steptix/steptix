@@ -372,6 +372,7 @@ describe('the line a list read that came back empty or mixed is shown with', () 
     const line = ['accounts is empty: `#x` matched nothing on this page.'];
     const ordinary = formatListReadsSection(line);
     expect(ordinary).toContain('go on with the step: that keeps it');
+    expect(ordinary).toContain('Reading one list again answers that list alone: the others are still to answer.');
     expect(ordinary).not.toContain('noop');
     const review = formatListReadsSection(line, true);
     expect(review).toContain('answer noop with needs_reeval false');
@@ -1140,6 +1141,27 @@ describe('a turn added only to show the model its lists never fails the step', (
     }
   });
 
+  it('discards an answer whose second read again fails, and compiles nothing from its first', async () => {
+    // The answer reads the list again with a narrower selector, which works,
+    // and again with one that does not parse. The values go back to the read
+    // the model was shown — and the narrower read, which the model's own
+    // answer abandoned, must not stand in for it at the compile.
+    const { result, params } = await runStep(
+      [plan(readOf(OVER_BROAD)), plan([readOf(RIGHT), readOf('#account-list ]]')])],
+      { retries: 1 },
+    );
+    expect(result.status).toBe('passed');
+    expect(JSON.parse(params.accounts!)).toHaveLength(6);
+    const [shown, narrowed] = readsOf(result);
+    expect(shown!.listReview).toMatchObject({ outcome: 'pending', shown: true });
+    expect(narrowed!.discarded).toBe(true);
+    expect(unprovenListRead(result)).toMatchObject({ kind: 'unchecked', name: 'accounts' });
+    expect(actionsOf(result).map((a) => a.selector)).not.toContain(RIGHT);
+    expect(renderReport(reportOf(result))).toContain(
+      'list read discarded: a read again later in the same answer failed, so the step ended where it stood',
+    );
+  });
+
   it('puts back what a turn added to ask stored when a read again in it fails', async () => {
     // The answer reads one list again, which works, and counts the other with
     // a selector that does not parse. The step ends where it stood: on the
@@ -1582,7 +1604,7 @@ function turnOf(subs: Array<{ action: Record<string, unknown>; extra?: Partial<S
  * read of every result for a repair — and answers Review with the file as it
  * stands, keeping every prompt.
  */
-function generatingClient(): { client: AiClient; prompts: string[] } {
+function generatingClient(selector = '#results li', as = 'titles'): { client: AiClient; prompts: string[] } {
   const prompts: string[] = [];
   const client = {
     complete: async (messages: ChatMessage[]) => {
@@ -1594,7 +1616,7 @@ function generatingClient(): { client: AiClient; prompts: string[] } {
       }
       const source = JSON.stringify(/## The (?:step|line), exactly as authored\n(.*)\n/.exec(last)?.[1] ?? 'step');
       // Reads with the recorded selector, as a generation must (§6.2).
-      const body = "await page.click('#open'); await step.read({ selector: '#results li', multiple: true, as: 'titles' });";
+      const body = `await page.click('#open'); await step.read({ selector: ${JSON.stringify(selector)}, multiple: true, as: ${JSON.stringify(as)} });`;
       return { text: JSON.stringify({ entry: `{ source: ${source}, async run({ page, step }) { ${body} } }` }), model: 'scripted' };
     },
   } as unknown as AiClient;
@@ -2108,8 +2130,92 @@ describe('the compile writes no entry for a step that ended on a list read provi
     expect(repair).toBeDefined();
     expect(repair).toContain('#results li');
     expect(repair).not.toContain('li.none');
-    // And what it must capture is what that run captured, not the empty row's [].
-    expect(repair).toContain('Shoe A');
+    // What it must capture is still what the recording captured on the page it
+    // failed on — row 1's search found nothing — not another row's values.
+    expect(repair).toContain('the recording captured a list of 0 items');
+    expect(repair).not.toContain('Shoe A');
+  });
+
+  it('tells a loop pass\'s repair what that pass captured, even when its list came back empty', async () => {
+    // For each account: Travel has no transactions, and the model kept the
+    // empty list. When the entry then fails on the Travel pass, its repair is
+    // told the Travel page captured nothing — not Everyday's two values,
+    // which it would then have to produce where there are none.
+    const accounts = ['Everyday', 'Savings', 'Travel'];
+    const line = 'For each {{account}} in {{accounts}}, Open the account named {{account}} and read every transaction [store as: txns]';
+    const markdown = ['# Accounts', '', '## Parameters', `- accounts: ${JSON.stringify(accounts)}`, '', '## Steps', `1. ${line}`, '2. Click the Go button', ''].join('\n');
+    const marker = (index: number): NonNullable<StepResult['loop']> => ({ kind: 'iteration', label: 'loop', index, values: { account: accounts[index - 1]! } });
+    const open = { action: 'click', selector: '#open', description: 'Open the account' };
+    const read = { action: 'read', multiple: true, selector: '#txns li', as: 'txns', description: 'Read every transaction' };
+    const pass = (n: number, txns: string, empty: boolean): StepResult => ranRow(2, {
+      loop: marker(n),
+      outputs: { txns },
+      turns: [turnOf([
+        { action: open },
+        { action: read, ...(empty && { extra: { listReview: { kind: 'empty', text: 'txns is empty', outcome: 'kept', shown: true } } }) },
+        ...(empty ? [{ action: { action: 'noop', description: 'No transactions' } }] : []),
+      ])],
+    });
+    const go = ranRow(3, { turns: [turnOf([{ action: { action: 'click', selector: '#go', description: 'Go' } }])] });
+    const recorded = [ranRow(1, { loop: marker(1) }), pass(1, '["T1","T2"]', false), pass(2, '["T3"]', false), pass(3, '[]', true), go];
+    const dir = await fs.mkdtemp(path.join(scratch, 'loop-repair-'));
+    const md = path.join(dir, 'accounts.md');
+    await fs.writeFile(md, markdown, 'utf-8');
+    let round = 0;
+    const runner: CompileRunner = async (request) => {
+      if (request.purpose === 'record') {
+        return { status: 'passed', ...outcomeRows(recorded, 3), resolvedParameters: { accounts: JSON.stringify(accounts), account: 'Travel' }, tokensUsed: 0 };
+      }
+      round++;
+      const codePass = (n: number, failed: boolean): StepResult => ranRow(2, {
+        loop: marker(n),
+        fromCodeBehind: true,
+        ...(failed && { status: 'failed' as const, error: 'Timeout waiting for #txns li' }),
+      });
+      return replayOf([ranRow(1, { loop: marker(1) }), codePass(1, false), codePass(2, false), codePass(3, round === 1), ranRow(3, { fromCodeBehind: true })]);
+    };
+    const { client, prompts } = generatingClient('#txns li', 'txns');
+    await compileTest({ test: await parseTestFile(md), config: configWith(0), contextContent: '', aiClient: client, runner, dryRun: true });
+    const repair = prompts.find((q) => q.startsWith('A generated code-behind entry was replayed'));
+    expect(repair).toBeDefined();
+    expect(repair).toContain('the recording captured a list of 0 items');
+    expect(repair).not.toContain('"T1"');
+  });
+
+  it('still calls a step a return kept from running a gap when the recording ran it', async () => {
+    // A section called twice. The recording ran both calls in full; on the
+    // replay the first call's return entry returned, so its second line never
+    // ran. Another inlining proving the entry does not make that a recording
+    // replayed: a return is not a guard, and this was the only sign of it.
+    const markdown = ['# T', '', '## Steps', '1. Dismiss the banner', '2. Dismiss the banner', '',
+      '### Dismiss the banner', '1. If no banner is shown then return', '2. Click the banner close button', ''].join('\n');
+    const noop = (index: number): StepResult => ranRow(index, { turns: [turnOf([{ action: { action: 'noop', description: 'a banner is shown' } }])] });
+    const close = (index: number): StepResult => ranRow(index, { turns: [turnOf([{ action: { action: 'click', selector: '#close', description: 'Close the banner' } }])] });
+    const skipped = (index: number): StepResult => ranRow(index, { status: 'skipped', aiExplanation: 'Not run: step 1 returned from "Dismiss the banner"' });
+    const { compile } = await compileOver(
+      [],
+      [noop(1), close(2), noop(3), close(4)],
+      [ranRow(1, { fromCodeBehind: true, flowControl: { kind: 'return', verb: 'return' } }), skipped(2), ranRow(3, { fromCodeBehind: true }), ranRow(4, { fromCodeBehind: true })],
+      [],
+      { markdown, client: generatingClient().client, dryRun: true },
+    );
+    expect(compile.status).toBe('partial');
+    expect(compile.summary.error ?? '').toContain('never reached step 2');
+  });
+
+  it('takes back an entry from an empty steps file without proposing a file of no entries', async () => {
+    // An empty file is no file: taking back the one entry the compile put in
+    // it leaves nothing to propose, not a header with no entries.
+    const { result: heading } = await runStep([plan(HEADING)], { instruction: HEADING_STEP });
+    const { compile } = await compileOver(
+      [HEADING_STEP],
+      [heading],
+      [ranRow(1, { status: 'failed', fromCodeBehind: true, error: 'Self-check failed' })],
+      [],
+      { stepsFile: '' },
+    );
+    expect(compile.summary.warnings ?? []).toContainEqual(expect.stringContaining('step 1 was not compiled'));
+    expect(compile.files).toEqual({});
   });
 
   it('drops an entry several steps share by the entry, when it fails on a step it was not compiled from', async () => {

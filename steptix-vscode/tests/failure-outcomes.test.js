@@ -343,6 +343,16 @@ test("a step whose list read proved nothing is not counted among the steps a sto
   assert.match(line, /Step 3 not compiled — /);
 });
 
+test("a partial compile that wrote nothing because generation failed says so", () => {
+  // It said every step already had code-behind.
+  const line = resultLine("partial", {
+    compiled: 0,
+    keptAi: 0,
+    error: "1 step(s) could not be generated; they stay AI",
+  });
+  assert.equal(line, "◐ Compiled nothing in failure-outcomes-live.md: 1 step(s) could not be generated; they stay AI.");
+});
+
 test("a Run & Compile with nothing to propose says why when the compile was partial", () => {
   // It said every step already had code-behind, beside a log line that said
   // step 3 was not compiled.

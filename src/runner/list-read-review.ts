@@ -260,7 +260,8 @@ export function supersededListReads(subs: readonly SubActionResult[]): Set<SubAc
   const latest = new Map<string, SubActionResult>();
   for (const sub of subs) {
     const name = storedName(sub.action);
-    if (sub.error !== undefined || name === undefined) continue;
+    // A read in a discarded answer stored nothing that stands (`discarded`).
+    if (sub.error !== undefined || sub.discarded === true || name === undefined) continue;
     const earlier = latest.get(name);
     if (earlier?.listReview !== undefined) superseded.add(earlier);
     latest.set(name, sub);
@@ -345,7 +346,9 @@ export function uncheckedListRead(result: StepResult | undefined): string | unde
 function standingReviews(result: StepResult | undefined): SubActionResult[] {
   const subs = (result?.turns ?? []).flatMap((t) => t.subActions);
   const superseded = supersededListReads(subs);
-  return subs.filter((s) => s.listReview !== undefined && s.error === undefined && !superseded.has(s));
+  return subs.filter(
+    (s) => s.listReview !== undefined && s.error === undefined && s.discarded !== true && !superseded.has(s),
+  );
 }
 
 function unanswered(review: NonNullable<SubActionResult['listReview']>): boolean {

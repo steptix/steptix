@@ -1270,9 +1270,14 @@ function renderSubAction(
   // A list read that came back empty or mixed, and what the model made of it
   // (src/runner/list-read-review.ts): without it a read that stored nothing
   // looks like any other read that worked.
-  const listReviewHtml = sub.listReview !== undefined
-    ? `<div class="sub-action-detail">${escapeHtml(describeListReview(sub.listReview))}</div>`
-    : '';
+  const listReviewHtml = sub.discarded === true
+    ? `<div class="sub-action-detail">${escapeHtml(
+      'list read discarded: a read again later in the same answer failed, so the step ended where it stood'
+        + (sub.listReview !== undefined ? ` — ${sub.listReview.text}` : ''),
+    )}</div>`
+    : sub.listReview !== undefined
+      ? `<div class="sub-action-detail">${escapeHtml(describeListReview(sub.listReview))}</div>`
+      : '';
   const onComputerTurn = opts.turnShot !== undefined;
   const ownShot = onComputerTurn && sub.screenshotBase64 === opts.turnShot
     ? undefined

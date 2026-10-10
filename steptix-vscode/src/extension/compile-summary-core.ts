@@ -189,6 +189,13 @@ export function compileResultLine(event: CompileResultEvent): string {
   }
   // "Every step already has code-behind" is only true when the run reached every
   // step. Stopped with nothing generated, it says the opposite of what happened.
+  // Nothing reached the proposal and nothing was owed, but the compile is
+  // partial: it says why (a step that could not be generated), not that every
+  // step already has code-behind.
+  const partialWhy = event.status === 'partial' ? summary.error?.trim() || undefined : undefined;
+  if (nothingHappened && summary.notAttempted.length === 0 && partialWhy !== undefined) {
+    return `◐ Compiled nothing in ${name}: ${asSentence(partialWhy)}${notCompiledTail}`;
+  }
   if (nothingHappened && summary.notAttempted.length === 0) {
     return `✓ Nothing to compile in ${name} — every step already has code-behind.${notCompiledTail}`;
   }
