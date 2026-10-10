@@ -39,12 +39,17 @@ export function partialNotes(summary: {
   notAttempted: number[];
   writtenOffAi: number[];
   unproven: number[];
+  unprovenReads?: Array<{ step: number; reason: string; keptEntry?: boolean }>;
 }): string {
   const parts: string[] = [];
+  // The steps a stop or an end kept from running. A step that ran on a list
+  // read proving nothing is said apart, below: fixing the stop, or a run that
+  // goes past the end, does nothing for it.
+  const notReached = notReachedOf(summary);
   if (summary.stoppedAt) {
     parts.push(
       ` Step ${summary.stoppedAt.step} failed under AI — ${summary.stoppedAt.error}.` +
-        (summary.notAttempted.length > 0 ? ` ${listSteps(summary.notAttempted)} not attempted.` : '') +
+        (notReached.length > 0 ? ` ${listSteps(notReached)} not attempted.` : '') +
         ' Fix it, run, and compile again for the rest.',
     );
   }
@@ -58,8 +63,8 @@ export function partialNotes(summary: {
     parts.push(
       ` Ended at step ${summary.endedAsWritten.step} as its text says — ` +
         `${summary.endedAsWritten.error}.` +
-        (summary.notAttempted.length > 0
-          ? ` ${listSteps(summary.notAttempted)} not attempted — a run that does not end there ` +
+        (notReached.length > 0
+          ? ` ${listSteps(notReached)} not attempted — a run that does not end there ` +
             'compiles the rest.'
           : ''),
     );
@@ -72,7 +77,53 @@ export function partialNotes(summary: {
   if (summary.unproven.length > 0) {
     parts.push(` ${listSteps(summary.unproven)} unproven — the next run proves or flags them.`);
   }
+  const notCompiled = notCompiledNote(summary.unprovenReads ?? []);
+  if (notCompiled !== '') parts.push(` ${notCompiled}`);
   return parts.join('');
+}
+
+/** `notAttempted` without the steps {@link notCompiledNote} says. */
+function notReachedOf(summary: {
+  notAttempted: number[];
+  unprovenReads?: Array<{ step: number }>;
+}): number[] {
+  const unprovenSteps = new Set((summary.unprovenReads ?? []).map((u) => u.step));
+  return summary.notAttempted.filter((n) => !unprovenSteps.has(n));
+}
+
+/**
+ * The steps that ran, and passed, on a list read that proves nothing about its
+ * selector (issue #48), in their own words: one step with the compile's
+ * reason, several with what they share. Empty when there are none.
+ */
+export function notCompiledNote(reads: Array<{ step: number; reason: string; keptEntry?: boolean }>): string {
+  if (reads.length === 0) return '';
+  const kept = reads.every((r) => r.keptEntry === true)
+    ? ` ${reads.length === 1 ? 'Its' : 'Their'} entry is left as it was.`
+    : '';
+  if (reads.length === 1) return `Step ${reads[0]!.step} not compiled — ${asSentence(reads[0]!.reason)}${kept}`;
+  return (
+    `${listSteps(reads.map((r) => r.step))} not compiled — each ended on a list read that proves nothing ` +
+    `about its selector.${kept}`
+  );
+}
+
+/**
+ * The notification for a compile-mode run that came back with nothing to
+ * propose. Green, nothing was owed. Otherwise something was — a step the run
+ * did not reach, or one whose list read proved nothing — and the notification
+ * says what, as the log line does, rather than that every step already has
+ * code-behind.
+ */
+export function emptyProposalMessage(
+  label: string,
+  status: CompileResultEvent['status'] | undefined,
+  summary: CompileResultEvent['summary'] | undefined,
+): string {
+  if (status === 'partial' && summary !== undefined) {
+    return compileResultLine({ type: 'compile:result', status, files: {}, summary });
+  }
+  return `Nothing to compile in ${label} — every step already has code-behind.`;
 }
 
 /**
@@ -86,6 +137,12 @@ export function partialNotes(summary: {
 export function compileResultLine(event: CompileResultEvent): string {
   const summary = event.summary;
   const name = path.basename(summary.test);
+  // A step that ran on a list read proving nothing is not one the run failed
+  // to reach: it is said in its own words, and left out of every count of
+  // steps not attempted.
+  const notReached = notReachedOf(summary);
+  const notCompiled = notCompiledNote(summary.unprovenReads ?? []);
+  const notCompiledTail = notCompiled === '' ? '' : ` ${notCompiled}`;
   // A run that ENDED as written is not a run that stopped (decisions 1–3): the step
   // did what its line says, so the sentence has to be the boxed compiler's — "ended
   // at step N as its text says" — and none of the stopped vocabulary, which sends
@@ -103,10 +160,11 @@ export function compileResultLine(event: CompileResultEvent): string {
   if (event.status === 'green' && wroteNothing) {
     return (
       `✓ Nothing to compile in ${name} — ` +
-      (summary.notAttempted.length > 0
-        ? `no step needed an entry (${summary.notAttempted.length} step(s) not attempted).`
+      (notReached.length > 0
+        ? `no step needed an entry (${notReached.length} step(s) not attempted).`
         : 'every step already has code-behind.') +
-      (ended ? ` The run ended at step ${ended.step} as its text says — ${ended.error}.` : '')
+      (ended ? ` The run ended at step ${ended.step} as its text says — ${ended.error}.` : '') +
+      notCompiledTail
     );
   }
   const nothingHappened = wroteNothing && !summary.stoppedAt && !ended;
@@ -131,8 +189,15 @@ export function compileResultLine(event: CompileResultEvent): string {
   }
   // "Every step already has code-behind" is only true when the run reached every
   // step. Stopped with nothing generated, it says the opposite of what happened.
+  // Nothing reached the proposal and nothing was owed, but the compile is
+  // partial: it says why (a step that could not be generated), not that every
+  // step already has code-behind.
+  const partialWhy = event.status === 'partial' ? summary.error?.trim() || undefined : undefined;
+  if (nothingHappened && summary.notAttempted.length === 0 && partialWhy !== undefined) {
+    return `◐ Compiled nothing in ${name}: ${asSentence(partialWhy)}${notCompiledTail}`;
+  }
   if (nothingHappened && summary.notAttempted.length === 0) {
-    return `✓ Nothing to compile in ${name} — every step already has code-behind.`;
+    return `✓ Nothing to compile in ${name} — every step already has code-behind.${notCompiledTail}`;
   }
   // After the stopped / ended wording, never instead of it, and never when it
   // would only repeat the step error that wording already quotes.
@@ -140,10 +205,16 @@ export function compileResultLine(event: CompileResultEvent): string {
     failedWhy !== undefined && failedWhy !== summary.stoppedAt?.error?.trim()
       ? ` ${asSentence(failedWhy)}`
       : '';
+  // Nothing compiled, and only because every step left had a list read that
+  // proved nothing: the run did not stop, and nothing failed.
+  if (nothingHappened && notReached.length === 0) {
+    return `◐ Compiled nothing in ${name}: ${notCompiled}${failedTail}`;
+  }
   if (nothingHappened) {
     return (
       `✗ Compiled nothing in ${name}: the run stopped before any step produced an entry ` +
-      `(${summary.notAttempted.length} step(s) not attempted).` +
+      `(${notReached.length} step(s) not attempted).` +
+      notCompiledTail +
       failedTail
     );
   }
@@ -155,9 +226,10 @@ export function compileResultLine(event: CompileResultEvent): string {
     return (
       `◐ Compiled nothing in ${name}: ended at step ${ended.step} as its text says — ` +
       `${ended.error}` +
-      (summary.notAttempted.length > 0
-        ? ` (${summary.notAttempted.length} step(s) not attempted).`
-        : '.')
+      (notReached.length > 0
+        ? ` (${notReached.length} step(s) not attempted).`
+        : '.') +
+      notCompiledTail
     );
   }
   const parts = [`${summary.compiled} step(s) as code (unproven — the next run proves them)`];
@@ -168,11 +240,11 @@ export function compileResultLine(event: CompileResultEvent): string {
   if (ended) {
     parts.push(`ended at step ${ended.step} as its text says — ${ended.error}`);
   }
-  if (summary.notAttempted.length > 0) {
-    parts.push(`${summary.notAttempted.length} step(s) not attempted`);
+  if (notReached.length > 0) {
+    parts.push(`${notReached.length} step(s) not attempted`);
   }
   const glyph = event.status === 'green' ? '✓' : event.status === 'partial' ? '◐' : '✗';
-  return `${glyph} Compiled ${name}: ${parts.join('; ')}.${failedTail}`;
+  return `${glyph} Compiled ${name}: ${parts.join('; ')}.${notCompiledTail}${failedTail}`;
 }
 
 /** `text` ending in terminal punctuation — the server's refusals mostly do, and

@@ -72,7 +72,8 @@ import {
   resolveEnvDataRef,
 } from '../parser/interpolate-env-data.js';
 import { bindVariable, clearDottedKeys, loadDataFile, placeholderRoot } from '../parser/parameters.js';
-import { evidenceRows, recordingDirFor, writeReplayFailure, type RecordedAction } from './recording.js';
+import { evidenceRank, evidenceRows, recordingDirFor, writeReplayFailure, type RecordedAction } from './recording.js';
+import { onFirstDataRow, unprovenListRead, type UnprovenListRead } from '../runner/list-read-review.js';
 import {
   inheritLoopBindings,
   isSecretParameterName,
@@ -176,6 +177,23 @@ export interface CompileSummary {
    *  them. They have no entry, and the next compile's default selection takes
    *  them. */
   notAttempted: number[];
+  /**
+   * The steps in {@link notAttempted} that ran, and passed, but ended on a list
+   * read that proves nothing about its selector — one that came back empty, or
+   * one the model never checked (src/runner/list-read-review.ts, issue #48) —
+   * each with the sentence the compile said about it.
+   *
+   * Named apart because nothing stopped, ended or skipped them: a reader that
+   * put them under "the run stopped at step 5" or "a return ended the flow
+   * before them" would say the wrong thing about a step that ran. Absent when
+   * there are none.
+   *
+   * `keptEntry` marks a step that has an entry of its own, left as it was. A
+   * working one (`--all`, or `--steps` naming it) is counted in {@link kept}
+   * and is not in {@link notAttempted}: nothing is owed. A broken one (stale)
+   * is in both lists' sense still owed, so it stays in {@link notAttempted}.
+   */
+  unprovenReads?: Array<{ step: number; reason: string; keptEntry?: boolean }> | undefined;
   /** Where the recording — and the candidate, and any replay failure — were
    *  written: the test's `.steptix-codebehind-cache/<name>.recording/`. */
   recordingDir: string;
@@ -369,6 +387,8 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   const parameters = resolvedParameters.values;
 
   const tokens = (): number => (options.tokenTracker?.total ?? 0) + runTokens;
+  /** {@link CompileSummary.unprovenReads}, once the recording has been read. */
+  let unprovenReads: NonNullable<CompileSummary['unprovenReads']> = [];
   const finish = (
     status: CompileStatus,
     summary: Partial<Omit<CompileSummary, 'test' | 'totalSteps' | 'tokensUsed' | 'rounds'>> &
@@ -393,6 +413,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         notAttempted: [],
         recordingDir: recordingDirFor(test.filePath),
         recoveredByValue,
+        ...(unprovenReads.length > 0 && { unprovenReads }),
         ...summary,
       },
     };
@@ -426,8 +447,10 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     );
   }
   const keptAiExisting = steps.filter((s) => s.isAiEntry).length;
-  const keptExistingFor = (sel: Selection): number =>
-    steps.filter((s) => s.hasEntry && !s.isAiEntry && s.key !== undefined && !sel.keys.has(s.key))
+  /** Entries left as they were: every one outside `sel`, but those in `owed`
+   *  — entries this compile still owes a step (a broken one it left alone). */
+  const keptExistingFor = (sel: Selection, owed: ReadonlySet<string> = new Set()): number =>
+    steps.filter((s) => s.hasEntry && !s.isAiEntry && s.key !== undefined && !sel.keys.has(s.key) && !owed.has(s.key))
       .length;
   let keptExisting = keptExistingFor(selection);
   emit({
@@ -681,6 +704,35 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   const recordLoops = loopEntries(recorded.rows, controls);
   const observationsFor = (member: number): RecordedObservation[] =>
     observationsOf(recordVisits, member, snapshots);
+  // One entry, several steps: the rows of a `### Section` table, or a section
+  // or skill called twice, bind one entry (`entryKeyOf`), and `selectSteps`
+  // stood the first of them in for all, before there was a recording to choose
+  // by. Its evidence is the best of theirs, ranked as `evidenceRows` ranks the
+  // passes of one index (`evidenceRank`): a row that read items beats one whose
+  // list came back empty, which proves nothing about the selector (issue #48),
+  // and a row that healed under AI beats one that ran clean as code, which has
+  // no transcript — generating from that wrote `ai: true` over a working entry.
+  // A tie keeps the first, as before. Only steps the recording ran to: one past
+  // where it stopped is not part of this compile. The live compiler gets the
+  // same answer by writing from whichever step of an entry proves it first.
+  selection = {
+    ...selection,
+    order: selection.order.map((first) => {
+      if (first.kind === 'condition') return first;
+      let best = first;
+      for (const s of steps) {
+        if (s.key !== first.key || s.kind === 'condition' || s.ineligible !== undefined) continue;
+        if (throughStep !== undefined && s.number > throughStep) continue;
+        const row = record.steps[s.index];
+        const held = record.steps[best.index];
+        if (row !== undefined && (held === undefined || evidenceRank(row) > evidenceRank(held))) best = s;
+      }
+      if (best !== first) {
+        stepEvent('select', best, `its entry, shared with step ${first.number}, takes its evidence from this step's run, which is better evidence`);
+      }
+      return best;
+    }),
+  };
   const stepKinds = selection.order.filter((s) => s.kind !== 'condition');
   const skippedInRecording = stepKinds.filter((s) => {
     const rows = recordedAt(s.index);
@@ -693,7 +745,60 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   const neverAsked = selection.order.filter(
     (s) => s.kind === 'condition' && observationsFor(s.index).length === 0,
   );
-  const noEvidence = new Set([...skippedInRecording, ...toleratedInRecording, ...neverAsked]);
+  // A step that ENDED on a list read proving nothing about its selector — one
+  // that came back empty, where every selector matches nothing, or one the
+  // model never saw (src/runner/list-read-review.ts, issue #48) — is no
+  // evidence on the same terms: dropped, named not attempted, and given no
+  // entry, so the next compile takes it again. Never `ai: true`, which every
+  // later compile would leave alone. The evidence row is already the first
+  // pass whose reads did prove something (`isEvidencePass`), so this is a step
+  // no pass of which did.
+  const unprovenInRecording = new Map<CompileStep, UnprovenListRead>();
+  /** A data-driven test records its first data row alone (`firstDataRow`). */
+  const dataDriven = test.dataRows !== undefined || test.frontmatter.dataFile !== undefined;
+  for (const s of stepKinds) {
+    const row = record.steps[s.index];
+    if (row === undefined || (row.status !== 'passed' && row.deliberate !== true)) continue;
+    const unproven = unprovenListRead(row);
+    if (unproven !== undefined) unprovenInRecording.set(s, dataDriven ? onFirstDataRow(unproven) : unproven);
+  }
+  unprovenReads = [...unprovenInRecording]
+    .map(([s, u]) => ({ step: s.number, reason: u.reason, ...(s.hasEntry && !s.isAiEntry && { keptEntry: true }) }))
+    .sort((a, b) => a.step - b.step);
+  /**
+   * The steps above whose existing entry is known to break: flagged stale, by
+   * an earlier run or by this Record. A stale step joins the selection to be
+   * written again, and leaves it here with its broken entry still in the file —
+   * which a strict replay then ran, failed on, and stopped at, proving none of
+   * the steps after it, and sending the author to recompile a step whose list
+   * reads the same way again. So the replay runs them under AI, in its own copy
+   * of the file only (`Candidate.materialise`). By key: every step that shares
+   * the entry runs it.
+   */
+  const underAiInReplay = new Map<string, { step: CompileStep; reason: string }>();
+  for (const [s, u] of unprovenInRecording) {
+    if (!s.hasEntry || s.isAiEntry || !recordStale.has(s.key!) || s.binding === undefined) continue;
+    // Only an entry the writer can find: one it cannot would be added beside
+    // the broken one, which the replay would still run.
+    const file = await candidate.read(s.binding.file);
+    if (file === null || entryTextIn(file, s.binding.source, s.binding.section, s.binding.occurrence) === undefined) continue;
+    underAiInReplay.set(s.key!, { step: s, reason: u.reason });
+  }
+  /**
+   * A step above with a working entry of its own — one `--all` or `--steps`
+   * took, not a stale one — keeps that entry, and is counted kept, as every
+   * entry left as it was is. Not also "not attempted", which says the next
+   * compile owes it an entry: it has one, and the next compile does not take
+   * it. A broken (stale) entry is still owed.
+   */
+  const keepsWorkingEntry = (s: CompileStep): boolean =>
+    unprovenInRecording.has(s) && s.hasEntry && !s.isAiEntry && !recordStale.has(s.key!);
+  const noEvidence = new Set([
+    ...skippedInRecording,
+    ...toleratedInRecording,
+    ...neverAsked,
+    ...unprovenInRecording.keys(),
+  ]);
   /** What the recording's skip cause is read off: each skipped step's first
    *  row, and a never-asked condition's own row — skipped too, by the same
    *  decision or return that skipped the structure it opens. */
@@ -708,24 +813,33 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     for (const step of neverAsked) {
       stepEvent('select', step, neverAskedReason(recordedAt(step.index)));
     }
+    for (const [step, unproven] of unprovenInRecording) {
+      stepEvent('select', step, unproven.reason);
+    }
     notAttempted = [
-      ...new Set([...notAttempted, ...[...noEvidence].map((s) => s.number)]),
+      ...new Set([...notAttempted, ...[...noEvidence].filter((s) => !keepsWorkingEntry(s)).map((s) => s.number)]),
     ].sort((a, b) => a - b);
     const attemptable = selection.order.filter((s) => !noEvidence.has(s));
     if (attemptable.length === 0) {
-      // Every selected step was behind the return, or failed and was tolerated:
-      // nothing to generate, and `partial` rather than `green`, which would say
-      // "already compiled" about work that has not started.
+      // Every selected step was behind the return, failed and was tolerated, or
+      // ended on a list read that proves nothing: nothing to generate, and
+      // `partial` rather than `green`, which would say "already compiled" about
+      // work that has not started.
       //
-      // A clause per cause, each over ITS OWN steps, because the two are opposite
-      // facts: a step behind a return never ran, a tolerated one ran and failed.
-      // Told in one list, an author sent to "run the test so they execute" over a
-      // step that DID execute looks for the wrong thing.
+      // A clause per cause, each over ITS OWN steps, because they are different
+      // facts: a step behind a return never ran, a tolerated one ran and failed,
+      // and one that read an empty list ran and passed. Told in one list, an
+      // author sent to "run the test so they execute" over a step that DID
+      // execute looks for the wrong thing.
       const toleratedNumbers = toleratedInRecording.map((s) => s.number);
+      const unproven = [...unprovenInRecording];
+      const emptyNumbers = unproven.filter(([, u]) => u.kind === 'empty').map(([s]) => s.number);
+      const uncheckedNumbers = unproven.filter(([, u]) => u.kind === 'unchecked').map(([s]) => s.number);
       // Everything else in `notAttempted`: the skipped rows, plus the post-prefix
       // steps of a recording that stopped — neither ran, so one sentence covers
       // both.
-      const didNotRun = notAttempted.filter((n) => !toleratedNumbers.includes(n));
+      const ranAndRefused = new Set([...toleratedNumbers, ...emptyNumbers, ...uncheckedNumbers]);
+      const didNotRun = notAttempted.filter((n) => !ranAndRefused.has(n));
       const cause = [
         didNotRun.length > 0
           ? `${listSteps(didNotRun)} did not run on the recording run` +
@@ -735,18 +849,41 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
           ? `${listSteps(toleratedNumbers)} failed on the recording run and was tolerated ` +
             '(otherwise continue)'
           : '',
+        emptyNumbers.length > 0
+          ? `${listSteps(emptyNumbers)} read an empty list on the recording run, which proves nothing about the selector`
+          : '',
+        uncheckedNumbers.length > 0
+          ? `${listSteps(uncheckedNumbers)} ended on a list read the model never checked`
+          : '',
       ]
         .filter((c) => c !== '')
         .join(', and ');
+      // What to do next: one cause's own sentence, or, with several, each one's
+      // steps and what they need — a step that read an empty list sent to "run
+      // the test so they execute" looks for the wrong thing.
+      const advice = ([
+        [didNotRun, 'Run the test so they execute, then compile again.', 'run the test so they execute'],
+        [toleratedNumbers, 'Make it pass, then compile again.', 'make it pass'],
+        dataDriven
+          ? [emptyNumbers, 'Put a data row whose list has items first, then compile again.', 'put a data row whose list has items first']
+          : [emptyNumbers, 'Compile again after a run where the list has items.', 'run it where the list has items'],
+        [uncheckedNumbers, 'Run it again, then compile again.', 'run it again'],
+      ] as Array<[number[], string, string]>).filter(([numbers]) => numbers.length > 0);
+      const each = advice.map(([numbers, , what]) => `${listSteps(numbers)}: ${what}`).join('; ');
       const next =
-        didNotRun.length > 0
-          ? 'Run the test so they execute, then compile again.'
-          : 'Make it pass, then compile again.';
+        advice.length === 1
+          ? advice[0]![1]
+          : `${each.charAt(0).toUpperCase()}${each.slice(1)}; then compile again.`;
       return finish(
         'partial',
         {
           compiled: 0,
-          kept: keptExisting,
+          // Counted as the main path counts it below: a step that keeps its
+          // working entry is kept.
+          kept: keptExistingFor({
+            ...selection,
+            keys: new Set(selection.order.filter((s) => !keepsWorkingEntry(s)).map((s) => s.key!)),
+          }),
           keptAi: keptAiExisting,
           written: [],
           notAttempted,
@@ -772,7 +909,12 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       order: attemptable,
       errors: [],
     };
-    keptExisting = keptExistingFor(selection);
+    // A broken entry left as it was is still owed (it is in `notAttempted`),
+    // so it is not also counted kept.
+    keptExisting = keptExistingFor(
+      selection,
+      new Set([...unprovenInRecording.keys()].filter((s) => s.hasEntry && !keepsWorkingEntry(s)).map((s) => s.key!)),
+    );
   }
 
   // ─── 3. Generate ──────────────────────────────────────────────────────────
@@ -798,6 +940,8 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   const keptAiConditions = new Set<string>();
   /** Steps this compile wrote off as `ai: true` after a replay failure. */
   const writtenOffAi: number[] = [];
+  /** The entries of {@link writtenOffAi}, which every inlining shares. */
+  const writtenOffKeys = new Set<string>();
   /**
    * Condition lines whose generation came back as an error — most often the
    * read-only rule (`conditionEntryComplaint`) refusing both answers.
@@ -928,7 +1072,25 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // that means something else on the next machine.
     if (result?.surface === 'computer') {
       stepEvent('generate', step, COMPUTER_MODE_STAYS_AI);
-      await candidate.apply(step, aiEntryFor(step.text, COMPUTER_MODE_STAYS_AI));
+      try {
+        await candidate.apply(step, aiEntryFor(step.text, COMPUTER_MODE_STAYS_AI));
+      } catch (err) {
+        // A file with no entry list to write into, as any generation that
+        // cannot be applied: the compile says so rather than throwing.
+        const message = (err as Error).message;
+        return finish(
+          'failed',
+          {
+            compiled: 0,
+            kept: keptExisting,
+            keptAi: keptAiExisting + declined,
+            written: [],
+            candidatePath: await candidate.persist(),
+            error: `generation failed for step ${step.number}: ${message}`,
+          },
+          `Generation failed at step ${step.number}: ${message}`,
+        );
+      }
       await candidate.persist();
       declined++;
       continue;
@@ -1047,10 +1209,20 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // compile wrote.
   const dropFromSelection = (numbers: readonly number[]): void => {
     if (numbers.length === 0) return;
-    const dropped = new Set(numbers);
-    const order = selection.order.filter((s) => !dropped.has(s.number));
+    // By entry: the step named may be any inlining of it, and the selection
+    // holds one — not always the first (the best evidence among them).
+    const dropped = new Set(numbers.map((n) => steps[n - 1]?.key).filter((k): k is string => k !== undefined));
+    const order = selection.order.filter((s) => !dropped.has(s.key!));
     selection = { keys: new Set(order.map((s) => s.key!)), order, errors: [] };
   };
+  /**
+   * The step the selection holds for `step`'s entry — the one its evidence
+   * came from — or `step` itself. A replay fails on whichever inlining it
+   * fails on; what that says about the entry is told under the step the
+   * entry was compiled from, and repaired from that step's evidence.
+   */
+  const ownerOf = (step: CompileStep): CompileStep =>
+    (step.key === undefined ? undefined : selection.order.find((s) => s.key === step.key)) ?? step;
   dropFromSelection([...conditionsNotCompiled, ...stepsNotCompiled].map((c) => c.number));
 
   // The candidate trail (stories/codebehind-recording-on-disk.md): what the
@@ -1211,6 +1383,8 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     loopWarnings = round.loopWarnings;
     const ended = round.rows.find((r) => deliberateFailure(r) && recordedDeliberate(r.index - 1));
     if (ended) endedInReplay = { step: ended.index };
+    /** Entries this round proved, apart from earlier rounds'. */
+    const provenThisRound = new Set<string>();
     for (const step of stepsInS()) {
       if (step.kind === 'condition') {
         // Proven when its code decided a visit cleanly and the decisions it made
@@ -1241,6 +1415,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         )
       ) {
         proven.add(step.key!);
+        provenThisRound.add(step.key!);
       }
       const tolerated = ran.find((r) => toleratedFailure(r));
       if (tolerated) {
@@ -1261,10 +1436,26 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         });
       }
     }
+    // An inlining a return kept from running is no gap when the recording
+    // skipped it too and another inlining of the same entry ran and proved it,
+    // in this round. One the recording ran is a replay that went another way:
+    // still a gap, and the only sign of it, since a return is not a guard.
+    unreached = unreached.filter((u) => {
+      const s = steps[u.step - 1];
+      if (s?.key === undefined) return true;
+      const recorded = recordedAt(s.index);
+      const recordingSkipped = recorded.length > 0 && recorded.every((r) => r.status === 'skipped');
+      return !(recordingSkipped && provenThisRound.has(s.key));
+    });
   };
   const replay = async (round: number): Promise<CompileRunOutcome> => {
     rounds = round;
-    const overrides = await candidate.materialise();
+    if (round === 1) {
+      for (const { step } of underAiInReplay.values()) {
+        stepEvent('replay', step, 'runs under AI: its entry broke on the recording run, and this compile wrote no new one');
+      }
+    }
+    const overrides = await candidate.materialise([...underAiInReplay.values()]);
     emit({
       kind: 'phase',
       phase: 'replay',
@@ -1356,6 +1547,24 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       return `step ${step.number} failed on the replay — ${failed.error}${capBodyNote(step, failed, controls)}`;
     }
     if (step.key !== undefined && selection.keys.has(step.key)) return undefined;
+    // A step whose list read proved nothing has no new entry for a reason
+    // recompiling it does not change (issue #48): say that reason.
+    const unproven = step.key === undefined
+      ? undefined
+      : [...unprovenInRecording].find(([s]) => s.key === step.key)?.[1];
+    if (unproven !== undefined && underAiInReplay.has(step.key!)) {
+      return (
+        `step ${step.number} failed on the replay under AI — ${failed.error} ` +
+        `(its entry broke on the recording run, and this compile wrote no new one: ${unproven.reason})`
+      );
+    }
+    if (unproven !== undefined && step.hasEntry && !step.isAiEntry) {
+      return (
+        `existing entry for step ${step.number} ` +
+        `${failed.mismatch ? 'answers differently from the recording' : 'fails'}, and this compile wrote no new one: ` +
+        unproven.reason
+      );
+    }
     if (step.ineligible !== undefined) {
       return `step ${step.number} failed on the replay — ${failed.error} (${step.ineligible})`;
     }
@@ -1395,7 +1604,8 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     await candidate.persist();
     proven.delete(step.key!);
     declined++;
-    writtenOffAi.push(step.number);
+    writtenOffAi.push(ownerOf(step).number);
+    writtenOffKeys.add(step.key!);
   };
   /**
    * An entry written from the recording that failed a strict replay
@@ -1414,7 +1624,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // The summary adds "It stays AI; compile again to retry" — and a compile's
     // own AI run is the live run this entry is written again from.
     const message = `its code, written from the recording, failed on the replay (${error})`;
-    stepsNotCompiled.push({ number: step.number, message });
+    stepsNotCompiled.push({ number: ownerOf(step).number, message });
     dropFromSelection([step.number]);
     stepEvent('replay', step, `not compiled — ${message}`);
     return true;
@@ -1525,6 +1735,12 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     );
     for (const secret of failedSnapshots.recovered) recoveredSecrets.add(secret);
     const failedValues = failedSnapshots.at(failed.result);
+    // The entry was compiled from its owner's run — which, for an entry several
+    // steps share, may not be the step that failed (a row whose list came back
+    // empty proves nothing, and its read is not the entry's). Its actions are
+    // what the repair is held to (§6.2); what it must capture is still what
+    // the failing pass captured, on the page it failed on.
+    const evidenceRow = record.steps[ownerOf(failed.step).index];
     const repaired =
       failed.step.kind === 'condition'
         ? await repairCondition(failed.step, failed)
@@ -1550,11 +1766,11 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
                 failed.result,
                 runRows(outcome).passes[failed.step.index] ?? [],
                 recordedAt(failed.step.index),
-                record.steps[failed.step.index],
+                evidenceRow,
               ),
               // The recording's evidence pass: what the entry was generated
               // from, and what the repair is checked against (§6.2).
-              actions: actionsOf(record.steps[failed.step.index]),
+              actions: actionsOf(evidenceRow),
             },
           );
     proven.delete(failed.step.key!);
@@ -1585,7 +1801,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       // worded entry would slide into its slot), it is written off as before.
       if (await candidate.retract(failed.step)) {
         await candidate.persist();
-        stepsNotCompiled.push({ number: failed.step.number, message: applied.message });
+        stepsNotCompiled.push({ number: ownerOf(failed.step).number, message: applied.message });
         dropFromSelection([failed.step.number]);
         stepEvent(
           'repair',
@@ -1691,8 +1907,28 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // ─── 6. Write ─────────────────────────────────────────────────────────────
   const compiled = selection.order.length - declined;
   const unproven = selection.order
-    .filter((s) => !proven.has(s.key!) && !writtenOffAi.includes(s.number))
+    .filter((s) => !proven.has(s.key!) && !writtenOffKeys.has(s.key!))
     .map((s) => s.number);
+  // The steps that ran and passed on a list read proving nothing (issue #48)
+  // are a cause of their own, said in a clause of their own: never folded into
+  // the stop, the end or the skips the rest of `notAttempted` is named by.
+  const unprovenSteps = new Set(unprovenReads.map((u) => u.step));
+  const otherNotAttempted = notAttempted.filter((n) => !unprovenSteps.has(n));
+  const unprovenOfKind = (kind: UnprovenListRead['kind']): number[] =>
+    [...unprovenInRecording].filter(([, u]) => u.kind === kind).map(([s]) => s.number);
+  /** The summary's clauses for one kind: the steps still owed an entry, and
+   *  the ones that keep a working entry of their own. */
+  const unprovenClauses = (kind: UnprovenListRead['kind'], why: string): string[] => {
+    const numbers = unprovenOfKind(kind);
+    const owed = numbers.filter((n) => notAttempted.includes(n));
+    const keeping = numbers.filter((n) => !notAttempted.includes(n));
+    return [
+      owed.length > 0 ? `${listSteps(owed)} not attempted (${why})` : '',
+      keeping.length > 0
+        ? `${listSteps(keeping)} not compiled again, ${keeping.length === 1 ? 'its' : 'their'} entry left as it was (${why})`
+        : '',
+    ];
+  };
   // A replay that returned proved only the steps it reached
   // (stories/step-flow-control.md, decision 12). Those entries are still
   // proposed — they are unproven, which the next run settles — but the compile
@@ -1718,7 +1954,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   if (endedAsWritten !== undefined && failure === undefined) {
     failure =
       `${endedAsWrittenReason('run', endedAsWritten.step)} (${clipLine(endedAsWritten.line)})` +
-      (notAttempted.length > 0 ? `; not attempted: ${listSteps(notAttempted)}` : '');
+      (otherNotAttempted.length > 0 ? `; not attempted: ${listSteps(otherNotAttempted)}` : '');
   }
   // Green means the whole test replayed as code. A prefix compile that went
   // green only proved the prefix; the rest of the test is still to do — and so
@@ -1740,6 +1976,10 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     && notAttempted.length === 0
     && conditionsNotCompiled.length === 0
     && stepsNotCompiled.length === 0
+    // A step left without a new entry because its list read proved nothing,
+    // even one that keeps a working entry of its own: not all of what was
+    // asked for was compiled.
+    && unprovenReads.length === 0
       ? 'green'
       : 'partial';
   const keptAi = keptAiExisting + declined;
@@ -1791,10 +2031,13 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // run, and "a return skipped them" over it is simply false — the same
     // correction `notRunOnRecordingReason` and the "Nothing to compile"
     // refusal already carry (stories/step-flow-control.md, decision 12).
-    notAttempted.length > 0 && !stoppedAt
-      ? `${listSteps(notAttempted)} not attempted on the recording run` +
+    otherNotAttempted.length > 0 && !stoppedAt
+      ? `${listSteps(otherNotAttempted)} not attempted on the recording run` +
         (notAttemptedCause === undefined ? '' : ` (${notAttemptedCause})`)
       : '',
+    // Said whether or not the recording stopped: they ran before it did.
+    ...unprovenClauses('empty', 'an empty list read on the recording run proves nothing about the selector'),
+    ...unprovenClauses('unchecked', 'the model never checked a list read on the recording run'),
     // The compliance signal, in front of whoever ran the compile rather than
     // only in the summary object (stories/placeholder-preserving-actions.md §6).
     recoveredByValue.length > 0
@@ -1842,7 +2085,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     return finish(
       status,
       { compiled, kept: keptExisting, keptAi, written: [], ...extras },
-      green ? 'Compiled (dry run) — nothing written.' : `${headline} Dry run — nothing written.`,
+      status === 'green' ? 'Compiled (dry run) — nothing written.' : `${headline} Dry run — nothing written.`,
     );
   }
 
@@ -1874,7 +2117,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     test.filePath,
     steps
       .filter(
-        (s) => s.key && selection.keys.has(s.key) && (proven.has(s.key) || writtenOffAi.includes(s.number)),
+        (s) => s.key && selection.keys.has(s.key) && (proven.has(s.key) || writtenOffKeys.has(s.key)),
       )
       .map((s) => s.number),
   );
@@ -3131,6 +3374,9 @@ function recordedCapturesAt(
 ): Record<string, string> | undefined {
   const at = failedRow !== undefined ? replayRows.indexOf(failedRow) : -1;
   const samePass = at >= 0 ? recordedRows[at] : undefined;
+  // The failing pass's own captures, even an empty list: they are what the
+  // recording saw on the page the replay failed on. Which selector reads them
+  // is the evidence row's business (the repair's `actions`), never this.
   return (
     recordedCapturesOf(step.binding, samePass?.outputs)
     ?? recordedCapturesOf(step.binding, evidenceRow?.outputs)

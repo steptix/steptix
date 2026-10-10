@@ -98,6 +98,43 @@ export interface SubActionResult {
    * ordinary run, and when the action started none.
    */
   requests?: ObservedRequest[];
+  /**
+   * A list read that came back empty or held more than one kind of element,
+   * which the step showed the model before it could end on it
+   * (src/runner/list-read-review.ts). `kind` says which; `text` is what the
+   * model was shown. `outcome`: `pending` until the model answers, then
+   * `kept` — it took no new read, or read the same way again — or `replaced`
+   * by a later read of the same name. `unseen` when the step ended on it
+   * without showing it (`unseenBecause` says why). `pending` stays when the
+   * model never answered — its attempt ended first, the turn that showed it
+   * the read ended without a keep or a read again, or the answer that read it
+   * again was discarded (`discarded`). The compile uses none of them except a
+   * `mixed` read the model kept (`unprovenListRead`). Absent on every other
+   * sub-action.
+   */
+  listReview?: {
+    kind: 'empty' | 'mixed';
+    text: string;
+    outcome: 'pending' | 'kept' | 'replaced' | 'unseen';
+    /** The read was put in front of the model in a turn's prompt. Absent when
+     *  it never was: replaced in the turn that read it, or that turn failed. */
+    shown?: true;
+    /**
+     * Why an `unseen` read was never shown: no turn was left, an action after
+     * it in the same turn may have changed the page it read, the step returned
+     * in that turn, or it changed each time the model read it again the same
+     * way.
+     */
+    unseenBecause?: 'no-turn-left' | 'page-changed' | 'returned' | 'kept-changing';
+  };
+  /**
+   * This read was part of an answer to a turn added only to ask about the
+   * step's lists, and a read again later in that same answer failed: the step
+   * ended where it stood, the values the answer stored were put back
+   * (src/runner/step-executor.ts), and this read stands for nothing — it
+   * replaces no earlier read, and the compile never uses it.
+   */
+  discarded?: true;
   /** Page URL at the time the screenshot was captured */
   pageUrl?: string;
   /**

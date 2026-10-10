@@ -941,7 +941,14 @@ something the sections above leave open, or departed from them.
 - **The evidence pass is the first with a transcript** (`evidenceRows` /
   `isEvidencePass`, review round 1). It passed (or failed as its text says)
   AND it ran under AI — a clean code run has no turns, and is no evidence —
-  or its entry threw first and it healed (`codeBehindStale`). A body entry
+  or its entry threw first and it healed (`codeBehindStale`). Since
+  steptix/steptix#48 it must also not have ended on a list read that came
+  back empty or that the model never saw (`unprovenListRead`), which proves
+  nothing about its selector; a body whose every pass did is not attempted.
+  The boxed compile ranks the steps that share one entry — the rows of a
+  `### Section` table — the same way, and compiles from the best of them
+  (`evidenceRank`), as compile-as-you-go does by writing from the first step
+  that proves it. A body entry
   that ran as code on pass 1 and healed on pass 2 joins the compile as stale;
   generating from pass 1 said *"the recorded run performed no page actions"*
   and wrote `ai: true` over a working entry, with a green replay under AI. The

@@ -655,6 +655,14 @@ export interface CompileSummary {
   endedAsWritten?: { step: number; error: string; line: string };
   /** Selected steps the prefix never reached; nothing was generated for them. */
   notAttempted: number[];
+  /**
+   * Steps that ran, and passed, but ended on a list read that proves nothing
+   * about its selector — one that came back empty, or one the model never
+   * checked (issue #48) — with the sentence the compile said about each. A
+   * step with no entry is also in `notAttempted`; `keptEntry` marks one that
+   * keeps an entry of its own, left as it was. Absent from older servers.
+   */
+  unprovenReads?: Array<{ step: number; reason: string; keptEntry?: boolean }>;
   /** Where the recording, the candidate and any replay failure were written —
    *  the test's `.steptix-codebehind-cache/<name>.recording/`
    *  (stories/codebehind-recording-on-disk.md). */

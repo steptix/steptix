@@ -31,7 +31,7 @@ import {
   runLogTallyLine,
   stepsSummaryText,
 } from '../src/extension/steps-summary-core.ts';
-import { compileResultLine, partialNotes } from '../src/extension/compile-summary-core.ts';
+import { compileResultLine, emptyProposalMessage, partialNotes } from '../src/extension/compile-summary-core.ts';
 
 const CB = { file: '/p/tests/booking.steps.ts', error: 'locator resolved to 2 elements' };
 const WARNING = 'No peanuts on the dashboard';
@@ -295,6 +295,81 @@ test('a compile that produced nothing because the run ended says so without a �
   // Not the other nothing-came-of-it line ("the run stopped before any step produced
   // an entry"), which is false about this run.
   assert.doesNotMatch(line, /the run stopped/);
+});
+
+/** What the compile says of a step whose list read came back empty (issue #48). */
+const NOT_PROVEN =
+  "{{accounts}} came back empty on the recording run, and a read that finds nothing proves nothing about its selector";
+
+test("a compile whose only uncompiled step read a list proving nothing says so, and not that the run stopped", () => {
+  // The run went to the end and passed: the step ran, and its read was not
+  // good enough to make code from.
+  const line = resultLine("partial", {
+    compiled: 0,
+    keptAi: 0,
+    notAttempted: [3],
+    unprovenReads: [{ step: 3, reason: NOT_PROVEN }],
+  });
+  assert.equal(line, `◐ Compiled nothing in failure-outcomes-live.md: Step 3 not compiled — ${NOT_PROVEN}.`);
+  assert.doesNotMatch(line, /the run stopped/);
+});
+
+test("a step whose list read proved nothing is not counted among the steps a stop or an end kept from running", () => {
+  // Fixing the stop, or a run that goes past the end, does nothing for it.
+  const stopped = notesFor({
+    stoppedAt: { step: 5, error: "boom" },
+    notAttempted: [3, 5, 6],
+    unprovenReads: [{ step: 3, reason: NOT_PROVEN }],
+  });
+  assert.match(stopped, /Steps 5–6 not attempted\. Fix it, run, and compile again for the rest\./);
+  assert.match(stopped, /Step 3 not compiled — \{\{accounts\}\} came back empty/);
+  assert.doesNotMatch(stopped, /Steps 3, 5/);
+
+  const ended = notesFor({
+    endedAsWritten: ENDED,
+    notAttempted: [3, 10],
+    unprovenReads: [{ step: 3, reason: NOT_PROVEN }],
+  });
+  assert.match(ended, /Step 10 not attempted — a run that does not end there compiles the rest\./);
+  assert.match(ended, /Step 3 not compiled — /);
+
+  const line = resultLine("partial", {
+    compiled: 2,
+    stoppedAt: { step: 9, error: "boom" },
+    notAttempted: [3, 9],
+    unprovenReads: [{ step: 3, reason: NOT_PROVEN }],
+  });
+  assert.match(line, /1 step\(s\) not attempted/);
+  assert.match(line, /Step 3 not compiled — /);
+});
+
+test("a partial compile that wrote nothing because generation failed says so", () => {
+  // It said every step already had code-behind.
+  const line = resultLine("partial", {
+    compiled: 0,
+    keptAi: 0,
+    error: "1 step(s) could not be generated; they stay AI",
+  });
+  assert.equal(line, "◐ Compiled nothing in failure-outcomes-live.md: 1 step(s) could not be generated; they stay AI.");
+});
+
+test("a Run & Compile with nothing to propose says why when the compile was partial", () => {
+  // It said every step already had code-behind, beside a log line that said
+  // step 3 was not compiled.
+  const partial = compileSummary({ compiled: 0, keptAi: 0, notAttempted: [3], unprovenReads: [{ step: 3, reason: NOT_PROVEN }] });
+  assert.equal(
+    emptyProposalMessage("accounts.md", "partial", partial),
+    `◐ Compiled nothing in failure-outcomes-live.md: Step 3 not compiled — ${NOT_PROVEN}.`,
+  );
+  assert.equal(
+    emptyProposalMessage("accounts.md", "green", compileSummary({ compiled: 0 })),
+    "Nothing to compile in accounts.md — every step already has code-behind.",
+  );
+});
+
+test("a step whose list read proved nothing and that keeps its own entry says the entry is left as it was", () => {
+  const line = resultLine("green", { compiled: 1, unprovenReads: [{ step: 3, reason: NOT_PROVEN, keptEntry: true }] });
+  assert.match(line, /Step 3 not compiled — .*selector\. Its entry is left as it was\.$/);
 });
 
 test('never says "Compiled nothing" over a GREEN compile', () => {

@@ -7,6 +7,7 @@ import { getAllAiInteractions, isHealedStep } from './types.js';
 import { stepAnchor } from './anchors.js';
 import { getReportTemplate } from './template.js';
 import { toDataUri } from '../browser/screenshot.js';
+import { uncheckedListRead } from '../runner/list-read-review.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -665,6 +666,15 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     : step.status.toUpperCase();
   const duration = formatDuration(step.durationMs);
   const retryBadge = step.retried ? '<span class="badge badge-skip">Retried</span>' : '';
+  // A step that passed on a list read the model never saw, empty or mixed —
+  // it ended with no turn left to show it (src/runner/list-read-review.ts).
+  // Said on the step, not only under the read, because the step body is folded.
+  const unchecked = step.status === 'passed' ? uncheckedListRead(step) : undefined;
+  const listBadge = unchecked !== undefined
+    ? `<span class="badge badge-skip" title="${escapeHtml(
+      `The step ended on its read of {{${unchecked}}} without the model checking what it matched. It is kept as read, and not compiled.`,
+    )}">⚠ list not checked</span>`
+    : '';
 
   // Render turns chronologically
   const hasMultipleAttempts = new Set(step.turns.map((t) => t.attemptNumber)).size > 1;
@@ -854,6 +864,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     ${originBadge}
     ${tabBadge}
     ${retryBadge}
+    ${listBadge}
     <span class="step-duration">${duration}</span>
     <span class="badge ${statusClass}">${statusIcon} ${statusLabel}</span>
     <span class="step-chevron">▼</span>
@@ -1256,12 +1267,23 @@ function renderSubAction(
       ? `<div class="sub-action-detail">dragged: ${escapeHtml(sub.action.selector ?? '?')} → onto: `
         + `${escapeHtml(sub.action.target ?? '?')}</div>`
       : '';
+  // A list read that came back empty or mixed, and what the model made of it
+  // (src/runner/list-read-review.ts): without it a read that stored nothing
+  // looks like any other read that worked.
+  const listReviewHtml = sub.discarded === true
+    ? `<div class="sub-action-detail">${escapeHtml(
+      'list read discarded: a read again later in the same answer failed, so the step ended where it stood'
+        + (sub.listReview !== undefined ? ` — ${sub.listReview.text}` : ''),
+    )}</div>`
+    : sub.listReview !== undefined
+      ? `<div class="sub-action-detail">${escapeHtml(describeListReview(sub.listReview))}</div>`
+      : '';
   const onComputerTurn = opts.turnShot !== undefined;
   const ownShot = onComputerTurn && sub.screenshotBase64 === opts.turnShot
     ? undefined
     : sub.screenshotBase64;
   const hasBody = ownShot || sub.domSnapshot || sub.aiReasoning || sub.error || sub.apiCallData
-    || uploadHtml !== '' || mappingHtml !== '' || dragHtml !== '';
+    || uploadHtml !== '' || mappingHtml !== '' || dragHtml !== '' || listReviewHtml !== '';
 
   const subUrlHtml = sub.pageUrl ? `<div class="screenshot-url">${escapeHtml(sub.pageUrl)}</div>` : '';
   const screenshotHtml = onComputerTurn && !ownShot
@@ -1307,9 +1329,33 @@ function renderSubAction(
     <span class="sub-action-desc">${escapeHtml(description)}</span>
     ${timeLabel}
   </div>
-  ${hasBody ? `<div class="sub-action-body">${uploadHtml}${dragHtml}${mappingHtml}${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
+  ${hasBody ? `<div class="sub-action-body">${uploadHtml}${dragHtml}${mappingHtml}${listReviewHtml}${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
 </div>`;
 }
+
+/** A reviewed list read's line: what happened to it, then what it matched. */
+function describeListReview(review: NonNullable<SubActionResult['listReview']>): string {
+  const how = review.outcome === 'kept'
+    ? 'shown to the model, which kept it'
+    : review.outcome === 'replaced'
+      ? review.shown === true
+        ? 'shown to the model, which replaced it with a later read'
+        : 'replaced by a later read before the model was shown it'
+      : review.outcome === 'unseen'
+        ? `never shown to the model: ${UNSEEN_BECAUSE[review.unseenBecause ?? 'no-turn-left']}`
+        : review.shown === true
+          ? 'shown to the model, which did not answer it'
+          : 'never shown to the model: its attempt ended before it could be';
+  return `list read ${how} — ${review.text}`;
+}
+
+/** Why a list read the step ended on was never shown to the model. */
+const UNSEEN_BECAUSE: Record<NonNullable<NonNullable<SubActionResult['listReview']>['unseenBecause']>, string> = {
+  'no-turn-left': 'the step ended on it with no turn left',
+  'page-changed': 'an action after it in the same turn may have changed the page it read',
+  returned: 'the step returned in the same turn',
+  'kept-changing': 'it changed each time the model read it again the same way',
+};
 
 /**
  * The `mapping` a `readTable` carries, in one line.

@@ -734,6 +734,28 @@ export interface ExecuteActionOptions {
   settleMatches?: { quietMs: number; timeoutMs: number } | undefined;
 }
 
+/** The elements of one kind a list read or count matched ({@link ListMatches}). */
+export interface MatchGroup {
+  /** Tag name plus the class names without a digit, sorted: `li.row`. */
+  kind: string;
+  /** How many matched elements are of this kind. */
+  count: number;
+  /**
+   * The first few values a read STORED from them — after its pattern, so
+   * fewer than \`count\`, or none. Never text the run did not store: a count
+   * stores a number and has none.
+   */
+  samples: string[];
+}
+
+/** What a read of every match, or a count, matched. */
+export interface ListMatches {
+  /** One per kind, in the order first met. Empty when nothing matched. */
+  groups: MatchGroup[];
+  /** A count only: matches it left out because they are not visible. */
+  hidden?: number;
+}
+
 /** Result of executing a single Playwright action */
 export interface ActionExecutionResult {
   success: boolean;
@@ -767,6 +789,15 @@ export interface ActionExecutionResult {
   /** The kinds of element a `read` or `count` matched, when the caller asked
    *  for them ({@link ExecuteActionOptions.kinds}). */
   kinds?: string[];
+  /**
+   * What a read of every match, or a count, matched — kind by kind, with the
+   * first few values of each — so the step loop can show the model a list
+   * that came back empty or mixed before the step ends on it
+   * (src/runner/list-read-review.ts). Collected on every run: a read of every
+   * match gets it from the same page call that reads the values. Absent
+   * whenever the page could not say.
+   */
+  listMatches?: ListMatches;
   /**
    * Do not retry this failure, and do not treat it as a broken plan: the
    * action was never attempted because the file it names is missing, is a
@@ -1105,7 +1136,10 @@ export async function executeAction(
           // no `resolvedSelector` because there is no single element.
           if (options?.settleMatches) await settleMatchCount(root, requireSelector(eff), options.settleMatches, signal);
           const list = await executeReadMultiple(root, eff);
-          const kinds = wantKinds ? await matchedKinds(root, requireSelector(eff)) : undefined;
+          // The kinds come from the same page call as the values, so they are
+          // the kinds of exactly the elements read — what `matchedKinds`
+          // would answer, one round trip sooner.
+          const kinds = wantKinds ? list.listMatches.groups.map((g) => g.kind) : undefined;
           return {
             success: true,
             capturedValues: list.values,
@@ -1117,6 +1151,7 @@ export async function executeAction(
               },
             }),
             ...(kinds !== undefined && { kinds }),
+            listMatches: list.listMatches,
           };
         }
         const captured = await executeRead(root, eff, remainingMs);
@@ -1161,11 +1196,24 @@ export async function executeAction(
         // Also plural, and its count IS its result — free, and never gated.
         if (options?.settleMatches) await settleMatchCount(root, requireSelector(eff), options.settleMatches, signal);
         const counted = await executeCount(root, eff);
-        const total = Number(counted);
-        const kinds = wantKinds ? await matchedKinds(root, requireSelector(eff)) : undefined;
+        const total = Number(counted.value);
+        // What the count counted — the visible matches unless it was asked for
+        // hidden ones too — kind by kind, for a count shown to the model
+        // (src/runner/list-read-review.ts). Looked at only when it found
+        // something: a count of 0 is empty whatever the elements are, and says
+        // only how many were hidden, so it costs the page no further call.
+        const groups = total > 0 ? await describeMatches(counted.counted) : [];
+        // Every element the selector matches, for a compile's self-check: the
+        // look just taken when the count counted all of them.
+        const kinds = !wantKinds
+          ? undefined
+          : counted.total === total && groups !== undefined
+            ? groups.map((g) => g.kind)
+            : await matchedKinds(root, requireSelector(eff));
+        const hidden = counted.total - total;
         return {
           success: true,
-          capturedValue: counted,
+          capturedValue: counted.value,
           ...(wantMeasure && Number.isFinite(total) && {
             targeting: {
               matchCount: total,
@@ -1174,6 +1222,9 @@ export async function executeAction(
             },
           }),
           ...(kinds !== undefined && { kinds }),
+          ...(groups !== undefined && {
+            listMatches: { groups, ...(Number.isFinite(hidden) && hidden > 0 && { hidden }) },
+          }),
         };
       }
 
@@ -3321,8 +3372,14 @@ function requireSelector(action: AIAction): string {
 /**
  * Count the number of elements matching a CSS selector.
  * Stores the result as a string (e.g. "3") in resolvedParameters[action.as].
+ *
+ * Returns the elements it counted beside the number, and how many matched in
+ * all, so the caller can say what a count of 0 left out.
  */
-async function executeCount(root: Page | FrameLocator, action: AIAction): Promise<string> {
+async function executeCount(
+  root: Page | FrameLocator,
+  action: AIAction,
+): Promise<{ value: string; counted: Locator; total: number }> {
   const selector = requireSelector(action);
   logger.subAction(`count ${selector} → ${action.as ?? '(unnamed)'}`);
   // VISIBLE matches, unless the step asked for hidden ones too
@@ -3333,21 +3390,26 @@ async function executeCount(root: Page | FrameLocator, action: AIAction): Promis
   const matches = root.locator(selector);
   const total = await matches.count();
   let count = total;
+  let counted = matches;
   if (!action.includeHidden && total > 0) {
-    const visible = await matches.locator('visible=true').count();
+    const visibleMatches = matches.locator('visible=true');
+    const visible = await visibleMatches.count();
     const onlyOptions = visible === 0
       && await matches.evaluateAll(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (els: any[]) => els.every((el) => el.tagName === 'OPTION' || el.tagName === 'OPTGROUP'),
       ).catch(() => false);
-    if (!onlyOptions) count = visible;
+    if (!onlyOptions) {
+      count = visible;
+      counted = visibleMatches;
+    }
   }
   const result = String(count);
   logger.info(
     `count: ${count} ${action.includeHidden ? '' : 'visible '}elements matching "${selector}"`
       + `${count !== total ? ` (${total} including hidden)` : ''} → variable "${action.as ?? '(unnamed)'}"`,
   );
-  return result;
+  return { value: result, counted, total };
 }
 
 /**
@@ -3528,7 +3590,7 @@ async function executeRead(
 async function executeReadMultiple(
   root: Page | FrameLocator,
   action: AIAction,
-): Promise<{ values: string[]; matchCount: number }> {
+): Promise<{ values: string[]; matchCount: number; listMatches: ListMatches }> {
   const selector = requireSelector(action);
   const attribute = action.attribute;
   const target = attribute ? `@${attribute}` : 'text';
@@ -3539,13 +3601,15 @@ async function executeReadMultiple(
   // the evaluateAll callback because Playwright cannot serialise references
   // to closures in Node scope. Keeping this in lockstep with
   // `extractValueInPage` is enforced by the tests in read-multiple.test.ts.
-  const values: string[] = await root.locator(selector).evaluateAll(
+  //
+  // Each element's kind rides back beside its value, named as `describeMatches`
+  // names it, so what the read matched costs no second round trip.
+  const read: Array<[string, string]> = await root.locator(selector).evaluateAll(
     (els, args) => {
       const { attribute, max } = args as { attribute?: string; max: number };
       const slice = els.slice(0, max);
-      return slice.map((el) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const e = el as any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const valueOf = (e: any): string => {
         if (attribute) {
           if (attribute === 'url') {
             const own = typeof e.getAttribute === 'function' ? e.getAttribute('url') : null;
@@ -3571,10 +3635,19 @@ async function executeReadMultiple(
           return (copy.textContent ?? '').trim();
         }
         return (e.textContent ?? '').trim();
+      };
+      return slice.map((el): [string, string] => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const e = el as any;
+        const classes = (Array.from(e.classList ?? []) as string[])
+          .filter((c) => !/\d/.test(c))
+          .sort();
+        return [valueOf(e), [String(e.tagName ?? '').toLowerCase(), ...classes].join('.')];
       });
     },
     { attribute, max: READ_MULTIPLE_MAX },
   );
+  const values = read.map(([value]) => value);
 
   // We capped inside the page. To tell the author whether anything was
   // truncated, do one cheap follow-up count() — only when the result hit
@@ -3596,11 +3669,14 @@ async function executeReadMultiple(
   // on empty, here one empty among many is a legitimate list item. An invalid
   // pattern still fails the step via compileReadPattern.
   let result = values;
+  /** What the read stored, beside each value's kind. */
+  let stored = read;
   if (action.pattern) {
     const re = compileReadPattern(action.pattern);
-    result = values
-      .map((v) => sliceWithReadPattern(re, v))
-      .filter((v): v is string => v !== null);
+    stored = read
+      .map(([v, kind]): [string | null, string] => [sliceWithReadPattern(re, v), kind])
+      .filter((pair): pair is [string, string] => pair[0] !== null);
+    result = stored.map(([v]) => v);
     logger.info(
       `read[multiple] pattern /${action.pattern}/ sliced ${result.length} of ${values.length} captured value${values.length === 1 ? '' : 's'}`,
     );
@@ -3609,7 +3685,12 @@ async function executeReadMultiple(
   logger.info(
     `read[multiple] captured: ${result.length} value${result.length === 1 ? '' : 's'} → variable "${action.as ?? '(unnamed)'}"`,
   );
-  return { values: result, matchCount };
+  // Kinds and counts from every match, before any pattern: a pattern that kept
+  // nothing still leaves what the selector matched to show, and a compiled
+  // read's `kinds` are every kind it matches. The values quoted are only the
+  // ones the read stored — never text the pattern dropped, such as the value
+  // of a password field among the inputs a read matched.
+  return { values: result, matchCount, listMatches: { groups: groupByKind(read, stored) } };
 }
 
 /**
@@ -3627,26 +3708,65 @@ async function matchedKinds(
   selector: string,
   limit = READ_MULTIPLE_MAX,
 ): Promise<string[] | undefined> {
+  return (await describeMatches(root.locator(selector), limit))?.map((g) => g.kind);
+}
+
+/**
+ * What `matches` holds, kind by kind — {@link matchedKinds}'s kinds, each with
+ * how many elements are of it and the trimmed text of the first few. At most
+ * {@link READ_MULTIPLE_MAX} elements looked at, or `limit`. Undefined when
+ * the page cannot say.
+ *
+ * `executeReadMultiple` names kinds the same way inside its own page call;
+ * tests/list-read-review.test.ts holds the two to the same answer.
+ */
+async function describeMatches(
+  matches: Locator,
+  limit = READ_MULTIPLE_MAX,
+): Promise<MatchGroup[] | undefined> {
   try {
-    return await root.locator(selector).evaluateAll(
-      (els, max) => {
-        const seen: string[] = [];
-        for (const el of els.slice(0, max as number)) {
+    const kinds: string[] = await matches.evaluateAll(
+      (els, max) =>
+        els.slice(0, max as number).map((el) => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const e = el as any;
           const classes = (Array.from(e.classList ?? []) as string[])
             .filter((c) => !/\d/.test(c))
             .sort();
-          const kind = [String(e.tagName ?? '').toLowerCase(), ...classes].join('.');
-          if (!seen.includes(kind)) seen.push(kind);
-        }
-        return seen;
-      },
+          return [String(e.tagName ?? '').toLowerCase(), ...classes].join('.');
+        }),
       limit,
     );
+    // No values: a count stores a number, so any text it quoted would be page
+    // text the run never held — a hidden cell, an inline script.
+    return groupByKind(kinds.map((kind): [string, string] => ['', kind]), []);
   } catch {
     return undefined;
   }
+}
+
+/** How many values of each kind {@link MatchGroup.samples} keeps. */
+const MATCH_SAMPLES = 3;
+
+/**
+ * `[value, kind]` pairs as one group per kind, in the order first met, each
+ * sampled from `sampled` — the values the read stored, which may be fewer.
+ */
+function groupByKind(pairs: Array<[string, string]>, sampled: Array<[string, string]> = pairs): MatchGroup[] {
+  const groups = new Map<string, MatchGroup>();
+  for (const [, kind] of pairs) {
+    let group = groups.get(kind);
+    if (group === undefined) {
+      group = { kind, count: 0, samples: [] };
+      groups.set(kind, group);
+    }
+    group.count++;
+  }
+  for (const [value, kind] of sampled) {
+    const group = groups.get(kind);
+    if (group !== undefined && group.samples.length < MATCH_SAMPLES) group.samples.push(value);
+  }
+  return [...groups.values()];
 }
 
 /**
