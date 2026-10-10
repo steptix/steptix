@@ -1197,10 +1197,19 @@ export async function executeAction(
         if (options?.settleMatches) await settleMatchCount(root, requireSelector(eff), options.settleMatches, signal);
         const counted = await executeCount(root, eff);
         const total = Number(counted.value);
-        const kinds = wantKinds ? await matchedKinds(root, requireSelector(eff)) : undefined;
-        // The elements the count counted, so the visible ones unless it was
-        // asked for hidden ones too.
-        const groups = await describeMatches(counted.counted);
+        // What the count counted — the visible matches unless it was asked for
+        // hidden ones too — kind by kind, for a count shown to the model
+        // (src/runner/list-read-review.ts). Looked at only when it found
+        // something: a count of 0 is empty whatever the elements are, and says
+        // only how many were hidden, so it costs the page no further call.
+        const groups = total > 0 ? await describeMatches(counted.counted) : [];
+        // Every element the selector matches, for a compile's self-check: the
+        // look just taken when the count counted all of them.
+        const kinds = !wantKinds
+          ? undefined
+          : counted.total === total && groups !== undefined
+            ? groups.map((g) => g.kind)
+            : await matchedKinds(root, requireSelector(eff));
         const hidden = counted.total - total;
         return {
           success: true,

@@ -20,26 +20,30 @@ run's read, the code-behind kept the wrong list.
 
 - **The model sees a list read that came back empty or mixed before the step
   ends.** That means a read of every match, or a count, that stored nothing,
-  or that matched more than one kind of element (tag plus class names
-  without a digit). The next turn shows what the selector matched, kind by
-  kind, with the first few values the read stored of each — whole, or as
-  their length when too long to show whole; a count shows kinds and numbers
-  only. The model reads again with a better selector, which
+  or whose values came from more than one kind of element (tag plus class
+  names without a digit; for a count, every element it counted). The next
+  turn shows the selector as the model wrote it, placeholders and all, and
+  what it matched, kind by kind, with the first few values the read stored of
+  each — whole, or as their length when too long to show whole; a count shows
+  kinds and numbers only. The model reads again with a better selector, which
   replaces the read, or keeps it: with `noop` in a turn added only to show
   the list, or by going on with the step in a turn it asked for anyway. An
   empty list can be the right answer. A read that finds one kind of element
   costs nothing extra.
 - **A list never fails the step.** A read the model changes is shown again,
   for as long as the step has turns left, and so is a list it left alone while
-  it read another one again. With no turn left — the step's last
+  it read another one again. A list that changes each time the model reads it
+  again the same way is shown once more, then the step ends on it as read. With no turn left — the step's last
   turn, or a `return` — the step ends on the list as it came back and
   passes, and the report marks it **⚠ list not checked**. So does a read the
   same turn then changed the page under (a click, a navigation, a wait for
-  something to go): a read again would read a different page. A turn added only to show the model its list
-  runs nothing but a keep or a read again of that list. Any other answer, a
-  read again that fails, or a model call that fails there ends the step where
-  it stood, passed and marked the same way, instead of failing a step that
-  was done.
+  something to go, a dialog answered): a read again would read a different
+  page. Taking a value off the page, or an API request that only fetches,
+  leaves it as it was. A turn added only to show the model its list runs
+  nothing but a keep or a read again of that list. Any other answer, no
+  answer at all, a read again that fails, or a model call that fails there
+  ends the step where it stood, passed and marked the same way, instead of
+  failing a step that was done.
 - **Only a read that proves its selector is compiled.** A read the model
   replaced is left out of what Run & Compile writes. A step that ended on a
   list that came back empty, or a count of 0, is not compiled at all, even
@@ -54,8 +58,19 @@ run's read, the code-behind kept the wrong list.
   entry is left as it is and the compile's replay runs the step under AI, so
   the steps after it are still proven. The compile names these steps apart
   from steps a stop, an end or a return kept from running (`unprovenReads`
-  in the summary, `Not compiled:` in `steptix compile`'s output). The report
-  says, under each reviewed read, what became of it.
+  in the summary, `Not compiled:` in `steptix compile`'s output, the
+  reason itself in Steptix's result line, which said the run had stopped). A
+  step whose working entry is left as it was, under `--all`, is counted as
+  kept, not as one still owed an entry. A data-driven test compiles from its
+  first data row, so the reason says to put a row whose list has items first.
+  A dry run that left steps uncompiled says which, instead of only that it
+  wrote nothing. The report says, under each reviewed read, what became of
+  it: kept, replaced (and whether the model had been shown it), or never
+  shown, and why — no turn left, a page change, a `return`, or a list that
+  kept changing. Entries compiled before this change from a list read that
+  came back empty keep passing on `[]`: compile that step again (Compile This
+  Step, or `steptix compile --steps N`) after a run where the list has items
+  (extension 0.5.190).
 
 ### Fixed — a compile no longer deletes the other entries in a code-behind file
 

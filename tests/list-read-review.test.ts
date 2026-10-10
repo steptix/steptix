@@ -43,12 +43,12 @@ import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { executeAction } from '../src/browser/actions.js';
 import { formatListReadsSection } from '../src/ai/prompts.js';
 import { executeStep } from '../src/runner/step-executor.js';
-import { listReadConcern, storedName, uncheckedListRead, unprovenListRead } from '../src/runner/list-read-review.js';
+import { leavesPageAsRead, listReadConcern, storedName, uncheckedListRead, unprovenListRead } from '../src/runner/list-read-review.js';
 import { parseFlowControlStep } from '../src/parser/flow-control-step.js';
 import { parseTestFile } from '../src/parser/markdown.js';
 import { actionsOf, evidenceRows, isEvidencePass } from '../src/codebehind/recording.js';
 import { entryFromRecording } from '../src/codebehind/generate.js';
-import { compileTest, outcomeRows, type CompileEvent, type CompileRunner, type CompileRunOutcome } from '../src/codebehind/compile.js';
+import { compileTest, outcomeRows, type CompileEvent, type CompileRunner, type CompileRunOutcome, type CompileSelect } from '../src/codebehind/compile.js';
 import { entryTextIn } from '../src/codebehind/writer.js';
 import { printSummary } from '../src/cli/commands/compile.js';
 import { generationRefusal, LiveCompiler, type LiveCompileEvent } from '../src/codebehind/live-compile.js';
@@ -275,6 +275,73 @@ describe('the line a list read that came back empty or mixed is shown with', () 
     }
   });
 
+  it('calls a read mixed only when its values come from more than one kind', async () => {
+    // A selector that also matches the labels beside the amounts a pattern
+    // picks out stores the amounts alone: the list is right, and asking about
+    // it cost a turn. A count counts every element it matched, so for it the
+    // labels do count.
+    const page = await pageWith('<!doctype html><html><body><ul id="money">'
+      + '<li class="label">Balance</li><li class="amount">$12</li><li class="label">Fees</li><li class="amount">$3</li>'
+      + '</ul></body></html>');
+    try {
+      const amounts = readOf('#money li', { as: 'amounts', pattern: '\\$(\\d+)' });
+      const kept = await executeAction(page, amounts);
+      expect(kept.capturedValues).toEqual(['12', '3']);
+      expect(listReadConcern(amounts, kept)).toBeUndefined();
+
+      const everything = readOf('#money li', { as: 'amounts' });
+      expect(listReadConcern(everything, await executeAction(page, everything))?.text)
+        .toContain('amounts holds 4 values from 2 kinds of element');
+
+      const count: AIAction = { action: 'count', selector: '#money li', as: 'n', description: 'count' };
+      expect(listReadConcern(count, await executeAction(page, count))?.text).toContain('n is 4, counting 2 kinds of element');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('leaves a list read shown after an action that only takes something off the page', () => {
+    const one = (action: Record<string, unknown>): boolean => leavesPageAsRead({ description: 'x', ...action } as AIAction);
+    expect(one({ action: 'extract_csrf', selector: 'input[name=token]' })).toBe(true);
+    expect(one({ action: 'extract_value', selector: '#total', as: 'total' })).toBe(true);
+    expect(one({ action: 'api_call', url: '/api/items' })).toBe(true);
+    expect(one({ action: 'api_call', url: '/api/items', method: 'head' })).toBe(true);
+    // A return ends the flow, not the page: the step ends on the read for that.
+    expect(one({ action: 'return' })).toBe(true);
+    // A request that writes, and a dialog answered — accepting a "Delete?"
+    // deletes — may change what a read again would read.
+    expect(one({ action: 'api_call', url: '/api/items', method: 'POST' })).toBe(false);
+    expect(one({ action: 'dialog', value: 'accept' })).toBe(false);
+  });
+
+  it('asks the page what a count counted only when it found something', async () => {
+    // A count of 0 is empty whatever the elements are. And when the count
+    // counted every match, a compile's kinds are the look it just took.
+    const page = await pageWith('<!doctype html><html><body><ul><li class="a">x</li><li class="b">y</li></ul></body></html>');
+    const spy = vi.spyOn(Object.getPrototypeOf(page.locator('li')), 'evaluateAll');
+    try {
+      const none = await executeAction(page, { action: 'count', selector: '#nothing li', as: 'n', description: 'count' });
+      expect(none.capturedValue).toBe('0');
+      expect(none.listMatches?.groups).toEqual([]);
+      expect(spy).not.toHaveBeenCalled();
+
+      const both = await executeAction(
+        page,
+        { action: 'count', selector: 'li', as: 'n', description: 'count' },
+        undefined,
+        undefined,
+        { kinds: true },
+      );
+      expect(both.capturedValue).toBe('2');
+      expect(both.kinds).toEqual(['li.a', 'li.b']);
+      expect(both.listMatches?.groups.map((g) => g.kind)).toEqual(['li.a', 'li.b']);
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+      await page.close();
+    }
+  });
+
   it('adds no section to a continuation turn that has none', () => {
     expect(formatListReadsSection(undefined)).toBe('');
     expect(formatListReadsSection([])).toBe('');
@@ -437,6 +504,8 @@ describe('the step loop shows the model an empty or mixed list read before the s
       kind: 'empty',
       text: `accounts is empty: \`${NOTHING}\` matched nothing on this page.`,
       outcome: 'replaced',
+      // Turn 2's prompt showed it.
+      shown: true,
     });
     expect(right!.listReview).toBeUndefined();
 
@@ -945,6 +1014,61 @@ describe('a turn added only to show the model its lists never fails the step', (
     }
   });
 
+  it('shows the selector as the model wrote it, placeholders and all', async () => {
+    // What a read again "the same way" has to repeat — and a value the run
+    // filled in is not shown where the model wrote a name.
+    const instruction = 'Read the name of every {{panel}} account [store as: accounts]';
+    const { requests } = await runStep(
+      [plan(readOf('#account-list [data-account="{{panel}}"] .nickname')), NOOP],
+      { instruction, params: { panel: 'Savings' } },
+    );
+    const lists = textOf(requests[1]!).split('## Lists to check')[1]!.split('## DOM Snapshot')[0]!;
+    expect(lists).toContain('accounts is empty: `#account-list [data-account="{{panel}}"] .nickname` matched nothing');
+    expect(lists).not.toContain('data-account="Savings"');
+  });
+
+  it('ends the step where it stood when a turn added to ask is answered with no actions', async () => {
+    // No answer: asking again would only spend the step's turns.
+    const silent = JSON.stringify({ actions: [], reasoning: 'scripted', needs_reeval: false });
+    const { result, requests } = await runStep([plan(readOf(NOTHING)), silent, NOOP], { retries: 1 });
+    expect(result.status).toBe('passed');
+    expect(result.retried).toBe(false);
+    expect(requests).toHaveLength(2);
+    expect(readsOf(result)[0]!.listReview).toMatchObject({ outcome: 'pending', shown: true });
+    expect(uncheckedListRead(result)).toBe('accounts');
+  });
+
+  it('shows a list that changed when read again the same way once more, and ends on it if it changes again', async () => {
+    // Still loading, the second read is a result the model has not seen; a
+    // list that changes every time is live, and the step ends on it as read.
+    const body = '<!doctype html><html><body><h1>Feed</h1><ul id="feed"></ul></body></html>';
+    const feed = readOf('#feed li', { as: 'events', description: 'Read every event' });
+    const fill = (items: string) => async (page: Page) => {
+      await page.evaluate(`document.getElementById('feed').innerHTML = ${JSON.stringify(items)}`);
+      return plan(feed);
+    };
+    const { result, requests } = await runStep(
+      [
+        plan(feed),
+        fill('<li class="event">Ada joined</li><li class="event new">Ben joined</li>'),
+        fill('<li class="event">Cy left</li><li class="event new">Di joined</li>'),
+        NOOP,
+      ],
+      { body, instruction: 'Read every event in the feed [store as: events]' },
+    );
+    expect(result.status).toBe('passed');
+    expect(requests).toHaveLength(3);
+    expect(readsOf(result).map((s) => [s.listReview?.kind, s.listReview?.outcome])).toEqual([
+      ['empty', 'replaced'],
+      ['mixed', 'replaced'],
+      ['mixed', 'unseen'],
+    ]);
+    expect(readsOf(result)[2]!.listReview?.unseenBecause).toBe('kept-changing');
+    expect(renderReport(reportOf(result)))
+      .toContain('list read never shown to the model: it changed each time the model read it again the same way');
+    expect(uncheckedListRead(result)).toBe('events');
+  });
+
   it('ends on a read the same turn changed the page after, without showing it', async () => {
     // "…then empty the cart": a read again in the next turn would read the
     // emptied cart and store `[]` over the three items the step read.
@@ -1179,6 +1303,49 @@ describe('the report', () => {
     expect(html).not.toContain('list not checked');
   });
 
+  it('says why a list read was never shown, and whether a replaced one was', async () => {
+    const html = (result: StepResult) => renderReport(reportOf(result));
+
+    // Read again in the same turn, before any prompt showed it.
+    const sameTurn = (await runStep([plan([readOf(OVER_BROAD), readOf(RIGHT)])])).result;
+    expect(readsOf(sameTurn)[0]!.listReview).toMatchObject({ outcome: 'replaced' });
+    expect(readsOf(sameTurn)[0]!.listReview!.shown).toBeUndefined();
+    expect(html(sameTurn)).toContain('list read replaced by a later read before the model was shown it');
+
+    // A click after it, in the same turn.
+    const cart = '<!doctype html><html><body><ul id="cart"><li class="item">Widget</li><li class="item new">Gadget</li></ul>'
+      + '<button id="empty" onclick="document.getElementById(\'cart\').innerHTML=\'\'">Empty</button></body></html>';
+    const clicked = (await runStep(
+      [plan([readOf('#cart li', { as: 'items' }), { action: 'click', selector: '#empty', description: 'Empty the cart' }])],
+      { body: cart, instruction: 'Read every item in the cart [store as: items], then empty the cart' },
+    )).result;
+    expect(readsOf(clicked)[0]!.listReview?.unseenBecause).toBe('page-changed');
+    expect(html(clicked))
+      .toContain('list read never shown to the model: an action after it in the same turn may have changed the page it read');
+
+    // A return in the same turn.
+    const returned = (await runStep(
+      [plan([readOf(NOTHING), { action: 'return', description: 'The panel lists no accounts' }])],
+      { instruction: 'If the Your accounts panel lists no accounts then return' },
+    )).result;
+    expect(readsOf(returned)[0]!.listReview?.unseenBecause).toBe('returned');
+    expect(html(returned)).toContain('list read never shown to the model: the step returned in the same turn');
+
+    // No turn left.
+    const last = (await runStep([plan(readOf(OVER_BROAD))], { maxTurns: 1 })).result;
+    expect(readsOf(last)[0]!.listReview?.unseenBecause).toBe('no-turn-left');
+
+    // The turn that read it failed, and the retry read it again.
+    const failed = (await runStep([plan([readOf(NOTHING), CLICK_NOTHING]), plan(readOf(RIGHT))], { retries: 1 })).result;
+    expect(readsOf(failed)[0]!.listReview).toMatchObject({ outcome: 'pending' });
+    expect(readsOf(failed)[0]!.listReview!.shown).toBeUndefined();
+    expect(html(failed)).toContain('list read never shown to the model: the turn that read it failed first');
+
+    // Shown, and not answered.
+    const unanswered = (await runStep([plan(readOf(NOTHING)), plan({ action: 'click', selector: '#x', description: 'x' })])).result;
+    expect(html(unanswered)).toContain('list read shown to the model, which did not answer it');
+  });
+
   it('flags a step that ended on a list the model never saw, empty or mixed, and not one it kept', async () => {
     const mixed = (await runStep([plan(readOf(OVER_BROAD))], { maxTurns: 1 })).result;
     expect(uncheckedListRead(mixed)).toBe('accounts');
@@ -1260,10 +1427,15 @@ async function compileOver(
   recorded: StepResult[],
   replayed: StepResult[],
   entries: string[] = [],
+  opts: { select?: CompileSelect; dryRun?: boolean; markdown?: string } = {},
 ): Promise<{ compile: Awaited<ReturnType<typeof compileTest>>; done: string }> {
   const dir = await fs.mkdtemp(path.join(scratch, 'causes-'));
   const md = path.join(dir, 'accounts.md');
-  await fs.writeFile(md, ['# Accounts', '', '## Steps', ...lines.map((l, i) => `${i + 1}. ${l}`), ''].join('\n'), 'utf-8');
+  await fs.writeFile(
+    md,
+    opts.markdown ?? ['# Accounts', '', '## Steps', ...lines.map((l, i) => `${i + 1}. ${l}`), ''].join('\n'),
+    'utf-8',
+  );
   if (entries.length > 0) await fs.writeFile(path.join(dir, 'accounts.steps.ts'), stepsFileWith(entries), 'utf-8');
   const events: CompileEvent[] = [];
   const runner: CompileRunner = async (request) => {
@@ -1275,8 +1447,6 @@ async function compileOver(
     const failed = rows.some((r) => r.status === 'failed' && r.deliberate !== true);
     return { status: failed ? 'failed' : 'passed', ...outcomeRows(rows, lines.length), resolvedParameters: {}, tokensUsed: 0 };
   };
-  // Not a dry run: a dry run whose replay passed says only that it wrote
-  // nothing, and the headline is what this asks about.
   const compile = await compileTest({
     test: await parseTestFile(md),
     config: configWith(0),
@@ -1284,6 +1454,8 @@ async function compileOver(
     aiClient: reviewOnlyClient().client,
     runner,
     onEvent: (e) => events.push(e),
+    ...(opts.select !== undefined && { select: opts.select }),
+    ...(opts.dryRun === true && { dryRun: true }),
   });
   const done = (events.find((e) => e.kind === 'done') as { message: string } | undefined)?.message ?? '';
   return { compile, done };
@@ -1516,7 +1688,8 @@ describe('the compile writes no entry for a step that ended on a list read provi
     expect(compile.summary.compiled).toBe(1);
     expect(compile.summary.unproven).toEqual([]);
     expect(compile.summary.notAttempted).toEqual([1]);
-    expect(compile.summary.unprovenReads).toEqual([{ step: 1, reason: EMPTY_REASON }]);
+    // Its entry, which broke, is left as it was — and still owed, above.
+    expect(compile.summary.unprovenReads).toEqual([{ step: 1, reason: EMPTY_REASON, keptEntry: true }]);
     expect(compile.summary.error).toBeUndefined();
     const proposed = compile.files[stepsFile] ?? '';
     expect(entryTextIn(proposed, STEP, undefined)).toContain('#accounts-tab');
@@ -1612,6 +1785,18 @@ describe('the compile writes no entry for a step that ended on a list read provi
     expect(stopped.done).toContain('step 1 not attempted (an empty list read on the recording run proves nothing about the selector)');
     expect(stopped.done).toContain('stopped at step 3');
     expect(stopped.done).not.toMatch(/steps 1, 3/);
+    // A dry run says the same. It used to say only that it wrote nothing
+    // whenever its replay passed, leaving steps 1 and 3–4 unexplained.
+    const dry = await compileOver(
+      [STEP, HEADING_STEP, 'Open the Payments tab', LAST],
+      [kept, { ...heading, index: 2 }, ranRow(3, { status: 'failed', error: 'the tab did not open' })],
+      [ranRow(1), ranRow(2, { fromCodeBehind: true })],
+      [],
+      { dryRun: true },
+    );
+    expect(dry.done).toContain('step 1 not attempted (an empty list read on the recording run proves nothing about the selector)');
+    expect(dry.done).toContain('stopped at step 3');
+    expect(dry.done).toContain('Dry run — nothing written.');
     const lines = printed(() => printSummary(stopped.compile, true));
     expect(lines).toContain('Step 3 failed under AI — the tab did not open Not attempted: steps 3–4.');
     expect(lines).toContain(`Not compiled: step 1 — ${EMPTY_REASON}. It stays AI; the next compile takes it again.`);
@@ -1631,6 +1816,58 @@ describe('the compile writes no entry for a step that ended on a list read provi
     );
     expect(ended.done).toContain('step 4 not attempted on the recording run (the run ended at step 3 as its text says)');
     expect(ended.done).toContain('step 2 not attempted (an empty list read on the recording run proves nothing about the selector)');
+  });
+
+  it('counts a step that keeps its working entry as kept, and not as one owed an entry', async () => {
+    // `--all` recompiles every step. One whose list came back empty keeps the
+    // entry it has, and that entry works: it is kept, and the next compile
+    // owes it nothing — the summary used to count it both ways.
+    const { result: kept } = await runStep([plan(readOf(NOTHING)), NOOP]);
+    const { result: heading } = await runStep([plan(HEADING)], { instruction: HEADING_STEP });
+    const entry = `{ source: ${JSON.stringify(STEP)}, async run({ step }) { await step.read({ selector: ${JSON.stringify(RIGHT)}, multiple: true, as: 'accounts' }); } }`;
+    const { compile, done } = await compileOver(
+      [STEP, HEADING_STEP],
+      [kept, { ...heading, index: 2 }],
+      [ranRow(1, { fromCodeBehind: true }), ranRow(2, { fromCodeBehind: true })],
+      [entry],
+      { select: { all: true } },
+    );
+    expect(compile.summary.compiled).toBe(1);
+    expect(compile.summary.kept).toBe(1);
+    expect(compile.summary.notAttempted).toEqual([]);
+    expect(compile.summary.unprovenReads).toEqual([{ step: 1, reason: EMPTY_REASON, keptEntry: true }]);
+    expect(done).toContain(
+      'step 1 not compiled again, its entry left as it was (an empty list read on the recording run proves nothing about the selector)',
+    );
+    expect(printed(() => printSummary(compile, false)))
+      .toContain(`Not compiled: step 1 — ${EMPTY_REASON}. Its existing entry is left as it was.`);
+  });
+
+  it('says a data-driven test compiles from its first data row, when that row\'s list came back empty', async () => {
+    // Both compilers record row 1 alone, so a list empty there never compiles
+    // until a row whose list has items comes first.
+    const note = ' — this test compiles from its first data row, so put a row whose list has items first';
+    const { result: empty } = await runStep([plan(readOf(NOTHING)), NOOP]);
+    const markdown = ['# Accounts', '', '## Steps', '| panel |', '|-------|', '| first |', '| second |', '', `1. ${STEP}`, ''].join('\n');
+    const boxed = await compileOver([STEP], [empty], [], [], { markdown });
+    expect(boxed.compile.summary.unprovenReads).toEqual([{ step: 1, reason: EMPTY_REASON + note }]);
+    expect(boxed.done).toContain('Put a data row whose list has items first, then compile again.');
+
+    const dir = await fs.mkdtemp(path.join(scratch, 'live-rows-'));
+    const live = new LiveCompiler({
+      mode: 'run',
+      testFilePath: path.join(dir, 'accounts.md'),
+      aiClient: reviewOnlyClient().client,
+      contextContent: '',
+      testName: 'accounts.md',
+      plan: [{ text: STEP, inScope: true, line: 5 }],
+      emit: () => {},
+      note: () => {},
+      dataDriven: true,
+    });
+    live.offer({ index: 0, binding: bindingFor(STEP, path.join(dir, 'accounts.steps.ts')), result: empty, resolvedParameters: { accounts: '[]' } });
+    const liveOut = await live.finish({ tokensUsed: 0 });
+    expect(liveOut.summary.unprovenReads).toEqual([{ step: 1, reason: EMPTY_REASON + note }]);
   });
 
   it('tells each step with nothing to compile what it needs, when they need different things', async () => {

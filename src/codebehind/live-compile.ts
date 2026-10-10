@@ -52,7 +52,7 @@ import { readLastRun, type LastRunStep } from './last-run.js';
 import { entryTextIn } from './writer.js';
 import type { CodeBehindBinding } from './loader.js';
 import { codeBehindFileKey as fileKey, recordingDirFor } from './recording.js';
-import { unprovenListRead, type UnprovenListRead } from '../runner/list-read-review.js';
+import { onFirstDataRow, unprovenListRead, type UnprovenListRead } from '../runner/list-read-review.js';
 import { evidenceKey, evidenceKeyOf, reviewCandidate, type EntryEvidence } from './review.js';
 import type { CompileStatus, CompileSummary } from './compile.js';
 
@@ -124,6 +124,12 @@ export interface LiveCompileProgressEvent {
 export type LiveCompileEvent = LiveCompileStepEvent | LiveCompileProgressEvent;
 
 export interface LiveCompileOptions {
+  /**
+   * The run is data-driven: it compiles from its first data row alone (the
+   * server puts `compile` on row 1 only), so a list that came back empty there
+   * is said with that note (`onFirstDataRow`).
+   */
+  dataDriven?: boolean | undefined;
   mode: LiveCompileMode;
   /** Absolute path of the test file. */
   testFilePath: string;
@@ -641,7 +647,7 @@ export class LiveCompiler {
    * a loop body whose first pass read an empty list and whose second read
    * items compiles from the second, and owes nothing.
    */
-  private readonly unprovenReads: { number: number; key: string; reason: string }[] = [];
+  private readonly unprovenReads: { number: number; key: string; reason: string; keptEntry: boolean }[] = [];
   /**
    * Entry keys this compile has already queued — the per-key dedupe the boxed
    * pipeline gets from `selectSteps` (compile.ts), which keeps a `keys` Set
@@ -1079,7 +1085,8 @@ export class LiveCompiler {
       this.offerDecisionSkip(input, at, text);
       return;
     }
-    const unproven = unprovenListRead(input.result);
+    const found = unprovenListRead(input.result);
+    const unproven = found !== undefined && this.options.dataDriven === true ? onFirstDataRow(found) : found;
     const refusal = generationRefusal({
       binding: input.binding,
       text,
@@ -1126,7 +1133,14 @@ export class LiveCompiler {
       }
       // And a step whose list read proved nothing, on the same terms (issue #48).
       if (unproven !== undefined && refusal === unproven.reason) {
-        this.unprovenReads.push({ number: at + 1, key: entryKeyOf(input.binding!), reason: unproven.reason });
+        this.unprovenReads.push({
+          number: at + 1,
+          key: entryKeyOf(input.binding!),
+          reason: unproven.reason,
+          // An entry of its own, left as it was: Compile This Step runs with
+          // code-behind off, and a stale step healed under AI.
+          keptEntry: input.binding!.entry !== undefined && input.binding!.entry.ai !== true,
+        });
         this.stepEvent('generate', { index: at, number: at + 1, text, hasEntry: false, isAiEntry: false }, refusal);
       }
       logger.debug(`Compile-as-you-go skipped step ${input.index + 1}: ${refusal}`);
@@ -1928,7 +1942,10 @@ export class LiveCompiler {
       ...new Map(
         this.unprovenReads
           .filter((s) => !this.writtenKeys.has(s.key))
-          .map((s): [number, { step: number; reason: string }] => [s.number, { step: s.number, reason: s.reason }])
+          .map((s): [number, { step: number; reason: string; keptEntry?: boolean }] => [
+            s.number,
+            { step: s.number, reason: s.reason, ...(s.keptEntry && { keptEntry: true }) },
+          ])
           .reverse(),
       ).values(),
     ].sort((a, b) => a.step - b.step);

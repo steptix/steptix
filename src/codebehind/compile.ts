@@ -73,7 +73,7 @@ import {
 } from '../parser/interpolate-env-data.js';
 import { bindVariable, clearDottedKeys, loadDataFile, placeholderRoot } from '../parser/parameters.js';
 import { evidenceRank, evidenceRows, recordingDirFor, writeReplayFailure, type RecordedAction } from './recording.js';
-import { unprovenListRead, type UnprovenListRead } from '../runner/list-read-review.js';
+import { onFirstDataRow, unprovenListRead, type UnprovenListRead } from '../runner/list-read-review.js';
 import {
   inheritLoopBindings,
   isSecretParameterName,
@@ -187,8 +187,13 @@ export interface CompileSummary {
    * put them under "the run stopped at step 5" or "a return ended the flow
    * before them" would say the wrong thing about a step that ran. Absent when
    * there are none.
+   *
+   * `keptEntry` marks a step that has an entry of its own, left as it was. A
+   * working one (`--all`, or `--steps` naming it) is counted in {@link kept}
+   * and is not in {@link notAttempted}: nothing is owed. A broken one (stale)
+   * is in both lists' sense still owed, so it stays in {@link notAttempted}.
    */
-  unprovenReads?: Array<{ step: number; reason: string }> | undefined;
+  unprovenReads?: Array<{ step: number; reason: string; keptEntry?: boolean }> | undefined;
   /** Where the recording — and the candidate, and any replay failure — were
    *  written: the test's `.steptix-codebehind-cache/<name>.recording/`. */
   recordingDir: string;
@@ -383,7 +388,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
 
   const tokens = (): number => (options.tokenTracker?.total ?? 0) + runTokens;
   /** {@link CompileSummary.unprovenReads}, once the recording has been read. */
-  let unprovenReads: Array<{ step: number; reason: string }> = [];
+  let unprovenReads: NonNullable<CompileSummary['unprovenReads']> = [];
   const finish = (
     status: CompileStatus,
     summary: Partial<Omit<CompileSummary, 'test' | 'totalSteps' | 'tokensUsed' | 'rounds'>> &
@@ -747,14 +752,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // pass whose reads did prove something (`isEvidencePass`), so this is a step
   // no pass of which did.
   const unprovenInRecording = new Map<CompileStep, UnprovenListRead>();
+  /** A data-driven test records its first data row alone (`firstDataRow`). */
+  const dataDriven = test.dataRows !== undefined || test.frontmatter.dataFile !== undefined;
   for (const s of stepKinds) {
     const row = record.steps[s.index];
     if (row === undefined || (row.status !== 'passed' && row.deliberate !== true)) continue;
     const unproven = unprovenListRead(row);
-    if (unproven !== undefined) unprovenInRecording.set(s, unproven);
+    if (unproven !== undefined) unprovenInRecording.set(s, dataDriven ? onFirstDataRow(unproven) : unproven);
   }
   unprovenReads = [...unprovenInRecording]
-    .map(([s, u]) => ({ step: s.number, reason: u.reason }))
+    .map(([s, u]) => ({ step: s.number, reason: u.reason, ...(s.hasEntry && !s.isAiEntry && { keptEntry: true }) }))
     .sort((a, b) => a.step - b.step);
   /**
    * The steps above whose existing entry is known to break: flagged stale, by
@@ -771,6 +778,15 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       .filter(([s]) => s.hasEntry && !s.isAiEntry && recordStale.has(s.key!))
       .map(([s, u]): [string, { step: CompileStep; reason: string }] => [s.key!, { step: s, reason: u.reason }]),
   );
+  /**
+   * A step above with a working entry of its own — one `--all` or `--steps`
+   * took, not a stale one — keeps that entry, and is counted kept, as every
+   * entry left as it was is. Not also "not attempted", which says the next
+   * compile owes it an entry: it has one, and the next compile does not take
+   * it. A broken (stale) entry is still owed.
+   */
+  const keepsWorkingEntry = (s: CompileStep): boolean =>
+    unprovenInRecording.has(s) && s.hasEntry && !s.isAiEntry && !recordStale.has(s.key!);
   const noEvidence = new Set([
     ...skippedInRecording,
     ...toleratedInRecording,
@@ -795,7 +811,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       stepEvent('select', step, unproven.reason);
     }
     notAttempted = [
-      ...new Set([...notAttempted, ...[...noEvidence].map((s) => s.number)]),
+      ...new Set([...notAttempted, ...[...noEvidence].filter((s) => !keepsWorkingEntry(s)).map((s) => s.number)]),
     ].sort((a, b) => a - b);
     const attemptable = selection.order.filter((s) => !noEvidence.has(s));
     if (attemptable.length === 0) {
@@ -842,7 +858,9 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       const advice = ([
         [didNotRun, 'Run the test so they execute, then compile again.', 'run the test so they execute'],
         [toleratedNumbers, 'Make it pass, then compile again.', 'make it pass'],
-        [emptyNumbers, 'Compile again after a run where the list has items.', 'run it where the list has items'],
+        dataDriven
+          ? [emptyNumbers, 'Put a data row whose list has items first, then compile again.', 'put a data row whose list has items first']
+          : [emptyNumbers, 'Compile again after a run where the list has items.', 'run it where the list has items'],
         [uncheckedNumbers, 'Run it again, then compile again.', 'run it again'],
       ] as Array<[number[], string, string]>).filter(([numbers]) => numbers.length > 0);
       const each = advice.map(([numbers, , what]) => `${listSteps(numbers)}: ${what}`).join('; ');
@@ -854,7 +872,12 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         'partial',
         {
           compiled: 0,
-          kept: keptExisting,
+          // Counted as the main path counts it below: a step that keeps its
+          // working entry is kept.
+          kept: keptExistingFor({
+            ...selection,
+            keys: new Set(selection.order.filter((s) => !keepsWorkingEntry(s)).map((s) => s.key!)),
+          }),
           keptAi: keptAiExisting,
           written: [],
           notAttempted,
@@ -1831,6 +1854,19 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   const otherNotAttempted = notAttempted.filter((n) => !unprovenSteps.has(n));
   const unprovenOfKind = (kind: UnprovenListRead['kind']): number[] =>
     [...unprovenInRecording].filter(([, u]) => u.kind === kind).map(([s]) => s.number);
+  /** The summary's clauses for one kind: the steps still owed an entry, and
+   *  the ones that keep a working entry of their own. */
+  const unprovenClauses = (kind: UnprovenListRead['kind'], why: string): string[] => {
+    const numbers = unprovenOfKind(kind);
+    const owed = numbers.filter((n) => notAttempted.includes(n));
+    const keeping = numbers.filter((n) => !notAttempted.includes(n));
+    return [
+      owed.length > 0 ? `${listSteps(owed)} not attempted (${why})` : '',
+      keeping.length > 0
+        ? `${listSteps(keeping)} not compiled again, ${keeping.length === 1 ? 'its' : 'their'} entry left as it was (${why})`
+        : '',
+    ];
+  };
   // A replay that returned proved only the steps it reached
   // (stories/step-flow-control.md, decision 12). Those entries are still
   // proposed — they are unproven, which the next run settles — but the compile
@@ -1934,14 +1970,8 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         (notAttemptedCause === undefined ? '' : ` (${notAttemptedCause})`)
       : '',
     // Said whether or not the recording stopped: they ran before it did.
-    unprovenOfKind('empty').length > 0
-      ? `${listSteps(unprovenOfKind('empty'))} not attempted ` +
-        '(an empty list read on the recording run proves nothing about the selector)'
-      : '',
-    unprovenOfKind('unchecked').length > 0
-      ? `${listSteps(unprovenOfKind('unchecked'))} not attempted ` +
-        '(the model never checked a list read on the recording run)'
-      : '',
+    ...unprovenClauses('empty', 'an empty list read on the recording run proves nothing about the selector'),
+    ...unprovenClauses('unchecked', 'the model never checked a list read on the recording run'),
     // The compliance signal, in front of whoever ran the compile rather than
     // only in the summary object (stories/placeholder-preserving-actions.md §6).
     recoveredByValue.length > 0
@@ -1989,7 +2019,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     return finish(
       status,
       { compiled, kept: keptExisting, keptAi, written: [], ...extras },
-      green ? 'Compiled (dry run) — nothing written.' : `${headline} Dry run — nothing written.`,
+      status === 'green' ? 'Compiled (dry run) — nothing written.' : `${headline} Dry run — nothing written.`,
     );
   }
 

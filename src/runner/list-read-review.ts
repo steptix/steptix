@@ -129,11 +129,17 @@ export function listReadConcern(
     return { kind: 'empty', name, text: line(sample), summary: line(undefined) };
   }
 
-  if (groups !== undefined && groups.length > 1) {
+  // The kinds the list's values came from. A count counts every element it
+  // matched; a read stores what its pattern kept, and a kind it kept nothing
+  // of adds nothing to the list (a group's samples are the values stored from
+  // it, so a kind with none stored has none) — a selector that also matches
+  // the labels beside the amounts a pattern picks out stores the amounts alone.
+  const holding = counting ? groups : groups?.filter((g) => g.samples.length > 0);
+  if (groups !== undefined && holding !== undefined && holding.length > 1) {
     const total = groups.reduce((sum, g) => sum + g.count, 0);
     const what = counting
-      ? `${name} is ${stored}, counting ${groups.length} kinds of element`
-      : `${name} holds ${stored} value${stored === 1 ? '' : 's'} from ${groups.length} kinds of element`;
+      ? `${name} is ${stored}, counting ${holding.length} kinds of element`
+      : `${name} holds ${stored} value${stored === 1 ? '' : 's'} from ${holding.length} kinds of element`;
     const line = (quote: typeof sample): string =>
       mask(`${what}: ${selector} matched ${elements(total)} — ${describeGroups(groups, quote)}.`);
     return { kind: 'mixed', name, text: line(sample), summary: line(undefined) };
@@ -193,18 +199,28 @@ export function isReviewAnswer(action: AIAction, shown: ReadonlyMap<string, SubA
 }
 
 /** Actions that leave the page as a list read before them saw it. */
-const PAGE_KEEPING_ACTIONS: ReadonlySet<string> = new Set(['read', 'count', 'readTable', 'find', 'expand', 'noop']);
+const PAGE_KEEPING_ACTIONS: ReadonlySet<string> = new Set([
+  'read', 'count', 'readTable', 'find', 'expand', 'noop', 'return', 'extract_csrf', 'extract_value',
+]);
+
+/** API requests that only fetch: they leave the page, and the server, as they were. */
+const FETCHING_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
 
 /**
  * Whether an action leaves the page as a list read before it in the same
- * turn saw it: another read, a look around (`find`, `expand`), a `noop`, or
- * an assertion that does not wait. Anything else may have changed it — a
- * click, a navigation, a tab move, a wait for something to go — and a read
+ * turn saw it: another read, a look around (`find`, `expand`), a value taken
+ * off the page (`extract_csrf`, `extract_value`), a `noop`, a `return` (it
+ * ends the flow, not the page — and the step ends on the read for that
+ * reason), an assertion that does not wait, or an API request that only
+ * fetches. Anything else may
+ * have changed it — a click, a navigation, a tab move, a wait for something
+ * to go, a `dialog` answered (accepting a "Delete?" deletes) — and a read
  * again in the next turn would read a different page and store over the
  * step's read (src/runner/step-executor.ts).
  */
 export function leavesPageAsRead(action: AIAction): boolean {
   if (action.action === 'assert') return action.poll === undefined;
+  if (action.action === 'api_call') return FETCHING_METHODS.has((action.method ?? 'GET').toUpperCase());
   return PAGE_KEEPING_ACTIONS.has(action.action);
 }
 
@@ -295,6 +311,19 @@ export function unprovenListRead(result: StepResult | undefined): UnprovenListRe
     }
   }
   return undefined;
+}
+
+/**
+ * `unproven` as said of a data-driven test, which compiles from its first data
+ * row alone (`firstDataRow`, src/codebehind/compile.ts; a compile-as-you-go
+ * run carries `compile` on row 1 only): a list that came back empty there
+ * never compiles, whatever the rows after it hold, until a row whose list has
+ * items comes first. A list the model never checked needs only another run.
+ */
+export function onFirstDataRow(unproven: UnprovenListRead): UnprovenListRead {
+  return unproven.kind === 'empty'
+    ? { ...unproven, reason: `${unproven.reason} — this test compiles from its first data row, so put a row whose list has items first` }
+    : unproven;
 }
 
 /**

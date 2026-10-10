@@ -1096,7 +1096,10 @@ own. §6.2 checks the selector either way.
   the file (`Candidate.materialise`), so the replay proves the steps after it
   rather than failing on an entry the compile did not write. The summary
   names these steps apart from the ones a stop, an end or a return kept from
-  running (`unprovenReads`).
+  running (`unprovenReads`); one whose working entry is left as it was
+  (`--all`) is counted kept, not owed. A data-driven test records its first
+  data row alone, so for it the reason says to put a row whose list has items
+  first.
 - **Review leaves these entries alone.** They carry `fromRecording: true`.
   Review's prompt says not to change them, and a revision that changes one is
   rejected, as the other rejections are (`review.ts:270-306`). The rejection

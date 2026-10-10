@@ -2583,6 +2583,8 @@ async function executeStepAttempt(
   // the step can end on it (src/runner/list-read-review.ts, issue #48).
   /** The latest read under review, per stored name, so a later read of the name replaces it. */
   const reviewedReads = new Map<string, SubActionResult>();
+  /** How many times in a row a shown list changed when the model read it again the same way. */
+  const rereadChanges = new Map<string, number>();
   /** What the next turn's prompt shows, and the reads it shows. */
   let listReadLines: string[] = [];
   let listReadsShown = new Map<string, SubActionResult>();
@@ -2936,7 +2938,12 @@ async function executeStepAttempt(
 
     logger.debug(`AI reasoning (turn ${currentTurn}): ${aiResponse.reasoning}`);
 
-    if (reviewOnly && !aiResponse.actions.every((a) => isReviewAnswer(a, listReadsShown))) {
+    // An answer with no actions keeps nothing and reads nothing again: it is
+    // no answer, and asking again would only spend the step's turns.
+    if (
+      reviewOnly
+      && (aiResponse.actions.length === 0 || !aiResponse.actions.every((a) => isReviewAnswer(a, listReadsShown)))
+    ) {
       logger.warn(
         `Step ${stepIndex}: asked about its list reads, the model answered with ${aiResponse.actions.map((a) => a.action).join(', ') || 'nothing'} — not run; the step ends where it stood`,
       );
@@ -3124,6 +3131,7 @@ async function executeStepAttempt(
         pageChangedThisTurn = true;
         for (const [name, { concern, sub }] of turnListConcerns) {
           sub.listReview!.outcome = 'unseen';
+          sub.listReview!.unseenBecause = 'page-changed';
           logger.warn(`Step ${stepIndex}: "${done.action.action}" may have changed the page ${name} was read on — the step ends on it as read: ${concern.summary}`);
         }
         turnListConcerns.clear();
@@ -4046,16 +4054,33 @@ async function executeStepAttempt(
           reviewedReads.delete(stored);
           turnListConcerns.delete(stored);
         }
-        const concern = listReadConcern(action, result, (text) => redact(text, secretsNow()));
+        // In the model's own words: the selector as it wrote it, placeholders
+        // and all, not with this run's values filled in — which is what a read
+        // again "the same way" has to repeat.
+        const concern = listReadConcern(emitted, result, (text) => redact(text, secretsNow()));
         if (concern !== undefined) {
           const shown = listReadsShown.get(stored);
-          const kept = shown !== undefined
-            && sameListRead(shown.action, emitted)
-            && shown.listReview?.text === concern.text;
-          sub.listReview = { kind: concern.kind, text: concern.text, outcome: kept ? 'kept' : 'pending' };
+          const sameWay = shown !== undefined && sameListRead(shown.action, emitted);
+          const kept = sameWay && shown.listReview?.text === concern.text;
+          // A list that changed when the model read it again the same way —
+          // still loading — is shown once more. One that changes again is
+          // live, and showing it again would only spend the step's turns: the
+          // step ends on it as read, unseen.
+          const changes = sameWay && !kept ? (rereadChanges.get(stored) ?? 0) + 1 : 0;
+          if (changes > 0) rereadChanges.set(stored, changes);
+          else rereadChanges.delete(stored);
+          const keptChanging = changes > 1;
+          sub.listReview = {
+            kind: concern.kind,
+            text: concern.text,
+            outcome: kept ? 'kept' : keptChanging ? 'unseen' : 'pending',
+            ...(keptChanging && { unseenBecause: 'kept-changing' as const }),
+          };
           reviewedReads.set(stored, sub);
           if (kept) {
             logger.info(`Step ${stepIndex}: the model read ${stored} the same way again — keeping it: ${concern.summary}`);
+          } else if (keptChanging) {
+            logger.warn(`Step ${stepIndex}: ${stored} changed again when the model read it the same way — the step ends on it as read: ${concern.summary}`);
           } else {
             turnListConcerns.set(stored, { concern, sub, action });
             logger.warn(`Step ${stepIndex}: ${concern.summary}`);
@@ -4222,7 +4247,10 @@ async function executeStepAttempt(
       // Nothing is shown after a return, so the step ends on this turn's list
       // reads as they came back: unseen, which the report flags and the
       // compile will not use (`unprovenListRead`).
-      for (const { sub } of turnListConcerns.values()) sub.listReview!.outcome = 'unseen';
+      for (const { sub } of turnListConcerns.values()) {
+        sub.listReview!.outcome = 'unseen';
+        sub.listReview!.unseenBecause = 'returned';
+      }
       break;
     }
 
@@ -4267,10 +4295,12 @@ async function executeStepAttempt(
         }
         listReadLines = [...concerns.map((c) => c.concern.text), ...unanswered.map(([, sub]) => sub.listReview!.text)];
         listReadsShown = new Map([...concerns.map((c): [string, SubActionResult] => [c.concern.name, c.sub]), ...unanswered]);
+        for (const sub of listReadsShown.values()) sub.listReview!.shown = true;
       } else {
         // The ones shown and not answered stay `pending`: not answered.
         for (const { concern, sub } of concerns) {
           sub.listReview!.outcome = 'unseen';
+          sub.listReview!.unseenBecause = 'no-turn-left';
           logger.warn(`Step ${stepIndex}: no turn left to show the model ${concern.name}; the step ends on it as read: ${concern.summary}`);
         }
       }

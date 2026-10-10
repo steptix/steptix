@@ -405,6 +405,8 @@ Say precisely what to read:
   it with `noop`; in a turn it asked for anyway, going on with the step keeps
   it. A read the model changes is shown again, for as long as the step has
   turns left, and so is a list it left alone while it read another one again.
+  A list that changes every time it is read — a live feed — is shown once
+  more, then the step ends on it as read.
   It never fails the step: with no turn left, when the
   same turn then changed the page (a click or a wait after the read), or when the
   model's answer is anything but keeping the list or reading it again, the

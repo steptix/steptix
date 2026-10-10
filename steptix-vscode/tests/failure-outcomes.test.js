@@ -297,6 +297,57 @@ test('a compile that produced nothing because the run ended says so without a �
   assert.doesNotMatch(line, /the run stopped/);
 });
 
+/** What the compile says of a step whose list read came back empty (issue #48). */
+const NOT_PROVEN =
+  "{{accounts}} came back empty on the recording run, and a read that finds nothing proves nothing about its selector";
+
+test("a compile whose only uncompiled step read a list proving nothing says so, and not that the run stopped", () => {
+  // The run went to the end and passed: the step ran, and its read was not
+  // good enough to make code from.
+  const line = resultLine("partial", {
+    compiled: 0,
+    keptAi: 0,
+    notAttempted: [3],
+    unprovenReads: [{ step: 3, reason: NOT_PROVEN }],
+  });
+  assert.equal(line, `◐ Compiled nothing in failure-outcomes-live.md: Step 3 not compiled — ${NOT_PROVEN}.`);
+  assert.doesNotMatch(line, /the run stopped/);
+});
+
+test("a step whose list read proved nothing is not counted among the steps a stop or an end kept from running", () => {
+  // Fixing the stop, or a run that goes past the end, does nothing for it.
+  const stopped = notesFor({
+    stoppedAt: { step: 5, error: "boom" },
+    notAttempted: [3, 5, 6],
+    unprovenReads: [{ step: 3, reason: NOT_PROVEN }],
+  });
+  assert.match(stopped, /Steps 5–6 not attempted\. Fix it, run, and compile again for the rest\./);
+  assert.match(stopped, /Step 3 not compiled — \{\{accounts\}\} came back empty/);
+  assert.doesNotMatch(stopped, /Steps 3, 5/);
+
+  const ended = notesFor({
+    endedAsWritten: ENDED,
+    notAttempted: [3, 10],
+    unprovenReads: [{ step: 3, reason: NOT_PROVEN }],
+  });
+  assert.match(ended, /Step 10 not attempted — a run that does not end there compiles the rest\./);
+  assert.match(ended, /Step 3 not compiled — /);
+
+  const line = resultLine("partial", {
+    compiled: 2,
+    stoppedAt: { step: 9, error: "boom" },
+    notAttempted: [3, 9],
+    unprovenReads: [{ step: 3, reason: NOT_PROVEN }],
+  });
+  assert.match(line, /1 step\(s\) not attempted/);
+  assert.match(line, /Step 3 not compiled — /);
+});
+
+test("a step whose list read proved nothing and that keeps its own entry says the entry is left as it was", () => {
+  const line = resultLine("green", { compiled: 1, unprovenReads: [{ step: 3, reason: NOT_PROVEN, keptEntry: true }] });
+  assert.match(line, /Step 3 not compiled — .*selector\. Its entry is left as it was\.$/);
+});
+
 test('never says "Compiled nothing" over a GREEN compile', () => {
   // `green` says nothing was owed and "Compiled nothing" is a complaint, so the two
   // cannot share a line. The renderer's half of the §"What the compile showed" fix.

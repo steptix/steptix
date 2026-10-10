@@ -1333,12 +1333,24 @@ function describeListReview(review: NonNullable<SubActionResult['listReview']>):
   const how = review.outcome === 'kept'
     ? 'shown to the model, which kept it'
     : review.outcome === 'replaced'
-      ? 'shown to the model, which replaced it with a later read'
+      ? review.shown === true
+        ? 'shown to the model, which replaced it with a later read'
+        : 'replaced by a later read before the model was shown it'
       : review.outcome === 'unseen'
-        ? 'never shown to the model: the step ended on it with no turn left'
-        : 'not answered by the model';
+        ? `never shown to the model: ${UNSEEN_BECAUSE[review.unseenBecause ?? 'no-turn-left']}`
+        : review.shown === true
+          ? 'shown to the model, which did not answer it'
+          : 'never shown to the model: the turn that read it failed first';
   return `list read ${how} — ${review.text}`;
 }
+
+/** Why a list read the step ended on was never shown to the model. */
+const UNSEEN_BECAUSE: Record<NonNullable<NonNullable<SubActionResult['listReview']>['unseenBecause']>, string> = {
+  'no-turn-left': 'the step ended on it with no turn left',
+  'page-changed': 'an action after it in the same turn may have changed the page it read',
+  returned: 'the step returned in the same turn',
+  'kept-changing': 'it changed each time the model read it again the same way',
+};
 
 /**
  * The `mapping` a `readTable` carries, in one line.

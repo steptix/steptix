@@ -117,6 +117,16 @@ export interface SubActionResult {
     kind: 'empty' | 'mixed';
     text: string;
     outcome: 'pending' | 'kept' | 'replaced' | 'unseen';
+    /** The read was put in front of the model in a turn's prompt. Absent when
+     *  it never was: replaced in the turn that read it, or that turn failed. */
+    shown?: true;
+    /**
+     * Why an `unseen` read was never shown: no turn was left, an action after
+     * it in the same turn may have changed the page it read, the step returned
+     * in that turn, or it changed each time the model read it again the same
+     * way.
+     */
+    unseenBecause?: 'no-turn-left' | 'page-changed' | 'returned' | 'kept-changing';
   };
   /** Page URL at the time the screenshot was captured */
   pageUrl?: string;

@@ -241,7 +241,12 @@ export function printSummary(result: CompileResult, dryRun: boolean): void {
       console.log('  Fix that step, run, and compile again for the rest.');
     }
     for (const u of unprovenReads) {
-      console.log(`  Not compiled: step ${u.step} — ${u.reason}. It stays AI; the next compile takes it again.`);
+      const after = u.keptEntry !== true
+        ? 'It stays AI; the next compile takes it again.'
+        : s.notAttempted.includes(u.step)
+          ? 'Its entry, which broke, is left as it was; the next compile takes it again.'
+          : 'Its existing entry is left as it was.';
+      console.log(`  Not compiled: step ${u.step} — ${u.reason}. ${after}`);
     }
     if (s.writtenOffAi.length > 0) {
       console.log(
