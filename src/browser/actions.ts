@@ -740,7 +740,11 @@ export interface MatchGroup {
   kind: string;
   /** How many matched elements are of this kind. */
   count: number;
-  /** The first few values read from them: what a read stored, or the text. */
+  /**
+   * The first few values a read STORED from them — after its pattern, so
+   * fewer than \`count\`, or none. Never text the run did not store: a count
+   * stores a number and has none.
+   */
   samples: string[];
 }
 
@@ -3585,11 +3589,14 @@ async function executeReadMultiple(
   // on empty, here one empty among many is a legitimate list item. An invalid
   // pattern still fails the step via compileReadPattern.
   let result = values;
+  /** What the read stored, beside each value's kind. */
+  let stored = read;
   if (action.pattern) {
     const re = compileReadPattern(action.pattern);
-    result = values
-      .map((v) => sliceWithReadPattern(re, v))
-      .filter((v): v is string => v !== null);
+    stored = read
+      .map(([v, kind]): [string | null, string] => [sliceWithReadPattern(re, v), kind])
+      .filter((pair): pair is [string, string] => pair[0] !== null);
+    result = stored.map(([v]) => v);
     logger.info(
       `read[multiple] pattern /${action.pattern}/ sliced ${result.length} of ${values.length} captured value${values.length === 1 ? '' : 's'}`,
     );
@@ -3598,9 +3605,12 @@ async function executeReadMultiple(
   logger.info(
     `read[multiple] captured: ${result.length} value${result.length === 1 ? '' : 's'} → variable "${action.as ?? '(unnamed)'}"`,
   );
-  // Grouped from the values as read, before any pattern: a pattern that kept
-  // nothing still leaves what the selector matched to show.
-  return { values: result, matchCount, listMatches: { groups: groupByKind(read) } };
+  // Kinds and counts from every match, before any pattern: a pattern that kept
+  // nothing still leaves what the selector matched to show, and a compiled
+  // read's `kinds` are every kind it matches. The values quoted are only the
+  // ones the read stored — never text the pattern dropped, such as the value
+  // of a password field among the inputs a read matched.
+  return { values: result, matchCount, listMatches: { groups: groupByKind(read, stored) } };
 }
 
 /**
@@ -3635,29 +3645,21 @@ async function describeMatches(
   limit = READ_MULTIPLE_MAX,
 ): Promise<MatchGroup[] | undefined> {
   try {
-    const described: Array<[string, string]> = await matches.evaluateAll(
-      (els, { max, keep, cap }) => {
-        const seen = new Map<string, number>();
-        return els.slice(0, max).map((el): [string, string] => {
+    const kinds: string[] = await matches.evaluateAll(
+      (els, max) =>
+        els.slice(0, max as number).map((el) => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const e = el as any;
           const classes = (Array.from(e.classList ?? []) as string[])
             .filter((c) => !/\d/.test(c))
             .sort();
-          const kind = [String(e.tagName ?? '').toLowerCase(), ...classes].join('.');
-          const n = seen.get(kind) ?? 0;
-          seen.set(kind, n + 1);
-          // Only the first few of each kind are shown, so only theirs crosses
-          // the wire — whole: trimmed, never collapsed or cut short here. The
-          // line masks the run's secrets in it before it cuts it, and a secret
-          // cut here would no longer match the value the mask knows. `cap`
-          // only bounds a runaway text.
-          return [n < keep ? String(e.textContent ?? '').trim().slice(0, cap) : '', kind];
-        });
-      },
-      { max: limit, keep: MATCH_SAMPLES, cap: SAMPLE_TEXT_CAP },
+          return [String(e.tagName ?? '').toLowerCase(), ...classes].join('.');
+        }),
+      limit,
     );
-    return groupByKind(described);
+    // No values: a count stores a number, so any text it quoted would be page
+    // text the run never held — a hidden cell, an inline script.
+    return groupByKind(kinds.map((kind): [string, string] => ['', kind]), []);
   } catch {
     return undefined;
   }
@@ -3665,20 +3667,24 @@ async function describeMatches(
 
 /** How many values of each kind {@link MatchGroup.samples} keeps. */
 const MATCH_SAMPLES = 3;
-/** The most of one sample's text that crosses the wire from a count. */
-const SAMPLE_TEXT_CAP = 10_000;
 
-/** `[value, kind]` pairs as one group per kind, in the order first met. */
-function groupByKind(pairs: Array<[string, string]>): MatchGroup[] {
+/**
+ * `[value, kind]` pairs as one group per kind, in the order first met, each
+ * sampled from `sampled` — the values the read stored, which may be fewer.
+ */
+function groupByKind(pairs: Array<[string, string]>, sampled: Array<[string, string]> = pairs): MatchGroup[] {
   const groups = new Map<string, MatchGroup>();
-  for (const [value, kind] of pairs) {
+  for (const [, kind] of pairs) {
     let group = groups.get(kind);
     if (group === undefined) {
       group = { kind, count: 0, samples: [] };
       groups.set(kind, group);
     }
     group.count++;
-    if (group.samples.length < MATCH_SAMPLES) group.samples.push(value);
+  }
+  for (const [value, kind] of sampled) {
+    const group = groups.get(kind);
+    if (group !== undefined && group.samples.length < MATCH_SAMPLES) group.samples.push(value);
   }
   return [...groups.values()];
 }

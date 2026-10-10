@@ -1071,7 +1071,7 @@ own. §6.2 checks the selector either way.
   #28 was merged into). Under AI, a read of every match or a count that comes
   back empty, or matches more than one kind of element, is shown to the model
   before the step can end on it: what the selector matched, kind by kind, with
-  a few values of each (`src/runner/list-read-review.ts`). The model reads
+  a few of the values the read stored (`src/runner/list-read-review.ts`). The model reads
   again, and the new read replaces the old, or it keeps the read. A changed
   read is shown again while the step has turns left; with none left (the last
   turn, or a `return`), the step ends on the read as it came back, unseen,

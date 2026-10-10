@@ -397,12 +397,13 @@ Say precisely what to read:
   (§3.8).
 - A list that comes back empty, or holds more than one kind of element (a
   name and the card number beside it), is shown to the model before the step
-  ends. It sees what its selector matched, with a few values of each kind. It
+  ends. It sees what its selector matched, kind by kind, with a few of the
+  values the read stored (a count shows only kinds and numbers). It
   then reads again with a better selector or keeps the list, since an empty
   list can be the right answer. That costs one more model call, and only for
   such a list. A read the model changes is shown again, for as long as the
   step has turns left. It never fails the step: with no turn left, when the
-  same turn then changed the page (a click after the read), or when the
+  same turn then changed the page (a click or a wait after the read), or when the
   model's answer is anything but keeping the list or reading it again, the
   step ends on the list as it came back, and the report marks the step
   **⚠ list not checked**. A count of 0 is treated the same way.

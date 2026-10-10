@@ -20,17 +20,19 @@ run's read, the code-behind kept the wrong list.
 
 - **The model sees a list read that came back empty or mixed before the step
   ends.** That means a read of every match, or a count, that stored nothing,
-  or that matched more than one kind of element (tag plus class names). The
-  next turn shows what the selector matched, kind by kind, with the first
-  few values of each. The model reads again with a better selector, which
+  or that matched more than one kind of element (tag plus class names
+  without a digit). The next turn shows what the selector matched, kind by
+  kind, with the first few values the read stored of each — whole, or as
+  their length when too long to show whole; a count shows kinds and numbers
+  only. The model reads again with a better selector, which
   replaces the read, or answers `noop` to keep it. An empty list can be the
   right answer. A read that finds one kind of element costs nothing extra.
 - **A list never fails the step.** A read the model changes is shown again,
   for as long as the step has turns left. With no turn left — the step's last
   turn, or a `return` — the step ends on the list as it came back and
   passes, and the report marks it **⚠ list not checked**. So does a read the
-  same turn then changed the page under (a click, a navigation): a read again
-  would read a different page. A turn added only to show the model its list
+  same turn then changed the page under (a click, a navigation, a wait for
+  something to go): a read again would read a different page. A turn added only to show the model its list
   runs nothing but a keep or a read again of that list. Any other answer, a
   read again that fails, or a model call that fails there ends the step where
   it stood, passed and marked the same way, instead of failing a step that

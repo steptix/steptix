@@ -195,7 +195,9 @@ describe('the line a list read that came back empty or mixed is shown with', () 
       const action = readOf('#account-list .account-balance', { pattern: '€([\\d.]+)', as: 'balances' });
       const concern = listReadConcern(action, await executeAction(page, action));
       expect(concern?.kind).toBe('empty');
-      expect(concern?.text).toContain('matched 3 elements — span.account-balance ×3 ("$1,234.56", "$8,410.00", "$372.19")');
+      // Kinds and counts, and none of the values: the pattern stored none.
+      expect(concern?.text).toContain('matched 3 elements — span.account-balance ×3 — and the pattern');
+      expect(concern?.text).not.toContain('$1,234.56');
       expect(concern?.text).toContain('the pattern /€([\\d.]+)/ kept none of them');
     } finally {
       await page.close();
@@ -800,45 +802,114 @@ describe('a turn added only to show the model its lists never fails the step', (
     expect(uncheckedListRead(result)).toBe('items');
   });
 
-  it('masks a long secret in a value before cutting it, and logs no values at all', async () => {
-    // A secret longer than a quoted value is cut to, and one with line breaks
-    // in it, on a list's page text. Cut or collapsed first, neither matched the
-    // whole value the mask knows, and the line kept its head.
-    const token = `github_pat_${'A1b2C3d4E5'.repeat(8)}`;
-    const key = '-----BEGIN KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n-----END KEY-----';
+  it('masks a long secret in a value whole, quotes no count, and logs no values at all', async () => {
+    // A secret longer than a quoted value may be, and one with line breaks in
+    // it, on a list's page text. Cut or collapsed first, neither matched the
+    // whole value the mask knows, and the line kept its head. Fakes named for
+    // this test, as CLAUDE.md asks of anything shaped like a credential.
+    const longSecret = `list-read-review-long-secret-${'x'.repeat(60)}`;
+    const multiLine = 'list-read-review fake secret\nits second line\nits third line';
     const body = '<!doctype html><html><body><table id="tokens">'
-      + `<tr><td class="label">Deploy key</td><td class="value">${token}</td></tr>`
-      + `<tr><td class="label">Signing key</td><td class="value"><pre>${key}</pre></td></tr></table></body></html>`;
+      + `<tr><td class="label">Deploy key</td><td class="value">${longSecret}</td></tr>`
+      + `<tr><td class="label">Signing key</td><td class="value"><pre>${multiLine}</pre></td></tr></table></body></html>`;
+    const params = { api_token: longSecret, signing_key: multiLine };
     const lines: string[] = [];
     const unhook = addLogCallback((_level, message) => lines.push(message));
     try {
       const read = await runStep(
         [plan(readOf('#tokens td', { as: 'labels', description: 'Read every label' })), NOOP],
-        {
-          body,
-          instruction: 'Read the label of every deploy token [store as: labels]',
-          params: { api_token: token, signing_key: key },
-        },
+        { body, instruction: 'Read the label of every deploy token [store as: labels]', params },
       );
       const counted = await runStep(
         [plan({ action: 'count', selector: '#tokens td', as: 'cells', description: 'Count the cells' }), NOOP],
-        { body, instruction: 'Count the cells [store as: cells]', params: { api_token: token, signing_key: key } },
+        { body, instruction: 'Count the cells [store as: cells]', params },
       );
-      for (const { result, requests } of [read, counted]) {
-        const text = readsOf(result)[0]!.listReview!.text;
-        expect(text).toContain('td.value ×2 ("***", "***")');
+      expect(readsOf(read.result)[0]!.listReview!.text).toContain('td.value ×2 ("***", "***")');
+      // A count stores a number: it quotes none of the text it counted.
+      expect(readsOf(counted.result)[0]!.listReview!.text).toContain('— td.label ×2; td.value ×2.');
+      for (const { requests } of [read, counted]) {
         const second = textOf(requests[1]!);
         const lists = second.slice(second.indexOf('## Lists to check'), second.indexOf('## DOM Snapshot'));
-        expect(lists).not.toContain('A1b2C3d4E5');
-        expect(lists).not.toContain('MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu');
+        expect(lists).not.toContain('list-read-review-long-secret');
+        expect(lists).not.toContain('list-read-review fake secret');
       }
       const logged = lines.join('\n');
       expect(logged).toContain('td.label ×2; td.value ×2');
-      expect(logged).not.toContain('A1b2C3d4E5');
+      expect(logged).not.toContain('list-read-review-long-secret');
       expect(logged).not.toContain('Deploy key');
     } finally {
       unhook();
     }
+  });
+
+  it('quotes a value too long to show whole as its length, so a later mask still finds it whole', async () => {
+    // A long value the run does not yet know is a secret — a later step will
+    // store it under a secret-looking name, and the report is masked with it
+    // at the end of the run, by whole value. Its head must not be in the line.
+    const later = `list-read-review-later-secret-${'y'.repeat(60)}`;
+    const body = '<!doctype html><html><body><ul id="keys">'
+      + `<li class="key primary">${later}</li><li class="key">Short</li></ul></body></html>`;
+    const { result } = await runStep(
+      // `entries`, not `keys`: a name with "key" in it is secret-looking, and
+      // such a list is described with no values at all.
+      [plan(readOf('#keys li', { as: 'entries', description: 'Read every entry' })), NOOP],
+      { body, instruction: 'Read every entry [store as: entries]' },
+    );
+    const text = readsOf(result)[0]!.listReview!.text;
+    expect(text).toContain(`li.key.primary ×1 (a value of ${later.length} characters)`);
+    expect(text).toContain('li.key ×1 ("Short")');
+    expect(text).not.toContain('list-read-review-later-secret');
+  });
+
+  it('quotes no text the read did not store: what its pattern dropped, or a count\'s', async () => {
+    // A form's inputs read with a pattern that keeps none: the line must not
+    // quote the password field's value, which the page snapshot shows as ***
+    // and the step never stored.
+    const signup = '<!doctype html><html><body><form id="signup">'
+      + '<input class="field" name="name" value="Ada">'
+      + '<input class="field" name="email" value="ada-at-example">'
+      + '<input class="field" type="password" name="password" value="list-read-review-fake-password">'
+      + '</form></body></html>';
+    const pattern = await runStep(
+      [plan(readOf('#signup input', { as: 'emails', pattern: '[^@\\s]+@[^@\\s]+\\.\\w+', description: 'Read every email' })), NOOP],
+      { body: signup, instruction: 'Read every email address in the form [store as: emails]' },
+    );
+    const patternText = readsOf(pattern.result)[0]!.listReview!.text;
+    expect(patternText).toContain('matched 3 elements — input.field ×3 — and the pattern');
+    expect(patternText).not.toContain('list-read-review-fake-password');
+
+    // A count over rows whose hidden cell holds a whole key, beside an inline script.
+    const keys = '<!doctype html><html><body><table id="keys">'
+      + '<tr class="row"><td>Deploy</td><td hidden>list-read-review-hidden-key</td></tr>'
+      + '<tr class="row current"><td>CI</td><td><script>window.cfg = "list-read-review-script-text"</script></td></tr>'
+      + '</table></body></html>';
+    const count = await runStep(
+      [plan({ action: 'count', selector: '#keys tr', as: 'n', description: 'Count the keys' }), NOOP],
+      { body: keys, instruction: 'Count the keys [store as: n]' },
+    );
+    const countText = readsOf(count.result)[0]!.listReview!.text;
+    expect(countText).toContain('tr.row ×1; tr.current.row ×1');
+    expect(countText).not.toContain('list-read-review-hidden-key');
+    expect(countText).not.toContain('list-read-review-script-text');
+  });
+
+  it('ends on a read the same turn then waited after, without showing it', async () => {
+    // "…then wait for them to close": a read again would read the page with
+    // the toasts gone and store `[]` over the two the step read.
+    const body = '<!doctype html><html><body><div id="toasts">'
+      + '<p class="toast success">Saved</p><p class="toast info">Synced</p></div>'
+      + '<script>setTimeout(() => { document.getElementById("toasts").innerHTML = ""; }, 200);</script></body></html>';
+    const { result, requests, params } = await runStep(
+      [plan([
+        readOf('#toasts .toast', { as: 'toasts', description: 'Read every toast' }),
+        { action: 'wait', waitType: 'selector', condition: '#toasts .toast', state: 'hidden', timeout: 5000, description: 'Wait for the toasts to close' },
+      ])],
+      { body, instruction: 'Read the toasts shown [store as: toasts], then wait for them to close' },
+    );
+    expect(result.status).toBe('passed');
+    expect(requests).toHaveLength(1);
+    expect(params.toasts).toBe('["Saved","Synced"]');
+    expect(readsOf(result)[0]!.listReview?.outcome).toBe('unseen');
   });
 
   it('masks a secret stored after the line was written, when the line is sent', async () => {

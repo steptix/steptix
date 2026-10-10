@@ -68,7 +68,7 @@ import {
 } from './placeholder-substitution.js';
 import { decideConditionLocally, type LocalDecision } from './literal-decision.js';
 import { storeCapture } from './store-capture.js';
-import { isReviewAnswer, listReadConcern, sameListRead, storedName, type ListReadConcern } from './list-read-review.js';
+import { isReviewAnswer, leavesPageAsRead, listReadConcern, sameListRead, storedName, type ListReadConcern } from './list-read-review.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import {
   isReturnClaim,
@@ -4006,11 +4006,12 @@ async function executeStepAttempt(
       // that loaded late) is a result the model has not seen.
       // A read is shown to the model on the page it read. An action after it in
       // this turn that may have changed that page — a click, a navigation, a
-      // tab move — leaves nothing to show it against: a read again would read
-      // a different page and store over the read with it. The step ends on the
-      // read as it came back, unseen, as with no turn left. (An action that
-      // failed changed nothing, and fails the turn.)
-      if (result.success && REEVAL_WHEN_UNSTATED.has(action.action)) {
+      // tab move, a wait for something to go (`leavesPageAsRead`) — leaves
+      // nothing to show it against: a read again would read a different page
+      // and store over the read with it. The step ends on the read as it came
+      // back, unseen, as with no turn left. (An action that failed changed
+      // nothing, and fails the turn.)
+      if (result.success && !leavesPageAsRead(action)) {
         for (const [name, { concern, sub }] of turnListConcerns) {
           sub.listReview!.outcome = 'unseen';
           logger.warn(`Step ${stepIndex}: "${action.action}" may have changed the page ${name} was read on — the step ends on it as read: ${concern.summary}`);

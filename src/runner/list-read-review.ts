@@ -82,12 +82,17 @@ export function isListRead(action: AIAction): boolean {
  * The concern about a list read that succeeded, or undefined when there is
  * none — not a list read, a list of one kind, or a page that could not say
  * what it matched. `mask` hides the run's secrets in the line, which quotes
- * page text and the selector. It runs on each value before the value is cut
- * short, since a secret cut in half no longer matches the whole value the
- * mask knows (as `formatRecordedCapture` in src/ai/prompts.ts does). A list
- * stored under a secret-looking name is described without its values: the
- * mask holds such a list whole, as the text it was stored as, and the line
- * would quote its items one by one.
+ * the selector and a few of the values the read STORED (`MatchGroup.samples`
+ * — never text the run did not store; a count quotes none).
+ *
+ * A value is quoted only whole: masked, and short enough to show as it is. A
+ * longer one, or one with line breaks, is given as its length. Cut short, a
+ * secret no longer matches the whole value a mask knows — the run's mask now,
+ * or the report's at the end of the run, which knows the secrets of later
+ * steps too — and its head would stay readable. A list stored under a
+ * secret-looking name is described without its values: the mask holds such a
+ * list whole, as the text it was stored as, and the line would quote its
+ * items one by one.
  */
 export function listReadConcern(
   action: AIAction,
@@ -99,8 +104,11 @@ export function listReadConcern(
   const selector = `\`${action.selector ?? ''}\``;
   const groups = result.listMatches?.groups;
   const counting = action.action === 'count';
-  /** How a value is quoted: masked whole, then cut — or not at all. */
-  const sample = isSecretParameterName(name) ? undefined : (value: string) => JSON.stringify(cut(mask(value)));
+  /** How a value is quoted: whole, or as its length — or not at all. */
+  const sample = isSecretParameterName(name) ? undefined : (value: string) => {
+    const masked = mask(value);
+    return cut(masked) === masked ? JSON.stringify(masked) : `a value of ${masked.length} characters`;
+  };
 
   const stored = counting ? Number(result.capturedValue) : (result.capturedValues ?? []).length;
   if (stored === 0) {
@@ -138,7 +146,7 @@ function describeGroups(groups: MatchGroup[], quote: ((value: string) => string)
   const shown = groups.slice(0, KINDS_SHOWN).map((g) => {
     if (quote === undefined) return `${g.kind} ×${g.count}`;
     const samples = g.samples.map(quote);
-    if (g.count > g.samples.length) samples.push('…');
+    if (samples.length > 0 && g.count > samples.length) samples.push('…');
     return `${g.kind} ×${g.count}${samples.length > 0 ? ` (${samples.join(', ')})` : ''}`;
   });
   const rest = groups.length - shown.length;
@@ -182,6 +190,22 @@ export function isReviewAnswer(action: AIAction, shown: ReadonlyMap<string, SubA
   if (action.action === 'noop') return true;
   if (!isListRead(action)) return false;
   return shown.get(action.as!)?.action.action === action.action;
+}
+
+/** Actions that leave the page as a list read before them saw it. */
+const PAGE_KEEPING_ACTIONS: ReadonlySet<string> = new Set(['read', 'count', 'readTable', 'find', 'expand', 'noop']);
+
+/**
+ * Whether an action leaves the page as a list read before it in the same
+ * turn saw it: another read, a look around (`find`, `expand`), a `noop`, or
+ * an assertion that does not wait. Anything else may have changed it — a
+ * click, a navigation, a tab move, a wait for something to go — and a read
+ * again in the next turn would read a different page and store over the
+ * step's read (src/runner/step-executor.ts).
+ */
+export function leavesPageAsRead(action: AIAction): boolean {
+  if (action.action === 'assert') return action.poll === undefined;
+  return PAGE_KEEPING_ACTIONS.has(action.action);
 }
 
 /**
