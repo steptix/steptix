@@ -125,7 +125,13 @@ export class Candidate {
       // skill's entries is the skill, not the test that pulled it in.
       markdownFile: binding.file.replace(/\.steps\.ts$/, '.md'),
     };
-    const before = this.current.get(binding.file) ?? this.original.get(binding.file) ?? null;
+    // The file as it stands, loading the on-disk original the first time. An
+    // entry applied before anything had read the file — one written from the
+    // recording, which asks no model and so never read it for a prompt —
+    // spliced into nothing, and the proposal was a fresh file holding that
+    // entry alone: every other entry the author had in it was gone, from the
+    // proposal and from disk once it was written.
+    const before = await this.read(binding.file);
     this.current.set(
       binding.file,
       await formatCodeBehindSource(
@@ -202,10 +208,42 @@ export class Candidate {
    * override map. `.ts` because esbuild picks its loader by extension; inside
    * the gitignored cache dir beside the real file, because a `node_modules`
    * path segment would break the `steptix/codebehind` self-reference.
+   *
+   * `underAi` names steps the replay is to run under AI instead of running
+   * their entry: each is spliced into the replay's copy as `ai: true`, with
+   * the reason. The proposal is untouched — what the author is handed, and
+   * what is written, still holds the entry as it was. For an entry the compile
+   * leaves as it found it and knows to break (src/codebehind/compile.ts): a
+   * strict replay would fail on it and prove nothing else.
    */
-  async materialise(): Promise<Record<string, string>> {
+  async materialise(
+    underAi: ReadonlyArray<{ step: CompileStep; reason: string }> = [],
+  ): Promise<Record<string, string>> {
+    const contents = new Map(this.current);
+    for (const { step, reason } of underAi) {
+      const binding = step.binding;
+      if (!binding) continue;
+      const before = contents.get(binding.file) ?? (await this.read(binding.file));
+      if (before === null) continue;
+      try {
+        contents.set(
+          binding.file,
+          spliceEntry(before, {
+            file: binding.file,
+            source: binding.source,
+            ...(binding.section !== undefined && { section: binding.section }),
+            occurrence: binding.occurrence,
+            entryCode: aiEntryFor(step.text, reason),
+          }).text,
+        );
+      } catch (err) {
+        // The entry is not where its binding says: the replay runs the file as
+        // it is, which is what it did before this existed.
+        logger.debug(`Could not run step ${step.number} under AI in the replay copy: ${String(err)}`);
+      }
+    }
     const overrides: Record<string, string> = {};
-    for (const [file, content] of this.current) {
+    for (const [file, content] of contents) {
       const dir = resolveCodeBehindCacheDir(file);
       const target = path.join(
         dir,

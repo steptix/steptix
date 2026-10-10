@@ -401,8 +401,11 @@ Say precisely what to read:
   values the read stored (a count shows only kinds and numbers). It
   then reads again with a better selector or keeps the list, since an empty
   list can be the right answer. That costs one more model call, and only for
-  such a list. A read the model changes is shown again, for as long as the
-  step has turns left. It never fails the step: with no turn left, when the
+  such a list. In a turn the step adds only to show the list, the model keeps
+  it with `noop`; in a turn it asked for anyway, going on with the step keeps
+  it. A read the model changes is shown again, for as long as the step has
+  turns left, and so is a list it left alone while it read another one again.
+  It never fails the step: with no turn left, when the
   same turn then changed the page (a click or a wait after the read), or when the
   model's answer is anything but keeping the list or reading it again, the
   step ends on the list as it came back, and the report marks the step
@@ -2327,7 +2330,13 @@ never compiled, because on a page with no items every selector matches
 nothing, so the read says nothing about its own; nor is a list the model never
 saw. Such a step gets no entry, is listed as not attempted, and compiles from
 a later run where the list has items. A step whose list is always empty — a
-count of error messages that should stay 0 — therefore stays under AI. Review leaves an entry marked
+count of error messages that should stay 0 — therefore stays under AI. Steps
+that share one entry, such as the rows of a `### Section` table, compile from
+the row whose list had items, so an empty first row does not hold the entry
+back. A data-driven test compiles from its first data row only, so put a row
+whose list has items first. When such a step already had an entry that broke,
+the compile leaves that entry as it is and its replay runs the step under AI,
+so the steps after it are still proven. Review leaves an entry marked
 `fromRecording: true` alone. A step that also acts — a click, then a read —
 still goes to the model, which does its read with `step.read` and the recorded
 fields; so does a read whose recorded selector held a parameter's value.

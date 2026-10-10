@@ -25,10 +25,13 @@ run's read, the code-behind kept the wrong list.
   kind, with the first few values the read stored of each — whole, or as
   their length when too long to show whole; a count shows kinds and numbers
   only. The model reads again with a better selector, which
-  replaces the read, or answers `noop` to keep it. An empty list can be the
-  right answer. A read that finds one kind of element costs nothing extra.
+  replaces the read, or keeps it: with `noop` in a turn added only to show
+  the list, or by going on with the step in a turn it asked for anyway. An
+  empty list can be the right answer. A read that finds one kind of element
+  costs nothing extra.
 - **A list never fails the step.** A read the model changes is shown again,
-  for as long as the step has turns left. With no turn left — the step's last
+  for as long as the step has turns left, and so is a list it left alone while
+  it read another one again. With no turn left — the step's last
   turn, or a `return` — the step ends on the list as it came back and
   passes, and the report marks it **⚠ list not checked**. So does a read the
   same turn then changed the page under (a click, a navigation, a wait for
@@ -45,8 +48,22 @@ run's read, the code-behind kept the wrong list.
   a list the model never saw. Such a step gets no entry and is named as not
   attempted, with the reason, and the next compile takes it again — after a
   run where the list has items, it compiles. A loop body compiles from the
-  first pass that read something. A step whose list is always empty stays
-  under AI. The report says, under each reviewed read, what became of it.
+  first pass that read something, and steps that share one entry (the rows of
+  a `### Section` table) from the row that did. A step whose list is always
+  empty stays under AI. When such a step already had an entry that broke, the
+  entry is left as it is and the compile's replay runs the step under AI, so
+  the steps after it are still proven. The compile names these steps apart
+  from steps a stop, an end or a return kept from running (`unprovenReads`
+  in the summary, `Not compiled:` in `steptix compile`'s output). The report
+  says, under each reviewed read, what became of it.
+
+### Fixed — a compile no longer deletes the other entries in a code-behind file
+
+A compile whose first entry for a `.steps.ts` file was written from the
+recording — a step that only reads, which asks no model — proposed a file
+holding that entry alone. Writing it deleted every other entry the author had
+in the file, and the compile still said green. Both `steptix compile` and
+Run & Compile did this. The entry is now spliced into the file as it stands.
 
 ### Fixed — a test closed and reopened, or renamed, runs the text it has now
 

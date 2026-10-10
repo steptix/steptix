@@ -641,7 +641,7 @@ export class LiveCompiler {
    * a loop body whose first pass read an empty list and whose second read
    * items compiles from the second, and owes nothing.
    */
-  private readonly unprovenReads: { number: number; key: string }[] = [];
+  private readonly unprovenReads: { number: number; key: string; reason: string }[] = [];
   /**
    * Entry keys this compile has already queued — the per-key dedupe the boxed
    * pipeline gets from `selectSteps` (compile.ts), which keeps a `keys` Set
@@ -1126,7 +1126,7 @@ export class LiveCompiler {
       }
       // And a step whose list read proved nothing, on the same terms (issue #48).
       if (unproven !== undefined && refusal === unproven.reason) {
-        this.unprovenReads.push({ number: at + 1, key: entryKeyOf(input.binding!) });
+        this.unprovenReads.push({ number: at + 1, key: entryKeyOf(input.binding!), reason: unproven.reason });
         this.stepEvent('generate', { index: at, number: at + 1, text, hasEntry: false, isAiEntry: false }, refusal);
       }
       logger.debug(`Compile-as-you-go skipped step ${input.index + 1}: ${refusal}`);
@@ -1923,6 +1923,15 @@ export class LiveCompiler {
     const unprovenOwed = this.unprovenReads
       .filter((s) => !this.writtenKeys.has(s.key))
       .map((s) => s.number);
+    /** {@link CompileSummary.unprovenReads}: once per step, the first reason. */
+    const unprovenReads = [
+      ...new Map(
+        this.unprovenReads
+          .filter((s) => !this.writtenKeys.has(s.key))
+          .map((s): [number, { step: number; reason: string }] => [s.number, { step: s.number, reason: s.reason }])
+          .reverse(),
+      ).values(),
+    ].sort((a, b) => a.step - b.step);
     // A step the run decided against owes an entry on the same terms
     // (stories/codebehind-loops-and-conditions.md, decision 12; issue 053): a
     // body line one pass skipped and another compiled owes nothing.
@@ -2018,6 +2027,7 @@ export class LiveCompiler {
       unproven: [...this.compiled].sort((a, b) => a - b),
       writtenOffAi: [],
       notAttempted,
+      ...(unprovenReads.length > 0 && { unprovenReads }),
       recordingDir: recordingDirFor(this.options.testFilePath),
       recoveredByValue: [...this.recoveredByValue],
       ...(candidatePath !== undefined && { candidatePath }),

@@ -72,7 +72,7 @@ import {
   resolveEnvDataRef,
 } from '../parser/interpolate-env-data.js';
 import { bindVariable, clearDottedKeys, loadDataFile, placeholderRoot } from '../parser/parameters.js';
-import { evidenceRows, recordingDirFor, writeReplayFailure, type RecordedAction } from './recording.js';
+import { evidenceRank, evidenceRows, recordingDirFor, writeReplayFailure, type RecordedAction } from './recording.js';
 import { unprovenListRead, type UnprovenListRead } from '../runner/list-read-review.js';
 import {
   inheritLoopBindings,
@@ -177,6 +177,18 @@ export interface CompileSummary {
    *  them. They have no entry, and the next compile's default selection takes
    *  them. */
   notAttempted: number[];
+  /**
+   * The steps in {@link notAttempted} that ran, and passed, but ended on a list
+   * read that proves nothing about its selector — one that came back empty, or
+   * one the model never checked (src/runner/list-read-review.ts, issue #48) —
+   * each with the sentence the compile said about it.
+   *
+   * Named apart because nothing stopped, ended or skipped them: a reader that
+   * put them under "the run stopped at step 5" or "a return ended the flow
+   * before them" would say the wrong thing about a step that ran. Absent when
+   * there are none.
+   */
+  unprovenReads?: Array<{ step: number; reason: string }> | undefined;
   /** Where the recording — and the candidate, and any replay failure — were
    *  written: the test's `.steptix-codebehind-cache/<name>.recording/`. */
   recordingDir: string;
@@ -370,6 +382,8 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   const parameters = resolvedParameters.values;
 
   const tokens = (): number => (options.tokenTracker?.total ?? 0) + runTokens;
+  /** {@link CompileSummary.unprovenReads}, once the recording has been read. */
+  let unprovenReads: Array<{ step: number; reason: string }> = [];
   const finish = (
     status: CompileStatus,
     summary: Partial<Omit<CompileSummary, 'test' | 'totalSteps' | 'tokensUsed' | 'rounds'>> &
@@ -394,6 +408,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         notAttempted: [],
         recordingDir: recordingDirFor(test.filePath),
         recoveredByValue,
+        ...(unprovenReads.length > 0 && { unprovenReads }),
         ...summary,
       },
     };
@@ -682,6 +697,35 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   const recordLoops = loopEntries(recorded.rows, controls);
   const observationsFor = (member: number): RecordedObservation[] =>
     observationsOf(recordVisits, member, snapshots);
+  // One entry, several steps: the rows of a `### Section` table, or a section
+  // or skill called twice, bind one entry (`entryKeyOf`), and `selectSteps`
+  // stood the first of them in for all, before there was a recording to choose
+  // by. Its evidence is the best of theirs, ranked as `evidenceRows` ranks the
+  // passes of one index (`evidenceRank`): a row that read items beats one whose
+  // list came back empty, which proves nothing about the selector (issue #48),
+  // and a row that healed under AI beats one that ran clean as code, which has
+  // no transcript — generating from that wrote `ai: true` over a working entry.
+  // A tie keeps the first, as before. Only steps the recording ran to: one past
+  // where it stopped is not part of this compile. The live compiler gets the
+  // same answer by writing from whichever step of an entry proves it first.
+  selection = {
+    ...selection,
+    order: selection.order.map((first) => {
+      if (first.kind === 'condition') return first;
+      let best = first;
+      for (const s of steps) {
+        if (s.key !== first.key || s.kind === 'condition' || s.ineligible !== undefined) continue;
+        if (throughStep !== undefined && s.number > throughStep) continue;
+        const row = record.steps[s.index];
+        const held = record.steps[best.index];
+        if (row !== undefined && (held === undefined || evidenceRank(row) > evidenceRank(held))) best = s;
+      }
+      if (best !== first) {
+        stepEvent('select', best, `compiled from this step's run, the better evidence for the entry it shares with step ${first.number}`);
+      }
+      return best;
+    }),
+  };
   const stepKinds = selection.order.filter((s) => s.kind !== 'condition');
   const skippedInRecording = stepKinds.filter((s) => {
     const rows = recordedAt(s.index);
@@ -709,6 +753,24 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     const unproven = unprovenListRead(row);
     if (unproven !== undefined) unprovenInRecording.set(s, unproven);
   }
+  unprovenReads = [...unprovenInRecording]
+    .map(([s, u]) => ({ step: s.number, reason: u.reason }))
+    .sort((a, b) => a.step - b.step);
+  /**
+   * The steps above whose existing entry is known to break: flagged stale, by
+   * an earlier run or by this Record. A stale step joins the selection to be
+   * written again, and leaves it here with its broken entry still in the file —
+   * which a strict replay then ran, failed on, and stopped at, proving none of
+   * the steps after it, and sending the author to recompile a step whose list
+   * reads the same way again. So the replay runs them under AI, in its own copy
+   * of the file only (`Candidate.materialise`). By key: every step that shares
+   * the entry runs it.
+   */
+  const underAiInReplay = new Map(
+    [...unprovenInRecording]
+      .filter(([s]) => s.hasEntry && !s.isAiEntry && recordStale.has(s.key!))
+      .map(([s, u]): [string, { step: CompileStep; reason: string }] => [s.key!, { step: s, reason: u.reason }]),
+  );
   const noEvidence = new Set([
     ...skippedInRecording,
     ...toleratedInRecording,
@@ -774,14 +836,20 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       ]
         .filter((c) => c !== '')
         .join(', and ');
+      // What to do next: one cause's own sentence, or, with several, each one's
+      // steps and what they need — a step that read an empty list sent to "run
+      // the test so they execute" looks for the wrong thing.
+      const advice = ([
+        [didNotRun, 'Run the test so they execute, then compile again.', 'run the test so they execute'],
+        [toleratedNumbers, 'Make it pass, then compile again.', 'make it pass'],
+        [emptyNumbers, 'Compile again after a run where the list has items.', 'run it where the list has items'],
+        [uncheckedNumbers, 'Run it again, then compile again.', 'run it again'],
+      ] as Array<[number[], string, string]>).filter(([numbers]) => numbers.length > 0);
+      const each = advice.map(([numbers, , what]) => `${listSteps(numbers)}: ${what}`).join('; ');
       const next =
-        didNotRun.length > 0
-          ? 'Run the test so they execute, then compile again.'
-          : toleratedNumbers.length > 0
-            ? 'Make it pass, then compile again.'
-            : emptyNumbers.length > 0
-              ? 'Compile again after a run where the list has items.'
-              : 'Run it again, then compile again.';
+        advice.length === 1
+          ? advice[0]![1]
+          : `${each.charAt(0).toUpperCase()}${each.slice(1)}; then compile again.`;
       return finish(
         'partial',
         {
@@ -1304,7 +1372,12 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   };
   const replay = async (round: number): Promise<CompileRunOutcome> => {
     rounds = round;
-    const overrides = await candidate.materialise();
+    if (round === 1) {
+      for (const { step } of underAiInReplay.values()) {
+        stepEvent('replay', step, 'runs under AI: its entry broke on the recording run, and this compile wrote no new one');
+      }
+    }
+    const overrides = await candidate.materialise([...underAiInReplay.values()]);
     emit({
       kind: 'phase',
       phase: 'replay',
@@ -1396,6 +1469,24 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       return `step ${step.number} failed on the replay — ${failed.error}${capBodyNote(step, failed, controls)}`;
     }
     if (step.key !== undefined && selection.keys.has(step.key)) return undefined;
+    // A step whose list read proved nothing has no new entry for a reason
+    // recompiling it does not change (issue #48): say that reason.
+    const unproven = step.key === undefined
+      ? undefined
+      : [...unprovenInRecording].find(([s]) => s.key === step.key)?.[1];
+    if (unproven !== undefined && underAiInReplay.has(step.key!)) {
+      return (
+        `step ${step.number} failed on the replay under AI — ${failed.error} ` +
+        `(its entry broke on the recording run, and this compile wrote no new one: ${unproven.reason})`
+      );
+    }
+    if (unproven !== undefined && step.hasEntry && !step.isAiEntry) {
+      return (
+        `existing entry for step ${step.number} ` +
+        `${failed.mismatch ? 'answers differently from the recording' : 'fails'}, and this compile wrote no new one: ` +
+        unproven.reason
+      );
+    }
     if (step.ineligible !== undefined) {
       return `step ${step.number} failed on the replay — ${failed.error} (${step.ineligible})`;
     }
@@ -1733,6 +1824,13 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   const unproven = selection.order
     .filter((s) => !proven.has(s.key!) && !writtenOffAi.includes(s.number))
     .map((s) => s.number);
+  // The steps that ran and passed on a list read proving nothing (issue #48)
+  // are a cause of their own, said in a clause of their own: never folded into
+  // the stop, the end or the skips the rest of `notAttempted` is named by.
+  const unprovenSteps = new Set(unprovenReads.map((u) => u.step));
+  const otherNotAttempted = notAttempted.filter((n) => !unprovenSteps.has(n));
+  const unprovenOfKind = (kind: UnprovenListRead['kind']): number[] =>
+    [...unprovenInRecording].filter(([, u]) => u.kind === kind).map(([s]) => s.number);
   // A replay that returned proved only the steps it reached
   // (stories/step-flow-control.md, decision 12). Those entries are still
   // proposed — they are unproven, which the next run settles — but the compile
@@ -1758,7 +1856,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   if (endedAsWritten !== undefined && failure === undefined) {
     failure =
       `${endedAsWrittenReason('run', endedAsWritten.step)} (${clipLine(endedAsWritten.line)})` +
-      (notAttempted.length > 0 ? `; not attempted: ${listSteps(notAttempted)}` : '');
+      (otherNotAttempted.length > 0 ? `; not attempted: ${listSteps(otherNotAttempted)}` : '');
   }
   // Green means the whole test replayed as code. A prefix compile that went
   // green only proved the prefix; the rest of the test is still to do — and so
@@ -1831,9 +1929,18 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // run, and "a return skipped them" over it is simply false — the same
     // correction `notRunOnRecordingReason` and the "Nothing to compile"
     // refusal already carry (stories/step-flow-control.md, decision 12).
-    notAttempted.length > 0 && !stoppedAt
-      ? `${listSteps(notAttempted)} not attempted on the recording run` +
+    otherNotAttempted.length > 0 && !stoppedAt
+      ? `${listSteps(otherNotAttempted)} not attempted on the recording run` +
         (notAttemptedCause === undefined ? '' : ` (${notAttemptedCause})`)
+      : '',
+    // Said whether or not the recording stopped: they ran before it did.
+    unprovenOfKind('empty').length > 0
+      ? `${listSteps(unprovenOfKind('empty'))} not attempted ` +
+        '(an empty list read on the recording run proves nothing about the selector)'
+      : '',
+    unprovenOfKind('unchecked').length > 0
+      ? `${listSteps(unprovenOfKind('unchecked'))} not attempted ` +
+        '(the model never checked a list read on the recording run)'
       : '',
     // The compliance signal, in front of whoever ran the compile rather than
     // only in the summary object (stories/placeholder-preserving-actions.md §6).

@@ -350,8 +350,7 @@ export async function writeRecording(testFilePath: string, input: RecordingInput
 export function evidenceRows(steps: readonly StepResult[]): StepResult[] {
   const firstSeen: number[] = [];
   const chosen = new Map<number, StepResult>();
-  const rank = (r: StepResult): number =>
-    isEvidencePass(r) ? 3 : ranWithTranscript(r) ? 2 : r.status === 'passed' ? 1 : 0;
+  const rank = evidenceRank;
   for (const result of steps) {
     if (result.hookScope || result.interactiveAdHoc || result.interactiveChild) continue;
     const held = chosen.get(result.index);
@@ -363,6 +362,19 @@ export function evidenceRows(steps: readonly StepResult[]): StepResult[] {
     }
   }
   return firstSeen.map((index) => chosen.get(index)!);
+}
+
+/**
+ * How good one row is as evidence for the entry its step binds to, for
+ * choosing among rows that could each stand for it: 3 for usable evidence
+ * ({@link isEvidencePass}), 2 for a row that worked under AI but ended on a
+ * list read that proves nothing, 1 for a pass with no transcript (it ran
+ * clean as code), 0 for anything else. `evidenceRows` takes the best pass of
+ * one index by it; the boxed compile takes the best of the steps that share
+ * one entry by it (src/codebehind/compile.ts).
+ */
+export function evidenceRank(result: StepResult): number {
+  return isEvidencePass(result) ? 3 : ranWithTranscript(result) ? 2 : result.status === 'passed' ? 1 : 0;
 }
 
 /**

@@ -1087,7 +1087,16 @@ own. §6.2 checks the selector either way.
   no entry — never `ai: true` — so the next compile takes it again. A loop
   body takes its evidence from the first pass whose reads did prove something
   (`isEvidencePass`), so a `For each` that read nothing on its first item and
-  three values on its second compiles from the second.
+  three values on its second compiles from the second. Steps that share one
+  entry — a `### Section` table's rows, a section or skill called twice — take
+  theirs from the best of their runs by the same rank (`evidenceRank`), so a
+  row that read items compiles the entry an earlier empty row could not. A
+  step left out this way whose existing entry broke (it is stale) keeps that
+  entry, and the compile's replay runs the step under AI in its own copy of
+  the file (`Candidate.materialise`), so the replay proves the steps after it
+  rather than failing on an entry the compile did not write. The summary
+  names these steps apart from the ones a stop, an end or a return kept from
+  running (`unprovenReads`).
 - **Review leaves these entries alone.** They carry `fromRecording: true`.
   Review's prompt says not to change them, and a revision that changes one is
   rejected, as the other rejections are (`review.ts:270-306`). The rejection

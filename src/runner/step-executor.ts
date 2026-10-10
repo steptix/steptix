@@ -2884,6 +2884,7 @@ async function executeStepAttempt(
         stepValues ?? { parameters: [] },
         promptAuthored,
         listReadLines.map((line) => redact(line, secretsNow())),
+        reviewOnly,
       );
     }
     listReadLines = [];
@@ -2929,7 +2930,9 @@ async function executeStepAttempt(
       timestamp: turnTimestamp,
     });
 
-    lastAiResponse = aiResponse;
+    // The step's explanation is its own reasoning, not a review turn's: that
+    // turn is about the lists, and its answer may never have run.
+    if (!reviewOnly) lastAiResponse = aiResponse;
 
     logger.debug(`AI reasoning (turn ${currentTurn}): ${aiResponse.reasoning}`);
 
@@ -3112,10 +3115,13 @@ async function executeStepAttempt(
      * and fails the turn.
      */
     let pageChangesSeen = 0;
+    /** An action this turn may have changed the page (`leavesPageAsRead`). */
+    let pageChangedThisTurn = false;
     const notePageChanges = (): void => {
       for (; pageChangesSeen < turnSubActions.length; pageChangesSeen++) {
         const done = turnSubActions[pageChangesSeen]!;
         if (done.error !== undefined || leavesPageAsRead(done.action)) continue;
+        pageChangedThisTurn = true;
         for (const [name, { concern, sub }] of turnListConcerns) {
           sub.listReview!.outcome = 'unseen';
           logger.warn(`Step ${stepIndex}: "${done.action.action}" may have changed the page ${name} was read on — the step ends on it as read: ${concern.summary}`);
@@ -4187,16 +4193,25 @@ async function executeStepAttempt(
       );
     }
 
-    // The list reads this turn's prompt showed the model: one it did not read
-    // again, it kept (src/runner/list-read-review.ts). In a turn added only to
-    // ask, only a `noop` keeps it — that turn exists for the answer — and one
-    // the answer left alone (it read another of them again) is shown again.
+    // The list reads this turn's prompt showed the model, and what its answer
+    // did with each (src/runner/list-read-review.ts). A read it read again was
+    // replaced in the hook above. One it left alone:
+    //  - a `noop` keeps, in any turn;
+    //  - in a turn added only to ask, nothing else does — that turn exists for
+    //    the answer;
+    //  - in a turn the model asked for, going on with the step keeps it, as
+    //    the prompt says — unless the answer read another of the lists again,
+    //    which shows it was answering them one at a time ("Return ONE
+    //    action"), and this one is still to answer.
+    // One still to answer is shown again — if the page is still the one it
+    // was read on. Otherwise it stays `pending`: shown, not answered.
     const keptByNoop = aiResponse.actions.some((a) => a.action === 'noop');
+    const answeringOne = [...listReadsShown.values()].some((sub) => sub.listReview?.outcome === 'replaced');
     const unanswered: Array<[string, SubActionResult]> = [];
     for (const [name, sub] of listReadsShown) {
       if (sub.listReview?.outcome !== 'pending') continue;
-      if (!reviewOnly || keptByNoop) sub.listReview.outcome = 'kept';
-      else unanswered.push([name, sub]);
+      if (keptByNoop || (!reviewOnly && !answeringOne)) sub.listReview.outcome = 'kept';
+      else if (!pageChangedThisTurn) unanswered.push([name, sub]);
     }
     listReadsShown = new Map();
 

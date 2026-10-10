@@ -852,6 +852,12 @@ export function buildContinuationMessage(
   values?: StepValues,
   authoredInstruction?: string,
   listReads?: string[],
+  /**
+   * This turn was added only to show the model its list reads, after it had
+   * said the step was done (src/runner/step-executor.ts, `reviewOnly`): it
+   * asks about the lists alone, not for the step's next action.
+   */
+  reviewOnly?: boolean,
 ): ChatMessage {
   const instructionText = authoredInstruction ?? originalInstruction;
 
@@ -877,7 +883,7 @@ export function buildContinuationMessage(
     ? `## Exploration Results\n${explorationResults.join('\n\n')}\n\n`
     : '';
 
-  const listReadsSection = formatListReadsSection(listReads);
+  const listReadsSection = formatListReadsSection(listReads, reviewOnly === true);
 
   const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
 
@@ -902,8 +908,8 @@ ${openPagesSection}${explorationSection}${listReadsSection}## DOM Snapshot
 ${domSnapshot}
 \`\`\`${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
 
-What is the next action needed to complete the original instruction: "${instructionText}"?
-Return ONE action, and always set needs_reeval: true if part of this instruction remains after it, false if this instruction is now fully satisfied — do NOT continue into actions that belong to subsequent steps. If the instruction is already satisfied and no further action is required, return { "actions": [ { "action": "noop", "description": "<why nothing is needed>" } ], "reasoning": "...", "needs_reeval": false }. If the instruction says to return or stop and its condition holds, return { "action": "return", "description": "<why the condition holds>", "needs_reeval": false } instead; if it does not hold, "noop". Never "return" on an instruction that does not say to. If the instruction says to FAIL the test and its condition holds, return { "action": "fail", "description": "<why the condition holds>", "needs_reeval": false }; if it does not hold, "noop". Never "fail" on an instruction that does not say to fail the test.`;
+${reviewOnly === true ? reviewClosing() : `What is the next action needed to complete the original instruction: "${instructionText}"?
+Return ONE action, and always set needs_reeval: true if part of this instruction remains after it, false if this instruction is now fully satisfied — do NOT continue into actions that belong to subsequent steps. If the instruction is already satisfied and no further action is required, return { "actions": [ { "action": "noop", "description": "<why nothing is needed>" } ], "reasoning": "...", "needs_reeval": false }. If the instruction says to return or stop and its condition holds, return { "action": "return", "description": "<why the condition holds>", "needs_reeval": false } instead; if it does not hold, "noop". Never "return" on an instruction that does not say to. If the instruction says to FAIL the test and its condition holds, return { "action": "fail", "description": "<why the condition holds>", "needs_reeval": false }; if it does not hold, "noop". Never "fail" on an instruction that does not say to fail the test.`}`;
 
   if (screenshotBase64) {
     return {
@@ -929,15 +935,38 @@ Return ONE action, and always set needs_reeval: true if part of this instruction
  * (src/runner/list-read-review.ts): what each selector matched, and the two
  * answers the model may give. Empty when there are none, so every other
  * continuation turn reads as it always did.
+ *
+ * How the model keeps a list depends on the turn. In a turn added only to ask
+ * (`reviewOnly`), the step is done, and keeping is a `noop`. In a turn the
+ * model asked for, the step still has work, and a `noop` with
+ * `needs_reeval` false would end it there: going on with the step keeps the
+ * list instead.
  */
-export function formatListReadsSection(lines: string[] | undefined): string {
+export function formatListReadsSection(lines: string[] | undefined, reviewOnly = false): string {
   if (lines === undefined || lines.length === 0) return '';
+  const readAgain = 'read it again the same way — a read of every match again, or a count again — with a selector '
+    + 'that matches only what the step asks for, and the same "as"';
+  const answers = reviewOnly
+    ? `If the selector missed what the step means, or caught other elements beside it, ${readAgain}: the new read replaces this one. If this is the answer (the list really is empty, or every kind belongs in it), answer noop with needs_reeval false.`
+    : `If the selector missed what the step means, or caught other elements beside it, ${readAgain}, before you go on: the new read replaces this one. If this is the answer (the list really is empty, or every kind belongs in it), go on with the step: that keeps it.`;
   return `## Lists to check
 A read of every match, or a count, in this step came back empty or matched more than one kind of element. Look at what it matched before the step ends:
 ${lines.map((line) => `- ${line}`).join('\n')}
-If the selector missed what the step means, or caught other elements beside it, read it again the same way — a read of every match again, or a count again — with a selector that matches only what the step asks for, and the same "as": the new read replaces this one. If this is the answer (the list really is empty, or every kind belongs in it), answer noop with needs_reeval false.
+${answers}
 
 `;
+}
+
+/**
+ * The question a turn added only to show list reads ends with, in place of
+ * the step's "what is the next action": the step is done, and anything but an
+ * answer about the lists ends it where it stands (src/runner/step-executor.ts).
+ */
+function reviewClosing(): string {
+  return 'The step is done: everything its instruction asks has been carried out. This turn is only about the lists above. '
+    + 'Answer with a read again of one or more of them, the same way, or — if they are right — '
+    + '{ "actions": [ { "action": "noop", "description": "<why the lists are right>" } ], "reasoning": "...", "needs_reeval": false }. '
+    + 'Do nothing else on the page: any other action ends the step where it stands, with the lists not checked.';
 }
 
 /**

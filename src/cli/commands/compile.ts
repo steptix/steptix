@@ -214,7 +214,7 @@ function printEvent(event: CompileEvent): void {
   console.log(`  ${' '.repeat(11)} ${chalk.dim(`step ${event.step}`)} ${event.message}`);
 }
 
-function printSummary(result: CompileResult, dryRun: boolean): void {
+export function printSummary(result: CompileResult, dryRun: boolean): void {
   const s = result.summary;
   console.log();
   if (result.status !== 'failed') {
@@ -228,12 +228,20 @@ function printSummary(result: CompileResult, dryRun: boolean): void {
       (s.keptAi > 0 ? `, ${s.keptAi} kept AI` : '') +
       (s.kept > 0 ? `, ${s.kept} unchanged` : '');
     console.log(result.status === 'green' ? chalk.green(`✓ ${headline}`) : chalk.yellow(`◐ ${headline}`));
+    // A step that ran on a list read proving nothing is not one the stop kept
+    // from running: it is named on a line of its own, with its reason.
+    const unprovenReads = s.unprovenReads ?? [];
+    const unprovenSteps = new Set(unprovenReads.map((u) => u.step));
     if (s.stoppedAt) {
+      const notReached = s.notAttempted.filter((n) => !unprovenSteps.has(n));
       console.log(
         chalk.yellow(`  Step ${s.stoppedAt.step} failed under AI — ${s.stoppedAt.error}`) +
-          (s.notAttempted.length > 0 ? ` Not attempted: ${listSteps(s.notAttempted)}.` : ''),
+          (notReached.length > 0 ? ` Not attempted: ${listSteps(notReached)}.` : ''),
       );
       console.log('  Fix that step, run, and compile again for the rest.');
+    }
+    for (const u of unprovenReads) {
+      console.log(`  Not compiled: step ${u.step} — ${u.reason}. It stays AI; the next compile takes it again.`);
     }
     if (s.writtenOffAi.length > 0) {
       console.log(
