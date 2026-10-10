@@ -3097,7 +3097,34 @@ async function executeStepAttempt(
     }
 
     const turnRefused = unknownAction !== undefined || refusal !== undefined;
+    /**
+     * A list read is shown to the model on the page it read. An action after
+     * it in this turn that may have changed that page — a click, a navigation,
+     * a tab or browser move, a wait, a check that polls (`leavesPageAsRead`)
+     * — leaves nothing to show it against: a read again would read a different
+     * page and store over the step's read. The step ends on such a read as it
+     * came back, unseen, as with no turn left.
+     *
+     * Asked of every sub-action the turn recorded, whichever branch below
+     * recorded it — several `continue` before the end of an action (the tab
+     * and browser moves, an assertion, an API call) — at the top of each
+     * action and once after the last. An action that failed changed nothing,
+     * and fails the turn.
+     */
+    let pageChangesSeen = 0;
+    const notePageChanges = (): void => {
+      for (; pageChangesSeen < turnSubActions.length; pageChangesSeen++) {
+        const done = turnSubActions[pageChangesSeen]!;
+        if (done.error !== undefined || leavesPageAsRead(done.action)) continue;
+        for (const [name, { concern, sub }] of turnListConcerns) {
+          sub.listReview!.outcome = 'unseen';
+          logger.warn(`Step ${stepIndex}: "${done.action.action}" may have changed the page ${name} was read on — the step ends on it as read: ${concern.summary}`);
+        }
+        turnListConcerns.clear();
+      }
+    };
     for (const [emittedIndex, emitted] of (turnRefused ? [] : aiResponse.actions).entries()) {
+      notePageChanges();
       // What the page gets: a COPY with `{{name}}` and `${…}` resolved. The
       // emitted object is never written to — the transcript and the recording
       // keep it as the model wrote it, which is the whole point of asking for
@@ -4004,20 +4031,6 @@ async function executeStepAttempt(
       // shown exactly this read, read it the same way again and got what it was
       // shown: that keeps it. The same read with a different result (a list
       // that loaded late) is a result the model has not seen.
-      // A read is shown to the model on the page it read. An action after it in
-      // this turn that may have changed that page — a click, a navigation, a
-      // tab move, a wait for something to go (`leavesPageAsRead`) — leaves
-      // nothing to show it against: a read again would read a different page
-      // and store over the read with it. The step ends on the read as it came
-      // back, unseen, as with no turn left. (An action that failed changed
-      // nothing, and fails the turn.)
-      if (result.success && !leavesPageAsRead(action)) {
-        for (const [name, { concern, sub }] of turnListConcerns) {
-          sub.listReview!.outcome = 'unseen';
-          logger.warn(`Step ${stepIndex}: "${action.action}" may have changed the page ${name} was read on — the step ends on it as read: ${concern.summary}`);
-        }
-        turnListConcerns.clear();
-      }
       const stored = result.success ? storedName(action) : undefined;
       if (stored !== undefined) {
         const sub = turnSubActions[turnSubActions.length - 1]!;
@@ -4124,6 +4137,9 @@ async function executeStepAttempt(
         break;
       }
     }
+
+    // The turn's last action may have changed the page too (`notePageChanges`).
+    notePageChanges();
 
     // Track non-assert/prompt actions for the continuation prompt on the next turn
     allCompletedActions.push(

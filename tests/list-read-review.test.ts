@@ -34,7 +34,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium, type Browser, type Page } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import type { AiClient } from '../src/ai/client.js';
 import type { AIAction, ChatMessage } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
@@ -52,6 +52,7 @@ import { compileTest, outcomeRows, type CompileEvent, type CompileRunner } from 
 import { generationRefusal, LiveCompiler, type LiveCompileEvent } from '../src/codebehind/live-compile.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import { renderReport } from '../src/report/generator.js';
+import { PageTracker } from '../src/browser/manager.js';
 import { addLogCallback } from '../src/utils/logger.js';
 import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
@@ -300,9 +301,12 @@ async function runStep(
     params?: Record<string, string>;
     execution?: Partial<Config['execution']>;
     signal?: AbortSignal;
+    /** A page of the caller's, left open, in place of the fixture page. */
+    page?: Page;
+    pageTracker?: PageTracker;
   } = {},
 ): Promise<{ result: StepResult; requests: ChatMessage[][]; params: Record<string, string> }> {
-  const page = await pageWith(opts.body);
+  const page = opts.page ?? await pageWith(opts.body);
   try {
     const { client, requests } = scriptedClient(responses, page);
     const params: Record<string, string> = { ...opts.params };
@@ -323,10 +327,11 @@ async function runStep(
       // What every runner computes off the authored line first.
       ...(claim !== undefined && { flowControlClaim: claim }),
       ...(opts.signal !== undefined && { signal: opts.signal }),
+      ...(opts.pageTracker !== undefined && { pageTracker: opts.pageTracker }),
     });
     return { result, requests, params };
   } finally {
-    await page.close();
+    if (opts.page === undefined) await page.close();
   }
 }
 
@@ -894,21 +899,78 @@ describe('a turn added only to show the model its lists never fails the step', (
   });
 
   it('ends on a read the same turn then waited after, without showing it', async () => {
-    // "…then wait for them to close": a read again would read the page with
-    // the toasts gone and store `[]` over the two the step read.
+    // "…then wait for them to close": a wait is for the page to become
+    // something else, and a read again on it would store `[]` over the two
+    // toasts the step read. The rule is about the action, so the wait here
+    // succeeds at once on a page that does not change — nothing is timed.
     const body = '<!doctype html><html><body><div id="toasts">'
-      + '<p class="toast success">Saved</p><p class="toast info">Synced</p></div>'
-      + '<script>setTimeout(() => { document.getElementById("toasts").innerHTML = ""; }, 200);</script></body></html>';
+      + '<p class="toast success">Saved</p><p class="toast info">Synced</p></div></body></html>';
     const { result, requests, params } = await runStep(
       [plan([
         readOf('#toasts .toast', { as: 'toasts', description: 'Read every toast' }),
-        { action: 'wait', waitType: 'selector', condition: '#toasts .toast', state: 'hidden', timeout: 5000, description: 'Wait for the toasts to close' },
+        { action: 'wait', waitType: 'selector', condition: '#toasts', timeout: 5000, description: 'Wait for the toast area' },
       ])],
       { body, instruction: 'Read the toasts shown [store as: toasts], then wait for them to close' },
     );
     expect(result.status).toBe('passed');
     expect(requests).toHaveLength(1);
     expect(params.toasts).toBe('["Saved","Synced"]');
+    expect(readsOf(result)[0]!.listReview?.outcome).toBe('unseen');
+  });
+
+  it('ends on a read the same turn then moved to another tab after, without showing it', async () => {
+    // A tab move and a new tab are handled before the end of an action, where
+    // the rule used to be asked; the read was shown against the other tab and
+    // a read again there stored its list over the step's.
+    const shop = '<!doctype html><html><head><title>Shop</title></head><body><ul id="orders">'
+      + '<li class="order">Order 12</li><li class="order">Order 13</li><li class="order total">Total: 2</li></ul></body></html>';
+    const admin = '<!doctype html><html><head><title>Admin</title></head><body><ul id="orders">'
+      + '<li class="order">Order 99</li></ul></body></html>';
+    const moves: Array<[string, Record<string, unknown>]> = [
+      ['switchPage', { action: 'switchPage', page: 'admin', description: 'Switch to the Admin tab' }],
+      ['openPage', { action: 'openPage', url: `${ORIGIN}/admin.html`, description: 'Open the Admin page' }],
+    ];
+    for (const [what, move] of moves) {
+      const context: BrowserContext = await browser.newContext();
+      try {
+        await context.route('**/*', (route) => {
+          const pathname = new URL(route.request().url()).pathname;
+          const body = pathname === '/shop.html' ? shop : pathname === '/admin.html' ? admin : undefined;
+          return body !== undefined
+            ? route.fulfill({ status: 200, contentType: 'text/html', body })
+            : route.fulfill({ status: 404, body: '' });
+        });
+        const page = await context.newPage();
+        await page.goto(`${ORIGIN}/shop.html`);
+        const pageTracker = new PageTracker(page);
+        context.on('page', (opened) => pageTracker.addPage(opened));
+        if (what === 'switchPage') await (await context.newPage()).goto(`${ORIGIN}/admin.html`);
+        const { result, requests, params } = await runStep(
+          [plan([readOf('#orders li', { as: 'orders', description: 'Read every order' }), move])],
+          { page, pageTracker, instruction: 'Read every order on the Shop tab [store as: orders], then switch to the Admin tab' },
+        );
+        expect(result.status, what).toBe('passed');
+        expect(requests, what).toHaveLength(1);
+        expect(params.orders, what).toBe('["Order 12","Order 13","Total: 2"]');
+        expect(readsOf(result)[0]!.listReview?.outcome, what).toBe('unseen');
+      } finally {
+        await context.close();
+      }
+    }
+  });
+
+  it('ends on a read a check that polls came after, without showing it', async () => {
+    // An assertion that polls waits for the page to become something; it is
+    // handled before the end of an action too. Its check passes at once here.
+    const poll = {
+      action: 'assert', against: 'predicate', condition: 'the accounts are listed', description: 'The accounts are listed',
+      poll: { timeoutMs: 5000, intervalMs: 100 },
+    };
+    const code = JSON.stringify({ code: "(() => ({ pass: true, actual: 'listed' }))()" });
+    const { result, requests, params } = await runStep([plan([readOf(OVER_BROAD), poll]), code]);
+    expect(result.status).toBe('passed');
+    expect(requests).toHaveLength(2);
+    expect(JSON.parse(params.accounts!)).toHaveLength(6);
     expect(readsOf(result)[0]!.listReview?.outcome).toBe('unseen');
   });
 
