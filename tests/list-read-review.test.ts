@@ -300,6 +300,22 @@ describe('the line a list read that came back empty or mixed is shown with', () 
     }
   });
 
+  it('names the kinds that hold a pattern\'s values first, ahead of the ones it kept nothing of', async () => {
+    // The line names five kinds; the ones holding the values came last on
+    // the page, and were summed up as "2 more kinds", values and all.
+    const page = await pageWith('<!doctype html><html><body><table><tr id="r">'
+      + '<td class="a">A</td><td class="b">B</td><td class="c">C</td><td class="d">D</td><td class="e">E</td>'
+      + '<td class="f">$12</td><td class="g">$3</td></tr></table></body></html>');
+    try {
+      const amounts = readOf('#r td', { as: 'amounts', pattern: '\\$(\\d+)' });
+      const text = listReadConcern(amounts, await executeAction(page, amounts))!.text;
+      expect(text).toContain('amounts holds 2 values from 2 kinds of element: `#r td` matched 7 elements — '
+        + 'td.f ×1 ("12"); td.g ×1 ("3"); td.a ×1; td.b ×1; td.c ×1; and 2 more kinds.');
+    } finally {
+      await page.close();
+    }
+  });
+
   it('leaves a list read shown after an action that only takes something off the page', () => {
     const one = (action: Record<string, unknown>): boolean => leavesPageAsRead({ description: 'x', ...action } as AIAction);
     expect(one({ action: 'extract_csrf', selector: 'input[name=token]' })).toBe(true);
@@ -1069,6 +1085,89 @@ describe('a turn added only to show the model its lists never fails the step', (
     expect(uncheckedListRead(result)).toBe('events');
   });
 
+  it('shows again a list the model\'s own click changed, rather than ending on it as one that keeps changing', async () => {
+    // "Load more", then read the rows again: the list changed because of the
+    // model's click, not by itself, so it is shown again each time.
+    const body = '<!doctype html><html><body><table id="orders"><tbody>'
+      + '<tr class="odd"><td>1</td></tr><tr class="even"><td>2</td></tr></tbody></table>'
+      + '<button id="more" onclick="more()">Load more</button><script>'
+      + 'function more(){const t=document.querySelector("#orders tbody");const n=t.rows.length;'
+      + 'for(let i=0;i<2;i++){const r=t.insertRow();r.className=(n+i)%2?"even":"odd";r.insertCell().textContent=String(n+i+1);}}'
+      + '</script></body></html>';
+    const rows = readOf('#orders tr', { as: 'orders', description: 'Read every order row' });
+    const loadMore = { action: 'click', selector: '#more', description: 'Load more' };
+    const { result, requests, params } = await runStep(
+      [plan(rows, true), plan([loadMore, rows], true), plan([loadMore, rows], true), NOOP],
+      { body, instruction: 'Load every order and read every order row [store as: orders]' },
+    );
+    expect(result.status).toBe('passed');
+    expect(requests).toHaveLength(4);
+    expect(textOf(requests[3]!)).toContain('orders holds 6 values from 2 kinds of element');
+    expect(JSON.parse(params.orders!)).toHaveLength(6);
+    expect(readsOf(result).map((s) => s.listReview?.outcome)).toEqual(['replaced', 'replaced', 'kept']);
+    expect(readsOf(result).some((s) => s.listReview?.unseenBecause !== undefined)).toBe(false);
+  });
+
+  it('shows the lists again beside what the model found when it only looked around', async () => {
+    // `expand` and `find` look; they do not go on with the step.
+    const { result, requests } = await runStep([
+      plan(readOf(OVER_BROAD), true),
+      plan({ action: 'expand', selector: '#account-list', description: 'Look at the account list' }, true),
+      NOOP,
+    ]);
+    expect(result.status).toBe('passed');
+    expect(requests).toHaveLength(3);
+    expect(textOf(requests[2]!)).toContain('accounts holds 6 values from 2 kinds of element');
+    expect(readsOf(result)[0]!.listReview?.outcome).toBe('kept');
+  });
+
+  it('counts a list read as shown only once a prompt carries it', async () => {
+    // A Stop after the step queued the read for its next turn, before that
+    // turn's prompt was built: the model never saw it.
+    const stop = new AbortController();
+    const unhook = addLogCallback((_level, message) => {
+      if (message.includes('showing the model the list read')) stop.abort();
+    });
+    try {
+      const { result, requests } = await runStep([plan(readOf(NOTHING)), NOOP], { signal: stop.signal });
+      expect(result.interrupted).toBe(true);
+      expect(requests).toHaveLength(1);
+      expect(readsOf(result)[0]!.listReview).toMatchObject({ outcome: 'pending' });
+      expect(readsOf(result)[0]!.listReview!.shown).toBeUndefined();
+      expect(renderReport(reportOf(result))).toContain('list read never shown to the model: its attempt ended before it could be');
+    } finally {
+      unhook();
+    }
+  });
+
+  it('puts back what a turn added to ask stored when a read again in it fails', async () => {
+    // The answer reads one list again, which works, and counts the other with
+    // a selector that does not parse. The step ends where it stood: on the
+    // read the model was shown, not on one it never saw.
+    const instruction = 'Read the name of every account [store as: accounts] and count the cards [store as: account_count]';
+    const { result, requests, params } = await runStep(
+      [
+        plan([readOf(OVER_BROAD), CARD_COUNT]),
+        plan([
+          readOf('#accounts-card span', { description: 'Read every span' }),
+          { action: 'count', selector: '#account-list ]]', as: 'account_count', description: 'Count the cards' },
+        ]),
+      ],
+      { instruction, retries: 1 },
+    );
+    expect(result.status).toBe('passed');
+    expect(result.retried).toBe(false);
+    expect(requests).toHaveLength(2);
+    const shown = JSON.parse(params.accounts!);
+    expect(shown).toHaveLength(6);
+    expect(shown).toContain('•••• 4417');
+    expect(params.account_count).toBe('0');
+    const [first, , again] = readsOf(result);
+    expect(first!.listReview).toMatchObject({ outcome: 'pending', shown: true });
+    expect(again!.action.selector).toBe('#accounts-card span');
+    expect(again!.listReview?.shown).toBeUndefined();
+  });
+
   it('ends on a read the same turn changed the page after, without showing it', async () => {
     // "…then empty the cart": a read again in the next turn would read the
     // emptied cart and store `[]` over the three items the step read.
@@ -1339,7 +1438,7 @@ describe('the report', () => {
     const failed = (await runStep([plan([readOf(NOTHING), CLICK_NOTHING]), plan(readOf(RIGHT))], { retries: 1 })).result;
     expect(readsOf(failed)[0]!.listReview).toMatchObject({ outcome: 'pending' });
     expect(readsOf(failed)[0]!.listReview!.shown).toBeUndefined();
-    expect(html(failed)).toContain('list read never shown to the model: the turn that read it failed first');
+    expect(html(failed)).toContain('list read never shown to the model: its attempt ended before it could be');
 
     // Shown, and not answered.
     const unanswered = (await runStep([plan(readOf(NOTHING)), plan({ action: 'click', selector: '#x', description: 'x' })])).result;
@@ -1427,8 +1526,8 @@ async function compileOver(
   recorded: StepResult[],
   replayed: StepResult[],
   entries: string[] = [],
-  opts: { select?: CompileSelect; dryRun?: boolean; markdown?: string } = {},
-): Promise<{ compile: Awaited<ReturnType<typeof compileTest>>; done: string }> {
+  opts: { select?: CompileSelect; dryRun?: boolean; markdown?: string; stepsFile?: string; client?: AiClient } = {},
+): Promise<{ compile: Awaited<ReturnType<typeof compileTest>>; done: string; events: CompileEvent[]; dir: string }> {
   const dir = await fs.mkdtemp(path.join(scratch, 'causes-'));
   const md = path.join(dir, 'accounts.md');
   await fs.writeFile(
@@ -1436,29 +1535,70 @@ async function compileOver(
     opts.markdown ?? ['# Accounts', '', '## Steps', ...lines.map((l, i) => `${i + 1}. ${l}`), ''].join('\n'),
     'utf-8',
   );
-  if (entries.length > 0) await fs.writeFile(path.join(dir, 'accounts.steps.ts'), stepsFileWith(entries), 'utf-8');
+  if (opts.stepsFile !== undefined) await fs.writeFile(path.join(dir, 'accounts.steps.ts'), opts.stepsFile, 'utf-8');
+  else if (entries.length > 0) await fs.writeFile(path.join(dir, 'accounts.steps.ts'), stepsFileWith(entries), 'utf-8');
   const events: CompileEvent[] = [];
+  // Sized by the test as parsed — a section or a data table expands it — and
+  // never by \`lines\`, which a test with markdown of its own leaves empty: rows
+  // past the count are dropped, and a compile with none stops at step 1.
+  const test = await parseTestFile(md);
+  const total = test.steps.length;
   const runner: CompileRunner = async (request) => {
     if (request.purpose === 'record') {
       const failed = recorded.some((r) => r.status === 'failed' && r.deliberate !== true);
-      return { status: failed ? 'failed' : 'passed', ...outcomeRows(recorded, lines.length), resolvedParameters: {}, tokensUsed: 0 };
+      return { status: failed ? 'failed' : 'passed', ...outcomeRows(recorded, total), resolvedParameters: {}, tokensUsed: 0 };
     }
     const rows = replayed.map((r) => ({ ...r }));
     const failed = rows.some((r) => r.status === 'failed' && r.deliberate !== true);
-    return { status: failed ? 'failed' : 'passed', ...outcomeRows(rows, lines.length), resolvedParameters: {}, tokensUsed: 0 };
+    return { status: failed ? 'failed' : 'passed', ...outcomeRows(rows, total), resolvedParameters: {}, tokensUsed: 0 };
   };
   const compile = await compileTest({
-    test: await parseTestFile(md),
+    test,
     config: configWith(0),
     contextContent: '',
-    aiClient: reviewOnlyClient().client,
+    aiClient: opts.client ?? reviewOnlyClient().client,
     runner,
     onEvent: (e) => events.push(e),
     ...(opts.select !== undefined && { select: opts.select }),
     ...(opts.dryRun === true && { dryRun: true }),
   });
   const done = (events.find((e) => e.kind === 'done') as { message: string } | undefined)?.message ?? '';
-  return { compile, done };
+  return { compile, done, events, dir };
+}
+
+/** A turn of `actions`, each a sub-action with `extra` merged in where given. */
+function turnOf(subs: Array<{ action: Record<string, unknown>; extra?: Partial<SubActionResult> }>): StepResult['turns'][number] {
+  return {
+    turnNumber: 1,
+    attemptNumber: 1,
+    timestamp: new Date(0).toISOString(),
+    aiInteractions: [],
+    subActions: subs.map(({ action, extra }, i) => ({ index: i + 1, action: action as unknown as AIAction, durationMs: 1, ...extra })),
+  };
+}
+
+/**
+ * A model that writes an entry for a generation or a repair — a click, and a
+ * read of every result for a repair — and answers Review with the file as it
+ * stands, keeping every prompt.
+ */
+function generatingClient(): { client: AiClient; prompts: string[] } {
+  const prompts: string[] = [];
+  const client = {
+    complete: async (messages: ChatMessage[]) => {
+      const last = textOf(messages.slice(-1));
+      prompts.push(last);
+      const file = /## The file, as generated\s*```ts\n([\s\S]*?)```/.exec(last)?.[1];
+      if (/Review a generated Playwright code-behind file/.test(last) && file !== undefined) {
+        return { text: JSON.stringify({ file }), model: 'scripted' };
+      }
+      const source = JSON.stringify(/## The (?:step|line), exactly as authored\n(.*)\n/.exec(last)?.[1] ?? 'step');
+      // Reads with the recorded selector, as a generation must (§6.2).
+      const body = "await page.click('#open'); await step.read({ selector: '#results li', multiple: true, as: 'titles' });";
+      return { text: JSON.stringify({ entry: `{ source: ${source}, async run({ page, step }) { ${body} } }` }), model: 'scripted' };
+    },
+  } as unknown as AiClient;
+  return { client, prompts };
 }
 
 /** What `print` writes to the console, line by line, colour codes removed. */
@@ -1688,6 +1828,7 @@ describe('the compile writes no entry for a step that ended on a list read provi
     expect(compile.summary.compiled).toBe(1);
     expect(compile.summary.unproven).toEqual([]);
     expect(compile.summary.notAttempted).toEqual([1]);
+    expect(compile.summary.kept).toBe(0);
     // Its entry, which broke, is left as it was — and still owed, above.
     expect(compile.summary.unprovenReads).toEqual([{ step: 1, reason: EMPTY_REASON, keptEntry: true }]);
     expect(compile.summary.error).toBeUndefined();
@@ -1702,6 +1843,32 @@ describe('the compile writes no entry for a step that ended on a list read provi
       'step 1 failed on the replay under AI — the panel did not load '
         + `(its entry broke on the recording run, and this compile wrote no new one: ${EMPTY_REASON})`,
     );
+  });
+
+  it('runs an entry under AI in the replay only when the writer can find it', async () => {
+    // An entry whose `source` is a template literal binds, but the writer
+    // cannot find it, and splicing `ai: true` in added a second entry beside
+    // it — which the replay still bound — while the compile said the step ran
+    // under AI.
+    const { result: kept } = await runStep([plan(readOf(NOTHING)), NOOP]);
+    const { result: heading } = await runStep([plan(HEADING)], { instruction: HEADING_STEP });
+    const dir = await fs.mkdtemp(path.join(scratch, 'unfound-'));
+    const md = path.join(dir, 'accounts.md');
+    const stepsFile = path.join(dir, 'accounts.steps.ts');
+    await fs.writeFile(md, `# Accounts\n\n## Steps\n1. ${STEP}\n2. ${HEADING_STEP}\n`, 'utf-8');
+    await fs.writeFile(stepsFile, stepsFileWith([`{ source: \`${STEP}\`, async run({ page }) { await page.click('#accounts-tab'); } }`]), 'utf-8');
+    const healed: StepResult = { ...kept, fromCodeBehind: true, codeBehindStale: { file: stepsFile, source: STEP, error: 'locator.click: Timeout' } };
+    const replayed: string[] = [];
+    const events: CompileEvent[] = [];
+    const runner: CompileRunner = async (request) => {
+      if (request.purpose === 'record') return { status: 'passed', ...outcomeRows([healed, { ...heading, index: 2 }], 2), resolvedParameters: {}, tokensUsed: 0 };
+      replayed.push(await fs.readFile(request.candidateFiles![stepsFile]!, 'utf-8'));
+      return replayOf([ranRow(1), ranRow(2, { fromCodeBehind: true })]);
+    };
+    await compileTest({ test: await parseTestFile(md), config: configWith(0), contextContent: '', aiClient: reviewOnlyClient().client, runner, onEvent: (e) => events.push(e), dryRun: true });
+    expect(replayed.length).toBeGreaterThan(0);
+    for (const copy of replayed) expect(copy).not.toContain('ai: true');
+    expect(events.some((e) => e.kind === 'step' && e.message.startsWith('runs under AI'))).toBe(false);
   });
 
   it('compiles an entry several steps share from the step whose run proves it', async () => {
@@ -1756,7 +1923,7 @@ describe('the compile writes no entry for a step that ended on a list read provi
       expect(compile.summary.notAttempted, what).toEqual([]);
       expect(events, what).toContainEqual(expect.objectContaining({
         kind: 'step', phase: 'select', step: 2,
-        message: "compiled from this step's run, the better evidence for the entry it shares with step 1",
+        message: "its entry, shared with step 1, takes its evidence from this step's run, which is better evidence",
       }));
       const written = entryTextIn(compile.files[stepsFile] ?? '', STEP, section) ?? '';
       expect(written, what).toContain('fromRecording: true');
@@ -1841,6 +2008,138 @@ describe('the compile writes no entry for a step that ended on a list read provi
     );
     expect(printed(() => printSummary(compile, false)))
       .toContain(`Not compiled: step 1 — ${EMPTY_REASON}. Its existing entry is left as it was.`);
+    // Not all of what `--all` asked for was compiled: partial, not green — and
+    // a dry run says why, too.
+    expect(compile.status).toBe('partial');
+    const dry = await compileOver(
+      [STEP, HEADING_STEP],
+      [kept, { ...heading, index: 2 }],
+      [ranRow(1, { fromCodeBehind: true }), ranRow(2, { fromCodeBehind: true })],
+      [entry],
+      { select: { all: true }, dryRun: true },
+    );
+    expect(dry.compile.status).toBe('partial');
+    expect(dry.done).toContain('step 1 not compiled again, its entry left as it was');
+
+    // MB8: the same step named alone ends on "Nothing to compile", and is
+    // counted kept there too.
+    const alone = await compileOver([STEP, HEADING_STEP], [kept, { ...heading, index: 2 }], [], [entry], { select: { steps: [1] } });
+    expect(alone.done).toContain('Nothing to compile');
+    expect(alone.compile.summary.kept).toBe(1);
+    expect(alone.compile.summary.notAttempted).toEqual([]);
+  });
+
+  it('writes an entry into a steps file that is empty, and fails a compile it cannot write into without throwing', async () => {
+    // An empty file holds no entry list: it is written as new, as no file is.
+    const { result: heading } = await runStep([plan(HEADING)], { instruction: HEADING_STEP });
+    const fresh = await compileOver([HEADING_STEP], [heading], [ranRow(1, { fromCodeBehind: true })], [], { stepsFile: '' });
+    expect(Object.values(fresh.compile.files).join('\n')).toContain('fromRecording: true');
+
+    // A computer-mode step's `ai: true` into a file with no entry list: the
+    // compile fails and says why, as any generation it cannot apply.
+    const COMPUTER = 'Click the OK button in the print dialog';
+    const computer = ranRow(1, { instruction: COMPUTER, surface: 'computer', turns: [turnOf([{ action: { action: 'noop', description: 'x' } }])] });
+    const refused = await compileOver([COMPUTER], [computer], [], [], { stepsFile: '// notes about this test\n' });
+    expect(refused.compile.status).toBe('failed');
+    expect(refused.compile.summary.error).toMatch(/^generation failed for step 1: /);
+  });
+
+  it('counts an inlining a return kept from running as no gap when another inlining proved the entry', async () => {
+    // A section called twice whose first call returned early: its second line
+    // ran only on the second call, which proves the entry they share.
+    const markdown = ['# T', '', '## Steps', '1. Dismiss the banner', '2. Dismiss the banner', '',
+      '### Dismiss the banner', '1. If no banner is shown then return', '2. Click the banner close button', ''].join('\n');
+    const skipped = (index: number): StepResult => ranRow(index, { status: 'skipped', aiExplanation: 'Not run: step 1 returned from "Dismiss the banner"' });
+    const returned = ranRow(1, { flowControl: { kind: 'return', verb: 'return' }, turns: [turnOf([{ action: { action: 'return', description: 'no banner' } }])] });
+    const shown = ranRow(3, { turns: [turnOf([{ action: { action: 'noop', description: 'a banner is shown' } }])] });
+    const closed = ranRow(4, { turns: [turnOf([{ action: { action: 'click', selector: '#close', description: 'Close the banner' } }])] });
+    const { compile } = await compileOver(
+      [],
+      [returned, skipped(2), shown, closed],
+      [ranRow(1, { fromCodeBehind: true, flowControl: { kind: 'return', verb: 'return' } }), skipped(2), ranRow(3, { fromCodeBehind: true }), ranRow(4, { fromCodeBehind: true })],
+      [],
+      { markdown, client: generatingClient().client, dryRun: true },
+    );
+    expect(compile.summary.unproven).toEqual([]);
+    expect(compile.summary.error ?? '').not.toContain('never reached');
+  });
+
+  it('repairs an entry several steps share from the run it was compiled from, never a row whose list came back empty', async () => {
+    // Row 1's list came back empty; the entry is compiled from row 2's run.
+    // When it then fails on row 1, the repair was shown row 1's empty read as
+    // the recording to match — and a repair that matched it compiled a
+    // selector that finds nothing.
+    const section = 'Search each term';
+    const line = 'Open the results and read every result title [store as: titles]';
+    const markdown = ['# Search', '', '## Steps', `1. ${section}`, '', `### ${section}`, '| term |', '|------|', '| zzzz |', '| shoes |', '', `1. ${line}`, ''].join('\n');
+    const click = { action: 'click', selector: '#open', description: 'Open the results' };
+    const empty = ranRow(1, {
+      instruction: line,
+      outputs: { titles: '[]' },
+      turns: [turnOf([
+        { action: click },
+        {
+          action: { action: 'read', multiple: true, selector: '#results li.none', as: 'titles', description: 'Read every title' },
+          extra: { listReview: { kind: 'empty', text: 'titles is empty', outcome: 'kept', shown: true } },
+        },
+        { action: { action: 'noop', description: 'No results' } },
+      ])],
+    });
+    const found = ranRow(2, {
+      instruction: line,
+      outputs: { titles: '["Shoe A","Shoe B"]' },
+      turns: [turnOf([{ action: click }, { action: { action: 'read', multiple: true, selector: '#results li', as: 'titles', description: 'Read every title' } }])],
+    });
+    const { client, prompts } = generatingClient();
+    // Scripted per round: row 1 fails as code, then both pass.
+    const dir = await fs.mkdtemp(path.join(scratch, 'repair-'));
+    const md = path.join(dir, 'search.md');
+    await fs.writeFile(md, markdown, 'utf-8');
+    let round = 0;
+    const runner: CompileRunner = async (request) => {
+      if (request.purpose === 'record') return { status: 'passed', ...outcomeRows([empty, found], 2), resolvedParameters: {}, tokensUsed: 0 };
+      round++;
+      return replayOf(round === 1
+        ? [ranRow(1, { status: 'failed', fromCodeBehind: true, error: 'Timeout waiting for #results li' }), ranRow(2, { fromCodeBehind: true })]
+        : [ranRow(1, { fromCodeBehind: true }), ranRow(2, { fromCodeBehind: true })]);
+    };
+    await compileTest({ test: await parseTestFile(md), config: configWith(0), contextContent: '', aiClient: client, runner, dryRun: true });
+    const repair = prompts.find((q) => q.startsWith('A generated code-behind entry was replayed'));
+    expect(repair).toBeDefined();
+    expect(repair).toContain('#results li');
+    expect(repair).not.toContain('li.none');
+    // And what it must capture is what that run captured, not the empty row's [].
+    expect(repair).toContain('Shoe A');
+  });
+
+  it('drops an entry several steps share by the entry, when it fails on a step it was not compiled from', async () => {
+    // The entry is written from row 2's read and fails on row 1. Dropped by
+    // step number, nothing was dropped: the compile counted the entry it had
+    // taken back, and a later round wrote `ai: true` over the step it had
+    // just said would stay AI.
+    const { result: empty } = await runStep([plan(readOf(NOTHING)), NOOP]);
+    const { result: right } = await runStep([plan(readOf(RIGHT))]);
+    const section = 'Read each panel';
+    const markdown = ['# Accounts', '', '## Steps', `1. ${section}`, '', `### ${section}`, '| panel |', '|-------|', '| first |', '| second |', '', `1. ${STEP}`, ''].join('\n');
+    const dir = await fs.mkdtemp(path.join(scratch, 'drop-'));
+    const md = path.join(dir, 'accounts.md');
+    await fs.writeFile(md, markdown, 'utf-8');
+    let round = 0;
+    const runner: CompileRunner = async (request) => {
+      if (request.purpose === 'record') {
+        return { status: 'passed', ...outcomeRows([{ ...empty, index: 1 }, { ...right, index: 2 }], 2), resolvedParameters: {}, tokensUsed: 0 };
+      }
+      round++;
+      return replayOf(round === 1
+        ? [ranRow(1, { status: 'failed', fromCodeBehind: true, error: 'Self-check failed' }), ranRow(2, { fromCodeBehind: true })]
+        : [ranRow(1, { status: 'failed', error: 'the panel never loaded' }), ranRow(2)]);
+    };
+    const compile = await compileTest({ test: await parseTestFile(md), config: configWith(0), contextContent: '', aiClient: reviewOnlyClient().client, runner, dryRun: true });
+    expect(compile.summary.compiled).toBe(0);
+    expect(compile.summary.warnings).toContain(
+      'step 2 was not compiled: its code, written from the recording, failed on the replay (Self-check failed). It stays AI; compile again to retry.',
+    );
+    expect(Object.values(compile.files).join('\n')).not.toContain('ai: true');
   });
 
   it('says a data-driven test compiles from its first data row, when that row\'s list came back empty', async () => {
@@ -1868,6 +2167,27 @@ describe('the compile writes no entry for a step that ended on a list read provi
     live.offer({ index: 0, binding: bindingFor(STEP, path.join(dir, 'accounts.steps.ts')), result: empty, resolvedParameters: { accounts: '[]' } });
     const liveOut = await live.finish({ tokensUsed: 0 });
     expect(liveOut.summary.unprovenReads).toEqual([{ step: 1, reason: EMPTY_REASON + note }]);
+
+    // A step whose entry broke and healed under AI: the run took the entry
+    // off its binding, and the file still holds it.
+    const healedLive = new LiveCompiler({
+      mode: 'run',
+      testFilePath: path.join(dir, 'accounts.md'),
+      aiClient: reviewOnlyClient().client,
+      contextContent: '',
+      testName: 'accounts.md',
+      plan: [{ text: STEP, inScope: true, line: 5 }],
+      emit: () => {},
+      note: () => {},
+    });
+    const stepsFile = path.join(dir, 'accounts.steps.ts');
+    healedLive.offer({
+      index: 0,
+      binding: bindingFor(STEP, stepsFile),
+      result: { ...empty, codeBehindStale: { file: stepsFile, source: STEP, error: 'locator.click: Timeout' } },
+      resolvedParameters: { accounts: '[]' },
+    });
+    expect((await healedLive.finish({ tokensUsed: 0 })).summary.unprovenReads).toEqual([{ step: 1, reason: EMPTY_REASON, keptEntry: true }]);
   });
 
   it('tells each step with nothing to compile what it needs, when they need different things', async () => {

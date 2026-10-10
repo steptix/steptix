@@ -948,7 +948,7 @@ export function formatListReadsSection(lines: string[] | undefined, reviewOnly =
     + 'that matches only what the step asks for, and the same "as"';
   const answers = reviewOnly
     ? `If the selector missed what the step means, or caught other elements beside it, ${readAgain}: the new read replaces this one. If this is the answer (the list really is empty, or every kind belongs in it), answer noop with needs_reeval false.`
-    : `If the selector missed what the step means, or caught other elements beside it, ${readAgain}, before you go on: the new read replaces this one. If this is the answer (the list really is empty, or every kind belongs in it), go on with the step: that keeps it.`;
+    : `If the selector missed what the step means, or caught other elements beside it, ${readAgain}, before you go on: the new read replaces this one. Reading one list again answers that list alone; the others are asked about again. If this is the answer (the list really is empty, or every kind belongs in it), go on with the step: that keeps it.`;
   return `## Lists to check
 A read of every match, or a count, in this step came back empty or matched more than one kind of element. Look at what it matched before the step ends:
 ${lines.map((line) => `- ${line}`).join('\n')}

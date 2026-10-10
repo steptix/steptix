@@ -1090,14 +1090,17 @@ own. §6.2 checks the selector either way.
   three values on its second compiles from the second. Steps that share one
   entry — a `### Section` table's rows, a section or skill called twice — take
   theirs from the best of their runs by the same rank (`evidenceRank`), so a
-  row that read items compiles the entry an earlier empty row could not. A
+  row that read items compiles the entry an earlier empty row could not.
+  Whatever then fails on the replay — on any of those steps — is dropped,
+  written off and repaired as that entry, the repair working from the same
+  run's evidence, never from a row whose list came back empty. A
   step left out this way whose existing entry broke (it is stale) keeps that
   entry, and the compile's replay runs the step under AI in its own copy of
   the file (`Candidate.materialise`), so the replay proves the steps after it
   rather than failing on an entry the compile did not write. The summary
   names these steps apart from the ones a stop, an end or a return kept from
   running (`unprovenReads`); one whose working entry is left as it was
-  (`--all`) is counted kept, not owed. A data-driven test records its first
+  (`--all`) is counted kept, not owed, and keeps the compile partial. A data-driven test records its first
   data row alone, so for it the reason says to put a row whose list has items
   first.
 - **Review leaves these entries alone.** They carry `fromRecording: true`.

@@ -140,8 +140,11 @@ export function listReadConcern(
     const what = counting
       ? `${name} is ${stored}, counting ${holding.length} kinds of element`
       : `${name} holds ${stored} value${stored === 1 ? '' : 's'} from ${holding.length} kinds of element`;
+    // The kinds that hold the values first: the line names only so many, and
+    // the ones a pattern kept nothing of tell the model least.
+    const ordered = counting ? groups : [...holding, ...groups.filter((g) => !holding.includes(g))];
     const line = (quote: typeof sample): string =>
-      mask(`${what}: ${selector} matched ${elements(total)} — ${describeGroups(groups, quote)}.`);
+      mask(`${what}: ${selector} matched ${elements(total)} — ${describeGroups(ordered, quote)}.`);
     return { kind: 'mixed', name, text: line(sample), summary: line(undefined) };
   }
   return undefined;

@@ -31,7 +31,7 @@ import {
   runLogTallyLine,
   stepsSummaryText,
 } from '../src/extension/steps-summary-core.ts';
-import { compileResultLine, partialNotes } from '../src/extension/compile-summary-core.ts';
+import { compileResultLine, emptyProposalMessage, partialNotes } from '../src/extension/compile-summary-core.ts';
 
 const CB = { file: '/p/tests/booking.steps.ts', error: 'locator resolved to 2 elements' };
 const WARNING = 'No peanuts on the dashboard';
@@ -341,6 +341,20 @@ test("a step whose list read proved nothing is not counted among the steps a sto
   });
   assert.match(line, /1 step\(s\) not attempted/);
   assert.match(line, /Step 3 not compiled — /);
+});
+
+test("a Run & Compile with nothing to propose says why when the compile was partial", () => {
+  // It said every step already had code-behind, beside a log line that said
+  // step 3 was not compiled.
+  const partial = compileSummary({ compiled: 0, keptAi: 0, notAttempted: [3], unprovenReads: [{ step: 3, reason: NOT_PROVEN }] });
+  assert.equal(
+    emptyProposalMessage("accounts.md", "partial", partial),
+    `◐ Compiled nothing in failure-outcomes-live.md: Step 3 not compiled — ${NOT_PROVEN}.`,
+  );
+  assert.equal(
+    emptyProposalMessage("accounts.md", "green", compileSummary({ compiled: 0 })),
+    "Nothing to compile in accounts.md — every step already has code-behind.",
+  );
 });
 
 test("a step whose list read proved nothing and that keeps its own entry says the entry is left as it was", () => {

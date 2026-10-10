@@ -2890,6 +2890,9 @@ async function executeStepAttempt(
       );
     }
     listReadLines = [];
+    // Shown now that a prompt carries them — not when 9b queued them: a Stop,
+    // or a throw before this turn's prompt, leaves them never shown.
+    for (const sub of listReadsShown.values()) sub.listReview!.shown = true;
 
     const messages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -3034,6 +3037,13 @@ async function executeStepAttempt(
     /** This turn's list reads that came back empty or mixed, by stored name. */
     const turnListConcerns = new Map<string, { concern: ListReadConcern; sub: SubActionResult; action: AIAction }>();
     let turnFailed = false;
+    /**
+     * A turn added only to ask stands or falls as one answer: when a read
+     * again in it fails, the step ends where it stood — the values its earlier
+     * reads stored are put back, and the reads they replaced stand again.
+     */
+    const storedBeforeReview = reviewOnly && opts.resolvedParameters ? { ...opts.resolvedParameters } : undefined;
+    const replacedThisTurn: SubActionResult[] = [];
     /** Set when an action reported a failure no retry could change. */
     let turnNonRetryable = false;
     let turnError: string | undefined;
@@ -4051,6 +4061,7 @@ async function executeStepAttempt(
         const earlier = reviewedReads.get(stored);
         if (earlier?.listReview !== undefined) {
           earlier.listReview.outcome = 'replaced';
+          replacedThisTurn.push(earlier);
           reviewedReads.delete(stored);
           turnListConcerns.delete(stored);
         }
@@ -4066,7 +4077,9 @@ async function executeStepAttempt(
           // still loading — is shown once more. One that changes again is
           // live, and showing it again would only spend the step's turns: the
           // step ends on it as read, unseen.
-          const changes = sameWay && !kept ? (rereadChanges.get(stored) ?? 0) + 1 : 0;
+          // Only a change nothing before it in the turn may have caused: a
+          // list the model's own click or wait changed is not a live one.
+          const changes = sameWay && !kept && !pageChangedThisTurn ? (rereadChanges.get(stored) ?? 0) + 1 : 0;
           if (changes > 0) rereadChanges.set(stored, changes);
           else rereadChanges.delete(stored);
           const keptChanging = changes > 1;
@@ -4201,7 +4214,17 @@ async function executeStepAttempt(
 
     if (turnFailed && reviewOnly) {
       // Only a list read can have failed here (`isReviewAnswer`): the step
-      // ends where it stood, with the reads it was shown unanswered.
+      // ends where it stood, with the reads it was shown unanswered — and
+      // not on a read again earlier in the same answer, which the model was
+      // never shown either.
+      if (storedBeforeReview !== undefined && opts.resolvedParameters !== undefined) {
+        const params = opts.resolvedParameters;
+        for (const key of Object.keys(params)) {
+          if (!(key in storedBeforeReview)) delete params[key];
+        }
+        Object.assign(params, storedBeforeReview);
+      }
+      for (const sub of replacedThisTurn) sub.listReview!.outcome = 'pending';
       logger.warn(`Step ${stepIndex}: a read again of its list failed (${turnError ?? 'no error'}) — the step ends where it stood`);
       break;
     }
@@ -4227,15 +4250,18 @@ async function executeStepAttempt(
     //  - in a turn the model asked for, going on with the step keeps it, as
     //    the prompt says — unless the answer read another of the lists again,
     //    which shows it was answering them one at a time ("Return ONE
-    //    action"), and this one is still to answer.
+    //    action"), and this one is still to answer; or only looked around.
     // One still to answer is shown again — if the page is still the one it
     // was read on. Otherwise it stays `pending`: shown, not answered.
     const keptByNoop = aiResponse.actions.some((a) => a.action === 'noop');
     const answeringOne = [...listReadsShown.values()].some((sub) => sub.listReview?.outcome === 'replaced');
+    // Looking around — `find`, `expand`, or no action at all — is not going
+    // on with the step either: the lists are shown again beside what it found.
+    const lookedOnly = aiResponse.actions.every((a) => a.action === 'find' || a.action === 'expand');
     const unanswered: Array<[string, SubActionResult]> = [];
     for (const [name, sub] of listReadsShown) {
       if (sub.listReview?.outcome !== 'pending') continue;
-      if (keptByNoop || (!reviewOnly && !answeringOne)) sub.listReview.outcome = 'kept';
+      if (keptByNoop || (!reviewOnly && !answeringOne && !lookedOnly)) sub.listReview.outcome = 'kept';
       else if (!pageChangedThisTurn) unanswered.push([name, sub]);
     }
     listReadsShown = new Map();
@@ -4295,7 +4321,6 @@ async function executeStepAttempt(
         }
         listReadLines = [...concerns.map((c) => c.concern.text), ...unanswered.map(([, sub]) => sub.listReview!.text)];
         listReadsShown = new Map([...concerns.map((c): [string, SubActionResult] => [c.concern.name, c.sub]), ...unanswered]);
-        for (const sub of listReadsShown.values()) sub.listReview!.shown = true;
       } else {
         // The ones shown and not answered stay `pending`: not answered.
         for (const { concern, sub } of concerns) {

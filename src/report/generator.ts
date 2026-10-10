@@ -1340,7 +1340,7 @@ function describeListReview(review: NonNullable<SubActionResult['listReview']>):
         ? `never shown to the model: ${UNSEEN_BECAUSE[review.unseenBecause ?? 'no-turn-left']}`
         : review.shown === true
           ? 'shown to the model, which did not answer it'
-          : 'never shown to the model: the turn that read it failed first';
+          : 'never shown to the model: its attempt ended before it could be';
   return `list read ${how} — ${review.text}`;
 }
 

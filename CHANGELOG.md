@@ -53,15 +53,19 @@ run's read, the code-behind kept the wrong list.
   attempted, with the reason, and the next compile takes it again — after a
   run where the list has items, it compiles. A loop body compiles from the
   first pass that read something, and steps that share one entry (the rows of
-  a `### Section` table) from the row that did. A step whose list is always
-  empty stays under AI. When such a step already had an entry that broke, the
+  a `### Section` table) from the row that did — as does a section or skill
+  called twice whose first call returned early, which now compiles from the
+  call that ran rather than being left not attempted. A repair after a check
+  run fails on another of those steps works from the same run. A step whose
+  list is always empty stays under AI. When such a step already had an entry that broke, the
   entry is left as it is and the compile's replay runs the step under AI, so
   the steps after it are still proven. The compile names these steps apart
   from steps a stop, an end or a return kept from running (`unprovenReads`
   in the summary, `Not compiled:` in `steptix compile`'s output, the
   reason itself in Steptix's result line, which said the run had stopped). A
   step whose working entry is left as it was, under `--all`, is counted as
-  kept, not as one still owed an entry. A data-driven test compiles from its
+  kept, not as one still owed an entry, and the compile is partial, since not
+  all it was asked to compile was. A data-driven test compiles from its
   first data row, so the reason says to put a row whose list has items first.
   A dry run that left steps uncompiled says which, instead of only that it
   wrote nothing. The report says, under each reviewed read, what became of
@@ -70,7 +74,7 @@ run's read, the code-behind kept the wrong list.
   kept changing. Entries compiled before this change from a list read that
   came back empty keep passing on `[]`: compile that step again (Compile This
   Step, or `steptix compile --steps N`) after a run where the list has items
-  (extension 0.5.190).
+  (extension 0.5.191).
 
 ### Fixed — a compile no longer deletes the other entries in a code-behind file
 
@@ -78,7 +82,8 @@ A compile whose first entry for a `.steps.ts` file was written from the
 recording — a step that only reads, which asks no model — proposed a file
 holding that entry alone. Writing it deleted every other entry the author had
 in the file, and the compile still said green. Both `steptix compile` and
-Run & Compile did this. The entry is now spliced into the file as it stands.
+Run & Compile did this. The entry is now spliced into the file as it stands,
+and an empty file is written as new.
 
 ### Fixed — a test closed and reopened, or renamed, runs the text it has now
 

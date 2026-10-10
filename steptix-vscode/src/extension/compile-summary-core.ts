@@ -109,6 +109,24 @@ export function notCompiledNote(reads: Array<{ step: number; reason: string; kep
 }
 
 /**
+ * The notification for a compile-mode run that came back with nothing to
+ * propose. Green, nothing was owed. Otherwise something was — a step the run
+ * did not reach, or one whose list read proved nothing — and the notification
+ * says what, as the log line does, rather than that every step already has
+ * code-behind.
+ */
+export function emptyProposalMessage(
+  label: string,
+  status: CompileResultEvent['status'] | undefined,
+  summary: CompileResultEvent['summary'] | undefined,
+): string {
+  if (status === 'partial' && summary !== undefined) {
+    return compileResultLine({ type: 'compile:result', status, files: {}, summary });
+  }
+  return `Nothing to compile in ${label} — every step already has code-behind.`;
+}
+
+/**
  * The one line a compile-mode run leaves in the log when its result arrives
  * (stories/compile-as-you-go.md). It stands in for the `compile:done`
  * narrative the boxed pipeline sends, which this path has no phase to hang

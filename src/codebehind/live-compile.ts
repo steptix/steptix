@@ -1139,7 +1139,10 @@ export class LiveCompiler {
           reason: unproven.reason,
           // An entry of its own, left as it was: Compile This Step runs with
           // code-behind off, and a stale step healed under AI.
-          keptEntry: input.binding!.entry !== undefined && input.binding!.entry.ai !== true,
+          // The run clears a healed step's entry off its binding (it fell
+          // through to AI); `codeBehindStale` says the file still holds it.
+          keptEntry: (input.binding!.entry !== undefined && input.binding!.entry.ai !== true)
+            || input.result.codeBehindStale !== undefined,
         });
         this.stepEvent('generate', { index: at, number: at + 1, text, hasEntry: false, isAiEntry: false }, refusal);
       }

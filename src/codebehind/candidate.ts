@@ -131,7 +131,9 @@ export class Candidate {
     // spliced into nothing, and the proposal was a fresh file holding that
     // entry alone: every other entry the author had in it was gone, from the
     // proposal and from disk once it was written.
-    const before = await this.read(binding.file);
+    const read = await this.read(binding.file);
+    // An empty file holds no entry list to splice into: it is written as new.
+    const before = read !== null && read.trim() !== '' ? read : null;
     this.current.set(
       binding.file,
       await formatCodeBehindSource(
