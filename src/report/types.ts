@@ -104,23 +104,14 @@ export interface SubActionResult {
    * (src/runner/list-read-review.ts). `kind` says which; `text` is what the
    * model was shown. `outcome`: `pending` until the model answers, then
    * `kept` — it took no new read, or read the same way again — or `replaced`
-   * by a later read of the same name. `unseen` when the step ended on it with
-   * no turn left to show it (its last turn, or a `return`), or when an action
-   * after it in the same turn changed the page it read; `pending` stays
-   * when the model never answered — its attempt failed first, or the turn that
-   * showed it the read ended without a keep or a read again. The compile uses
-   * none of them except a
+   * by a later read of the same name. `unseen` when the step ended on it
+   * without showing it (`unseenBecause` says why). `pending` stays when the
+   * model never answered — its attempt ended first, the turn that showed it
+   * the read ended without a keep or a read again, or the answer that read it
+   * again was discarded (`discarded`). The compile uses none of them except a
    * `mixed` read the model kept (`unprovenListRead`). Absent on every other
    * sub-action.
    */
-  /**
-   * This read was part of an answer to a turn added only to ask about the
-   * step's lists, and a read again later in that same answer failed: the step
-   * ended where it stood, the values the answer stored were put back
-   * (src/runner/step-executor.ts), and this read stands for nothing — it
-   * replaces no earlier read, and the compile never uses it.
-   */
-  discarded?: true;
   listReview?: {
     kind: 'empty' | 'mixed';
     text: string;
@@ -136,6 +127,14 @@ export interface SubActionResult {
      */
     unseenBecause?: 'no-turn-left' | 'page-changed' | 'returned' | 'kept-changing';
   };
+  /**
+   * This read was part of an answer to a turn added only to ask about the
+   * step's lists, and a read again later in that same answer failed: the step
+   * ended where it stood, the values the answer stored were put back
+   * (src/runner/step-executor.ts), and this read stands for nothing — it
+   * replaces no earlier read, and the compile never uses it.
+   */
+  discarded?: true;
   /** Page URL at the time the screenshot was captured */
   pageUrl?: string;
   /**

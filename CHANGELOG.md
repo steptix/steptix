@@ -56,7 +56,8 @@ run's read, the code-behind kept the wrong list.
   a `### Section` table) from the row that did — as does a section or skill
   called twice whose first call returned early, which now compiles from the
   call that ran rather than being left not attempted. A repair after a check
-  run fails on another of those steps works from the same run. A step whose
+  run fails on another of those steps is held to that run's selector, and is
+  told what the step it failed on captured. A step whose
   list is always empty stays under AI. When such a step already had an entry that broke, the
   entry is left as it is and the compile's replay runs the step under AI, so
   the steps after it are still proven. The compile names these steps apart
@@ -69,9 +70,9 @@ run's read, the code-behind kept the wrong list.
   first data row, so the reason says to put a row whose list has items first.
   A dry run that left steps uncompiled says which, instead of only that it
   wrote nothing. The report says, under each reviewed read, what became of
-  it: kept, replaced (and whether the model had been shown it), or never
-  shown, and why — no turn left, a page change, a `return`, or a list that
-  kept changing. Entries compiled before this change from a list read that
+  it: kept, replaced (and whether the model had been shown it), never shown,
+  and why — no turn left, a page change, a `return`, or a list that kept
+  changing — or discarded with an answer whose read again failed. Entries compiled before this change from a list read that
   came back empty keep passing on `[]`: compile that step again (Compile This
   Step, or `steptix compile --steps N`) after a run where the list has items
   (extension 0.5.192).
