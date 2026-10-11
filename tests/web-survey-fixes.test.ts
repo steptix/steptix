@@ -9,8 +9,10 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Frame, type Page } from 'playwright';
-import { executeAction, normaliseColour, normaliseKeyName, resolveRoleName, scrollToFitBoth, waitForThreshold } from '../src/browser/actions.js';
+import { executeAction, explainEnclosedToggle, hiddenToggleOf, normaliseColour, normaliseKeyName, resolveRoleName, scrollToFitBoth, waitForThreshold } from '../src/browser/actions.js';
 import { parseAIResponse, parseAssertionCode } from '../src/ai/action-parser.js';
+import { classifyOutcome } from '../src/stats/classify.js';
+import { addLogCallback } from '../src/utils/logger.js';
 import { installDialogGuard } from '../src/browser/manager.js';
 import { dialogRecords, disarmDialog } from '../src/browser/dialogs.js';
 import { installNoticeRecorder } from '../src/browser/notices.js';
@@ -270,6 +272,327 @@ describe('§2.10 styled checkboxes and radios', () => {
     expect(result.success).toBe(true);
     expect(await page.isChecked('#basic')).toBe(true);
     await page.close();
+  });
+
+  it('clicks nothing beside a checkbox hidden in a closed panel, and says to open the panel', async () => {
+    // Issue 32. The label is hidden with the checkbox, so the stand-in used to
+    // climb past the panel to the <section> and click its middle: the
+    // heading, which opened the panel, and the click reported success. Like
+    // any click on something hidden, this one waits out its 10 s first.
+    const page = await pageWith(`
+      <section>
+        <h3 id="hdr" onclick="togglePanel()">Delivery options</h3>
+        <div id="panel" style="display:none">
+          <input type="checkbox" id="gift"> <label for="gift">Gift wrap</label>
+        </div>
+      </section>
+      <script>
+        function togglePanel() {
+          const p = document.getElementById('panel');
+          p.style.display = p.style.display === 'none' ? 'block' : 'none';
+        }
+        window.clicked = [];
+        document.addEventListener('click', (e) => window.clicked.push(e.target.id || e.target.tagName), true);
+      </script>`);
+    try {
+      const action = act({ action: 'click', selector: '#gift' });
+      const result = await executeAction(page, action);
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(
+        /^Timeout \d+ms exceeded waiting for "#gift" to show\n"#gift" is a checkbox inside collapsed: Delivery options\. Open it first, then click the checkbox;/,
+      );
+      // The first line is still the verdict, so the scoreboard files it as
+      // the selector matching nothing visible, as it did the bare timeout.
+      expect(classifyOutcome({ index: 1, action, durationMs: 0, error: result.error!, errorSource: 'playwright' }))
+        .toBe('no-match');
+      expect(await page.evaluate(() => (window as unknown as { clicked: string[] }).clicked)).toEqual([]);
+      expect(await page.isChecked('#gift')).toBe(false);
+      expect(await page.isHidden('#panel')).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('clicks the label of a styled checkbox once the panel the click waits on opens', async () => {
+    // The input is hidden on purpose and stays hidden, so the click cannot
+    // wait for IT; it waits for its container, then decides again.
+    const page = await pageWith(`
+      <section>
+        <h3>Delivery options</h3>
+        <div id="panel" style="display:none">
+          <input type="checkbox" id="gift" style="display:none"> <label for="gift">Gift wrap</label>
+        </div>
+      </section>`);
+    // Open the panel once the click is waiting on it, as a step that opened
+    // it a moment before would.
+    const stop = addLogCallback((_level, message) => {
+      if (message.includes('"#gift"') && message.includes('waiting for it to show')) {
+        void page.evaluate(() => { document.getElementById('panel')!.style.display = 'block'; });
+      }
+    });
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: '#gift' }));
+      expect(result.success).toBe(true);
+      expect(await page.isChecked('#gift')).toBe(true);
+    } finally {
+      stop();
+      await page.close();
+    }
+  });
+
+  it('fails a click beside a lone hidden checkbox when the checkbox does not change', async () => {
+    // No label, and nothing but the input in the closed panel: in the markup
+    // that is a styled toggle's hidden wrapper. So the section is clicked,
+    // and only the unchanged checkbox shows the click went elsewhere.
+    const page = await pageWith(`
+      <section>
+        <h3 onclick="document.getElementById('panel').style.display = 'block'">Gift wrap</h3>
+        <div id="panel" style="display:none"><input type="checkbox" id="gift" aria-label="Gift wrap"></div>
+      </section>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: '#gift' }));
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/^Clicked the visible element around the hidden checkbox "#gift", and the checkbox did not change/);
+      expect(await page.isChecked('#gift')).toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('passes a click beside a lone hidden checkbox that loads a new page, and not one that only reloads an ad', async () => {
+    // A filter checkbox that reloads the page is ticked on the page that comes
+    // next, so a navigation of the page excuses the unchanged box. Another
+    // frame navigating says nothing about it.
+    const http = await import('node:http');
+    const section = (onclick: string): string => `
+      <section id="gifts">
+        <h3 onclick="${onclick}">Gift wrap</h3>
+        <div style="display:none"><input type="checkbox" id="gift" aria-label="Gift wrap"></div>
+      </section>`;
+    const pages: Record<string, string> = {
+      '/': section(`location.href = '/next'`),
+      '/next': '<input type="checkbox" id="gift" aria-label="Gift wrap" checked>',
+      '/framed': `${section(`document.getElementById('ad').src = '/ad?2'`)}<iframe id="ad" src="/ad?1"></iframe>`,
+      '/ad': '<p>ad</p>',
+    };
+    const server = http.createServer((req, res) => {
+      res.setHeader('content-type', 'text/html');
+      res.end(`<!doctype html><html><body>${pages[(req.url ?? '/').split('?')[0]!] ?? ''}</body></html>`);
+    });
+    const port = await listenFetchable(server, '127.0.0.1');
+    const page = await context.newPage();
+    try {
+      await page.goto(`http://127.0.0.1:${port}/`);
+      const navigated = await executeAction(page, act({ action: 'click', selector: '#gift' }), undefined, undefined, { measure: true });
+      expect(navigated.success).toBe(true);
+      await page.waitForURL(/\/next$/);
+      // Measured on the page the click was on, not the one it led to.
+      expect(navigated.targeting).toMatchObject({ standIn: 'box', resolvedSelector: '#gifts' });
+
+      await page.goto(`http://127.0.0.1:${port}/framed`);
+      const adOnly = await executeAction(page, act({ action: 'click', selector: '#gift' }));
+      expect(adOnly.success).toBe(false);
+      expect(adOnly.error).toMatch(/and the checkbox did not change/);
+    } finally {
+      await page.close();
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('still clicks the label of a hidden checkbox when the run measures its actions, and records what it clicked', async () => {
+    // Run & Compile measures every action, and the measurement waited for a
+    // visible match before the stand-in ever ran. A compile has to know what
+    // stood in, because nothing replays the stand-in.
+    const page = await pageWith(`
+      <input type="checkbox" id="ajax" aria-label="Ajax" style="display:none">
+      <label for="ajax">Ajax</label>
+      <div id="wrap" style="display:inline-block;padding:4px"
+           onclick="const c = document.getElementById('basic'); c.checked = !c.checked">
+        <div style="display:none"><input type="checkbox" id="basic" aria-label="Basic"></div>
+        <span style="display:inline-block;width:20px;height:20px;border:1px solid"></span>
+      </div>`);
+    try {
+      const measured = { measure: true };
+      const label = await executeAction(page, act({ action: 'click', selector: '#ajax' }), undefined, undefined, measured);
+      expect(label.success).toBe(true);
+      expect(await page.isChecked('#ajax')).toBe(true);
+      expect(label.targeting?.standIn).toBe('label');
+      expect(await page.locator(label.targeting!.resolvedSelector!).textContent()).toBe('Ajax');
+
+      const box = await executeAction(page, act({ action: 'click', selector: '#basic' }), undefined, undefined, measured);
+      expect(box.success).toBe(true);
+      expect(await page.isChecked('#basic')).toBe(true);
+      expect(box.targeting?.standIn).toBe('box');
+      expect(await page.locator(box.targeting!.resolvedSelector!).getAttribute('id')).toBe('wrap');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('refuses several hidden matches under browser.ambiguousTarget "fail"', async () => {
+    const page = await pageWith(`
+      <input type="checkbox" id="a" style="display:none"><label for="a">A</label>
+      <input type="checkbox" id="b" style="display:none"><label for="b">B</label>`);
+    try {
+      const result = await executeAction(
+        page, act({ action: 'click', selector: 'input[type=checkbox]' }), undefined, undefined, { ambiguousTarget: 'fail' },
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/^2 hidden elements matched "input\[type=checkbox\]" .*\(browser\.ambiguousTarget is "fail"\)$/);
+      expect(result.matchCount).toBe(2);
+      expect(await page.isChecked('#a')).toBe(false);
+      expect(await page.isChecked('#b')).toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('tells a toggle hidden with its container from one hidden alone', async () => {
+    const page = await pageWith(`
+      <details><summary>Delivery options</summary>
+        <input type="checkbox" id="gift"> <label for="gift">Gift wrap</label>
+      </details>
+      <details><summary>Extras</summary><input type="checkbox" id="solo" aria-label="Insurance"></details>
+      <section><div style="content-visibility:hidden"><h4>Extras</h4><input type="checkbox" id="cv" aria-label="Extras"></div></section>
+      <div id="menu" hidden>
+        <div class="chk"><div style="display:none"><input type="checkbox" id="red" aria-label="Red"></div><span class="box"></span><span>Red</span></div>
+      </div>
+      <div style="visibility:hidden">
+        <ul><li><label><input type="checkbox" id="asc"> Ascending</label></li></ul>
+      </div>
+      <div hidden><h4>Extras</h4><x-check></x-check></div>
+      <script>
+        customElements.define('x-check', class extends HTMLElement {
+          constructor() {
+            super();
+            this.attachShadow({ mode: 'open' }).innerHTML = '<input type="checkbox" id="inner" style="display:none"><span>box</span>';
+          }
+        });
+      </script>
+      <div class="switch">
+        <input type="checkbox" id="sw" style="display:none"><label for="sw" style="display:none">Notifications</label>
+        <span style="display:inline-block;width:30px;height:16px;border:1px solid"></span>
+      </div>
+      <div class="chk" id="box" style="width:20px;height:20px;border:1px solid">
+        <div style="display:none"><input type="checkbox" id="basic" aria-label="Basic"></div>
+      </div>
+      <input type="checkbox" id="ajax" style="display:none"><label for="ajax">Ajax</label>`);
+    try {
+      const enclosed = async (selector: string): Promise<boolean | undefined> =>
+        (await hiddenToggleOf(page.locator(selector)))?.enclosed;
+      // Its label is in the closed <details> with it.
+      expect(await enclosed('#gift')).toBe(true);
+      // No label, but the closed <details> holds its summary too.
+      expect(await enclosed('#solo')).toBe(true);
+      // `content-visibility: hidden` hides the heading beside it as well.
+      expect(await enclosed('#cv')).toBe(true);
+      // No label, but the hidden menu holds the drawn box and the text too.
+      expect(await enclosed('#red')).toBe(true);
+      // An enclosing label hidden by an ancestor's `visibility: hidden`.
+      expect(await enclosed('#asc')).toBe(true);
+      // Inside a web component, inside a hidden panel that holds more.
+      expect(await enclosed('x-check >> input')).toBe(true);
+      // Hidden alone: a label hidden by its own style, a wrapper holding
+      // nothing but the input, or the input itself.
+      expect(await enclosed('#sw')).toBe(false);
+      expect(await enclosed('#basic')).toBe(false);
+      expect(await enclosed('#ajax')).toBe(false);
+      expect(await hiddenToggleOf(page.locator('#box'))).toBeNull();
+      // The names are for a failure's message: a decision does without them.
+      expect(await hiddenToggleOf(page.locator('#gift'))).toEqual({ type: 'checkbox', id: 'gift', enclosed: true });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('names what to open the way a person reads the page', async () => {
+    const page = await pageWith(`
+      <details><summary>Delivery options</summary>
+        <input type="checkbox" id="gift"> <label for="gift">Gift wrap</label>
+      </details>
+      <button aria-controls="menu">Filters</button>
+      <div id="menu" hidden>
+        <div class="chk"><div style="display:none"><input type="checkbox" id="red" aria-label="Red"></div><span>Red</span></div>
+      </div>
+      <div style="visibility:hidden" aria-label="Sort">
+        <ul><li><label><input type="checkbox" id="asc"> Ascending</label></li></ul>
+      </div>
+      <button role="tab" id="tab-2">Wrapping</button>
+      <div role="tabpanel" aria-labelledby="tab-2" hidden>
+        <input type="radio" name="wrap" id="paper"> <label for="paper">Paper</label>
+      </div>
+      <section>
+        <h3>Shipping</h3>
+        <div hidden><p>Standard</p></div>
+        <h3>Gifts</h3>
+        <div hidden><input type="checkbox" id="note"> <label for="note">Add a note</label></div>
+      </section>
+      <section>
+        <script>window.unused = 1;</script>
+        <div hidden><input type="checkbox" id="card"> <label for="card">Add a card</label></div>
+        <h3>Messages</h3>
+      </section>`);
+    try {
+      const names = async (selector: string): Promise<string[] | undefined> =>
+        (await hiddenToggleOf(page.locator(selector), { names: true }))?.collapsedUnder;
+      expect(await names('#gift')).toEqual(['Delivery options']);
+      // By the button that controls it; its own hidden wrapper is not named.
+      expect(await names('#red')).toEqual(['Filters']);
+      // `visibility: hidden` is inherited: named once, where it starts.
+      expect(await names('#asc')).toEqual(['Sort']);
+      // An inactive tab, by the tab that labels it.
+      expect(await names('#paper')).toEqual(['Wrapping']);
+      // The header just before the panel, not the first header in the section.
+      expect(await names('#note')).toEqual(['Gifts']);
+      // Never a script's source; the header after the panel when none is before.
+      expect(await names('#card')).toEqual(['Messages']);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('explains only a failure on an enclosed toggle, after the failure\'s first line', async () => {
+    const page = await pageWith(`
+      <button id="go" style="display:none">Go</button>
+      <section>
+        <h3>Extras</h3>
+        <div style="display:none"><input type="checkbox" id="ins"> <label for="ins">Insurance</label></div>
+      </section>`);
+    try {
+      const timeout = Object.assign(
+        new Error('locator.click: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator'),
+        { name: 'TimeoutError' },
+      );
+      expect(await explainEnclosedToggle('#go', page.locator('#go'), timeout)).toBe(timeout);
+      const explained = await explainEnclosedToggle('#ins', page.locator('#ins'), timeout) as Error;
+      expect(explained.name).toBe('TimeoutError');
+      expect(explained.message.split('\n')).toEqual([
+        'locator.click: Timeout 10000ms exceeded.',
+        '"#ins" is a checkbox inside collapsed: Extras. Open it first, then click the checkbox; '
+          + 'while it is hidden there is nothing on screen to click.',
+        'Call log:',
+        '  - waiting for locator',
+      ]);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('still clicks a visible label for a checkbox hidden with others', async () => {
+    // A label sets its own input wherever that sits, so a visible one stands
+    // in even when the input's hidden container holds more than it.
+    const page = await pageWith(`
+      <div hidden><input type="checkbox" id="a"><input type="checkbox" id="b"></div>
+      <label for="a">Show the menu</label>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: '#a' }));
+      expect(result.success).toBe(true);
+      expect(await page.isChecked('#a')).toBe(true);
+      expect(await page.isChecked('#b')).toBe(false);
+    } finally {
+      await page.close();
+    }
   });
 });
 

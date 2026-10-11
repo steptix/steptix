@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { Frame, Page, FrameLocator, Locator } from 'playwright';
+import type { Frame, Page, FrameLocator, Locator, Request } from 'playwright';
 import type { AIAction, ActionType, TableReadColumn, TableReadMapping } from '../ai/types.js';
 // §9.2: one validator for both paths into the table extractor. The dependency
 // points this way because the parser owns the §6.2 rules and their wording;
@@ -653,6 +653,18 @@ export interface ActionTargeting {
    * `resolvedSelector`, or locate the element the way this does.
    */
   roleNameFallback?: string;
+  /**
+   * The click's selector matched only a hidden checkbox or radio, so the
+   * runtime clicked what the page draws in its place: the toggle's `label`, or
+   * the visible `box` around it (SPEC-web-survey-fixes.md §2.10). Present only
+   * then, with `resolvedSelector` naming the element clicked when one could be
+   * verified.
+   *
+   * What it tells generation: a click on the selector as written waits on a
+   * hidden element on replay, because nothing replays the stand-in. A compiled
+   * entry clicks `resolvedSelector` instead; reading the input's state is fine.
+   */
+  standIn?: 'label' | 'box';
 }
 
 /** How a `resolvedSelector` was arrived at. See {@link ActionTargeting}. */
@@ -981,7 +993,25 @@ export async function executeAction(
     // wait timing out, which throws into the catch below exactly as the
     // action's own wait would have.
     const singular = wantMeasure || wantGate ? singularTargetOf(root, eff) : null;
-    if (singular && eff.selector !== undefined) {
+    // A click on a hidden checkbox or radio is executeClick's to decide: it
+    // clicks what stands in for it, or waits for its container to open
+    // (§2.10). Waiting here for a visible match would spend the click's whole
+    // budget on one that never comes, so that click goes unmeasured.
+    const hiddenToggle = singular !== null && eff.action === 'click' && eff.selector !== undefined
+      && (await hiddenToggleInput(root.locator(eff.selector))) !== null;
+    if (hiddenToggle && wantGate && eff.selector !== undefined) {
+      // The gate still holds for it: several hidden matches are as ambiguous
+      // as several visible ones, and the stand-in would take the first.
+      const matchCount = await root.locator(eff.selector).count().catch(() => 1);
+      if (matchCount > 1) {
+        const message =
+          `${matchCount} hidden elements matched "${eff.selector}" — use a more specific selector `
+          + `(browser.ambiguousTarget is "fail")`;
+        logger.error(`Action refused [${eff.action}]: ${message}`);
+        return { success: false, error: message, failedSelector: eff.selector, matchCount };
+      }
+    }
+    if (singular && eff.selector !== undefined && !hiddenToggle) {
       const startedAt = Date.now();
       await singular.target.waitFor({ state: singular.state, timeout: singular.budgetMs });
       targeting = await measureTargeting(root, eff.selector, singular, wantMeasure);
@@ -1053,9 +1083,13 @@ export async function executeAction(
     if (wantMeasure && roleNameFallback !== undefined) targeting = { ...(targeting ?? {}), roleNameFallback };
 
     switch (eff.action) {
-      case 'click':
-        await executeClick(page, root, eff, remainingMs);
+      case 'click': {
+        // §2.10: the selector as written reaches only a hidden input on
+        // replay, so a compile must see what the runtime clicked instead.
+        const standIn = await executeClick(page, root, eff, remainingMs, wantMeasure);
+        if (standIn !== undefined) targeting = { ...(targeting ?? {}), ...standIn };
         break;
+      }
 
       case 'type':
         await executeType(page, root, eff, remainingMs);
@@ -1388,96 +1422,405 @@ const MEASUREMENT_TIMEOUT_MS = 2_000;
 
 /**
  * Click, double-click or right-click `selector` (SPEC-web-survey-fixes.md
- * §2.2, §2.5, §2.10).
+ * §2.2, §2.10, §2.24).
  *
- * Two recoveries, each for one measured failure and each narrow on purpose:
- *  - a styled checkbox or radio whose `<input>` is hidden gets its label or a
- *    visible ancestor clicked instead, because a hidden input never becomes
- *    clickable and the click would only time out;
- *  - a click blocked by an AD gets the page's ads hidden and one more try.
- *    Only ad markup counts: a real overlay still fails the click, which is
- *    what tells the author the page is in the way.
+ * A checkbox or radio whose `<input>` is hidden never becomes clickable, so
+ * the click would only time out. A person clicks what the page draws in its
+ * place, and so does this: its label, else a visible ancestor. A label sets
+ * its own input; an ancestor can be a section's frame as easily as the
+ * toggle's box, so its click must change the toggle or the action fails. A
+ * toggle hidden with what is around it — a collapsed section, a closed menu —
+ * has nothing drawn in its place: the click waits for it to show or for its
+ * container to open, then decides again, and a timeout says what to open.
+ *
+ * With `measure`, returns what a compile records when something stood in.
  */
 async function executeClick(
   page: Page,
   root: Page | FrameLocator,
   action: AIAction,
   timeoutMs?: number,
-): Promise<void> {
+  measure = false,
+): Promise<ActionTargeting | undefined> {
   const selector = requireSelector(action);
   const hold = action.clickCount === 2 ? 0 : (action.holdMs ?? 0);
-  const options = {
-    // The hold is part of the click, so it is added to the time allowed.
-    timeout: (timeoutMs ?? CLICK_TIMEOUT_MS) + hold,
-    ...(action.button !== undefined && action.button !== 'left' && { button: action.button }),
-    // Playwright's `delay` is the time between mousedown and mouseup (§2.24).
-    ...(hold > 0 && { delay: hold }),
+  const budget = timeoutMs ?? CLICK_TIMEOUT_MS;
+  /** Spent waiting for a hidden toggle's container, out of the click's budget. */
+  let waited = 0;
+  const press = (target: Locator): Promise<void> => {
+    const options = {
+      // The hold is part of the click, so it is added to the time allowed.
+      timeout: Math.max(budget - waited, MIN_ACTION_TIMEOUT_MS) + hold,
+      ...(action.button !== undefined && action.button !== 'left' && { button: action.button }),
+      // Playwright's `delay` is the time between mousedown and mouseup (§2.24).
+      ...(hold > 0 && { delay: hold }),
+    };
+    return action.clickCount === 2 ? target.dblclick(options) : target.click(options);
   };
-  const press = (target: Locator): Promise<void> =>
-    action.clickCount === 2 ? target.dblclick(options) : target.click(options);
 
   const matches = root.locator(selector);
-  const stand = await standInForHiddenToggle(root, matches);
-  if (stand !== null) {
-    logger.info(`"${selector}" is a hidden checkbox or radio — clicking its visible label instead`);
-    await press(stand);
-    return;
+  let toggle = await hiddenToggleClick(root, matches);
+  if (toggle?.kind === 'enclosed') {
+    logger.debug(`"${selector}" is a hidden ${toggle.type} inside something hidden — waiting for it to show`);
+    const startedAt = Date.now();
+    try {
+      await pollUntil(async () => {
+        toggle = await hiddenToggleClick(root, matches);
+        return toggle?.kind !== 'enclosed';
+      }, budget, `"${selector}" to show`);
+    } catch (err) {
+      throw await explainEnclosedToggle(selector, matches, err);
+    }
+    waited = Date.now() - startedAt;
+  }
+
+  if (toggle?.kind === 'stand-in') {
+    const stand = toggle;
+    // Before the click, as every targeting fact is measured: a click that
+    // navigates or re-renders leaves another page to measure.
+    const recorded = measure ? await standInTargeting(stand) : undefined;
+    if (stand.label) {
+      logger.info(`"${selector}" is a hidden ${stand.type} — clicking its label instead`);
+      await press(stand.target);
+    } else {
+      logger.info(`"${selector}" is a hidden ${stand.type} — clicking the visible element around it instead`);
+      await clickInPlaceOf(page, selector, stand, () => press(stand.target));
+    }
+    return recorded;
   }
 
   const target = matches.locator('visible=true').first();
-  await press(target);
+  try {
+    await press(target);
+  } catch (err) {
+    throw await explainEnclosedToggle(selector, matches, err);
+  }
+  return undefined;
 }
 
 /**
- * When every match of a click's selector is a HIDDEN checkbox or radio, the
- * element a person would click instead: its `<label for>`, the `<label>` it
- * sits in, or the nearest of its three closest ancestors that is visible.
- * `null` when the selector matches something else, matches nothing yet (the
- * normal click then waits for it), or has a visible match.
+ * {@link ActionTargeting} for a click a stand-in took: which kind, and a
+ * verified selector for the element clicked when one can be built.
  */
-async function standInForHiddenToggle(root: Page | FrameLocator, matches: Locator): Promise<Locator | null> {
+async function standInTargeting(stand: ToggleStandIn): Promise<ActionTargeting> {
+  const resolved = await stand.target
+    .evaluate(resolvedSelectorInPage, undefined, { timeout: MEASUREMENT_TIMEOUT_MS })
+    .catch(() => null);
+  return {
+    standIn: stand.label ? 'label' : 'box',
+    ...(resolved !== null && { resolvedSelector: resolved.selector, resolvedBy: resolved.by }),
+  };
+}
+
+/** What a click on a hidden checkbox or radio does instead (§2.10). */
+type ToggleClick = ToggleStandIn | { kind: 'enclosed'; type: string };
+
+interface ToggleStandIn {
+  kind: 'stand-in';
+  /** The hidden toggle. */
+  input: Locator;
+  /** `checkbox` or `radio`. */
+  type: string;
+  /** What is clicked in its place. */
+  target: Locator;
+  /** The toggle's own label, which sets it natively; else an ancestor. */
+  label: boolean;
+}
+
+/**
+ * The first match, when every match of `matches` is hidden and the first is a
+ * checkbox or radio (§2.10); `null` otherwise, and while nothing matches yet.
+ */
+async function hiddenToggleInput(matches: Locator): Promise<Locator | null> {
   try {
-    const total = await matches.count();
-    if (total === 0) return null;
+    if ((await matches.count()) === 0) return null;
     if ((await matches.locator('visible=true').count()) > 0) return null;
     const input = matches.first();
-    const id = await input.evaluate(
+    const toggle = await input.evaluate(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (el: any) => {
-        const toggle = el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio');
-        return toggle ? String(el.id ?? '') : null;
-      },
+      (el: any) => el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio'),
       undefined,
       { timeout: MEASUREMENT_TIMEOUT_MS },
     );
-    if (id === null) return null;
-    const candidates: Locator[] = [];
-    // From the ROOT, which is the input's own frame. A chained XPath that
-    // starts with // is relative to the element in Playwright, so it would
-    // only ever search inside the input.
-    if (id !== '') {
-      const quoted = id.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      candidates.push(root.locator(`label[for="${quoted}"]`));
-    }
-    candidates.push(input.locator('xpath=ancestor::label[1]'));
-    // Never <body> or <html>: clicking the page itself "succeeds" and does nothing.
-    for (let depth = 1; depth <= 3; depth++) {
-      candidates.push(input.locator(`xpath=ancestor::*[not(self::body) and not(self::html)][${depth}]`));
-    }
-    for (const candidate of candidates) {
+    return toggle ? input : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * When every match of a click's selector is a hidden checkbox or radio, what
+ * the click does instead. It clicks the first visible of the toggle's
+ * `<label for>`, the `<label>` it sits in, or one of its three nearest
+ * ancestors — but no ancestor when the toggle is hidden with what is around
+ * it, because the nearest visible ancestor is then a section's frame, not the
+ * toggle's box: that click waits (`enclosed`). `null` when the selector
+ * matches something else, matches nothing yet (the normal click then waits
+ * for it), has a visible match, or nothing visible could stand in.
+ */
+async function hiddenToggleClick(root: Page | FrameLocator, matches: Locator): Promise<ToggleClick | null> {
+  try {
+    const input = await hiddenToggleInput(matches);
+    if (input === null) return null;
+    const toggle = await hiddenToggleOf(input);
+    if (toggle === null) return null;
+    const usable = async (candidate: Locator): Promise<Locator | null> => {
       const first = candidate.first();
-      if (!(await first.isVisible().catch(() => false))) continue;
+      if (!(await first.isVisible().catch(() => false))) return null;
       // "Visible" includes the 1×1 px clip wrapper accessible toggles hide
       // their input in (PrimeFaces' ui-helper-hidden-accessible): something
       // else covers it, so the click timed out (SPEC-web-survey-fixes.md
       // §2.32). Only stand in with something a person could click.
       const box = await first.boundingBox().catch(() => null);
-      if (box !== null && box.width >= 4 && box.height >= 4) return first;
+      return box !== null && box.width >= 4 && box.height >= 4 ? first : null;
+    };
+    const labels: Locator[] = [];
+    // From the ROOT, which is the input's own frame. A chained XPath that
+    // starts with // is relative to the element in Playwright, so it would
+    // only ever search inside the input.
+    if (toggle.id !== '') {
+      const quoted = toggle.id.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      labels.push(root.locator(`label[for="${quoted}"]`));
+    }
+    labels.push(input.locator('xpath=ancestor::label[1]'));
+    for (const label of labels) {
+      const target = await usable(label);
+      if (target !== null) return { kind: 'stand-in', input, type: toggle.type, target, label: true };
+    }
+    if (toggle.enclosed) return { kind: 'enclosed', type: toggle.type };
+    // Never <body> or <html>: clicking the page itself "succeeds" and does nothing.
+    for (let depth = 1; depth <= 3; depth++) {
+      const target = await usable(input.locator(`xpath=ancestor::*[not(self::body) and not(self::html)][${depth}]`));
+      if (target !== null) return { kind: 'stand-in', input, type: toggle.type, target, label: false };
     }
   } catch {
     // Anything unexpected leaves the ordinary click to report what is wrong.
   }
   return null;
+}
+
+/** How long an ancestor's click has to change the toggle it stood in for. */
+const STAND_IN_CONFIRM_MS = 2_000;
+
+/**
+ * Click an ancestor in place of a hidden checkbox or radio, and fail unless
+ * the toggle changed: a checkbox flipped, a radio checked (§2.10). Nothing in
+ * the markup tells a toggle's box from a section's frame around a toggle with
+ * no label, and a click on the frame "succeeds" whatever it lands on. Not
+ * judged when the toggle cannot be read, or when the click started a
+ * navigation of the page or of the toggle's own frame: a filter checkbox that
+ * reloads the page is ticked on the page that comes next. Another frame
+ * navigating — an ad, a widget — says nothing about the toggle.
+ */
+async function clickInPlaceOf(
+  page: Page,
+  selector: string,
+  toggle: ToggleStandIn,
+  press: () => Promise<void>,
+): Promise<void> {
+  const checked = (): Promise<boolean | null> =>
+    toggle.input.isChecked({ timeout: MIN_ACTION_TIMEOUT_MS }).catch(() => null);
+  const before = await checked();
+  const handle = await toggle.input.elementHandle({ timeout: MIN_ACTION_TIMEOUT_MS }).catch(() => null);
+  const ownFrame = await handle?.ownerFrame().catch(() => null) ?? null;
+  await handle?.dispose().catch(() => undefined);
+  let navigating = false;
+  const onRequest = (request: Request): void => {
+    if (!request.isNavigationRequest()) return;
+    try {
+      const frame = request.frame();
+      if (frame === page.mainFrame() || frame === ownFrame) navigating = true;
+    } catch {
+      // A service worker's request has no frame, and is no navigation of ours.
+    }
+  };
+  page.on('request', onRequest);
+  try {
+    await press();
+    if (before === null) return;
+    try {
+      await pollUntil(async () => {
+        if (navigating) return true;
+        const now = await checked();
+        return now === null || (toggle.type === 'radio' ? now : now !== before);
+      }, STAND_IN_CONFIRM_MS, `"${selector}" to change`);
+    } catch {
+      throw new Error(
+        `Clicked the visible element around the hidden ${toggle.type} "${selector}", and the ${toggle.type} `
+          + `did not change: the click did not reach it. If it is inside something closed, such as a collapsed `
+          + `section or a closed menu, open that first, then click the ${toggle.type}.`,
+      );
+    }
+  } finally {
+    page.off('request', onRequest);
+  }
+}
+
+/** What a click needs to know about a hidden checkbox or radio (§2.10). */
+export interface HiddenToggle {
+  /** `checkbox` or `radio`. */
+  type: string;
+  /** The input's id; '' when it has none. */
+  id: string;
+  /**
+   * Hidden with what is around it — a collapsed section, a closed menu, an
+   * inactive tab — rather than alone behind a box or label drawn in its
+   * place. True when a container that hides it holds anything but the input,
+   * or when its labels are all hidden together with it.
+   */
+  enclosed: boolean;
+  /** Only when asked for with `names`: what to open to show it, outermost
+   *  first, named the way `find` names collapsed sections (§2.28). Empty when
+   *  the page names none. */
+  collapsedUnder?: string[];
+}
+
+/**
+ * {@link HiddenToggle} for `input`, or `null` when it is not a checkbox or
+ * radio. It does not ask whether the input is hidden; the caller knows. The
+ * names are for a failure's message, so a click's decision does without them.
+ */
+export async function hiddenToggleOf(
+  input: Locator,
+  options: { names?: boolean } = {},
+): Promise<HiddenToggle | null> {
+  return input.evaluate(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el: any, names: boolean) => {
+      if (el.tagName !== 'INPUT' || (el.type !== 'checkbox' && el.type !== 'radio')) return null;
+      const w = globalThis as any;
+      const body = w.document.body;
+      const style = (node: any): any => w.getComputedStyle(node);
+      const rendered = (node: any): boolean => typeof node.checkVisibility === 'function'
+        ? node.checkVisibility({ visibilityProperty: true })
+        : node.getClientRects().length > 0 && style(node).visibility === 'visible';
+      // The parent a node is drawn in: through a slot, or out of a shadow root.
+      const up = (node: any): any => node.assignedSlot ?? node.parentElement ?? node.parentNode?.host ?? null;
+      const chain = new Set<any>();
+      for (let node = el; node; node = up(node)) chain.add(node);
+      const inert = new Set(['SCRIPT', 'STYLE', 'TEMPLATE', 'NOSCRIPT']);
+      // Anything in `box` but the input, the wrappers it sits in, and hidden
+      // form fields: text, a label, a drawn box, another control.
+      const holdsMore = (box: any): boolean => {
+        const walker = w.document.createTreeWalker(box, 1 | 4 /* SHOW_ELEMENT | SHOW_TEXT */, {
+          acceptNode: (node: any) => (node.nodeType === 1 && inert.has(node.tagName) ? 2 /* REJECT */ : 1),
+        });
+        for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+          if (node.nodeType === 3) {
+            if (node.data.trim() !== '') return true;
+          } else if (!chain.has(node) && !(node.tagName === 'INPUT' && node.type === 'hidden')) {
+            return true;
+          }
+        }
+        return false;
+      };
+      // A container that hides what is in it. `child` is the next node down
+      // towards the input, since a closed <details> still shows its summary.
+      const closes = (box: any, child: any): boolean => {
+        const cs = style(box);
+        if (cs.display === 'none' || cs.contentVisibility === 'hidden') return true;
+        if (box.tagName === 'DETAILS' && !box.open) return child.tagName !== 'SUMMARY';
+        if (cs.visibility === 'visible') return false;
+        // Inherited, so only where it starts.
+        const parent = up(box);
+        return parent === null || style(parent).visibility === 'visible';
+      };
+
+      // Every container that hides the input and holds more than it,
+      // outermost first. A wrapper holding only the input is how a styled
+      // toggle hides it; a container holding more is a closed section.
+      const closed: any[] = [];
+      for (let child = el, node = up(el); node && node !== body; child = node, node = up(node)) {
+        if (closes(node, child) && holdsMore(node)) closed.unshift(node);
+      }
+      // A styled toggle hides its input and shows its label. Labels hidden
+      // together with it — inside something holding both — say the whole
+      // control is; one hidden by its own style (a breakpoint's `display:
+      // none`) does not, and one too small to click is still on screen.
+      const hiddenWithInput = (label: any): boolean => {
+        if (rendered(label)) return false;
+        let shared = label;
+        while (shared && !shared.contains(el)) shared = shared.parentElement;
+        while (shared && shared !== body && style(shared).display === 'contents') shared = shared.parentElement;
+        return Boolean(shared) && shared !== body && !rendered(shared);
+      };
+      const labels = Array.from(el.labels ?? []) as any[];
+      const toggle = {
+        type: String(el.type),
+        id: String(el.id ?? ''),
+        enclosed: closed.length > 0 || (labels.length > 0 && labels.every((label) => hiddenWithInput(label))),
+      };
+      if (!names) return toggle;
+
+      // What a person opens, named as `find` names a collapsed section
+      // (§2.28): by what controls it (an accordion header's or a tab's
+      // `aria-controls`), what labels it, a closed <details>' summary, else
+      // the header beside it — the nearest sibling with text that is not
+      // another closed panel, before it, then after it.
+      const oneLine = (v: unknown): string => String(v ?? '').replace(/\s+/g, ' ').trim().substring(0, 60);
+      const textOf = (node: any): string =>
+        (node && !inert.has(node.tagName) ? oneLine(node.innerText ?? node.textContent) : '');
+      const nameOf = (box: any): string => {
+        if (box.tagName === 'DETAILS') return textOf(box.querySelector(':scope > summary'));
+        const tree = box.getRootNode();
+        if (box.id) {
+          const opener = tree.querySelector?.(`[aria-controls~="${w.CSS.escape(box.id)}"]`);
+          if (textOf(opener) !== '') return textOf(opener);
+        }
+        const labelledBy = String(box.getAttribute('aria-labelledby') ?? '').split(/\s+/)
+          .map((ref: string) => (ref === '' ? '' : textOf(tree.getElementById?.(ref))))
+          .filter((name: string) => name !== '');
+        if (labelledBy.length > 0) return oneLine(labelledBy.join(' '));
+        if (box.getAttribute('aria-label')) return oneLine(box.getAttribute('aria-label'));
+        for (const step of ['previousElementSibling', 'nextElementSibling']) {
+          for (let sibling = box[step]; sibling; sibling = sibling[step]) {
+            if (closes(sibling, sibling)) continue;
+            const text = textOf(sibling);
+            if (text !== '') return text;
+          }
+        }
+        return '';
+      };
+      const collapsedUnder: string[] = [];
+      for (const box of closed) {
+        const name = nameOf(box);
+        if (name !== '' && !collapsedUnder.includes(name)) collapsedUnder.push(name);
+      }
+      return { ...toggle, collapsedUnder };
+    },
+    options.names === true,
+    { timeout: MEASUREMENT_TIMEOUT_MS },
+  );
+}
+
+/**
+ * `err` with what to open, when the click it failed was on a checkbox or
+ * radio hidden inside something hidden; any other failure as it was. The
+ * explanation goes after the first line, which stays the verdict the
+ * scoreboard classifies by (src/stats/classify.ts).
+ */
+export async function explainEnclosedToggle(selector: string, matches: Locator, err: unknown): Promise<unknown> {
+  try {
+    const input = await hiddenToggleInput(matches);
+    const toggle = input === null ? null : await hiddenToggleOf(input, { names: true });
+    if (toggle === null || !toggle.enclosed) return err;
+    const names = toggle.collapsedUnder ?? [];
+    const where = names.length === 0
+      ? 'inside something hidden, such as a collapsed section, a closed menu or an inactive tab. Open that first'
+      : `inside collapsed: ${names.join(' › ')}. `
+        + (names.length > 1 ? 'Open those first, outermost first' : 'Open it first');
+    const [verdict = '', ...rest] = (err instanceof Error ? err.message : String(err)).split('\n');
+    const explained = new Error([
+      verdict,
+      `"${selector}" is a ${toggle.type} ${where}, then click the ${toggle.type}; `
+        + 'while it is hidden there is nothing on screen to click.',
+      ...rest,
+    ].join('\n'));
+    if (err instanceof Error) explained.name = err.name;
+    return explained;
+  } catch {
+    return err;
+  }
 }
 
 

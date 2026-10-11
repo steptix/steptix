@@ -23,7 +23,7 @@ in the test files, not here.
 | 2.7 | `type` breaks on colour, date and range inputs | 46 | `type` clears first. Clearing `<input type=color>` fills `""`, which is a malformed value | Skip the clear on inputs that cannot be empty, and normalise colour values to `#rrggbb` |
 | 2.8 | Multi-selects take one value | 50, 56 (2) | `select` passes one string, so `"Red, Green"` matches no option | When the `<select>` is `multiple`, accept a list (`values`) or a comma-separated `value`, matched by value, then by label |
 | 2.9 | Drag is a single jump | 52, 72 (2) | `dragTo` jumps from source to target, which jQuery UI's draggable and sortable ignore | Drag with the mouse in steps: press, nudge past the drag threshold, glide to the target, release |
-| 2.10 | Hidden checkbox inputs cannot be clicked | 62 | A click on a styled checkbox's hidden `<input>` waits for it to become visible, then times out | When the only match is a hidden checkbox or radio, click its `<label for>` or its nearest visible ancestor |
+| 2.10 | Hidden checkbox inputs cannot be clicked | 62 | A click on a styled checkbox's hidden `<input>` waits for it to become visible, then times out | When the only match is a hidden checkbox or radio, click its `<label for>` or its nearest visible ancestor. The ancestor only when the input is hidden alone, and its click must change the toggle. One hidden with its container (a collapsed section, a closed menu) waits for the container to open, then fails saying what to open (issue 32) |
 | 2.11 | Text reads include script source | 64 | `read` takes `textContent`, so reading a container also captured its `<script>` | Drop `<script>`, `<style>` and `<template>` text from element reads |
 | 2.12 | Wrong "no value" warnings | every run that captures a value | The MCP run result warns that `{{x}}` "will reach the AI literally" when an earlier `[as: x]` step fills it | Treat names captured by earlier steps as defined |
 | 2.13 | Waits cannot compare numbers | 42 | A `wait` on an attribute matches one exact value, so `aria-valuenow=75` misses a bar that steps past 75 | Accept `>=`, `<=`, `>` and `<` in attribute waits |
@@ -202,6 +202,111 @@ for real mouse movement.
 `<input type=checkbox|radio>`, it clicks the first visible of: the
 `<label for=id>`, the enclosing `<label>`, or one of the input's nearest three
 ancestors. This is what a person does with a PrimeFaces or Material checkbox.
+
+**Only for an input hidden alone.** A stand-in is right when the page hides
+the input and draws a box or a label in its place. It is wrong when the
+checkbox is hidden because its container is: a collapsed accordion, a closed
+dropdown, an inactive tab. The label is hidden with it, so the search climbed
+past the container to the first visible ancestor and clicked its middle. That
+landed on a heading, another control or empty space, and the click reported
+success with the box unticked (steptix/steptix#32, found in the review of PR #27).
+
+So the ancestors are tried only when the input is hidden alone. It is not
+when either of these holds:
+
+- a container around it hides it and holds anything but the input: text, a
+  label, a drawn box, another control. A container hides what is in it when
+  it is `display: none`, `content-visibility: hidden` (as `hidden="until-found"`
+  is), a closed `<details>` (all but its summary), or where `visibility`
+  stops being `visible`. A wrapper holding only the input and hidden form
+  fields is how a styled toggle hides it, whether that wrapper is `display:
+  none` or not;
+- it has `<label>`s, and every one is hidden together with it: the nearest
+  element holding both the label and the input is not rendered. A label
+  hidden by its own style, such as a `display: none` at one screen width,
+  does not count, and neither does one rendered too small to click.
+
+Rendered means `checkVisibility({ visibilityProperty: true })`. Both walks go
+up the tree the page is drawn in, out of a shadow root and through a slot, so
+a toggle inside a web component counts the panel around the component.
+
+A visible label is clicked either way, because clicking a label sets its own
+input wherever the input sits. When nothing stands in, the click waits up to
+its budget, polling, for the toggle to show or for its container to open,
+and then decides again. So a step that opens the panel just before still
+works, for a styled toggle too, whose input never shows: once the panel is
+open its label stands in. A measured run (Run & Compile, or
+`browser.ambiguousTarget: "fail"`) skips its usual wait for a visible match on
+such a click, since that wait would spend the whole budget on a match that
+never comes. The gate still holds: under `"fail"`, several hidden matches are
+refused as several visible ones are. When a stand-in takes the click in a
+measured run, the result's `targeting` says so: `standIn` is `label` or `box`,
+and `resolvedSelector` names the element clicked, verified as usual and
+measured before the click, so a click that loads another page still records
+the page it was on. Nothing
+replays a stand-in, so code generation is told to click that element. It also
+refuses an entry that clicks the hidden input itself
+(`hiddenToggleClickComplaint`), as it refuses a role name that matched nothing
+(§2.34). Reading the input's checked state is still allowed.
+
+When the wait times out, the error's first line stays the verdict
+(`Timeout 10000ms exceeded waiting for "#gift" to show`), which the
+scoreboard files as a selector that matched nothing visible, as it did the
+bare timeout. The next line says what to open:
+
+```
+"#gift" is a checkbox inside collapsed: Delivery options. Open it first, then
+click the checkbox; while it is hidden there is nothing on screen to click.
+```
+
+The names follow `find`'s (§2.28), outermost first. Each comes from the
+control whose `aria-controls` names the container, else the container's
+`aria-labelledby` or `aria-label`, else a closed `<details>`' summary, else
+the header beside it: the nearest sibling with text that is not itself a
+closed panel, before the container and then after it. Script and style text
+never counts. With no name to give, it says "inside something hidden, such as
+a collapsed section, a closed menu or an inactive tab".
+
+One case still looks like a styled toggle: a checkbox with no `<label>`,
+alone in a hidden container. Nothing in the markup tells that container from
+a wrapper hidden behind a drawn box, so its ancestors are still tried. That
+is why an ancestor's click must change the toggle: a checkbox must flip, a
+radio must end up checked, within 2 s. Otherwise the click fails ("Clicked
+the visible element around the hidden checkbox "#gift", and the checkbox did
+not change: the click did not reach it."). A label's click is not checked,
+since a label sets its input natively. Nor is a click that starts a
+navigation of the page or of the toggle's own frame, because a filter
+checkbox that reloads the page is ticked on the next page, nor one whose
+toggle cannot be read afterwards. Another frame navigating meanwhile, such as
+an ad, does not excuse it.
+
+**Tests.** Real Chromium:
+- **The issue's markup** (a checkbox and its label in a `display: none` panel
+  under a heading that opens it) fails the click with the message above, and
+  classifies as `no-match`. A page-side listener records no click at all.
+- **A panel that opens while the click waits** gets a styled checkbox ticked
+  through its label.
+- **A lone label-less checkbox in a closed panel** gets the section clicked,
+  and the click fails because the checkbox did not change.
+- **A measured click** still ticks a styled checkbox, and records `standIn`
+  with a `resolvedSelector` for the label or box it clicked. Under
+  `ambiguousTarget: "fail"`, two hidden matches are refused.
+- **A section click that loads a new page** passes; one that only reloads an
+  ad frame fails.
+- **Generation** refuses an entry that clicks the hidden input, however it
+  is written (`codebehind-generate.test.ts`). It accepts one that clicks what
+  stood in or only reads the input.
+- **Count as enclosed:** a label in a closed `<details>`; a label-less input
+  in one; a `content-visibility: hidden` container; a closed menu; a
+  `visibility: hidden` list; a web component in a hidden panel.
+- **Do not count:** a label hidden by its own style; a wrapper holding only
+  the input.
+- **Names:** come from `aria-controls`, `aria-label`, `aria-labelledby`, a
+  summary, and the header just before a second accordion panel, skipping a
+  script.
+- **The explanation** goes after the first line, and a hidden button's failure
+  is left as it was.
+- **A visible label** still ticks an input hidden beside others.
 
 ### 2.11 Text reads skip script source
 
@@ -475,9 +580,11 @@ action.
 
 ### 2.32 Stand-ins a person could click
 
-**Fix.** In `standInForHiddenToggle`, a candidate (label or ancestor) must be
-visible **and** have a bounding box of at least 4×4 px. The 1 px clip wrapper is
-skipped, and the next ancestor, the toggle's container, takes the click.
+**Fix.** In `hiddenToggleClick` (once `standInForHiddenToggle`), a candidate
+(label or ancestor) must be visible **and** have a bounding box of at least
+4×4 px. The 1 px clip wrapper is skipped, and the next ancestor, the toggle's
+container, takes the click. The wrapper is rendered and hides nothing else,
+so the input counts as hidden alone (§2.10) and its ancestors are tried.
 
 ### 2.33 Notifications are remembered
 

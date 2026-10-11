@@ -23,6 +23,7 @@ import {
   stepParameters,
   staleHandleComplaint,
   tabIdentifierComplaint,
+  hiddenToggleClickComplaint,
   unmatchedRoleNameComplaint,
   unwaitedReadComplaint,
   undeclaredContextComplaint,
@@ -568,6 +569,55 @@ describe('unmatchedRoleNameComplaint', () => {
       .toBeUndefined();
     expect(unmatchedRoleNameComplaint(entry(`await page.locator('role=button[name="Dismiss"]').click();`), [
       { action: 'click', selector: 'role=button[name="Dismiss"]', description: 'x', targeting: { matchCount: 1 } },
+    ])).toBeUndefined();
+  });
+});
+
+/**
+ * SPEC-web-survey-fixes.md §2.10: a click whose selector matched only a hidden
+ * checkbox or radio was taken by what the page draws in its place, which
+ * nothing replays.
+ */
+describe('hiddenToggleClickComplaint', () => {
+  const STOOD_IN: RecordedAction[] = [
+    {
+      action: 'click',
+      selector: '[aria-label="Basic"]',
+      description: 'Tick Basic',
+      targeting: { standIn: 'box', resolvedSelector: '#basic-box', resolvedBy: 'attribute' },
+    },
+  ];
+  const entry = (body: string): string =>
+    `{ source: 'Tick Basic', async run({ page }) { ${body} } }`;
+
+  it('refuses a click on the hidden input, however it is written, and names what to click instead', () => {
+    for (const body of [
+      `await page.locator('[aria-label="Basic"]').click();`,
+      `await page.locator('[aria-label="Basic"]').first().check();`,
+      `await page.click('[aria-label="Basic"]');`,
+      `await page.frameLocator('#f').locator('[aria-label="Basic"]').click();`,
+      `const box = page.locator('[aria-label="Basic"]');\nawait box.first().click();`,
+    ]) {
+      const complaint = hiddenToggleClickComplaint(entry(body), STOOD_IN);
+      expect(complaint, body).toContain('hidden checkbox or radio');
+      expect(complaint, body).toContain('#basic-box');
+    }
+    expect(entryFaults(entry(`await page.locator('[aria-label="Basic"]').click();`), {
+      source: 'Tick Basic',
+      actions: STOOD_IN,
+    }).map((f) => f.check)).toContain('hidden-toggle-click');
+  });
+
+  it('accepts a click on what stood in, a read of the input, and a run that clicked nothing in its place', () => {
+    for (const body of [
+      `await page.locator('#basic-box').click();`,
+      `await page.locator('#basic-box').click();\nexpect(await page.locator('[aria-label="Basic"]').isChecked()).toBe(true);`,
+      `await page.locator('[aria-label="Basic"]').locator('xpath=../..').click();`,
+    ]) {
+      expect(hiddenToggleClickComplaint(entry(body), STOOD_IN), body).toBeUndefined();
+    }
+    expect(hiddenToggleClickComplaint(entry(`await page.locator('[aria-label="Basic"]').click();`), [
+      { action: 'click', selector: '[aria-label="Basic"]', description: 'x', targeting: { matchCount: 1 } },
     ])).toBeUndefined();
   });
 });

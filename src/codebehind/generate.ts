@@ -725,7 +725,8 @@ export interface EntryFault {
     | 'context-value-as-variable'
     | 'chained-assertion'
     | 'tab-identifier'
-    | 'unmatched-role-name';
+    | 'unmatched-role-name'
+    | 'hidden-toggle-click';
   complaint: string;
   /** The recorded selector, for a `read` fault. */
   selector?: string;
@@ -770,6 +771,7 @@ export function entryFaults(
     ['chained-assertion', chainedAssertionComplaint(code)],
     ['tab-identifier', tabIdentifierComplaint(code, actions, ctx.secrets)],
     ['unmatched-role-name', unmatchedRoleNameComplaint(code, actions, ctx.substitute)],
+    ['hidden-toggle-click', hiddenToggleClickComplaint(code, actions, ctx.substitute)],
   ];
   for (const [check, complaint] of found) {
     if (complaint !== undefined) out.push({ check, complaint });
@@ -1015,6 +1017,7 @@ export function staticEntryComplaint(
   return (
     ambiguousSelectorComplaint(code, actions, substitute) ??
     unmatchedRoleNameComplaint(code, actions, substitute) ??
+    hiddenToggleClickComplaint(code, actions, substitute) ??
     literalUploadPathComplaint(code, actions)
   );
 }
@@ -1138,6 +1141,75 @@ export function unmatchedRoleNameComplaint(
     );
   }
   return undefined;
+}
+
+/** A call that clicks or toggles what it is called on. */
+const CLICKING_CALL = /\.\s*(?:click|dblclick|tap|check|uncheck|setChecked)\s*\(/;
+/** `page.click('sel')` and its kin: the selector is the call's own argument. */
+const CLICKING_PAGE_CALL =
+  /(?:^|[^\w$.])(?:page|frame)\s*\.\s*(?:click|dblclick|tap|check|uncheck|setChecked)\s*\(\s*$/;
+/** `.locator('sel')` on a page, a frame locator or another locator. */
+const LOCATOR_CALL = /\.\s*locator\s*\(\s*$/;
+/** `const box = …` open in the statement the selector sits in. */
+const BOUND_IN_STATEMENT = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^;=]*$/;
+/** A step down from the located element to another one. */
+const TO_ANOTHER_ELEMENT = /\.\s*(?:locator|filter|getBy[A-Za-z]+)\s*\(/;
+
+/**
+ * Why this entry must not be written as it stands: it clicks a selector that
+ * matched only a hidden checkbox or radio in the recorded run, where the
+ * runtime clicked what the page draws in its place instead — the toggle's
+ * label or the box around it (`targeting.standIn`, SPEC-web-survey-fixes.md
+ * §2.10). Nothing replays that stand-in, so the click waits on a hidden
+ * element and never lands. Reading the input, `isChecked()` and the like, is
+ * not a click and passes.
+ */
+export function hiddenToggleClickComplaint(
+  code: string,
+  actions: RecordedAction[],
+  substitute?: ((text: string) => string) | undefined,
+): string | undefined {
+  let strings: StringToken[] | undefined;
+  for (const action of actions) {
+    const selector = action.selector;
+    const standIn = action.targeting?.standIn;
+    if (selector === undefined || standIn === undefined) continue;
+    strings ??= scan(code).strings;
+    const substituted = substitute?.(selector);
+    const spellings =
+      substituted !== undefined && substituted !== selector ? [selector, substituted] : [selector];
+    if (!strings.some((token) => spellings.includes(token.value) && clicksSelector(code, token))) continue;
+
+    const resolved = action.targeting?.resolvedSelector;
+    return (
+      `The entry clicks ${JSON.stringify(selector)}, but in this run that matched only a hidden checkbox ` +
+      `or radio — the runtime clicked ${standIn === 'label' ? 'its label' : 'the visible box around it'} ` +
+      `instead, and nothing replays that, so the click waits on a hidden element and never lands. ` +
+      (resolved !== undefined
+        ? `Click the verified resolvedSelector ${JSON.stringify(resolved)}.`
+        : `Click the element the runtime clicked.`)
+    );
+  }
+  return undefined;
+}
+
+/** Does the code click the element this string literal selects? */
+function clicksSelector(code: string, token: StringToken): boolean {
+  const before = code.slice(Math.max(0, token.start - 120), token.start);
+  if (CLICKING_PAGE_CALL.test(before)) return true;
+  if (!LOCATOR_CALL.test(before)) return false;
+
+  // The rest of this statement, up to its click: `).first().click()` still
+  // clicks the input, `).locator('..').click()` clicks something else.
+  const after = code.slice(token.end, token.end + 400);
+  const statement = after.split(/[;\n]/, 1)[0] ?? after;
+  const click = CLICKING_CALL.exec(statement);
+  if (click) return !TO_ANOTHER_ELEMENT.test(statement.slice(0, click.index));
+
+  const name = BOUND_IN_STATEMENT.exec(before)?.[1];
+  if (name === undefined) return false;
+  const narrowed = String.raw`(?:\.\s*(?:first|last|nth)\s*\([^()]*\)\s*)*`;
+  return new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\s*${narrowed}${CLICKING_CALL.source}`).test(code);
 }
 
 /**
