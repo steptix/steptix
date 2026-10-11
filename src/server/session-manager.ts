@@ -4735,6 +4735,8 @@ export class SessionManager {
           ...(envDataCtx && { envData: envDataCtx }),
           plan,
           ...(signal && { signal }),
+          // A data-driven run compiles on row 1 alone.
+          ...(request.dataRow !== undefined && { dataDriven: true }),
           emit,
           note: (msg, level) => emit({ type: 'output', msg, kind: level }),
         });

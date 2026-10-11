@@ -1001,7 +1001,8 @@ and goes one step further: a step that only reads needs no model at all.
 **Which steps qualify.** All of these must hold:
 
 - Every recorded action is a `read` or a `count`. `find` and `expand` are
-  ignored: they only showed the model the page.
+  ignored: they only showed the model the page. So is `noop`, which did
+  nothing; it is how the model keeps a list read it was shown (below).
 - Every variable the step captured came straight from one of those actions,
   so the entry stores exactly what the run stored.
 - The step states no expectation: the transcript has no `assert` action.
@@ -1065,7 +1066,45 @@ own. §6.2 checks the selector either way.
   as §6.5 defines it: the entry takes no action, so the step falls back to
   AI and the entry is regenerated. This is the check that would have caught
   B: its selector matched both `span.account-name` and `span.account-number`.
-  An empty result passes, as it does under AI.
+  An empty result passes.
+- **Only a read the AI run stood by is compiled** (steptix/steptix#48, which
+  #28 was merged into). Under AI, a read of every match or a count that comes
+  back empty, or matches more than one kind of element, is shown to the model
+  before the step can end on it: what the selector matched, kind by kind, with
+  a few of the values the read stored (`src/runner/list-read-review.ts`). The model reads
+  again, and the new read replaces the old, or it keeps the read. A changed
+  read is shown again while the step has turns left; with none left (the last
+  turn, or a `return`), the step ends on the read as it came back, unseen,
+  and passes. `actionsOf` drops every reviewed read a later action stored
+  over, in any attempt, so a read the model replaced — B's over-broad
+  selector, or one that matched nothing — never reaches the entry.
+- **A read that proves nothing is not compiled at all.** A step that ended on
+  a list that came back empty, kept or not, or on a list the model never saw,
+  is no evidence for its selector: on a page with no items, a selector one
+  level too deep matches nothing just as the right one does, and the entry
+  would pass on that page for good (`unprovenListRead`). Both compilers treat
+  it as they treat a tolerated failure: not attempted, named with the reason,
+  no entry — never `ai: true` — so the next compile takes it again. A loop
+  body takes its evidence from the first pass whose reads did prove something
+  (`isEvidencePass`), so a `For each` that read nothing on its first item and
+  three values on its second compiles from the second. Steps that share one
+  entry — a `### Section` table's rows, a section or skill called twice — take
+  theirs from the best of their runs by the same rank (`evidenceRank`), so a
+  row that read items compiles the entry an earlier empty row could not.
+  Whatever then fails on the replay — on any of those steps — is dropped,
+  written off and repaired as that entry. The repair is held to the selector
+  of the run the entry was compiled from, never to a row whose list came back
+  empty, and is told what the failing pass captured on the page it failed on.
+  A
+  step left out this way whose existing entry broke (it is stale) keeps that
+  entry, and the compile's replay runs the step under AI in its own copy of
+  the file (`Candidate.materialise`), so the replay proves the steps after it
+  rather than failing on an entry the compile did not write. The summary
+  names these steps apart from the ones a stop, an end or a return kept from
+  running (`unprovenReads`); one whose working entry is left as it was
+  (`--all`) is counted kept, not owed, and keeps the compile partial. A data-driven test records its first
+  data row alone, so for it the reason says to put a row whose list has items
+  first.
 - **Review leaves these entries alone.** They carry `fromRecording: true`.
   Review's prompt says not to change them, and a revision that changes one is
   rejected, as the other rejections are (`review.ts:270-306`). The rejection

@@ -5,6 +5,7 @@ import type { ActionTargeting } from '../browser/actions.js';
 import type { ObservedRequest } from '../browser/page-state.js';
 import type { AssertionResult, StepResult, StepStatus, SubActionResult } from '../report/types.js';
 import { logger } from '../utils/logger.js';
+import { supersededListReads, unprovenListRead } from '../runner/list-read-review.js';
 import {
   isSecretName,
   secretValues,
@@ -329,9 +330,14 @@ export async function writeRecording(testFilePath: string, input: RecordingInput
  * compiler's rule too: it refuses a clean code run as "ran as code" and takes
  * the healed pass for its repair.
  *
- * When no pass is usable evidence: the first that passed (a step that only
- * ever ran as code), else the first row of all (a step that never passed is
- * recorded as it first failed or was skipped).
+ * When no pass is usable evidence: the first with a transcript that worked —
+ * a pass that ended on a list read proving nothing about its selector, which
+ * the compile then refuses rather than generate from (`unprovenListRead`,
+ * issue #48) — else the first that passed (a step that only ever ran as
+ * code), else the first row of all (a step that never passed is recorded as
+ * it first failed or was skipped). That middle rank is load-bearing: ranked
+ * with the clean code runs, a healed pass whose list came back empty lost to
+ * pass 1's empty transcript, and the compile wrote `ai: true` over the entry.
  *
  * Hook rows and interactive rows are dropped, as both writers always did.
  * Returned in the order each index first appears, which is the run's order,
@@ -344,7 +350,7 @@ export async function writeRecording(testFilePath: string, input: RecordingInput
 export function evidenceRows(steps: readonly StepResult[]): StepResult[] {
   const firstSeen: number[] = [];
   const chosen = new Map<number, StepResult>();
-  const rank = (r: StepResult): number => (isEvidencePass(r) ? 2 : r.status === 'passed' ? 1 : 0);
+  const rank = evidenceRank;
   for (const result of steps) {
     if (result.hookScope || result.interactiveAdHoc || result.interactiveChild) continue;
     const held = chosen.get(result.index);
@@ -359,12 +365,36 @@ export function evidenceRows(steps: readonly StepResult[]): StepResult[] {
 }
 
 /**
+ * How good one row is as evidence for the entry its step binds to, for
+ * choosing among rows that could each stand for it: 3 for usable evidence
+ * ({@link isEvidencePass}), 2 for a row that worked under AI but ended on a
+ * list read that proves nothing, 1 for a pass with no transcript (it ran
+ * clean as code), 0 for anything else. `evidenceRows` takes the best pass of
+ * one index by it; the boxed compile takes the best of the steps that share
+ * one entry by it (src/codebehind/compile.ts).
+ */
+export function evidenceRank(result: StepResult): number {
+  return isEvidencePass(result) ? 3 : ranWithTranscript(result) ? 2 : result.status === 'passed' ? 1 : 0;
+}
+
+/**
  * Is this pass usable evidence — something an entry can be generated from?
  * It passed (or failed as its own text says: `deliberate`), and it has a
  * transcript: it ran under AI, which a clean code run did not — unless its
  * entry threw first and the step healed under AI (`codeBehindStale`).
+ *
+ * And its list reads prove their selectors: a pass that ended on a list that
+ * came back empty, or on one the model never saw, is no evidence for the
+ * selector that read it (`unprovenListRead`, issue #48). So a loop body
+ * whose first pass read an empty list and whose second read three items is
+ * compiled from the second.
  */
 export function isEvidencePass(result: StepResult): boolean {
+  return ranWithTranscript(result) && unprovenListRead(result) === undefined;
+}
+
+/** It worked — passed, or failed as its text says — and ran under AI. */
+function ranWithTranscript(result: StepResult): boolean {
   const worked = result.status === 'passed' || result.deliberate === true;
   const transcript = result.fromCodeBehind !== true || result.codeBehindStale !== undefined;
   return worked && transcript;
@@ -801,6 +831,15 @@ export async function readRecording(testFilePath: string): Promise<Recording | n
  * runtime marked `deliberate`, so an UNCLAIMED `fail` the model tried and was
  * refused — which also carries an `error` — stays dropped.
  *
+ * So is a list read the step showed the model because it came back empty or
+ * mixed, once a later action stored over its name (`supersededListReads`,
+ * src/runner/list-read-review.ts): one the model replaced with a better read,
+ * or one an attempt that failed left behind and the retry read again, was not
+ * the step's read, and a step that only reads is compiled straight from what
+ * this returns (docs/specs/SPEC-codebehind-robustness.md §6.6). A step whose
+ * own read came back empty, or was never seen, is kept whole here, for the
+ * recording; the compile refuses it (`unprovenListRead`).
+ *
  * Lives in this module rather than in `candidate.ts`, which re-exports it,
  * only because every ordinary run already loads this file while `candidate.ts`
  * pulls in prettier and esbuild through the writer. One implementation, in the
@@ -808,9 +847,13 @@ export async function readRecording(testFilePath: string): Promise<Recording | n
  */
 export function actionsOf(result: StepResult | undefined): RecordedAction[] {
   const keepFail = result?.deliberate === true;
-  return (result?.turns ?? [])
-    .flatMap((t) => t.subActions)
+  const subs = (result?.turns ?? []).flatMap((t) => t.subActions);
+  // A list read a later action stored over was not this step's read (issue #48).
+  const superseded = supersededListReads(subs);
+  return subs
     .filter((sa) => !sa.error || (keepFail && sa.action.action === 'fail'))
+    // Nor was a read in an answer the step discarded (`discarded`).
+    .filter((sa) => !superseded.has(sa) && sa.discarded !== true)
     .map((sa) => {
       // Here and not later, for `targeting`'s reason: a URL can carry a
       // secret, and the recording redacts what this returns.
