@@ -24,7 +24,7 @@ import {
 import type { CompileOutcome, RunController, SkillDebugContext } from '../run-controller.js';
 import { codeBehindPathFor, findEntryLine, type CodeBehindDiffs } from '../codebehind-diff.js';
 import { getOutputChannel } from '../output-channel.js';
-import { partialNotes } from '../compile-summary-core.js';
+import { emptyProposalMessage, partialNotes } from '../compile-summary-core.js';
 import { sectionedSkillRefusal } from '../sections.js';
 import { resolveProjectDirs } from '../steptix-config.js';
 import {
@@ -273,9 +273,7 @@ export function registerCommands(
     const files = outcome.files ?? {};
     const summary = outcome.summary;
     if (Object.keys(files).length === 0) {
-      vscode.window.showInformationMessage(
-        `Nothing to compile in ${label} — every step already has code-behind.`,
-      );
+      vscode.window.showInformationMessage(emptyProposalMessage(label, outcome.status, summary));
       await restore();
       return;
     }

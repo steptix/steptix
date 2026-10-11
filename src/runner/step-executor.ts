@@ -68,6 +68,7 @@ import {
 } from './placeholder-substitution.js';
 import { decideConditionLocally, type LocalDecision } from './literal-decision.js';
 import { storeCapture } from './store-capture.js';
+import { isReviewAnswer, leavesPageAsRead, listReadConcern, sameListRead, storedName, type ListReadConcern } from './list-read-review.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import {
   isReturnClaim,
@@ -2578,6 +2579,21 @@ async function executeStepAttempt(
   // answers bare once tends to answer bare again, and re-evaluating every
   // time would repeat a "Click Next" until the turn cap.
   let inferredReevalUsed = false;
+  // A list read that came back empty or mixed is shown to the model before
+  // the step can end on it (src/runner/list-read-review.ts, issue #48).
+  /** The latest read under review, per stored name, so a later read of the name replaces it. */
+  const reviewedReads = new Map<string, SubActionResult>();
+  /** How many times in a row a shown list changed when the model read it again the same way. */
+  const rereadChanges = new Map<string, number>();
+  /** What the next turn's prompt shows, and the reads it shows. */
+  let listReadLines: string[] = [];
+  let listReadsShown = new Map<string, SubActionResult>();
+  /**
+   * The next turn exists only to show the model its list reads: the model had
+   * said the step was done (9b). Such a turn is the step's epilogue, not more
+   * of the step, and it can never fail it — see `reviewOnly` below.
+   */
+  let nextTurnReviewOnly = false;
   let stallCount = 0;
   const STALL_LIMIT = 2;
 
@@ -2646,6 +2662,18 @@ async function executeStepAttempt(
   try {
   for (let currentTurn = 1; currentTurn <= maxTurns; currentTurn++) {
     completedTurns = currentTurn;
+    /**
+     * This turn was added only to show the model its list reads, after it had
+     * said the step was done (9b). The step passed as far as the step goes, so
+     * nothing here may fail it (steptix/steptix#48, decision 1): the model may
+     * keep a read (`noop`) or read again (a list read, `isReviewAnswer`), and
+     * anything else — another action, a question, a failed read, a call that
+     * failed or did not parse — ends the step where it stood. The reads it was
+     * shown then stay unanswered (`pending`): the report flags them and the
+     * compile does not use them.
+     */
+    const reviewOnly = nextTurnReviewOnly;
+    nextTurnReviewOnly = false;
 
     // Abort check — bail before doing any work on this turn if the run was
     // stopped, so a multi-turn step stops spawning AI calls. Throwing unwinds
@@ -2741,7 +2769,7 @@ async function executeStepAttempt(
     // (or whatever triggered the wait) likely didn't register. Bail out instead
     // of burning more turns.
     const pageFingerprint = `${currentUrl}\n${domSnapshot}`;
-    if (currentTurn > 1 && lastActionWasWait) {
+    if (currentTurn > 1 && lastActionWasWait && !reviewOnly) {
       const unchanged = pageFingerprint === prevPageFingerprint;
       const networkIdle = tracker.isIdle();
       if (unchanged && networkIdle) {
@@ -2857,8 +2885,14 @@ async function executeStepAttempt(
         // was the widest surface a secret reached (decision 2).
         stepValues ?? { parameters: [] },
         promptAuthored,
+        listReadLines.map((line) => redact(line, secretsNow())),
+        reviewOnly,
       );
     }
+    listReadLines = [];
+    // Shown now that a prompt carries them — not when 9b queued them: a Stop,
+    // or a throw before this turn's prompt, leaves them never shown.
+    for (const sub of listReadsShown.values()) sub.listReview!.shown = true;
 
     const messages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -2866,9 +2900,28 @@ async function executeStepAttempt(
     ];
 
     // 6. Get the AI action plan
-    const completion = await traceOp(`ai.complete (turn ${currentTurn})`, () => aiClient.complete(messages, opts.signal));
+    let completion: Awaited<ReturnType<typeof aiClient.complete>>;
+    let aiResponse: ReturnType<typeof parseAIResponse>;
+    try {
+      completion = await traceOp(`ai.complete (turn ${currentTurn})`, () => aiClient.complete(messages, opts.signal));
+      aiResponse = parseAIResponse(completion.text);
+    } catch (err) {
+      // A call that failed, or a reply that did not parse, fails a turn of the
+      // step. It ends a review turn instead, with the reads unanswered — a
+      // Stop still stops.
+      const aborted = opts.signal?.aborted === true
+        || (err instanceof Error && err.name === 'AbortError');
+      if (!reviewOnly || aborted) throw err;
+      logger.warn(
+        `Step ${stepIndex}: the turn showing the model its list reads failed (${err instanceof Error ? err.message : String(err)}) — the step ends where it stood`,
+      );
+      if (inFlightTurn && (inFlightTurn.aiInteractions.length > 0 || inFlightTurn.subActions.length > 0)) {
+        allTurns.push(inFlightTurn);
+      }
+      inFlightTurn = undefined;
+      break;
+    }
     const rawResponse = completion.text;
-    let aiResponse = parseAIResponse(rawResponse);
 
     turnAiInteractions.push({
       purpose: 'action-plan',
@@ -2882,9 +2935,27 @@ async function executeStepAttempt(
       timestamp: turnTimestamp,
     });
 
-    lastAiResponse = aiResponse;
+    // The step's explanation is its own reasoning, not a review turn's: that
+    // turn is about the lists, and its answer may never have run.
+    if (!reviewOnly) lastAiResponse = aiResponse;
 
     logger.debug(`AI reasoning (turn ${currentTurn}): ${aiResponse.reasoning}`);
+
+    // An answer with no actions keeps nothing and reads nothing again: it is
+    // no answer, and asking again would only spend the step's turns.
+    if (
+      reviewOnly
+      && (aiResponse.actions.length === 0 || !aiResponse.actions.every((a) => isReviewAnswer(a, listReadsShown)))
+    ) {
+      logger.warn(
+        `Step ${stepIndex}: asked about its list reads, the model answered with ${aiResponse.actions.map((a) => a.action).join(', ') || 'nothing'} — not run; the step ends where it stood`,
+      );
+      if (inFlightTurn && (inFlightTurn.aiInteractions.length > 0 || inFlightTurn.subActions.length > 0)) {
+        allTurns.push(inFlightTurn);
+      }
+      inFlightTurn = undefined;
+      break;
+    }
 
     // 7. Handle prompt actions (ambiguity resolution)
     const promptAction = aiResponse.actions.find((a) => a.action === 'prompt');
@@ -2963,7 +3034,16 @@ async function executeStepAttempt(
     }
 
     // 8. Execute each sub-action
+    /** This turn's list reads that came back empty or mixed, by stored name. */
+    const turnListConcerns = new Map<string, { concern: ListReadConcern; sub: SubActionResult; action: AIAction }>();
     let turnFailed = false;
+    /**
+     * A turn added only to ask stands or falls as one answer: when a read
+     * again in it fails, the step ends where it stood — the values its earlier
+     * reads stored are put back, and the reads they replaced stand again.
+     */
+    const storedBeforeReview = reviewOnly && opts.resolvedParameters ? { ...opts.resolvedParameters } : undefined;
+    const replacedThisTurn: SubActionResult[] = [];
     /** Set when an action reported a failure no retry could change. */
     let turnNonRetryable = false;
     let turnError: string | undefined;
@@ -3037,7 +3117,38 @@ async function executeStepAttempt(
     }
 
     const turnRefused = unknownAction !== undefined || refusal !== undefined;
+    /**
+     * A list read is shown to the model on the page it read. An action after
+     * it in this turn that may have changed that page — a click, a navigation,
+     * a tab or browser move, a wait, a check that polls (`leavesPageAsRead`)
+     * — leaves nothing to show it against: a read again would read a different
+     * page and store over the step's read. The step ends on such a read as it
+     * came back, unseen, as with no turn left.
+     *
+     * Asked of every sub-action the turn recorded, whichever branch below
+     * recorded it — several `continue` before the end of an action (the tab
+     * and browser moves, an assertion, an API call) — at the top of each
+     * action and once after the last. An action that failed changed nothing,
+     * and fails the turn.
+     */
+    let pageChangesSeen = 0;
+    /** An action this turn may have changed the page (`leavesPageAsRead`). */
+    let pageChangedThisTurn = false;
+    const notePageChanges = (): void => {
+      for (; pageChangesSeen < turnSubActions.length; pageChangesSeen++) {
+        const done = turnSubActions[pageChangesSeen]!;
+        if (done.error !== undefined || leavesPageAsRead(done.action)) continue;
+        pageChangedThisTurn = true;
+        for (const [name, { concern, sub }] of turnListConcerns) {
+          sub.listReview!.outcome = 'unseen';
+          sub.listReview!.unseenBecause = 'page-changed';
+          logger.warn(`Step ${stepIndex}: "${done.action.action}" may have changed the page ${name} was read on — the step ends on it as read: ${concern.summary}`);
+        }
+        turnListConcerns.clear();
+      }
+    };
     for (const [emittedIndex, emitted] of (turnRefused ? [] : aiResponse.actions).entries()) {
+      notePageChanges();
       // What the page gets: a COPY with `{{name}}` and `${…}` resolved. The
       // emitted object is never written to — the transcript and the recording
       // keep it as the model wrote it, which is the whole point of asking for
@@ -3799,7 +3910,15 @@ async function executeStepAttempt(
         await watcher?.ready;
         result = await traceOp(`action.${action.action}: ${action.description}`, async () => {
           if (action.action !== 'readTable') {
-            return executeAction(page, action, baseUrl, opts.signal, execOptions);
+            // In a review turn a read that throws — a frame that does not
+            // parse throws rather than failing — is a read again that failed:
+            // the step ends where it stood (`reviewOnly`). A Stop still stops.
+            return reviewOnly
+              ? executeAction(page, action, baseUrl, opts.signal, execOptions).catch((err: unknown) => {
+                if (opts.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) throw err;
+                return { success: false, error: err instanceof Error ? err.message : String(err) };
+              })
+              : executeAction(page, action, baseUrl, opts.signal, execOptions);
           }
           // Structured table reads carry a structure question of their own
           // (SPEC-structured-table-reads.md §7.10) — at most one model call,
@@ -3929,6 +4048,59 @@ async function executeStepAttempt(
         timestamp: new Date().toISOString(),
       });
 
+      // A list read that came back empty or mixed (src/runner/list-read-review.ts).
+      // Anything stored under a name already under review replaces that read,
+      // so only the later one can reach the code-behind. A new concern waits
+      // for the turn's end, which shows it to the model — unless the model was
+      // shown exactly this read, read it the same way again and got what it was
+      // shown: that keeps it. The same read with a different result (a list
+      // that loaded late) is a result the model has not seen.
+      const stored = result.success ? storedName(action) : undefined;
+      if (stored !== undefined) {
+        const sub = turnSubActions[turnSubActions.length - 1]!;
+        const earlier = reviewedReads.get(stored);
+        if (earlier?.listReview !== undefined) {
+          earlier.listReview.outcome = 'replaced';
+          replacedThisTurn.push(earlier);
+          reviewedReads.delete(stored);
+          turnListConcerns.delete(stored);
+        }
+        // In the model's own words: the selector as it wrote it, placeholders
+        // and all, not with this run's values filled in — which is what a read
+        // again "the same way" has to repeat.
+        const concern = listReadConcern(emitted, result, (text) => redact(text, secretsNow()));
+        if (concern !== undefined) {
+          const shown = listReadsShown.get(stored);
+          const sameWay = shown !== undefined && sameListRead(shown.action, emitted);
+          const kept = sameWay && shown.listReview?.text === concern.text;
+          // A list that changed when the model read it again the same way —
+          // still loading — is shown once more. One that changes again is
+          // live, and showing it again would only spend the step's turns: the
+          // step ends on it as read, unseen.
+          // Only a change nothing before it in the turn may have caused: a
+          // list the model's own click or wait changed is not a live one.
+          const changes = sameWay && !kept && !pageChangedThisTurn ? (rereadChanges.get(stored) ?? 0) + 1 : 0;
+          if (changes > 0) rereadChanges.set(stored, changes);
+          else rereadChanges.delete(stored);
+          const keptChanging = changes > 1;
+          sub.listReview = {
+            kind: concern.kind,
+            text: concern.text,
+            outcome: kept ? 'kept' : keptChanging ? 'unseen' : 'pending',
+            ...(keptChanging && { unseenBecause: 'kept-changing' as const }),
+          };
+          reviewedReads.set(stored, sub);
+          if (kept) {
+            logger.info(`Step ${stepIndex}: the model read ${stored} the same way again — keeping it: ${concern.summary}`);
+          } else if (keptChanging) {
+            logger.warn(`Step ${stepIndex}: ${stored} changed again when the model read it the same way — the step ends on it as read: ${concern.summary}`);
+          } else {
+            turnListConcerns.set(stored, { concern, sub, action });
+            logger.warn(`Step ${stepIndex}: ${concern.summary}`);
+          }
+        }
+      }
+
       // After a successful "wait" on a CSRF-related selector, automatically extract and
       // cache the token value so a subsequent api_call can inject it without needing an
       // explicit extract_csrf action from the AI.
@@ -4010,6 +4182,9 @@ async function executeStepAttempt(
       }
     }
 
+    // The turn's last action may have changed the page too (`notePageChanges`).
+    notePageChanges();
+
     // Track non-assert/prompt actions for the continuation prompt on the next turn
     allCompletedActions.push(
       ...aiResponse.actions
@@ -4037,6 +4212,28 @@ async function executeStepAttempt(
     });
     inFlightTurn = undefined;
 
+    if (turnFailed && reviewOnly) {
+      // Only a list read can have failed here (`isReviewAnswer`): the step
+      // ends where it stood, with the reads it was shown unanswered — and
+      // not on a read again earlier in the same answer, which the model was
+      // never shown either.
+      if (storedBeforeReview !== undefined && opts.resolvedParameters !== undefined) {
+        const params = opts.resolvedParameters;
+        for (const key of Object.keys(params)) {
+          if (!(key in storedBeforeReview)) delete params[key];
+        }
+        Object.assign(params, storedBeforeReview);
+      }
+      for (const sub of replacedThisTurn) sub.listReview!.outcome = 'pending';
+      // And what this answer read stands for nothing: it no longer replaces
+      // the reads above, and the compile never uses it.
+      for (const sub of turnSubActions) {
+        if (sub.error === undefined && storedName(sub.action) !== undefined) sub.discarded = true;
+      }
+      logger.warn(`Step ${stepIndex}: a read again of its list failed (${turnError ?? 'no error'}) — the step ends where it stood`);
+      break;
+    }
+
     if (turnFailed) {
       // The turn is finalised above before this throws, so a deliberate failure's
       // `fail` sub-action is in the report like any other.
@@ -4049,10 +4246,42 @@ async function executeStepAttempt(
       );
     }
 
+    // The list reads this turn's prompt showed the model, and what its answer
+    // did with each (src/runner/list-read-review.ts). A read it read again was
+    // replaced in the hook above. One it left alone:
+    //  - a `noop` keeps, in any turn;
+    //  - in a turn added only to ask, nothing else does — that turn exists for
+    //    the answer;
+    //  - in a turn the model asked for, going on with the step keeps it, as
+    //    the prompt says — unless the answer read another of the lists again,
+    //    which shows it was answering them one at a time ("Return ONE
+    //    action"), and this one is still to answer; or only looked around.
+    // One still to answer is shown again — if the page is still the one it
+    // was read on. Otherwise it stays `pending`: shown, not answered.
+    const keptByNoop = aiResponse.actions.some((a) => a.action === 'noop');
+    const answeringOne = [...listReadsShown.values()].some((sub) => sub.listReview?.outcome === 'replaced');
+    // Looking around — `find`, `expand`, or no action at all — is not going
+    // on with the step either: the lists are shown again beside what it found.
+    const lookedOnly = aiResponse.actions.every((a) => a.action === 'find' || a.action === 'expand');
+    const unanswered: Array<[string, SubActionResult]> = [];
+    for (const [name, sub] of listReadsShown) {
+      if (sub.listReview?.outcome !== 'pending') continue;
+      if (keptByNoop || (!reviewOnly && !answeringOne && !lookedOnly)) sub.listReview.outcome = 'kept';
+      else if (!pageChangedThisTurn) unanswered.push([name, sub]);
+    }
+    listReadsShown = new Map();
+
     // 9. The step returned: it is over whatever `needs_reeval` says. A model
     // that asked for another turn after ending the flow would be asking to act
     // inside a flow that no longer exists.
     if (flowControlSignal) {
+      // Nothing is shown after a return, so the step ends on this turn's list
+      // reads as they came back: unseen, which the report flags and the
+      // compile will not use (`unprovenListRead`).
+      for (const { sub } of turnListConcerns.values()) {
+        sub.listReview!.outcome = 'unseen';
+        sub.listReview!.unseenBecause = 'returned';
+      }
       break;
     }
 
@@ -4065,6 +4294,7 @@ async function executeStepAttempt(
     // (REEVAL_WHEN_UNSTATED), and the last turn ends as it always did rather
     // than failing a step on a re-evaluation the model never asked for.
     const inferredReeval =
+      !reviewOnly &&
       !aiResponse.needs_reeval &&
       aiResponse.reevalUnstated === true &&
       !inferredReevalUsed &&
@@ -4077,7 +4307,42 @@ async function executeStepAttempt(
       );
     }
 
-    // 9b. Check needs_reeval: if false/absent, the step is complete after this turn
+    // 9b. A list read this turn that came back empty or mixed is shown to the
+    // model before the step can end on it (src/runner/list-read-review.ts):
+    // in the next turn when there is one anyway, else in a turn added for it,
+    // for as long as the step has turns left. A read the model changes is
+    // shown again. It is never a failure — an empty list is a real answer —
+    // so on the last turn the step ends on the read as it came back: unseen,
+    // which the report flags and the compile will not use.
+    if (turnListConcerns.size > 0 || unanswered.length > 0) {
+      const concerns = [...turnListConcerns.values()];
+      // A review turn's own `needs_reeval` asks for nothing: the step is done.
+      const nextTurnAnyway = !reviewOnly && (aiResponse.needs_reeval === true || inferredReeval);
+      if (currentTurn < maxTurns) {
+        if (!nextTurnAnyway) {
+          nextTurnReviewOnly = true;
+          const n = concerns.length + unanswered.length;
+          logger.info(`Turn ${currentTurn}: showing the model the list read${n === 1 ? '' : 's'} before the step ends`);
+        }
+        listReadLines = [...concerns.map((c) => c.concern.text), ...unanswered.map(([, sub]) => sub.listReview!.text)];
+        listReadsShown = new Map([...concerns.map((c): [string, SubActionResult] => [c.concern.name, c.sub]), ...unanswered]);
+      } else {
+        // The ones shown and not answered stay `pending`: not answered.
+        for (const { concern, sub } of concerns) {
+          sub.listReview!.outcome = 'unseen';
+          sub.listReview!.unseenBecause = 'no-turn-left';
+          logger.warn(`Step ${stepIndex}: no turn left to show the model ${concern.name}; the step ends on it as read: ${concern.summary}`);
+        }
+      }
+    }
+
+    // 9c. A turn added only to show list reads comes next, or the review is
+    // over: either way the step's own `needs_reeval` and turn cap no longer
+    // apply — the step had finished.
+    if (nextTurnReviewOnly) continue;
+    if (reviewOnly) break;
+
+    // Check needs_reeval: if false/absent, the step is complete after this turn
     if (!aiResponse.needs_reeval && !inferredReeval) {
       break;
     }

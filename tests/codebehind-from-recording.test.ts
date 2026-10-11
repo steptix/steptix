@@ -185,6 +185,14 @@ describe('entryFromRecording — which steps are written from the recording', ()
   it('sends a step with nothing but exploration, or nothing at all, to the model', () => {
     expect(fromRecording(B_STEP, [B_FIND])).toBeUndefined();
     expect(fromRecording(B_STEP, [])).toBeUndefined();
+    expect(fromRecording(B_STEP, [{ action: 'noop' }])).toBeUndefined();
+  });
+
+  it('leaves out a noop, as it leaves out a find: the model answering that a list is right did nothing', () => {
+    // A list read shown to the model and kept is recorded as the read and the
+    // noop that kept it (src/runner/list-read-review.ts).
+    expect(fromRecording(B_STEP, [B_READ, { action: 'noop' }])).toBe(B_ENTRY);
+    expect(fromRecording(B_STEP, [B_FIND, B_READ, { action: 'noop' }])).toBe(B_ENTRY);
   });
 
   it('writes a read inside a skill body under the authored names, placeholders included', () => {
@@ -734,7 +742,48 @@ describe('Run & Compile', () => {
     expect(file).not.toContain(OLD_SELECTOR);
     expect(file).toContain('fromRecording: true');
   });
+
+  it("keeps the file's other entries when the first entry it writes there is from the recording", async () => {
+    // Nothing had read the file when that entry went in, and the proposal was
+    // a fresh file holding it alone: the author's entry for step 1 was gone.
+    const testFile = path.join(dir, 'accounts.md');
+    const stepsFile = path.join(dir, 'accounts.steps.ts');
+    await fs.writeFile(stepsFile, stepsFileOf([CLICK_ENTRY]), 'utf-8');
+    const { client, prompts } = fakeAi();
+    const compiler = compilerFor(testFile, client, []);
+    // Step 1 ran as its entry; step 2 has none, and only reads.
+    compiler.offer({
+      index: 0,
+      binding: { ...bindingFor(CLICK_STEP), file: stepsFile, entry: { source: CLICK_STEP, run: async () => {} } },
+      result: { ...readResult(1, CLICK_STEP, []), fromCodeBehind: true, turns: [] },
+      resolvedParameters: {},
+    });
+    compiler.offer({
+      index: 1,
+      binding: { ...bindingFor(B_STEP), file: stepsFile },
+      result: readResult(2, B_STEP, [B_FIND, B_READ], { accounts: B_NAMES }),
+      resolvedParameters: {},
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(entryPrompts(prompts)).toEqual([]);
+    const file = outcome.files[stepsFile] ?? '';
+    expect(file).toContain('fromRecording: true');
+    expect(file).toContain(`source: '${CLICK_STEP}'`);
+    expect(file).toContain("await page.click('#accounts-link');");
+  });
 });
+
+/** A `.steps.ts` holding `entries`, as an author's would. */
+function stepsFileOf(entries: string[]): string {
+  return [
+    "import { defineSteps } from 'steptix/codebehind';",
+    'export default defineSteps([',
+    ...entries.map((e) => `  ${e.split('\n').join('\n  ')},`),
+    ']);',
+    '',
+  ].join('\n');
+}
 
 const CONFIG: Config = { ...DEFAULT_CONFIG };
 
@@ -839,5 +888,43 @@ describe('steptix compile', () => {
     const proposal = Object.values(result.files).join('\n');
     expect(proposal).not.toContain(B_STEP);
     expect(proposal).not.toContain('ai: true');
+  });
+
+  it("keeps the file's other entries when the first entry it writes there is from the recording", async () => {
+    // Nothing had read the file when that entry went in, and the proposal was
+    // a fresh file holding it alone. Written, it deleted the author's entry
+    // for step 1 — and the compile said green.
+    const test = await accountsTest();
+    const stepsFile = path.join(dir, 'accounts.steps.ts');
+    await fs.writeFile(stepsFile, stepsFileOf([CLICK_ENTRY]), 'utf-8');
+    const { client, prompts } = fakeAi();
+    const asCode = (index: number, instruction: string): StepResult =>
+      ({ ...readResult(index, instruction, []), fromCodeBehind: true, turns: [] });
+    const runner: CompileRunner = async (request) => {
+      if (request.purpose === 'record') {
+        return {
+          status: 'passed',
+          ...outcomeRows([asCode(1, CLICK_STEP), readResult(2, B_STEP, [B_FIND, B_READ], { accounts: B_NAMES })], 2),
+          resolvedParameters: { accounts: B_NAMES },
+          tokensUsed: 0,
+        };
+      }
+      return {
+        status: 'passed',
+        ...outcomeRows([asCode(1, CLICK_STEP), asCode(2, B_STEP)], 2),
+        resolvedParameters: { accounts: B_NAMES },
+        tokensUsed: 0,
+      };
+    };
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner });
+
+    expect(result.status).toBe('green');
+    expect(result.summary.compiled).toBe(1);
+    expect(entryPrompts(prompts)).toEqual([]);
+    const written = await fs.readFile(stepsFile, 'utf-8');
+    expect(written).toContain('fromRecording: true');
+    expect(written).toContain(`source: '${CLICK_STEP}'`);
+    expect(written).toContain("await page.click('#accounts-link');");
   });
 });
