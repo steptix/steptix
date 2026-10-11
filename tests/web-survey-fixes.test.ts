@@ -1504,15 +1504,131 @@ describe('§2.41 clearing a field', () => {
 });
 
 describe('§2.43 label marks around a checked text', () => {
-  it('ignores a required-field asterisk or a colon around the text, and nothing inside it', async () => {
-    const { sameTextIgnoringMarks } = await import('../src/runner/step-executor.js');
-    expect(sameTextIgnoringMarks('Return date *', 'Return date')).toBe(true);
-    expect(sameTextIgnoringMarks('Total:', 'Total')).toBe(true);
-    expect(sameTextIgnoringMarks('  Name  ', 'Name')).toBe(true);
-    expect(sameTextIgnoringMarks('Not Done', 'Done')).toBe(false);
-    expect(sameTextIgnoringMarks('Return date (optional)', 'Return date')).toBe(false);
-    expect(sameTextIgnoringMarks('*', '')).toBe(false);
-    expect(sameTextIgnoringMarks('anything', undefined)).toBe(false);
+  it('tells the check writer that marks around a label are not part of it', async () => {
+    const { buildAssertionCodePrompt } = await import('../src/ai/prompts.js');
+    const msg = buildAssertionCodePrompt('Field shown', 'field label', 'Hull colour', '<label>Hull colour *</label>', null);
+    const text = typeof msg.content === 'string' ? msg.content : '';
+    expect(text).toMatch(/A mark around a label is not part of its text/);
+    // Both directions of a check about the mark keep it, or the model strips
+    // the `*` from "the asterisk is gone" and passes it.
+    expect(text).toMatch(/The exception is a check about a mark or what it means/);
+    expect(text).toMatch(/shown, gone or no longer there/);
+    expect(text).toMatch(/Nothing overrides your verdict/);
+  });
+
+  /** Run one check step on a real page, with the check code the model "wrote". */
+  async function runCheck(html: string, step: string, check: Record<string, unknown>, code: string) {
+    const { executeStep } = await import('../src/runner/step-executor.js');
+    const { DEFAULT_BROWSER_DIMENSIONS } = await import('../src/config/browser-dimensions.js');
+    const page = await pageWith(html);
+    try {
+      const stepReply = JSON.stringify({ actions: [{ action: 'assert', against: 'dom', ...check }], reasoning: 'Check the text.' });
+      const codeReply = JSON.stringify({ code });
+      const isCodeRequest = (messages: Array<{ content: unknown }>) =>
+        messages.some((m) => JSON.stringify(m.content).includes('evaluates the following assertion'));
+      const aiClient = {
+        complete: vi.fn((messages: Array<{ content: unknown }>) =>
+          Promise.resolve({ text: isCodeRequest(messages) ? codeReply : stepReply, model: 'test' })),
+      };
+      return await executeStep(1, 1, step, {
+        page,
+        config: {
+          ai: { gatewayUrl: '', model: 'test', maxInputTokens: 1000, streamResponses: false },
+          browser: { headed: false, viewport: { ...DEFAULT_BROWSER_DIMENSIONS }, windowSize: { ...DEFAULT_BROWSER_DIMENSIONS }, slowMo: 0, browser: 'chromium', fullPageScreenshots: false },
+          tests: { dir: '.', contextDir: '.', pattern: '**/*.md' },
+          execution: { timeout: 30000, retries: 0, screenshotOnFailure: false, promptOnAmbiguity: false, maxTurns: 3 },
+          reports: { outputDir: '.', includeScreenshots: false, includeDomSnapshots: false, includeAiReasoning: false, embedScreenshots: true },
+          api: { specsDir: '.', requestTimeout: 5000, redactSensitive: false },
+        } as never,
+        aiClient: aiClient as never,
+        contextContent: '',
+        testName: 'test',
+        conversationHistory: [],
+        csrfTokens: {},
+      });
+    } finally {
+      await page.close();
+    }
+  }
+
+  /** Check code that compares the label's text exactly. */
+  const exactLabel = (selector: string, want: string) =>
+    `(() => { const t = document.querySelector('${selector}').textContent.replace(/\\s+/g, ' ').trim(); return { pass: t === '${want}', actual: t }; })()`;
+
+  /** Check code that strips the marks around the label first, as the prompt asks. */
+  const markFreeLabel = (selector: string, want: string) =>
+    `(() => { const t = document.querySelector('${selector}').textContent.replace(/\\s+/g, ' ').trim(); const bare = t.replace(/^[\\s*:•·|]+|[\\s*:•·|]+$/g, ''); return { pass: bare === '${want}', actual: t }; })()`;
+
+  /** A check that wants its text absent. */
+  const absent = (selector: string, text: string) =>
+    `(() => { const t = document.querySelector('${selector}').textContent.trim(); return { pass: !t.includes('${text}'), actual: t }; })()`;
+
+  it('passes a label check whose code strips the marks, however the check is worded', async () => {
+    for (const condition of ['return date field label', "label of the return date field, which can't be left blank"]) {
+      const result = await runCheck(
+        '<label for="ret">Return date *</label><input id="ret" required>',
+        'Verify a return date field is shown',
+        { condition, expected: 'Return date', description: 'Return date field is shown' },
+        markFreeLabel('label', 'Return date'),
+      );
+      expect(result.error, condition).toBeUndefined();
+      expect(result.status, condition).toBe('passed');
+    }
+  });
+
+  // Every case is a check whose own code correctly said "fail", and the step
+  // must fail with it. A rule after the check used to turn such failures into
+  // passes when the page's text matched the expected text without its marks
+  // (issue 35). The first row is the §2.43 situation with an exact comparison:
+  // it fails now, because stripping the marks is the check code's job (see the
+  // prompt test above), not something done to its verdict afterwards.
+  const failing: Array<{ name: string; html: string; step: string; check: Record<string, unknown>; code: string; got: string }> = [
+    {
+      name: 'an exact comparison that read a mark',
+      html: '<label for="ret">Return date *</label><input id="ret" required>',
+      step: 'Verify a return date field is shown',
+      check: { condition: 'return date field label', expected: 'Return date', description: 'Return date field is shown' },
+      code: exactLabel('label', 'Return date'),
+      got: 'Return date *',
+    },
+    {
+      name: 'a check for the asterisk on a field that lost it (#35)',
+      html: '<label for="email">Email</label><input id="email">',
+      step: 'Verify the Email label shows the required asterisk',
+      check: { condition: 'Email label shows the required asterisk', expected: 'Email *', description: 'Email label is marked required' },
+      code: exactLabel('label', 'Email *'),
+      got: 'Email',
+    },
+    {
+      name: 'a check that the asterisk is gone, worded without "not" (#35)',
+      html: '<label for="email">Email *</label><input id="email" required>',
+      step: 'Verify the Email field is optional now',
+      check: { condition: 'asterisk is gone from the Email label', expected: 'Email', description: 'Email label is plain' },
+      code: exactLabel('label', 'Email'),
+      got: 'Email *',
+    },
+    ...['Pending', '• Pending'].map((shown) => ({
+      name: `"is not Pending" on ${shown} (#35)`,
+      html: `<p id="status">${shown}</p>`,
+      step: 'Verify the order status is not Pending',
+      check: { condition: 'order status is not Pending', expected: 'Pending', description: 'Order status is not Pending' },
+      code: absent('#status', 'Pending'),
+      got: shown,
+    })),
+    {
+      name: 'a negative check worded without "not" (#35)',
+      html: '<p id="status">• Pending</p>',
+      step: 'Verify the order status has moved on from Pending',
+      check: { condition: 'order status has changed from Pending', expected: 'Pending', description: 'Order status changed' },
+      code: absent('#status', 'Pending'),
+      got: '• Pending',
+    },
+  ];
+
+  it.each(failing)('keeps the check code\'s failure: $name', async ({ html, step, check, code, got }) => {
+    const result = await runCheck(html, step, check, code);
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain(`got "${got}"`);
   });
 });
 

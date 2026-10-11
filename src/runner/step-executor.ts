@@ -4708,14 +4708,11 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
     throw new Error(`Assertion code failed after ${MAX_ASSERTION_CODE_ATTEMPTS} attempts: ${lastErr ?? 'unknown error'}`);
   }
 
-  // A required-field asterisk or a label's colon is not part of the label: the
-  // check for "Return date" read "Return date *" and failed (§2.43). Only the
-  // marks around the text are ignored, so "Done" against "Not Done" still fails.
-  if (!evalResult.pass && p.against !== 'predicate' && sameTextIgnoringMarks(evalResult.actual, p.expected)) {
-    logger.debug(`"${evalResult.actual}" is "${p.expected}" with label marks around it — passing`);
-    evalResult = { ...evalResult, pass: true };
-  }
-
+  // The check code's verdict is final. A required-field asterisk around a
+  // label (§2.43) is the check writer's to strip, as its prompt says: only the
+  // code knows whether the check wanted the text, wanted it absent, or was
+  // about the mark itself. Passing a failed check here when the texts matched
+  // without their marks turned real failures into passes (issue 35).
   logger.assertion(evalResult.pass, evalResult.actual, p.description);
 
   // Predicate-mode failures don't have a literal `expected` to quote — the
@@ -4752,22 +4749,6 @@ export function quoteReply(text: string): string {
   return flat.length > REPLY_QUOTE_CHARS
     ? `"${flat.slice(0, REPLY_QUOTE_CHARS)}…" (${flat.length} characters)`
     : `"${flat}"`;
-}
-
-/** Marks that sit around a label without being part of it (§2.43). */
-const LABEL_MARKS = /^[\s*:•·|]+|[\s*:•·|]+$/g;
-
-/**
- * Whether what a check read is the expected text once whitespace is collapsed
- * and required-field and label marks (`*`, `:`, bullets) are stripped from
- * both ends. Nothing inside the text is ignored, and an empty expectation
- * never matches this way.
- */
-export function sameTextIgnoringMarks(actual: string, expected: string | undefined): boolean {
-  if (expected === undefined) return false;
-  const norm = (s: string) => s.replace(/\s+/g, ' ').replace(LABEL_MARKS, '').trim();
-  const want = norm(expected);
-  return want !== '' && norm(actual) === want;
 }
 
 async function runAssertionCode(
