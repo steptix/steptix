@@ -101,6 +101,14 @@ the answer has to be decided before the dialog opens.
    seen during the step to the model's next turn ("A browser confirm appeared:
    'Press a button!'. It was dismissed."), and to the assertion prompt, so a
    step like "Verify the alert says …" can be checked against the record.
+   Each dialog is shown once per reader: the model's pre-turn snapshot is one
+   reader (marked once the model's reply arrives, so a failed call or an
+   unreadable reply leaves the note for the retry), and a `get_page_content`
+   or `peek_tab` read is another. Every
+   other capture (the report's capture after each action, checks, the
+   step-end page) lists the dialogs the model has not been told about yet
+   and marks nothing. When every capture marked, the report's capture used
+   up the note before the model's turn (issue 31).
 4. A `dialog` action that arrives **after** a dialog has already been answered
    in the same step returns an error: the dialog was already answered as
    *dismiss*, so send `dialog` first, then click again. The model's retry then

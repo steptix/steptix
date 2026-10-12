@@ -37,7 +37,7 @@ import { resolveFrame } from '../browser/actions.js';
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
-import { disarmDialog } from '../browser/dialogs.js';
+import { disarmDialog, markDialogsShown, type DialogRecord } from '../browser/dialogs.js';
 import type {
   ActionExecutionResult,
   ExecuteActionOptions,
@@ -2755,12 +2755,17 @@ async function executeStepAttempt(
     // 2. Capture current page state — the model's input for this turn.
     // Screenshots are taken when they feed the model (`sendScreenshots`) or
     // the per-action filmstrip (`captureScreenshotsPerAction`).
+    // This is the acting model's capture, so it is the one whose dialog note
+    // gets used up (dialogs.ts `DialogReader`) — but only once the model's
+    // reply has arrived (step 6), and only the dialogs the note listed.
+    let dialogsForModel: readonly DialogRecord[] = [];
     const turnTimestamp = new Date().toISOString();
     const domSnapshot = await traceOp(`captureDomSnapshot (turn ${currentTurn})`, () =>
       captureDomSnapshot(page, {
         ...config.browser.domNoiseReduction,
         maxIframeDepth: config.browser.maxIframeDepth,
         domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+        onDialogNote: (listed) => { dialogsForModel = listed; },
       }),
     );
     const wantPreTurnShot =
@@ -2942,6 +2947,8 @@ async function executeStepAttempt(
       inFlightTurn = undefined;
       break;
     }
+    // The model has read this turn's snapshot, so its dialog note is used up.
+    markDialogsShown(dialogsForModel, 'model');
     const rawResponse = completion.text;
 
     turnAiInteractions.push({
@@ -4037,7 +4044,9 @@ async function executeStepAttempt(
         storeCapture(opts.resolvedParameters, action.as, result, () => secretsFor(opts));
       }
 
-      // Capture state after action (full-page for report visibility).
+      // Capture state after action (full-page for report visibility). It
+      // names no dialog reader: the report shows any dialog note, and the
+      // model's next pre-turn capture still gets it (issue 31).
       const postDom = await traceOp(`captureDomSnapshot (post-${action.action})`, () =>
         captureDomSnapshot(page, {
           ...config.browser.domNoiseReduction,

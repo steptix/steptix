@@ -2,7 +2,7 @@ import { noticeNote } from './notices.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Frame, Page } from 'playwright';
-import { describeDialogs, takeUnshownDialogs } from './dialogs.js';
+import { describeDialogs, takeUnshownDialogs, unshownDialogs, type DialogReader, type DialogRecord } from './dialogs.js';
 
 /** Default maximum character length for DOM snapshots (prevents token blowup).
  *  Overridable per-call via CaptureDomOptions.domSnapshotCharLimit. */
@@ -398,6 +398,16 @@ export interface CaptureDomOptions {
   /** Strip `id` attributes that match known framework-generated unstable
    *  patterns (UNSTABLE_ID_PATTERNS). Default false in DEFAULT_CONFIG. */
   dropUnstableIds?: boolean | undefined;
+  /** Who reads this snapshot's dialog note. A named reader is shown each
+   *  dialog once, and the dialogs listed are marked shown to it. Unset, the
+   *  note lists the dialogs the acting model has not been told about yet and
+   *  marks nothing — see {@link DialogReader}. */
+  dialogReader?: DialogReader | undefined;
+  /** Called with the dialogs this snapshot's note lists, when it lists any.
+   *  Not called when the capture failed before the note was added. For a
+   *  reader marked only once its snapshot has been delivered — the step
+   *  loop's model (`markDialogsShown`). */
+  onDialogNote?: ((listed: readonly DialogRecord[]) => void) | undefined;
 }
 
 /** Resolved, all-fields-present option set used internally. */
@@ -466,7 +476,7 @@ export async function captureDomSnapshot(page: Page, opts: CaptureDomOptions = {
       + DOM_SNAPSHOT_TRUNCATION_MARKER;
   }
 
-  return snapshot + dialogNote(page) + (await noticeNote(page));
+  return snapshot + dialogNote(page, opts.dialogReader, opts.onDialogNote) + (await noticeNote(page));
 }
 
 /**
@@ -476,15 +486,26 @@ export async function captureDomSnapshot(page: Page, opts: CaptureDomOptions = {
  * one appeared or what it said. Empty when there were none, which keeps every
  * dialog-free snapshot exactly as it was. A page without a context (a test
  * double) has no dialogs to report.
+ *
+ * Only a capture that names its reader marks anything. When every capture
+ * marked, the report's capture after each action used up the note, and the
+ * model's next turn — the capture it was written for — never carried it.
  */
-function dialogNote(page: Page): string {
+function dialogNote(
+  page: Page,
+  reader: DialogReader | undefined,
+  onListed: ((listed: readonly DialogRecord[]) => void) | undefined,
+): string {
   let records;
   try {
-    records = takeUnshownDialogs(page.context());
+    records = reader === undefined
+      ? unshownDialogs(page.context(), 'model')
+      : takeUnshownDialogs(page.context(), reader);
   } catch {
     return '';
   }
   if (records.length === 0) return '';
+  onListed?.(records);
   return '\n<!-- Browser dialogs answered since the last snapshot. Each is also readable in the '
     + 'page as window.__steptixDialogs (type, message, answer, text). A dialog is answered the '
     + 'moment it opens: to choose the answer, send a "dialog" action BEFORE the click that opens it.\n'

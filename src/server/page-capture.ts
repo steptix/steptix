@@ -254,13 +254,16 @@ async function capture(
   }
 
   // Project settings, not the server's — see `ManagedSession.browserConfig`
-  // for a session, and the peek route's project bundle for a tab.
+  // for a session, and the peek route's project bundle for a tab. An API
+  // reader gets its own dialog note, so a read during a run does not use up
+  // the one the running model's next turn needs.
   let snapshot: string;
   try {
     snapshot = await captureDomSnapshot(page, {
       ...browserConfig.domNoiseReduction,
       maxIframeDepth: browserConfig.maxIframeDepth,
       domSnapshotCharLimit: browserConfig.domSnapshotCharLimit,
+      dialogReader: 'api',
     });
   } catch (err) {
     throw toPageCaptureError(err, 'DOM capture');

@@ -686,13 +686,32 @@ describe('§2.1 browser dialogs', () => {
 
   it('shows the dialogs in the next snapshot, once', async () => {
     const page = await pageWith(DIALOGS);
-    await captureDomSnapshot(page); // drain anything earlier tests left
+    await captureDomSnapshot(page, { dialogReader: 'model' }); // drain anything earlier tests left
     await executeAction(page, act({ action: 'click', selector: '#confirm' }));
     await expect.poll(() => page.textContent('#out')).toBe('confirm:false');
-    const first = await captureDomSnapshot(page);
+    const first = await captureDomSnapshot(page, { dialogReader: 'model' });
     expect(first).toContain('[confirm] "Sure?" — dismissed by default');
-    const second = await captureDomSnapshot(page);
+    const second = await captureDomSnapshot(page, { dialogReader: 'model' });
     expect(second).not.toContain('Browser dialogs');
+    await page.close();
+  });
+
+  // Issue 31: the report's capture after each action used up the note before
+  // the model's next turn could read it.
+  it('a capture that names no reader shows the note without using it up', async () => {
+    const page = await pageWith(DIALOGS);
+    await captureDomSnapshot(page, { dialogReader: 'model' }); // drain anything earlier tests left
+    await executeAction(page, act({ action: 'click', selector: '#confirm' }));
+    await expect.poll(() => page.textContent('#out')).toBe('confirm:false');
+    expect(await captureDomSnapshot(page)).toContain('[confirm] "Sure?" — dismissed by default');
+    expect(await captureDomSnapshot(page)).toContain('[confirm] "Sure?" — dismissed by default');
+    // Each reader is told once, and one reader's read leaves the other's note.
+    expect(await captureDomSnapshot(page, { dialogReader: 'api' })).toContain('[confirm] "Sure?"');
+    expect(await captureDomSnapshot(page, { dialogReader: 'api' })).not.toContain('Browser dialogs');
+    expect(await captureDomSnapshot(page, { dialogReader: 'model' })).toContain('[confirm] "Sure?"');
+    expect(await captureDomSnapshot(page, { dialogReader: 'model' })).not.toContain('Browser dialogs');
+    // Once the model has been told, an unnamed capture has nothing new to list.
+    expect(await captureDomSnapshot(page)).not.toContain('Browser dialogs');
     await page.close();
   });
 });

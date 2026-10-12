@@ -14,10 +14,29 @@ import { logger } from '../utils/logger.js';
  *
  * Every dialog is also RECORDED, because the model never sees one otherwise:
  * a confirm opened and closed between two snapshots. The record is shown in
- * the next snapshot ({@link takeUnshownDialogs}) and copied into the page as
- * `window.__steptixDialogs`, which is what lets an assertion check what an
- * alert said.
+ * the next snapshot its reader takes ({@link takeUnshownDialogs}) and copied
+ * into the page as `window.__steptixDialogs`, which is what lets an assertion
+ * check what an alert said.
  */
+
+/**
+ * Who a snapshot's dialog note is for. Each reader is told about a dialog
+ * once, in the first snapshot it reads after the dialog was answered, and one
+ * reader's snapshot never uses up another reader's note.
+ *
+ * - `model`: the model acting in the step loop. Its pre-turn capture names no
+ *   reader; the loop marks what that capture listed once the model's reply
+ *   has arrived ({@link markDialogsShown}), so a turn whose call fails or
+ *   whose reply does not parse leaves the note for the retry.
+ * - `api`: a caller reading the page through the server (`get_page_content`,
+ *   `peek_tab`).
+ *
+ * Every other capture — the report's capture after each action, a check, the
+ * step-end DOM, a failure diagnosis — names no reader. It lists the dialogs
+ * the model has not been told about yet and marks nothing, so taking it does
+ * not hide them from the model's next turn (issue 31).
+ */
+export type DialogReader = 'model' | 'api';
 
 /** One dialog the session saw. */
 export interface DialogRecord {
@@ -32,8 +51,8 @@ export interface DialogRecord {
   armed: boolean;
   /** Epoch ms. */
   at: number;
-  /** Shown in a snapshot yet. */
-  shown: boolean;
+  /** The readers a snapshot has shown it to. */
+  shownTo: Set<DialogReader>;
   /** Reported to a `dialog` action that arrived after it was answered. */
   reported: boolean;
 }
@@ -92,13 +111,22 @@ export function takeUnreportedDefaultAnswers(context: BrowserContext, sinceMs: n
   return found;
 }
 
-/** Dialogs not yet shown in a snapshot, marked shown. */
-export function takeUnshownDialogs(context: BrowserContext): DialogRecord[] {
-  const state = states.get(context);
-  if (state === undefined) return [];
-  const found = state.records.filter((r) => !r.shown);
-  for (const record of found) record.shown = true;
+/** Dialogs not yet shown to `reader`, left unmarked. */
+export function unshownDialogs(context: BrowserContext, reader: DialogReader): DialogRecord[] {
+  return (states.get(context)?.records ?? []).filter((r) => !r.shownTo.has(reader));
+}
+
+/** Dialogs not yet shown to `reader`, marked shown to it. */
+export function takeUnshownDialogs(context: BrowserContext, reader: DialogReader): DialogRecord[] {
+  const found = unshownDialogs(context, reader);
+  markDialogsShown(found, reader);
   return found;
+}
+
+/** Mark `records` shown to `reader` — for a reader that is only told once its
+ *  snapshot has actually been delivered, as the step loop's model is. */
+export function markDialogsShown(records: readonly DialogRecord[], reader: DialogReader): void {
+  for (const record of records) record.shownTo.add(reader);
 }
 
 /** Every dialog the context has recorded, oldest first. */
@@ -140,7 +168,7 @@ export function answerDialog(context: BrowserContext, dialog: Dialog): void {
     ...(text !== undefined && { text }),
     armed: useArmed,
     at: Date.now(),
-    shown: false,
+    shownTo: new Set(),
     reported: false,
   };
   state.records.push(record);
