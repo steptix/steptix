@@ -65,4 +65,38 @@ function serverApiKey(workspaceRoot) {
   return key;
 }
 
-module.exports = { readEnvValue, resolveCredential, serverApiKey, userRootEnvPath };
+/**
+ * The repo this suite belongs to, found from where this file sits rather than
+ * from the workspace: a shard drives a copy of `templates/` under
+ * `<repo>/.live-shards/wN/`, so the workspace's parent is not the repo there.
+ */
+const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', '..');
+
+/**
+ * `AI_API_KEY` and `AI_MODEL` for a test that posts to the Sessions API itself
+ * rather than through the extension. Each comes from the first place that has
+ * it, in the order the runner checks before a live run starts
+ * (`liveAiProblem`, liveShards.cjs): the workspace `.env`, the environment,
+ * the repo-root `.env`, then the machine-wide `.env`. So the test runs on the
+ * model every other suite runs on, with the key that model goes to — not the
+ * workspace's model with the machine file's key, which sends a gateway key
+ * straight to a provider and dies on a 401.
+ */
+function liveAiSettings(workspaceRoot) {
+  const sources = [
+    (k) => readEnvValue(path.join(workspaceRoot, '.env'), k),
+    (k) => (process.env[k] ?? '').trim(),
+    (k) => readEnvValue(path.join(REPO_ROOT, '.env'), k),
+    (k) => readEnvValue(userRootEnvPath(), k),
+  ];
+  const first = (key) => {
+    for (const read of sources) {
+      const value = read(key);
+      if (value) return value;
+    }
+    return '';
+  };
+  return { aiKey: first('AI_API_KEY'), aiModel: first('AI_MODEL') };
+}
+
+module.exports = { liveAiSettings, readEnvValue, resolveCredential, serverApiKey, userRootEnvPath };

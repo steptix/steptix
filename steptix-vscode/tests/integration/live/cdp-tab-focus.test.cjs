@@ -68,7 +68,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const vscode = require('vscode');
 const { listenFetchable } = require('../../../../tests/listen-fetchable.cjs');
-const { readEnvValue, resolveCredential, serverApiKey } = require('./credentials.cjs');
+const { liveAiSettings, serverApiKey } = require('./credentials.cjs');
 
 const PROFILE = 'focus-live';
 
@@ -219,20 +219,8 @@ describe('Steptix live — CDP tab focus (stories/cdp-tab-focus.md)', function (
       `no steptix.config.json under ${projectRoot}`,
     );
 
-    const projectEnv = path.join(workspaceRoot, '.env');
     apiKey = serverApiKey(workspaceRoot);
-
-    // AI credentials prefer the REPO ROOT `.env` over `templates/.env`, and the
-    // difference is the MODEL rather than the key. Both files carry the same
-    // `AI_API_KEY`, but templates names a bare `openrouter/…` model, which
-    // routes direct/BYOK — so the gateway key is sent to a provider that has
-    // never heard of it and the first step dies on `401 Missing Authentication
-    // header`. The root file's `aibroker/…` prefix routes through the gateway
-    // the key actually belongs to.
-    const repoRootEnv = path.resolve(workspaceRoot, '..', '.env');
-    const preferred = fs.existsSync(repoRootEnv) ? repoRootEnv : projectEnv;
-    aiKey = resolveCredential(preferred, 'AI_API_KEY') || resolveCredential(projectEnv, 'AI_API_KEY');
-    aiModel = readEnvValue(preferred, 'AI_MODEL') || readEnvValue(projectEnv, 'AI_MODEL');
+    ({ aiKey, aiModel } = liveAiSettings(workspaceRoot));
 
     serverUrl = process.env.LIVE_STEPTIX_SERVER_URL || 'http://localhost:3100';
     try {
