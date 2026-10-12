@@ -10,6 +10,7 @@ import { parseTestFile } from '../src/parser/markdown.js';
 import { clearSkillCache } from '../src/skills/expander.js';
 import {
   compileTest,
+  type CompileEvent,
   type CompileRunOutcome,
   type CompileRunner,
 } from '../src/codebehind/compile.js';
@@ -174,6 +175,46 @@ describe("compileTest's generation prompt", () => {
     // The project's context still leads; the test's block is the most specific.
     expect(generate.indexOf(PROJECT_CONTEXT)).toBeGreaterThanOrEqual(0);
     expect(generate.indexOf(PROJECT_CONTEXT)).toBeLessThan(generate.indexOf(CONTEXT_LINE));
+  });
+
+  it("carries it into the repair prompt after a replay fails", async () => {
+    const test = await parseTestFile(await write('grid.md', WITH_CONTEXT_MD));
+    const { client, calls } = recordingClient([ENTRY, ENTRY, ENTRY, ENTRY, ENTRY, ENTRY, ENTRY, ENTRY]);
+    const events: CompileEvent[] = [];
+    let replays = 0;
+    // Round 1's replay fails at the step, as the entry's selector would
+    // without the frame; round 2 passes.
+    const runner: CompileRunner = async (request) => {
+      if (request.purpose === 'record') {
+        return { status: 'passed', steps: [recordedStep()], resolvedParameters: {}, tokensUsed: 0 };
+      }
+      replays += 1;
+      const failed = replays === 1;
+      return {
+        status: failed ? 'failed' : 'passed',
+        steps: [{
+          ...recordedStep(),
+          fromCodeBehind: true,
+          ...(failed && {
+            status: 'failed' as const,
+            error: 'locator.fill: Timeout 30000ms exceeded',
+            domSnapshot: '<iframe id="host"></iframe>',
+          }),
+        }],
+        resolvedParameters: {},
+        tokensUsed: 0,
+      };
+    };
+
+    await compileTest({
+      test, config: CONFIG, contextContent: PROJECT_CONTEXT, aiClient: client,
+      runner, maxRounds: 2, dryRun: true, onEvent: (e) => events.push(e),
+    });
+
+    expect(events.some((e) => e.kind === 'step' && e.phase === 'repair')).toBe(true);
+    const repair = calls.find((c) => c.includes('Timeout 30000ms exceeded'));
+    expect(repair).toBeDefined();
+    expect(repair).toContain(CONTEXT_LINE);
   });
 
   it('is unchanged for a test without ## Context', async () => {

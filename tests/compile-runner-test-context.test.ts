@@ -265,6 +265,10 @@ beforeAll(async () => {
 
   projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'compile-test-context-'));
   await fs.writeFile(path.join(projectRoot, 'steptix.config.json'), JSON.stringify({}));
+  // The compile resolves `$VAR` from the nearest `.env` walking up from the
+  // test. An empty one here stops that walk before it leaves the scratch dir
+  // and reads a `.env` on the developer's machine.
+  await fs.writeFile(path.join(projectRoot, '.env'), '');
   await fs.writeFile(path.join(projectRoot, 'with-context.md'), WITH_CONTEXT_MD);
   await fs.writeFile(path.join(projectRoot, 'without-context.md'), WITHOUT_CONTEXT_MD);
 });
