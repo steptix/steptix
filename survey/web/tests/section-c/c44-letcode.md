@@ -96,9 +96,10 @@ closed shadow roots.
 ### WebTable
 1. Open the sandbox
 2. Click "Play Sandbox" on the WebTable card
-3. Add up the prices in the shopping list table [as: price_total]
-4. Read the total shown under the shopping list table [as: shown_total]
-5. Verify that {{price_total}} equals {{shown_total}}
+3. Read the price of every item in the shopping list table, not the total row [store as: prices]
+4. [tool: sum values="{{prices}}" out.sum="price_total"]
+5. Read the total shown under the shopping list table [store as: shown_total]
+6. Verify that {{price_total}} equals {{shown_total}}
 
 ### Shadow DOM
 1. Open the sandbox

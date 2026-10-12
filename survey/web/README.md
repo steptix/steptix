@@ -24,6 +24,12 @@ Or open the folder in VS Code and run a file from Steptix.
   there to find out, so a failure can be filed under the rubric's categories.
 - `tests/section-c/attachments/`: files the upload steps use.
 - `context/public-sites.md`: what the model is told about every site.
+- `tools/src/`: tools the tests call with `[tool: …]`, for work that must be
+  exact, such as `sum` adding up the numbers a step read off a page. `sum`
+  reads en-US numbers only: `.` is the decimal point and `,` groups
+  thousands, so `$1.200` is 1.2, and it refuses any other form. They
+  import `steptix/tools`, which resolves from this repo, so there is nothing
+  to install.
 - `results/section-c-runs.md`: every section C run side by side, with what
   failed and why. Reports themselves go to `reports/`, which is gitignored.
 
