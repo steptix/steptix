@@ -28,24 +28,24 @@ const actions = vi.hoisted(() => ({ received: [] as AIAction[] }));
 /**
  * Lines the clarification REPL will "read" from the console.
  *
- * `promptUserWithReplEscape` opens its own readline when the caller hands it
- * no reader — and the caller under test here is `executeStepAttempt`, which
- * hands it none. Mocking the module is what lets the REPL be driven through
- * the REAL `executeStep` rather than around it.
+ * `promptUserWithReplEscape` opens its own line reader when the caller hands
+ * it none — and the caller under test here is `executeStepAttempt`, which
+ * hands it none. Mocking `createLineReader` is what lets the REPL be driven
+ * through the REAL `executeStep` rather than around it.
  */
 const replLines = vi.hoisted(() => ({ queue: [] as string[] }));
 
-vi.mock('node:readline/promises', () => {
-  const createInterface = () => ({
+vi.mock('../src/utils/ask-user.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/utils/ask-user.js')>()),
+  createLineReader: () => ({
     question: async (): Promise<string> => {
       const next = replLines.queue.shift();
       if (next === undefined) throw new Error('scripted REPL input exhausted');
       return next;
     },
     close: () => {},
-  });
-  return { default: { createInterface }, createInterface };
-});
+  }),
+}));
 
 vi.mock('../src/browser/actions.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/browser/actions.js')>();

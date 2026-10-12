@@ -107,21 +107,19 @@ vi.mock('../src/report/history-appender.js', () => ({
 }));
 
 /** The console an `[input:]` step prompts on: `promptUserForInput` asks
- *  `readline`, so the question is answered here — and can say what the lock
- *  looked like while the run waited for it. */
+ *  through `createLineReader`, so the question is answered here — and can say
+ *  what the lock looked like while the run waited for it. The runs in this
+ *  file have a terminal: `steptix run` asks nobody, and opens no REPL, when
+ *  stdin is not one (steptix/steptix#47), and a test worker's stdin is not. */
 const questionMock = vi.fn();
-vi.mock('node:readline/promises', async (importOriginal) => {
-  const real = await importOriginal<typeof import('node:readline/promises')>();
-  const createInterface = () => ({
+vi.mock('../src/utils/ask-user.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/utils/ask-user.js')>()),
+  canAskUser: () => true,
+  createLineReader: () => ({
     question: (query: string) => questionMock(query),
     close: () => {},
-  });
-  return {
-    ...real,
-    createInterface,
-    default: { ...(real as unknown as { default: object }).default, createInterface },
-  };
-});
+  }),
+}));
 
 /** The `[interactive]` and failure REPL, answered without a console. */
 const runInteractiveReplMock = vi.fn();

@@ -1,5 +1,3 @@
-import readline from 'node:readline/promises';
-import { stdin as input, stdout as output } from 'node:process';
 import type { Frame, Browser, BrowserContext, Page } from 'playwright';
 import type { Config } from '../config/types.js';
 import { effectiveViewport } from '../config/viewport.js';
@@ -52,7 +50,8 @@ import { launchBrowser, type PageTracker, type BrowserTracker, type LaunchOverri
 import { withRetry } from './retry.js';
 import { applyTailOutcome } from './failure-tail-outcome.js';
 import { runInteractiveRepl } from './interactive-repl.js';
-import type { InteractiveReader } from './interactive-repl.js';
+import type { InteractiveDecision, InteractiveReader } from './interactive-repl.js';
+import { createLineReader, NoAnswerError } from '../utils/ask-user.js';
 import { logger, traceOp } from '../utils/logger.js';
 import { callApiStandalone, callApiBrowserContext } from '../api/client.js';
 import { extractCsrfToken } from '../api/csrf-handler.js';
@@ -264,18 +263,38 @@ export interface StepExecutorOptions {
    *  the immediate-next-step default. */
   testSteps?: string[];
   /** When true, there is no interactive console attached to this run (e.g.
-   *  it's driven by the Sessions API server, not the CLI). The AI
-   *  clarification prompt reads its answer from `process.stdin` via
-   *  `readline`; with no console that blocks forever and hangs the run. In
-   *  this mode a clarification request fails the step fast instead, with the
-   *  AI's question surfaced as the error so the client can show it. See
-   *  issues/014. */
+   *  it's driven by the Sessions API server, or `steptix run` with no terminal
+   *  on stdin — CI, a script, a scheduled job). The AI clarification prompt
+   *  reads its answer from `process.stdin`; with no console nothing ever
+   *  answers and the run hangs. In this mode a clarification request fails the
+   *  step fast instead, with the AI's question surfaced as the error so the
+   *  client can show it. See issues/014 and steptix/steptix#47. */
   nonInteractive?: boolean;
   /** Run abort signal (client "stop"). Threaded into every AI call so an
    *  in-flight request cancels immediately, checked at the top of each turn so a
    *  stopped step stops spawning turns, and consulted in the catch so an aborted
-   *  step reports as aborted (not a spurious failure). See issues/020. */
+   *  step reports as aborted (not a spurious failure). See issues/020.
+   *
+   *  `steptix run` also aborts it when the test's `timeout:` runs out
+   *  (src/runner/test-deadline.ts) and tells the two apart itself, so the
+   *  executor treats both the same: the step stops, and says it was stopped.
+   *  The clarification question waits on it too. */
   signal?: AbortSignal;
+  /**
+   * Run a person's REPL session — the one `/repl` opens from the clarification
+   * prompt — with the test's `timeout:` stopped, and give the time back after
+   * (steptix/steptix#47).
+   *
+   * `steptix run` makes its timeout a real deadline, which aborts
+   * {@link signal}. The REPL's ad-hoc steps inherit this step's options, signal
+   * included, so a deadline passing mid-session would cut each of them off —
+   * while the CLI has always given debugging time back on `/resume`. The plain
+   * answer to the question is NOT paused: that wait was always billed, and it is
+   * what lets a question nobody answers end at the timeout.
+   *
+   * Absent (the server, which never asks), the REPL simply runs.
+   */
+  pauseTestTimeout?: <T>(wait: () => Promise<T>) => Promise<T>;
   /**
    * This step's code-behind binding, resolved at test load
    * (stories/step-codebehind.md). When it carries an entry, the entry runs in
@@ -2636,7 +2655,9 @@ async function executeStepAttempt(
   let controlSignal:
     | { kind: 'resume'; fromStepIndex: number }
     | { kind: 'exit' }
-    | { kind: 'clarification-unavailable'; question: string }
+    // `inputEnded`: there was a terminal, and its input ended before an answer
+    // came (Ctrl+D, a closed pty) — the same dead end, told apart in the error.
+    | { kind: 'clarification-unavailable'; question: string; inputEnded?: true }
     | null = null;
   /** Ad-hoc StepResults produced inside the clarification REPL (typed Flick steps,
    *  /screenshot captures). Returned via a side-channel for the runner to merge. */
@@ -2962,10 +2983,11 @@ async function executeStepAttempt(
     if (promptAction && config.execution.promptOnAmbiguity) {
       const question = promptAction.question ?? promptAction.description;
       if (opts.nonInteractive) {
-        // No console to read an answer from (server-driven run). Asking via
-        // readline would block on stdin forever and hang the test. Fail the
-        // step fast, carrying the AI's question as the error so the client
-        // can surface it. See issues/014.
+        // No console to read an answer from (a server-driven run, or
+        // `steptix run` with no terminal on stdin). Asking would block on
+        // stdin forever and hang the test. Fail the step fast, carrying the
+        // AI's question as the error so the client can surface it. See
+        // issues/014 and steptix/steptix#47.
         controlSignal = { kind: 'clarification-unavailable', question };
         allTurns.push({
           turnNumber: currentTurn,
@@ -2977,22 +2999,42 @@ async function executeStepAttempt(
         inFlightTurn = undefined;
         break;
       }
-      const outcome = await promptUserWithReplEscape({
-        question,
-        page,
-        testSteps: opts.testSteps ?? [],
-        currentStepIndex: stepIndex,
-        // The claim belongs to THIS step's authored line and to nothing else
-        // (stories/step-flow-control.md, decision 2). Ad-hoc lines the user
-        // types at the REPL run through `executeStep` with these options, so
-        // handing `opts` over whole let a `return` action end the flow from a
-        // line the framework never read the form off — the exact hole the
-        // claim exists to close. `failureTail` goes with it for the same reason
-        // (decision 4): a typed line that failed must not be renamed — or
-        // tolerated — by a tail belonging to the step that asked the question.
-        executorOptions: { ...opts, flowControlClaim: undefined, failureTail: undefined },
-        adHocResults: clarificationAdHoc,
-      });
+      let outcome: ClarificationOutcome;
+      try {
+        outcome = await promptUserWithReplEscape({
+          question,
+          page,
+          testSteps: opts.testSteps ?? [],
+          currentStepIndex: stepIndex,
+          // The claim belongs to THIS step's authored line and to nothing else
+          // (stories/step-flow-control.md, decision 2). Ad-hoc lines the user
+          // types at the REPL run through `executeStep` with these options, so
+          // handing `opts` over whole let a `return` action end the flow from a
+          // line the framework never read the form off — the exact hole the
+          // claim exists to close. `failureTail` goes with it for the same reason
+          // (decision 4): a typed line that failed must not be renamed — or
+          // tolerated — by a tail belonging to the step that asked the question.
+          executorOptions: { ...opts, flowControlClaim: undefined, failureTail: undefined },
+          adHocResults: clarificationAdHoc,
+        });
+      } catch (err) {
+        if (!(err instanceof NoAnswerError)) throw err;
+        // The terminal's input ended before an answer (steptix/steptix#47).
+        // Nothing will answer a second time either, so it fails the step the
+        // way no terminal at all does — through the same tail — rather than
+        // throwing into `withRetry`, which would ask the model again only to
+        // reach the same closed input.
+        controlSignal = { kind: 'clarification-unavailable', question, inputEnded: true };
+        allTurns.push({
+          turnNumber: currentTurn,
+          attemptNumber,
+          timestamp: turnTimestamp,
+          aiInteractions: turnAiInteractions,
+          subActions: turnSubActions,
+        });
+        inFlightTurn = undefined;
+        break;
+      }
 
       if (outcome.kind === 'exit' || outcome.kind === 'resume') {
         controlSignal = outcome.kind === 'exit'
@@ -4390,9 +4432,10 @@ async function executeStepAttempt(
   const durationMs = Date.now() - startTime;
 
   if (controlSignal && controlSignal.kind === 'clarification-unavailable') {
-    // Server-driven run with no interactive console: the AI asked a
-    // question we can't answer here. Fail the step with the question as the
-    // error rather than blocking on stdin. See issues/014.
+    // A run with no interactive console (server-driven, or a CLI run with no
+    // terminal), or one whose terminal input ended: the AI asked a question
+    // we can't answer here. Fail the step with the question as the error
+    // rather than blocking on stdin. See issues/014 and steptix/steptix#47.
     //
     // Through the tail seam as well (decisions 5 and 6): it is the one failure
     // that RETURNS rather than throws, so the outer catch never sees it, and a
@@ -4410,9 +4453,11 @@ async function executeStepAttempt(
       durationMs,
       retried,
       aiExplanation: `AI asked for clarification: ${controlSignal.question}`,
-      error:
-        `AI needs clarification, but this run has no interactive prompt ` +
-        `to answer it: ${controlSignal.question}`,
+      error: controlSignal.inputEnded
+        ? `AI needs clarification, but the terminal's input ended before an ` +
+          `answer was typed: ${controlSignal.question}`
+        : `AI needs clarification, but this run has no interactive prompt ` +
+          `to answer it: ${controlSignal.question}`,
     }, opts);
   }
 
@@ -5554,30 +5599,33 @@ export interface PromptUserWithReplEscapeContext {
  * here returns it as the literal answer. Rationale: the prompt is "the AI
  * is waiting for your answer"; mixing commands at that level blurs what
  * input the system expects. Use `/repl` to take control.
+ *
+ * The question settles whatever happens to stdin (steptix/steptix#47): it
+ * rejects with `NoAnswerError` when the input ends before an answer, and with
+ * an `AbortError` when the step's signal aborts — a Stop, or the test's
+ * timeout. The caller turns the first into a failed step; the second unwinds
+ * like any other abort.
  */
 export async function promptUserWithReplEscape(
   ctx: PromptUserWithReplEscapeContext,
 ): Promise<ClarificationOutcome> {
   const ownsReader = ctx.reader === undefined;
-  const reader: InteractiveReader = ctx.reader ?? (() => {
-    const rl = readline.createInterface({ input, output });
-    return {
-      question: (prompt: string) => rl.question(prompt),
-      close: () => rl.close(),
-    };
-  })();
+  const reader: InteractiveReader = ctx.reader ?? createLineReader();
   const write = ctx.write ?? ((s: string): void => { console.log(s); });
+  // The step's own signal, which `executorOptions` carries for the REPL's
+  // ad-hoc steps anyway.
+  const signal = ctx.executorOptions.signal;
 
   try {
     write('');
     write('⚠  AI needs clarification:');
     if (ctx.question) write(`  ${ctx.question}`);
     write('  Type your answer, or /repl to take control.');
-    const raw = await reader.question('  Your answer: ');
+    const raw = await reader.question('  Your answer: ', signal ? { signal } : {});
     const trimmed = raw.trim();
 
     if (trimmed.toLowerCase() === '/repl') {
-      const decision = await runInteractiveRepl({
+      const repl = (): Promise<InteractiveDecision> => runInteractiveRepl({
         page: ctx.page,
         testSteps: ctx.testSteps,
         currentStepIndex: ctx.currentStepIndex,
@@ -5590,6 +5638,10 @@ export async function promptUserWithReplEscape(
         reader,
         ...(ctx.write !== undefined && { write: ctx.write }),
       });
+      // A person's session, so the test's timeout stops while it runs — see
+      // `StepExecutorOptions.pauseTestTimeout`.
+      const pause = ctx.executorOptions.pauseTestTimeout;
+      const decision = pause ? await pause(repl) : await repl();
       if (decision.kind === 'continue') return { kind: 'answer', text: '' };
       if (decision.kind === 'resume') {
         return { kind: 'resume', fromStepIndex: decision.fromStepIndex };
@@ -5604,20 +5656,6 @@ export async function promptUserWithReplEscape(
     }
   }
 }
-
-/** @deprecated Kept for callers that still want the bare prompt. New code should use `promptUserWithReplEscape`. */
-async function promptUser(question: string): Promise<string> {
-  const rl = readline.createInterface({ input, output });
-  try {
-    console.log(`\n⚠  AI needs clarification:`);
-    const answer = await rl.question(`  ${question}\n  Your answer: `);
-    return answer.trim();
-  } finally {
-    rl.close();
-  }
-}
-// Suppress unused-export warning — kept intentionally as a deprecated fallback.
-void promptUser;
 
 /**
  * Does the step expect to land on an error page — "Navigate to /status/404",

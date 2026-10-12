@@ -1,8 +1,7 @@
 import { unmarkLoopBindings } from '../utils/loop-bindings.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import readline from 'node:readline/promises';
-import { stdin as input, stdout as output } from 'node:process';
+import { canAskUser, createLineReader, NoAnswerError } from '../utils/ask-user.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -11,6 +10,17 @@ import { logger } from '../utils/logger.js';
  * 2. Environment variable ($VAR_NAME)
  * 3. Data file row (injected externally)
  * 4. Prompt user at runtime
+ *
+ * Step 4 asks only when someone can answer (#46). Without a terminal — CI, a
+ * script, a scheduled job — the prompt used to wait on a stdin that had
+ * already ended, the wait never settled, and `steptix run` exited 0 having run
+ * nothing. Now a parameter that reaches step 4 with nobody to ask fails the
+ * resolution, with a message naming the variable or parameter.
+ *
+ * Every such parameter is named at once, not just the first. Nothing is asked
+ * on this path, so finding the rest costs nothing — and the person reading the
+ * message is usually fixing a pipeline's secrets, where each round trip is a
+ * whole CI run.
  */
 export async function resolveParameters(
   rawParams: Record<string, string>,
@@ -18,9 +28,35 @@ export async function resolveParameters(
   promptUser = true,
 ): Promise<Record<string, string>> {
   const resolved: Record<string, string> = {};
+  const unanswerable: MissingParameter[] = [];
+  // Asked only once something is missing: a run whose parameters all resolve
+  // has no business touching stdin.
+  let askable: boolean | undefined;
 
   for (const [key, rawValue] of Object.entries(rawParams)) {
-    resolved[key] = await resolveValue(key, rawValue, dataRow, promptUser);
+    const found = lookupValue(key, rawValue, dataRow);
+    if (typeof found === 'string') {
+      resolved[key] = found;
+      continue;
+    }
+    if (promptUser && !(askable ??= canAskUser())) {
+      // No warning here: the error below says the same thing, once.
+      unanswerable.push(found);
+      continue;
+    }
+    if (found.envVar !== undefined) {
+      logger.warn(`Environment variable $${found.envVar} not set for parameter "${key}"`);
+    }
+    if (promptUser) {
+      resolved[key] = await promptForValue(found);
+      continue;
+    }
+    logger.warn(`Parameter "${key}" could not be resolved, using empty string`);
+    resolved[key] = '';
+  }
+
+  if (unanswerable.length > 0) {
+    throw new Error(missingParametersMessage(unanswerable, 'there is no terminal to ask'));
   }
 
   // Merge any additional keys from the data row that weren't in rawParams
@@ -42,8 +78,8 @@ export async function resolveParameters(
  * A row's cell goes through this for the same reason a `## Parameters` value
  * does — so a password can live in `.env` and the table can hold
  * `$TEST_PASSWORD` rather than the secret. Until data-driven rows this was
- * skipped for rows entirely: `resolveValue` returned a row's cell before it
- * reached the `$` branch, so a `dataFile:` row holding `$TEST_PASSWORD` typed
+ * skipped for rows entirely: the chain's row step returned a row's cell before
+ * it reached the `$` branch, so a `dataFile:` row holding `$TEST_PASSWORD` typed
  * that literal string into the page.
  *
  * An unset variable stays literal with a warning rather than becoming empty:
@@ -61,12 +97,28 @@ function resolveEnvRef(key: string, rawValue: string): string {
   return rawValue;
 }
 
-async function resolveValue(
+/**
+ * A parameter that steps 1–3 left without a value: the one step 4 would ask
+ * for. Carries what a message about it needs.
+ */
+interface MissingParameter {
+  name: string;
+  /** The `$VAR` it names, when that variable is not set. */
+  envVar?: string;
+  /** What is wrong with it, as the rest of `Parameter "name" …`. */
+  reason: string;
+}
+
+/**
+ * Steps 1–3 of the chain {@link resolveParameters} walks: a value, or why
+ * there is none. Asking is the caller's decision, because only the caller
+ * knows whether anyone is there.
+ */
+function lookupValue(
   key: string,
   rawValue: string,
   dataRow?: Record<string, string>,
-  promptUser = true,
-): Promise<string> {
+): string | MissingParameter {
   // 1. Check data row override (highest priority for data-driven tests).
   //     The cell still goes through the `$VAR` rule — a row is a set of
   //     parameter values that happens to arrive in a table, and a cell that
@@ -89,23 +141,35 @@ async function resolveValue(
       logger.debug(`Parameter "${key}" resolved from env var $${envVarName}`);
       return envValue;
     }
-    logger.warn(`Environment variable $${envVarName} not set for parameter "${key}"`);
+    return { name: key, envVar: envVarName, reason: `needs $${envVarName}, which is not set` };
   }
 
   // 3. Inline value (non-empty, not a reference)
-  if (rawValue && !rawValue.startsWith('$') && rawValue !== '{{' + key + '}}') {
+  if (rawValue && rawValue !== '{{' + key + '}}') {
     logger.debug(`Parameter "${key}" resolved from inline value`);
     return rawValue;
   }
 
-  // 4. Prompt user
-  if (promptUser) {
-    const value = await promptForValue(key);
-    return value;
-  }
+  // 4. Nothing: the value has to come from someone.
+  return rawValue
+    ? { name: key, reason: `is ${rawValue}, which asks for a value at run time` }
+    : { name: key, reason: 'has no value' };
+}
 
-  logger.warn(`Parameter "${key}" could not be resolved, using empty string`);
-  return '';
+/**
+ * `Parameter "password" needs $TEST_PASSWORD, which is not set, and there is
+ * no terminal to ask` — or, for several, one line each under a count, so a
+ * CI log shows the whole list where it shows the error.
+ */
+function missingParametersMessage(missing: readonly MissingParameter[], why: string): string {
+  const [only] = missing;
+  if (only && missing.length === 1) {
+    return `Parameter "${only.name}" ${only.reason}, and ${why}`;
+  }
+  return [
+    `${missing.length} parameters have no value, and ${why}:`,
+    ...missing.map((m) => `  - "${m.name}" ${m.reason}`),
+  ].join('\n');
 }
 
 /**
@@ -117,15 +181,29 @@ export function isSecretName(name: string): boolean {
   return /password|secret|token|key/i.test(name);
 }
 
-async function promptForValue(key: string): Promise<string> {
-  const rl = readline.createInterface({ input, output });
+/**
+ * Ask at the terminal. The caller has checked that there is one; this covers
+ * the input ending anyway — Ctrl+D at the prompt — which used to
+ * leave the question pending forever, exactly as an ended stdin did in CI.
+ * It fails now, naming the parameter, rather than ending the run silently.
+ */
+async function promptForValue(missing: MissingParameter): Promise<string> {
+  const reader = createLineReader();
   try {
-    const isSecret = isSecretName(key);
+    const isSecret = isSecretName(missing.name);
     const hint = isSecret ? ' (input hidden)' : '';
-    const answer = await rl.question(`  Enter value for "${key}"${hint}: `);
+    const answer = await reader.question(`  Enter value for "${missing.name}"${hint}: `);
     return answer.trim();
+  } catch (err) {
+    if (err instanceof NoAnswerError) {
+      throw new Error(
+        missingParametersMessage([missing], 'input ended before a value was typed'),
+        { cause: err },
+      );
+    }
+    throw err;
   } finally {
-    rl.close();
+    reader.close();
   }
 }
 
