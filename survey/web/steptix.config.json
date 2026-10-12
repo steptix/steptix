@@ -1,6 +1,7 @@
 {
   "browser": {
     "headed": true,
+    "captureScreenshotsPerAction": true,
     "blockAds": [
       "doubleclick.net",
       "googlesyndication.com",

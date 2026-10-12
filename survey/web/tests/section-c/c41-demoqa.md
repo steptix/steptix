@@ -10,7 +10,8 @@ plain HTML practice sites lack. Its pages carry heavy ads.
 
 The last section signs in to the Book Store. Create the account at
 https://demoqa.com/register and put it in `.env` as `DEMOQA_USERNAME` and
-`DEMOQA_PASSWORD`. Registration has a reCAPTCHA, so a person has to do it.
+`DEMOQA_PASSWORD`. Registration runs an invisible reCAPTCHA (v3): there is
+nothing to solve, but it scores visitors, so a person should do it.
 
 **Probes:** an expandable checkbox tree, a disabled radio, editing a row in a
 web table, double-click and right-click, a button enabled after a delay, a
@@ -59,6 +60,10 @@ result, ads covering content, login.
 1. Navigate to /login
 2. Enter the username {{bookstore_user}} and the password {{bookstore_password}}, then click Login
 3. Verify the page shows the user name {{bookstore_user}}
-4. Search the books for "Git"
-5. Verify the book list shows "Git Pocket Guide"
-6. Click "Log out"
+4. Navigate to /books
+5. Verify the book list shows more than one book
+6. Type "Git" in the book search box
+7. Verify the book list shows "Git Pocket Guide" and no other book
+8. Navigate to /profile
+9. Click "Log out"
+10. Verify the page shows the Login button
