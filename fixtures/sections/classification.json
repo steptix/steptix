@@ -324,6 +324,217 @@
         }
       ],
       "expectsCliParseError": "empty section name (hashes-only heading)"
+    },
+    "classification-indented.md": {
+      "note": "steptix/steptix#49, verbatim from the issue: steps 1-5 are indented by two spaces, 6-7 are not. Markdown makes all seven one top-level list, and so does every parser here. Before the fix the editor marked lines 10-16, a VS Code run sent only 15-16, and the CLI ran all seven but numbered them 15, 16, 0, 0, 0, 0, 0.",
+      "lines": [
+        {
+          "line": 1,
+          "kind": "heading"
+        },
+        {
+          "line": 3,
+          "kind": "heading"
+        },
+        {
+          "line": 4,
+          "kind": "prose"
+        },
+        {
+          "line": 6,
+          "kind": "heading"
+        },
+        {
+          "line": 7,
+          "kind": "prose"
+        },
+        {
+          "line": 9,
+          "kind": "heading"
+        },
+        {
+          "line": 10,
+          "kind": "step"
+        },
+        {
+          "line": 11,
+          "kind": "step"
+        },
+        {
+          "line": 12,
+          "kind": "step"
+        },
+        {
+          "line": 13,
+          "kind": "step"
+        },
+        {
+          "line": 14,
+          "kind": "step"
+        },
+        {
+          "line": 15,
+          "kind": "step"
+        },
+        {
+          "line": 16,
+          "kind": "step"
+        }
+      ],
+      "expectedSections": [],
+      "expectedMainFlow": [
+        {
+          "line": 10,
+          "instruction": "Navigate to the baseUrl"
+        },
+        {
+          "line": 11,
+          "instruction": "Reject non-essential cookies in the cookie banner"
+        },
+        {
+          "line": 12,
+          "instruction": "Enter the username {{username}}"
+        },
+        {
+          "line": 13,
+          "instruction": "Enter the password password123"
+        },
+        {
+          "line": 14,
+          "instruction": "Click the Sign in button"
+        },
+        {
+          "line": 15,
+          "instruction": "Click \"Transaction History\""
+        },
+        {
+          "line": 16,
+          "instruction": "Click \"Sign out\""
+        }
+      ]
+    },
+    "classification-nested.md": {
+      "note": "The indentation rule of steptix/steptix#49, case by case, measured against marked. A marker up to three columns in is a top-level item (lines 5, 6, 22, and the body's 25 and 27); one that reaches the content column of the item above it is nested in that item and folds into its text (8, 10, 12, 14, 26); four columns at the top level, a tab included, is indented code (18, 20). Line 16's prose after a blank line closes the list, which is why 22 is a step again.",
+      "lines": [
+        {
+          "line": 1,
+          "kind": "heading"
+        },
+        {
+          "line": 3,
+          "kind": "heading"
+        },
+        {
+          "line": 5,
+          "kind": "step"
+        },
+        {
+          "line": 6,
+          "kind": "step"
+        },
+        {
+          "line": 7,
+          "kind": "step"
+        },
+        {
+          "line": 8,
+          "kind": "prose"
+        },
+        {
+          "line": 9,
+          "kind": "step"
+        },
+        {
+          "line": 10,
+          "kind": "prose"
+        },
+        {
+          "line": 12,
+          "kind": "prose"
+        },
+        {
+          "line": 13,
+          "kind": "step"
+        },
+        {
+          "line": 14,
+          "kind": "prose"
+        },
+        {
+          "line": 16,
+          "kind": "prose"
+        },
+        {
+          "line": 18,
+          "kind": "prose"
+        },
+        {
+          "line": 20,
+          "kind": "prose"
+        },
+        {
+          "line": 22,
+          "kind": "step"
+        },
+        {
+          "line": 24,
+          "kind": "section-heading"
+        },
+        {
+          "line": 25,
+          "kind": "section-step"
+        },
+        {
+          "line": 26,
+          "kind": "prose"
+        },
+        {
+          "line": 27,
+          "kind": "section-step"
+        }
+      ],
+      "expectedSections": [
+        {
+          "name": "Body",
+          "headingLine": 24,
+          "steps": [
+            {
+              "line": 25,
+              "instruction": "An indented body step"
+            },
+            {
+              "line": 27,
+              "instruction": "Another body step"
+            }
+          ]
+        }
+      ],
+      "expectedMainFlow": [
+        {
+          "line": 5,
+          "instruction": "One space in"
+        },
+        {
+          "line": 6,
+          "instruction": "Three spaces in, below a one-space item: a sibling"
+        },
+        {
+          "line": 7,
+          "instruction": "Ten"
+        },
+        {
+          "line": 9,
+          "instruction": "Three"
+        },
+        {
+          "line": 13,
+          "instruction": "Four"
+        },
+        {
+          "line": 22,
+          "instruction": "Three spaces after the list closed: a step"
+        }
+      ]
     }
   }
 }

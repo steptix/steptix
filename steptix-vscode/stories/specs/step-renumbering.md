@@ -81,8 +81,10 @@ no new grammar, no fourth copy of the rules:
   so its body restarts too; renumbering doesn't care that the file would be
   refused at run time.
 - `inert-step`, `frontmatter`, `heading`, `prose`, `blank` are untouched.
-  Indented numbered items and numbered lists outside the Steps span already
-  classify as `prose`, so they are excluded by construction.
+  Nested numbered items and numbered lists outside the Steps span already
+  classify as `prose`, so they are excluded by construction. A step indented
+  by up to three spaces and not nested is a `step` (Markdown's rule, #49), and
+  is renumbered at its own column: the edit replaces its digits, not column 0.
 - A wrapped step's continuation lines classify as `prose` — only the first
   physical line carries the ordinal, so wrapping needs no special handling.
 

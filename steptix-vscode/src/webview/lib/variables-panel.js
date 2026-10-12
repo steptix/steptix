@@ -36,9 +36,11 @@
  * `classifyCaptureSource`.
  */
 
-const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
-const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
-const STEP_LINE_RE = /^\s*\d+\.\s+\S/;
+// Which lines are steps is runner-core's answer, not a copy of it here: this
+// panel used to scan with the editor's old, looser rule (steptix/steptix#49).
+// The direct `dist/step-lines.js` import is why it can — see
+// step-lines-inline.js.
+import { extractStepLineIds } from "steptix-runner-core/dist/step-lines.js";
 const INPUT_PATTERN = /\[input:\s*(\w+)\]/i;
 const OUTPUT_PATTERN = /\[output:\s*(\w+)\]/i;
 // `Read the order number … [store as: order_id]` — the handbook's capture
@@ -134,15 +136,14 @@ export function collectVariables(text, parameterValues, runtimeValues, runtimeSo
     seen.add(name);
   }
 
-  // 2/3. Walk lines inside the Steps section (only) and pick up
-  // [input:] / [output:] markers in document order.
+  // 2/3. Walk the step lines — main flow and section bodies, the lines the
+  // editor marks as steps — and pick up [input:] / [output:] markers in
+  // document order.
   const lines = text.split(/\r?\n/);
-  const stepsSpan = findStepsSpan(lines);
-  if (!stepsSpan) return out;
 
-  for (let i = stepsSpan.start; i <= stepsSpan.end; i++) {
+  for (const id of extractStepLineIds(text)) {
+    const i = id - 1;
     const raw = lines[i] || "";
-    if (!STEP_LINE_RE.test(raw)) continue;
     // `[use ai] … [store as: name]` — FIRST on the line, so an `[output: x]`
     // inside one is labelled for what fills it (the model, via the runner)
     // rather than as a page capture. Row source `generated`; the capture
@@ -438,25 +439,4 @@ export function maskIfSecretAuthoredInline(name, value) {
   if (!isSecretFlatNameInline(name)) return maskRecordSecretsInline(String(value));
   if (!value) return "(empty)";
   return maskValueInline(String(value));
-}
-
-function findStepsSpan(lines) {
-  let headingIndex = -1;
-  let headingDepth = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const m = STEPS_HEADING_RE.exec(lines[i] || "");
-    if (m) {
-      headingIndex = i;
-      headingDepth = m[1].length;
-      break;
-    }
-  }
-  if (headingIndex < 0) return null;
-  for (let i = headingIndex + 1; i < lines.length; i++) {
-    const m = ANY_HEADING_RE.exec(lines[i] || "");
-    if (m && m[1].length <= headingDepth) {
-      return { start: headingIndex + 1, end: i - 1 };
-    }
-  }
-  return { start: headingIndex + 1, end: lines.length - 1 };
 }

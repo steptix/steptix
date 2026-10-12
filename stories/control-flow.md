@@ -156,12 +156,15 @@ row, each pass in its own frame with `iteration` and `iterationCount`
 ([stories/data-driven-rows.md](data-driven-rows.md), part B), and every
 consumer already copes with the same source line running several times.
 
-**Indented numbered items are not steps anywhere.** The runner-core
+**Nested numbered items are not steps anywhere.** The runner-core
 classifier ([runner-core/src/step-lines.ts](../runner-core/src/step-lines.ts))
 ignores them by design, and the CLI's marked-based parser folds a nested list
 into the parent item's text (`classifyReading` in
 [src/parser/markdown.ts](../src/parser/markdown.ts)). A block with indented
-sub-steps would today reach the model as one long prose step. Making nesting
+sub-steps would today reach the model as one long prose step. (An item
+indented by up to three spaces that does NOT reach the content of the item
+above it is not nested: it is a step, by Markdown's rule —
+[#49](https://github.com/steptix/steptix/issues/49).) Making nesting
 real would mean a new line kind in every one of the step-line parsers
 [#49](https://github.com/steptix/steptix/issues/49)
 lists, plus painting, breakpoints, renumbering and go-to-definition for nested

@@ -110,9 +110,24 @@ const corpus = CORPUS_ROOTS.flatMap((root) => walk(path.join(REPO, root)))
   .map((file) => ({ file: path.relative(REPO, file), text: readIfPresent(file) }))
   .filter((entry) => entry.text !== null && isTestFile(entry.text));
 
-/** Uses grammar the legacy classifier predates: a section, or an ignored region. */
+/**
+ * A step whose marker is indented. The legacy rule took steps from column 0
+ * only; Markdown's, adopted for steptix/steptix#49, takes a top-level item up
+ * to three spaces in. Every other line classifies as it did.
+ */
+const hasIndentedStep = (text) => {
+  const lines = text.split(/\r?\n/);
+  return classifyLines(text).some(
+    (l) => (l.kind === 'step' || l.kind === 'section-step') && /^\s/.test(lines[l.line - 1] ?? ''),
+  );
+};
+
+/** Uses grammar the legacy classifier predates: a section, an ignored region,
+ *  or an indented step. */
 const usesNewGrammar = (text) =>
-  extractSections(text).length > 0 || classifyLines(text).some((l) => l.kind === 'inert-step');
+  extractSections(text).length > 0 ||
+  classifyLines(text).some((l) => l.kind === 'inert-step') ||
+  hasIndentedStep(text);
 
 const untouched = corpus.filter((entry) => !usesNewGrammar(entry.text));
 const sectioned = corpus.filter((entry) => extractSections(entry.text).length > 0);
@@ -238,4 +253,13 @@ test('the reference classifier really can disagree', () => {
   assert.equal(extractSections(inertText).length, 0);
   assert.notDeepEqual(classifyLines(inertText), legacyClassifyLines(inertText));
   assert.equal(usesNewGrammar(inertText), true);
+  // And through an indented step, the third half (steptix/steptix#49).
+  const indentedText = ['## Steps', '  1. One', '2. Two'].join('\n');
+  assert.equal(extractSections(indentedText).length, 0);
+  assert.notDeepEqual(classifyLines(indentedText), legacyClassifyLines(indentedText));
+  assert.equal(usesNewGrammar(indentedText), true);
+  // A nested item is still not a step, so a file with one is untouched.
+  const nestedText = ['## Steps', '1. One', '   1. nested', '2. Two'].join('\n');
+  assert.deepEqual(classifyLines(nestedText), legacyClassifyLines(nestedText));
+  assert.equal(usesNewGrammar(nestedText), false);
 });

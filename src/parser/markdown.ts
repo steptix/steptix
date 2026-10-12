@@ -46,8 +46,8 @@ import { loadDataFromPath, type DataObject } from '../env/data-loader.js';
 import { scanDataTable, type DataTableScan } from './data-rows.js';
 import {
   ANY_HEADING_RE,
+  createStepLineReader,
   HASHES_ONLY_RE,
-  STEP_LINE_RE,
   STEPS_HEADING_RE,
 } from './line-grammar.js';
 import { logger } from '../utils/logger.js';
@@ -778,8 +778,7 @@ function parseSections(rawContent: string, filePath: string): {
     const causes =
       `Usual causes: a numbered line the markdown parser doesn't treat as a ` +
       `step (inside a fenced code block or an HTML comment), or one the line ` +
-      `scanner doesn't (indented by 1-3 spaces, or using \`1)\` instead of ` +
-      `\`1.\`).`;
+      `scanner doesn't (using \`1)\` instead of \`1.\`).`;
 
     if (scan.entries.length !== steps.length) {
       throw new Error(
@@ -1378,6 +1377,11 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
   /** Dropped items per ignored heading, for the note below. */
   const dropped: { name: string; line: number; count: number }[] = [];
 
+  // Fed every line of the span, blanks and headings included: whether an
+  // indented numbered line is a step or nested inside the one above depends
+  // on what came before it (steptix/steptix#49).
+  const readStepLine = createStepLineReader();
+
   for (let j = headingIndex + 1; j < lines.length; j++) {
     const raw = lines[j] ?? '';
     const line = j + 1;
@@ -1387,6 +1391,8 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
       spanEndIndex = j;
       break;
     }
+
+    const isStepLine = readStepLine(raw);
 
     if (sectionsRecognised && HASHES_ONLY_RE.test(raw)) {
       // Hashes with no text, at any depth >= 3. Always an error, but raise it
@@ -1438,13 +1444,13 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
       continue;
     }
 
-    if (!STEP_LINE_RE.test(raw)) continue;
+    if (!isStepLine) continue;
 
     // Replicate `extractSteps`' culls so the two passes stay index-aligned by
     // construction: an item with no text, and a marker-only item, are dropped
-    // from both. (STEP_LINE_RE already requires a non-space after the number,
-    // so the first check only fires defensively.)
-    const text = raw.replace(/^\d+\.\s+/, '').trim();
+    // from both. (A step line already has a non-space after the number, so
+    // the first check only fires defensively.)
+    const text = raw.replace(/^\s*\d+\.\s+/, '').trim();
     if (!text) continue;
     if (text.replace(NO_HOOKS_MARKER, '').trim() === '') continue;
 

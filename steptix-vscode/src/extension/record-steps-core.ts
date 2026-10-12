@@ -38,6 +38,7 @@ import * as path from 'node:path';
 import {
   classifyLines,
   parseConfig,
+  stepOrdinal,
   type ClassifiedLine,
   type RecordActionKind,
   type RecordingPanelState,
@@ -563,7 +564,13 @@ export function planRecordInsertion(
   if (targets.length > 0) {
     for (const edit of computeRenumberEdits(sim.lines.join('\n'), targets)) {
       const orig = edit.line - 1 - block.length;
-      edits.push({ startLine: orig, startChar: 0, endLine: orig, endChar: edit.digits, text: String(edit.ordinal) });
+      edits.push({
+        startLine: orig,
+        startChar: edit.column,
+        endLine: orig,
+        endChar: edit.column + edit.digits,
+        text: String(edit.ordinal),
+      });
       renumber.push({ line: orig, text: String(edit.ordinal) });
     }
   }
@@ -739,6 +746,10 @@ function tailOf(p: Placement): Array<{ line: number; digits: string }> {
     const kind = kindAt(p.m, i);
     if (kind === 'section-heading') break;
     if (kind !== wanted) continue;
+    // Column 0 only: a tail slot is `wrote + rest` from the start of its line,
+    // and every comparison of a tail against the document relies on that. An
+    // indented step (steptix/steptix#49) therefore keeps the number it has
+    // while recording; Renumber Steps fixes it afterwards.
     const digits = LEADING_ORDINAL_RE.exec(p.m.lines[i] ?? '')?.[1];
     if (digits !== undefined) out.push({ line: i, digits });
   }
@@ -804,7 +815,7 @@ function endOfFlow(m: LineModel, section: string | null): { idx: number; kind: '
  *  authors use; a new step joins it as `1.` too. */
 function allOnes(m: LineModel, section: string | null): boolean {
   const steps = flowSteps(m, section);
-  return steps.length >= 2 && steps.every((i) => LEADING_ORDINAL_RE.exec(m.lines[i] ?? '')?.[1] === '1');
+  return steps.length >= 2 && steps.every((i) => stepOrdinal(m.lines[i] ?? '')?.value === '1');
 }
 
 // ---------------------------------------------------------------------------
@@ -877,8 +888,8 @@ export function trackAnchorThroughChanges(anchor: RecordAnchor, changes: Documen
  * to the step's position in its flow.
  */
 function writtenOrdinal(m: LineModel, idx: number, section: string | null): number {
-  const match = LEADING_ORDINAL_RE.exec(m.lines[idx] ?? '');
-  const n = match ? Number(match[1]) : NaN;
+  const match = stepOrdinal(m.lines[idx] ?? '');
+  const n = match ? Number(match.value) : NaN;
   if (Number.isSafeInteger(n)) return n;
   return flowSteps(m, section).indexOf(idx) + 1;
 }

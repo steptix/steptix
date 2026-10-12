@@ -5,8 +5,9 @@
 // run over the same shapes to catch.
 /** Mirrors `ANY_HEADING_RE`. */
 const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
-/** Mirrors `STEP_LINE_RE`. */
-const STEP_LINE_RE = /^\d+\.\s+\S/;
+/** Mirrors `STEP_LINE_RE`. The head region ends at the first numbered item,
+ *  indented or not: nothing above the first step can be nested in one. */
+const STEP_LINE_RE = /^ {0,3}\d+\.\s+\S/;
 /** Mirrors `STEPS_HEADING_RE`. */
 const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
 

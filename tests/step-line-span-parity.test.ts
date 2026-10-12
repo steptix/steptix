@@ -2,7 +2,14 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { scanStepSpans } from '../src/parser/markdown.js';
+import { parseTestContent, scanStepSpans } from '../src/parser/markdown.js';
+import { createStepLineReader } from '../src/parser/line-grammar.js';
+import {
+  // runner-core's SOURCE, not its `dist/` — the root `npm test` does not
+  // build runner-core, so the compiled copy could be stale.
+  createStepLineReader as coreCreateStepLineReader,
+  extractSteps as coreExtractSteps,
+} from '../runner-core/src/step-lines.ts';
 
 /**
  * Cross-package parity: the server-side span scanner vs the frozen
@@ -52,11 +59,20 @@ const frozen = JSON.parse(read('classification.json')) as { files: Record<string
 const mainFlowLines = (file: FrozenFile): number[] =>
   file.lines.filter((l) => l.kind === 'step').map((l) => l.line);
 
+/** Every fixture the scanner returns a table for (see the hashes-only note). */
+const SCANNABLE = [
+  'classification.md',
+  'classification-edge.md',
+  // steptix/steptix#49: indented and nested numbered lines.
+  'classification-indented.md',
+  'classification-nested.md',
+];
+
 describe('server span scanner vs the frozen classification table', () => {
   // classification-hashes.md is excluded: every one of its headings is
   // hashes-only, so the scanner raises the empty-name error before it can
   // return a table. That refusal is asserted below instead.
-  for (const fixture of ['classification.md', 'classification-edge.md']) {
+  for (const fixture of SCANNABLE) {
     const expected = frozen.files[fixture]!;
 
     it(`reproduces the section headings for ${fixture}`, () => {
@@ -123,4 +139,105 @@ describe('server span scanner vs the frozen classification table', () => {
     expect(byLine.get(14)).toBe('[no-hooks] Click Sign in');
     expect(byLine.get(15)).toBe('**[no-hooks]** Bold marker is not stripped by the marker regex');
   });
+});
+
+/**
+ * steptix/steptix#49. The CLI takes its steps from `marked` and their line
+ * numbers from the scanner above, and pairs the two by index. When the two
+ * passes disagreed about an indented step, a file without sections ran every
+ * step but cited the wrong lines — 15, 16, then 0 for the rest — and a file
+ * with sections was refused outright.
+ *
+ * So these rows hold the PARSER's output, not just the scanner's, to the
+ * frozen table: the steps `marked` found, on the lines the scanner found,
+ * which is only right when both passes chose the same lines.
+ */
+describe('the CLI parser vs the frozen classification table', () => {
+  it('still refuses classification-edge.md, for its fenced line', () => {
+    // Its one divergence is a numbered line inside a fence, which the scanner
+    // counts and `marked` does not. Indentation must not have added another.
+    expect(() =>
+      parseTestContent(read('classification-edge.md'), 'classification-edge.md'),
+    ).toThrow(/markdown parser found 6 step\(s\) in `## Steps` but the line scanner found 7/);
+  });
+
+  for (const fixture of SCANNABLE.filter((f) => !frozen.files[f]!.expectsCliParseError)) {
+    const expected = frozen.files[fixture]!;
+
+    it(`numbers every main-flow step of ${fixture} on its own line`, () => {
+      const parsed = parseTestContent(read(fixture), fixture);
+      expect(parsed.stepLines).toEqual(mainFlowLines(expected));
+      expect(parsed.steps).toHaveLength(mainFlowLines(expected).length);
+      expect(parsed.stepLines).not.toContain(0);
+    });
+
+    it(`finds the section bodies of ${fixture} on their own lines`, () => {
+      const parsed = parseTestContent(read(fixture), fixture);
+      expect(
+        Object.values(parsed.sections ?? {}).map((s) => ({
+          name: s.name,
+          headingLine: s.headingLine,
+          stepLines: s.stepLines,
+        })),
+      ).toEqual(
+        expected.expectedSections.map((s) => ({
+          name: s.name,
+          headingLine: s.headingLine,
+          stepLines: s.steps.map((step) => step.line),
+        })),
+      );
+    });
+  }
+
+  it("runs the issue's example in order, from line 10", () => {
+    const parsed = parseTestContent(read('classification-indented.md'), 'classification-indented.md');
+    expect(parsed.steps[0]).toBe('Navigate to the baseUrl');
+    expect(parsed.stepLines).toEqual([10, 11, 12, 13, 14, 15, 16]);
+  });
+});
+
+/**
+ * The step-line rule is implemented twice — runner-core's
+ * `createStepLineReader` and its mirror in src/parser/line-grammar.ts — and
+ * both are meant to say what `marked` says. Each shape below is run through
+ * all three: the two readers line by line, and the CLI parser for the steps it
+ * actually produced. A `marked` upgrade that changes an answer fails here.
+ *
+ * Bullets are left out on purpose: the CLI runs a bullet list under
+ * `## Steps` as steps of its own, which no line scanner does — a separate gap
+ * from this one.
+ */
+const SHAPES: Record<string, string[]> = {
+  'two spaces in, then the margin': ['  1. A', '  2. B', '3. C', '4. D'],
+  'one space in': [' 1. A', ' 2. B'],
+  'three spaces in at the start': ['   1. A', '   2. B', '3. C'],
+  'three spaces under `1. `: nested': ['1. A', '   1. a1', '   2. a2', '2. B'],
+  'two spaces under `1. `: a sibling': ['1. A', '  1. a1', '  2. a2', '2. B'],
+  'three spaces under `10. `: a sibling': ['10. A', '   11. B', '12. C'],
+  'two spaces after the dot': ['1.  A', '   2. B', '3. C'],
+  'deeper item, then back out': ['  1. A', '     1. sub', '  2. B'],
+  'nested after a blank line': ['1. A', '', '   2. B', '3. C'],
+  'a tab at the top level': ['\t1. A', '\t2. B'],
+  'a tab under an item': ['1. A', '\t2. B', '3. C'],
+  'four spaces at the top level': ['    1. A', '    2. B'],
+  'prose after a blank closes the list': ['1. A', '', 'Prose here.', '', '   1. B', '   2. C'],
+  'prose directly below continues the item': ['1. A', 'lazy', '  2. B'],
+  'prose before an indented list': ['Intro', '  1. A', '  2. B'],
+  'a thematic break closes the list': ['1. A', '', '***', '   1. B'],
+};
+
+describe('server step-line reader vs runner-core vs marked', () => {
+  for (const [name, body] of Object.entries(SHAPES)) {
+    it(name, () => {
+      const serverRead = createStepLineReader();
+      const coreRead = coreCreateStepLineReader();
+      expect(body.map((line) => serverRead(line))).toEqual(body.map((line) => coreRead(line)));
+
+      const text = ['# T', '', '## Steps', '', ...body, ''].join('\n');
+      const coreLines = coreExtractSteps(text).map((s: { line: number }) => s.line);
+      const parsed = parseTestContent(text, 'shape.md');
+      expect(parsed.steps).toHaveLength(coreLines.length);
+      expect(parsed.stepLines).toEqual(coreLines);
+    });
+  }
 });
