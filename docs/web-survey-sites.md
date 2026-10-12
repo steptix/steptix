@@ -74,7 +74,7 @@ EverShop, Gatling computer DB, testfire, vulnweb and QA Playground.
 
 | # | Site | URL | What it tests | Login |
 |---|------|-----|---------------|-------|
-| 39 | The Internet | https://the-internet.herokuapp.com/ | about 40 classic traps: auth, upload, download, frames, dynamic loading | given |
+| 39 | The Internet | https://the-internet.herokuapp.com/ | about 40 classic traps: auth, upload, download, frames, dynamic loading. **Test removed:** Chromium gets no page from it over HTTP/2 from our network (see survey/web/results/section-c-runs.md) | given |
 | 40 | Expand Testing practice | https://practice.expandtesting.com/ | successor to The Internet, more pages | |
 | 41 | DemoQA | https://demoqa.com/ | forms, widgets, interactions, Book Store | create (Book Store) |
 | 42 | UI Testing Playground | http://uitestingplayground.com/ | AJAX delays, hidden layers, shifting buttons, non-breaking spaces | |

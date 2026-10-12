@@ -12,7 +12,7 @@ other people.
 ```powershell
 cd <checkout>\survey\web
 Copy-Item .env.example .env   # then fill in the logins you created
-node ..\..\dist\index.js run tests\section-c\c39-the-internet.md
+node ..\..\dist\index.js run tests\section-c\c40-expand-testing.md
 ```
 
 Or open the folder in VS Code and run a file from Steptix.
