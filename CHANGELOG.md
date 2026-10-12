@@ -9,6 +9,49 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — an unattended `steptix run` no longer passes without testing, or waits forever, when it needs an answer
+
+`steptix run` asks at the terminal in four places: a parameter with no
+value, an `[input: …]` step, the AI's clarification question, and the
+failure REPL. None checked whether anyone could answer. With stdin not a
+terminal (CI, a script, a scheduled job), a parameter prompt ended the
+process with exit code 0 before any step ran, so a missing secret in CI
+looked like a passing test (#46). A clarification question or an
+`[input: …]` step mid-test waited forever, past the test's own `timeout:`
+(#47).
+
+- **No terminal, no question.** A parameter Steptix can't fill in — an unset
+  `$VAR`, an empty value, a `{{name}}` placeholder that points at itself —
+  fails the run with exit code 1 and names every one that is missing:
+  `Parameter "password" needs $TEST_PASSWORD, which is not set, and there is
+  no terminal to ask`. Like a data file that won't load, it stops the run
+  before the test starts. An AI clarification question fails its step with
+  the question as the error, as it already did on the server, and
+  `otherwise continue` still applies. An `[input: …]` step fails naming its
+  prompt, `[interactive]` is skipped, and the failure REPL doesn't open.
+- **Input that ends is an answer of its own.** On a terminal, Ctrl+D at a
+  prompt fails that prompt instead of leaving it waiting; at a REPL prompt it
+  leaves the REPL as `/exit` does. Ctrl+C at any prompt stops the run, as it
+  does anywhere else in it.
+- **`timeout:` is a deadline.** A step that blocks — a question nobody
+  answers, a model call that hangs, a guard or watch group that never
+  returns — ends at the test's timeout with `Test timeout after …ms at step
+  N`: a failed test, never a Stop. Time a person spends answering an
+  `[input: …]` step or working in `/repl` still doesn't count. The plain
+  answer to a clarification question counts, as it always did, and is now
+  cut off when the budget runs out. A `[tool: …]` call, the browser launch,
+  and code-behind that awaits something other than `step.*` still run to
+  their end before the timeout is noticed.
+- **No unfinished run exits 0.** If `steptix run` is about to exit before its
+  tests have finished, it exits 1 and says so.
+- **`--timeout` takes a whole number of milliseconds** and refuses anything
+  else with a usage error. An `execution.timeout` in a config file that isn't
+  a non-negative number means no timeout, as a non-numeric one did before.
+
+"A terminal" means stdin is a TTY. A pipe is not one, so
+`echo secret | steptix run …` no longer answers a prompt, and neither does
+typing into Git Bash's mintty without `winpty`.
+
 ### Fixed — a step that reads a list no longer passes on a read that went wrong
 
 "Read the name of every account [store as: accounts]" stored whatever the

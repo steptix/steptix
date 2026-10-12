@@ -91,6 +91,18 @@ vi.mock('../src/runner/step-executor.js', () => ({
   executeBranchedStep: (...args: unknown[]) => executeBranchedStepMock(...args),
 }));
 
+/**
+ * The runs in this file have a terminal. `steptix run` opens no REPL — the
+ * failure handoff or an `[interactive]` step's — when stdin is not one
+ * (steptix/steptix#47), and a test worker's stdin is not: without this the
+ * failure-REPL guard below would pass for the wrong reason, and the planned
+ * `[interactive]` step would be skipped rather than resumed.
+ */
+vi.mock('../src/utils/ask-user.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/utils/ask-user.js')>()),
+  canAskUser: () => true,
+}));
+
 const runInteractiveReplMock = vi.fn();
 vi.mock('../src/runner/interactive-repl.js', () => ({
   runInteractiveRepl: (...args: unknown[]) => runInteractiveReplMock(...args),

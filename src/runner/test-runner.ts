@@ -1,7 +1,5 @@
 import path from 'node:path';
-import readline from 'node:readline/promises';
 import { spawn } from 'node:child_process';
-import { stdin as input, stdout as output } from 'node:process';
 import type { Config } from '../config/types.js';
 import {
   describeViewportSource,
@@ -137,6 +135,8 @@ import {
   type RunStats,
 } from './run-stats.js';
 import type { StatsSuite } from '../stats/types.js';
+import { canAskUser, createLineReader, NoAnswerError } from '../utils/ask-user.js';
+import { TestDeadline, testTimeoutError, timedOutResult } from './test-deadline.js';
 
 /**
  * What the report says in place of a root-cause analysis when the run had no
@@ -242,17 +242,42 @@ function computeStepCaptures(
   return Object.keys(captures).length > 0 ? captures : undefined;
 }
 
-/** Prompt the user for a value during test execution */
-async function promptUserForInput(promptText: string): Promise<string> {
-  const rl = readline.createInterface({ input, output });
+/**
+ * Prompt the user for a value during test execution.
+ *
+ * Only when someone can answer: the caller checks `canAskUser()` first and
+ * fails the step when stdin is not a terminal (steptix/steptix#47). Even then
+ * the question settles — `NoAnswerError` when the input ends before an answer,
+ * an `AbortError` when `signal` aborts — rather than waiting forever.
+ */
+async function promptUserForInput(promptText: string, signal?: AbortSignal): Promise<string> {
+  const reader = createLineReader();
   try {
     console.log(`\n🔑 User input required:`);
-    const answer = await rl.question(`  ${promptText}: `);
+    const answer = await reader.question(`  ${promptText}: `, signal ? { signal } : {});
     return answer.trim();
   } finally {
-    rl.close();
+    reader.close();
   }
 }
+
+/**
+ * Why an `[input:]` step failed with nobody to ask (steptix/steptix#47).
+ * Names the prompt, because the step's own line is all a CI log has to say
+ * which value the run wanted.
+ */
+function inputUnavailableError(variable: string, promptText: string): string {
+  return (
+    `[input: ${variable}] needs a value typed at a terminal, but this run has ` +
+    `no terminal to ask (stdin is not a terminal): ${promptText}`
+  );
+}
+
+/** What an `[interactive]` step says when there is no terminal to open its
+ *  REPL at (steptix/steptix#47). */
+const INTERACTIVE_NO_TERMINAL =
+  'Skipped: [interactive] needs a terminal to open the REPL at, and this run ' +
+  'has none (stdin is not a terminal)';
 
 /**
  * Read `cdp:` and `cdpTab:` from a test's `## Config` block. Returns
@@ -782,16 +807,46 @@ export async function runTest(
   let report: TestReport | undefined;
   let overallStatus: 'passed' | 'failed' = 'failed';
 
+  /**
+   * The test's `timeout:`, as a deadline that aborts the step in flight
+   * (steptix/steptix#47; src/runner/test-deadline.ts). Its `signal` replaces
+   * `extras.signal` wherever a step ran under that — and reaches the hook
+   * steps and watch groups that ran under none — so a step that blocks ends
+   * at the timeout instead of never. It carries the caller's Stop too;
+   * `deadline.timedOut` is how a timeout is told from one.
+   *
+   * Started here, where the old `timeoutDeadline` was, so the `before` hooks
+   * are on the clock as they always were. Disposed after the loop — the
+   * `after` hooks have never been on it — and again in the `finally`, so the
+   * timer can neither fire after the run nor hold the process.
+   */
+  const deadline = new TestDeadline(testTimeout, extras.signal);
+  /**
+   * Who can answer a question at the terminal (steptix/steptix#47). Read once:
+   * a run's stdin does not become a terminal halfway through. With none, the
+   * AI's clarification question fails its step the way it does on the server,
+   * an `[input:]` step fails naming its prompt, and no REPL opens.
+   */
+  const canAsk = canAskUser();
+  /** The executor options every call site shares for asking a person. */
+  const askOpts: Pick<StepExecutorOptions, 'nonInteractive' | 'pauseTestTimeout'> = {
+    ...(!canAsk && { nonInteractive: true }),
+    pauseTestTimeout: (wait) => deadline.pause(wait),
+  };
+
   try {
     // (Base-URL navigation lives in the deferred launcher above — it needs a
     // page, and there is none until the first browser-surface step.)
 
     const stepResults: StepResult[] = [];
-    let timeoutDeadline = Date.now() + testTimeout;
     let bail = false;
     let humanIntervened = false;
     /**
      * The run ran out of time.
+     *
+     * Set by the check between steps and, since the timeout became a real
+     * deadline (steptix/steptix#47), wherever a step, hook, guard or watch
+     * group the deadline cut short comes back.
      *
      * An explicit flag, set where the timeout `break` is, replacing the old
      * inference `stepResults.length < stepLimit` — which was already loose
@@ -847,7 +902,9 @@ export async function runTest(
         ...(extras.captureStepContext !== undefined && {
           captureStepContext: extras.captureStepContext,
         }),
-        ...(extras.signal && { signal: extras.signal }),
+        // The caller's Stop and the test's timeout, in one signal. Read per
+        // step: a REPL's `/resume` renews one the timeout had aborted.
+        signal: deadline.signal,
       };
     };
 
@@ -1025,6 +1082,10 @@ export async function runTest(
       // `ensureLaunched` is idempotent, but saying it once is what makes the
       // launch point readable.
       if (instructions.length > 0) await ensureBrowser();
+      // On the test's clock (steptix/steptix#47), except `after`: it runs once
+      // the loop is over, past a timeout included, and was never on it — so it
+      // keeps exactly the signals it had, the caller's Stop on `[use ai]` alone.
+      const onClock = scope !== 'after';
       for (let idx = 0; idx < instructions.length; idx++) {
         const raw = instructions[idx]!;
         const toolCall = toolCalls[idx] ?? null;
@@ -1164,7 +1225,7 @@ export async function runTest(
             unmask: unmaskNames,
             aiClient,
             retries: config.execution.retries,
-            signal: extras.signal,
+            signal: onClock ? deadline.signal : extras.signal,
             failureTail: hookFailureTail,
             stats: { ...statsFor(), hook: scope, hookIndex: idx + 1 },
           });
@@ -1205,6 +1266,10 @@ export async function runTest(
             structureMemo,
             dismissalGuidance: hooks.hasAny,
             ...placeholderOpts,
+            // A hook step can be asked a question like any other, and with no
+            // terminal it must fail rather than wait (steptix/steptix#47).
+            ...askOpts,
+            ...(onClock && { signal: deadline.signal }),
             // A CONDITIONAL `fail` hook. The claim is what lets the model's `fail`
             // action through (decision 7); a `return`/`stop` claim never reaches
             // here, having been refused above.
@@ -1231,6 +1296,15 @@ export async function runTest(
           // parse (hooks are not shown to the model as authored text the way
           // steps are), its `{{…}}` on the line above.
           raw);
+        }
+
+        // The budget ran out under this hook line: a timeout, not the Stop the
+        // executor's `interrupted` row would report (steptix/steptix#47). The
+        // scope then fails as any failed hook does, which ends the run.
+        if (onClock && deadline.timedOut && result.status === 'failed') {
+          const where = scope === 'before' ? 'the before hook' : `step ${hookIndex} (${scope} hook)`;
+          result = timedOutResult(result, testTimeoutError(testTimeout, where));
+          timedOut = true;
         }
 
         result.hookScope = scope;
@@ -1356,8 +1430,11 @@ export async function runTest(
     for (let i = 0; i < stepLimit; i++) {
       if (bail) break;
 
-      if (Date.now() > timeoutDeadline) {
-        logger.error(`Test timeout after ${testTimeout}ms at step ${i + 1}`);
+      // The between-steps check, kept beside the deadline's timer: a step
+      // whose work ignores its signal (a `[tool:]` call, a browser launch)
+      // still runs to its end, and the budget it overran is caught here.
+      if (deadline.expired()) {
+        logger.error(testTimeoutError(testTimeout, `step ${i + 1}`));
         timedOut = true;
         break;
       }
@@ -1613,7 +1690,8 @@ export async function runTest(
             // block, so it needs the same env context an ordinary step's
             // prompt does (stories/placeholder-preserving-actions.md).
             ...(test.envData && { envData: test.envData }),
-            ...(extras.signal && { signal: extras.signal }),
+            ...askOpts,
+            signal: deadline.signal,
             // §5.6 — judged from a capture of the screen, with no DOM.
             ...(surfaceState.surface === 'computer' && surfaceState.adapter
               ? { computer: computerContextFor(config.desktop, surfaceState.adapter) }
@@ -1630,14 +1708,39 @@ export async function runTest(
           // and the browser left open.
           //
           // There is no other abort path in this function to copy: `runTest`
-          // threads `extras.signal` into the executor and the judge and
-          // handles neither, because `executeStep` swallows an abort and
-          // returns a failed result. So this is the CLI's first one, and it
-          // ends the run the way the SERVER ends an aborted one — the step in
-          // flight is recorded `interrupted`, the report is marked `aborted`,
-          // and the report is still written. Nothing today sets
-          // `extras.signal` (`steptix run` and `compile` both leave it unset), so
-          // this is the hook for whoever wires one rather than a live path.
+          // threads its signal into the executor and the judge and handles
+          // neither, because `executeStep` swallows an abort and returns a
+          // failed result. So this is the CLI's first one, and it ends the run
+          // the way the SERVER ends an aborted one — the step in flight is
+          // recorded `interrupted`, the report is marked `aborted`, and the
+          // report is still written. A compile's cancel is the caller that sets
+          // `extras.signal`; `steptix run` leaves it unset.
+          //
+          // The same abort is also how the test's timeout ends a judge that
+          // overran it (steptix/steptix#47) — and that is a timeout, a failed
+          // test, never the stopped state below.
+          if (deadline.timedOut) {
+            const error = testTimeoutError(testTimeout, `step ${i + 1}`);
+            logger.error(error);
+            timedOut = true;
+            stepResults.push(
+              tagOrigin(
+                {
+                  index: i + 1,
+                  instruction: redact(guardText, secretsNow()),
+                  status: 'failed',
+                  turns: [],
+                  durationMs: 0,
+                  retried: false,
+                  error,
+                  aiExplanation: error,
+                },
+                i,
+              ),
+            );
+            bail = true;
+            break;
+          }
           if (extras.signal?.aborted || (err as Error | undefined)?.name === 'AbortError') {
             logger.info(`Run stopped at step ${i + 1} while deciding "${redact(guardText, secretsNow())}"`);
             aborted = true;
@@ -1797,37 +1900,85 @@ export async function runTest(
         // without it a chain's untaken half sank to the bottom of the report.
         if (hasControls) flushSkips(i);
 
-        const branchedResults = await executeBranchedStep(group, test.steps.length, {
-          page: session.page,
-          config,
-          aiClient,
-          contextContent,
-          testName: test.title,
-          ...(baseUrl !== undefined && { baseUrl }),
-          conversationHistory: [...conversationHistory],
-          apiResponseStore,
-          csrfTokens,
-          uploadPaths,
-          resolvedParameters,
-          pageTracker: session.pageTracker,
-          browserTracker,
-          structureMemo,
-          dismissalGuidance: hooks.hasAny,
-          testSteps: test.steps,
-          ...placeholderOpts,
-          // A branched step's text was never interpolated on the way in —
-          // `identifyStepGroups` reads the raw list — so the matched step typed
-          // `{{email}}` into the page literally. The executor substitutes now,
-          // and needs the run's env context to resolve `${…}` as well
-          // (stories/placeholder-preserving-actions.md §Executor).
-          ...(test.envData && { envData: test.envData }),
-          // The group's steps arrive 0-based and are made 1-based below, after
-          // they recorded their lines — so they record under the number the
-          // report will show.
-          stats: { ...statsFor(), reportIndex: (index0) => index0 + 1 },
-        });
+        let branchedResults: StepResult[];
+        try {
+          branchedResults = await executeBranchedStep(group, test.steps.length, {
+            page: session.page,
+            config,
+            aiClient,
+            contextContent,
+            testName: test.title,
+            ...(baseUrl !== undefined && { baseUrl }),
+            conversationHistory: [...conversationHistory],
+            apiResponseStore,
+            csrfTokens,
+            uploadPaths,
+            resolvedParameters,
+            pageTracker: session.pageTracker,
+            browserTracker,
+            structureMemo,
+            dismissalGuidance: hooks.hasAny,
+            testSteps: test.steps,
+            ...placeholderOpts,
+            // A branched step's text was never interpolated on the way in —
+            // `identifyStepGroups` reads the raw list — so the matched step typed
+            // `{{email}}` into the page literally. The executor substitutes now,
+            // and needs the run's env context to resolve `${…}` as well
+            // (stories/placeholder-preserving-actions.md §Executor).
+            ...(test.envData && { envData: test.envData }),
+            // The matched branch is an ordinary step, question and all.
+            ...askOpts,
+            // On the test's clock like every other step (steptix/steptix#47).
+            // Until this the group ran under no signal at all, so a Stop
+            // reaches it here for the first time too.
+            signal: deadline.signal,
+            // The group's steps arrive 0-based and are made 1-based below, after
+            // they recorded their lines — so they record under the number the
+            // report will show.
+            stats: { ...statsFor(), reportIndex: (index0) => index0 + 1 },
+          });
+        } catch (err) {
+          // The watch loop THROWS an abort between polls, where a step returns
+          // an `interrupted` row — so this is the guard's catch above, for the
+          // same two causes: the budget ran out, or the caller stopped the run.
+          const timedOutHere = deadline.timedOut;
+          if (!timedOutHere && !extras.signal?.aborted && (err as Error | undefined)?.name !== 'AbortError') {
+            throw err;
+          }
+          const error = timedOutHere ? testTimeoutError(testTimeout, `step ${i + 1}`) : undefined;
+          if (error !== undefined) {
+            logger.error(error);
+            timedOut = true;
+          } else {
+            logger.info(`Run stopped at step ${i + 1}`);
+            aborted = true;
+          }
+          stepResults.push(
+            tagOrigin(
+              {
+                index: i + 1,
+                instruction: redact(test.steps[i] ?? '', secretsNow()),
+                status: 'failed',
+                turns: [],
+                durationMs: 0,
+                retried: false,
+                ...(error !== undefined
+                  ? { error, aiExplanation: error }
+                  : { interrupted: true, aiExplanation: 'Stopped by user (run aborted).' }),
+              },
+              i,
+            ),
+          );
+          bail = true;
+          break;
+        }
 
-        for (const result of branchedResults) {
+        for (let result of branchedResults) {
+          // A branch the budget ran out on — see `timedOutResult`.
+          if (deadline.timedOut && result.status === 'failed') {
+            result = timedOutResult(result, testTimeoutError(testTimeout, `step ${result.index + 1}`));
+            timedOut = true;
+          }
           // `executeBranchedStep` copies `StepGroup`'s own indices — positions
           // in `test.steps`, so **0-based** — onto every row it builds,
           // including the matched one it passes to `executeStep` as the step
@@ -2112,7 +2263,7 @@ export async function runTest(
           unmask: unmaskNames,
           aiClient,
           retries: config.execution.retries,
-          signal: extras.signal,
+          signal: deadline.signal,
           failureTail,
           stats: statsFor(),
         });
@@ -2125,30 +2276,99 @@ export async function runTest(
               `"${redact(maskRecordSecrets(aiOutcome.value ?? ''), secretsNow())}"`,
           );
         }
+      } else if (inputStep && !canAsk) {
+        // Nobody to ask (steptix/steptix#47): a pipe or a closed stdin never
+        // answers, and the open browser keeps the process alive while the
+        // question waits — forever. The step fails instead, naming the
+        // prompt, and the run ends as at any failed step. Masked: the prompt
+        // text was interpolated, and the error reaches the console as is.
+        const error = redact(inputUnavailableError(inputStep.variable, inputStep.promptText), secretsNow());
+        stepResult = {
+          index: i + 1,
+          instruction,
+          status: 'failed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          error,
+          aiExplanation: error,
+        };
       } else if (inputStep) {
         const stepStartTime = Date.now();
         // §5.9: a run waiting for a person holds no mouse lock.
         releaseLockForPause(`[input: ${inputStep.variable}]`);
-        const value = await promptUserForInput(inputStep.promptText);
-        // Through the one helper, like every other write into this map: an
-        // `[input: order]` after a `For each {{order}} …` is a rebind of that
-        // root, and left to a plain assignment it kept the last pass's
-        // `order.id` alive for every step that followed (§8.2).
-        bindVariable(resolvedParameters, inputStep.variable, value);
-        logger.info(`Stored user input as parameter "{{${inputStep.variable}}}"`);
+        try {
+          // Don't count user input time against the test timeout: the
+          // deadline stops while the person types. Its signal still carries
+          // the caller's Stop.
+          const value = await deadline.pause(() =>
+            promptUserForInput(inputStep.promptText, deadline.signal),
+          );
+          // Through the one helper, like every other write into this map: an
+          // `[input: order]` after a `For each {{order}} …` is a rebind of that
+          // root, and left to a plain assignment it kept the last pass's
+          // `order.id` alive for every step that followed (§8.2).
+          bindVariable(resolvedParameters, inputStep.variable, value);
+          logger.info(`Stored user input as parameter "{{${inputStep.variable}}}"`);
 
-        // Don't count user input time against the test timeout
-        const inputDuration = Date.now() - stepStartTime;
-        timeoutDeadline += inputDuration;
-
+          stepResult = {
+            index: i + 1,
+            instruction,
+            status: 'passed',
+            turns: [],
+            durationMs: Date.now() - stepStartTime,
+            retried: false,
+            aiExplanation: `User provided input for "${inputStep.variable}"`,
+          };
+        } catch (err) {
+          const durationMs = Date.now() - stepStartTime;
+          if (err instanceof NoAnswerError) {
+            // The terminal's input ended first (Ctrl+D, a closed pty): a
+            // failed step with the question in it, not a crash or a hang.
+            const error = redact(`[input: ${inputStep.variable}] ${err.message}`, secretsNow());
+            stepResult = {
+              index: i + 1,
+              instruction,
+              status: 'failed',
+              turns: [],
+              durationMs,
+              retried: false,
+              error,
+              aiExplanation: error,
+            };
+          } else if ((err as Error | undefined)?.name === 'AbortError') {
+            // The run's signal aborted while it asked — the executors' shape
+            // for that, so the tail below reads it as they do: a Stop, or a
+            // timeout that had already run out before the question.
+            stepResult = {
+              index: i + 1,
+              instruction,
+              status: 'failed',
+              turns: [],
+              durationMs,
+              retried: false,
+              interrupted: true,
+              error: 'Aborted by client',
+              aiExplanation: 'Step aborted by client (run stopped).',
+            };
+          } else {
+            throw err;
+          }
+        }
+      } else if (interactiveStep && !canAsk) {
+        // No terminal to open the REPL at (steptix/steptix#47). Skipped and
+        // the run carries on, like a `debugger;` statement with no debugger
+        // attached and like the server's unattended skip: the step asks for a
+        // person, and none is there. Not failed — nothing it would have done
+        // is missing from the run, the way an `[input:]` value would be.
         stepResult = {
           index: i + 1,
           instruction,
-          status: 'passed',
+          status: 'skipped',
           turns: [],
-          durationMs: inputDuration,
+          durationMs: 0,
           retried: false,
-          aiExplanation: `User provided input for "${inputStep.variable}"`,
+          aiExplanation: INTERACTIVE_NO_TERMINAL,
         };
       } else if (interactiveStep) {
         // Planned interactive step — hand off to the unified REPL.
@@ -2180,6 +2400,7 @@ export async function runTest(
             pageTracker: session.pageTracker,
             browserTracker,
             dismissalGuidance: hooks.hasAny,
+            ...askOpts,
             stats: statsFor(),
           },
           adHocResults,
@@ -2255,7 +2476,7 @@ export async function runTest(
             `[interactive] user resumed test at step ${decision.fromStepIndex}`,
           );
           // Refresh the timeout — debugging shouldn't be billed against the test.
-          timeoutDeadline = Date.now() + testTimeout;
+          deadline.restart();
           // Pre-decrement so the loop's `i++` lands on the chosen index.
           i = decision.fromStepIndex - 2;
           tokenTracker.resetStep();
@@ -2280,6 +2501,7 @@ export async function runTest(
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
           ...placeholderOpts,
+          ...askOpts,
           ...codeBehindOptionsFor(i),
           // This step's own tail, read at one seam over a step that has finally
           // failed (stories/step-failure-outcomes.md, decision 4).
@@ -2361,7 +2583,10 @@ export async function runTest(
             ...(test.envData && { envData: test.envData }),
             ...(flowControlClaim && { flowControlClaim }),
             ...(failureTail && { failureTail }),
-            ...(extras.signal && { signal: extras.signal }),
+            // This surface never asks — it fails a question fast on its own —
+            // but it takes the same options every step does.
+            ...askOpts,
+            signal: deadline.signal,
             computer: computerContextFor(config.desktop, surfaceState.adapter),
             stats: statsFor(),
           },
@@ -2386,6 +2611,10 @@ export async function runTest(
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
           ...placeholderOpts,
+          // With no terminal, the AI's question fails this step the way it
+          // does on the server, instead of waiting on stdin forever
+          // (steptix/steptix#47) — and through the step's own tail.
+          ...askOpts,
           ...codeBehindOptionsFor(i),
           // The conditional form only — the unconditional one never reaches
           // here. Present, this is what lets the model's `return` action end
@@ -2400,6 +2629,24 @@ export async function runTest(
           stats: statsFor(),
         },
         rawInstruction);
+      }
+
+      // The budget ran out while this step ran (steptix/steptix#47). The
+      // executors answer the abort as a Stop — `interrupted`, "Aborted by
+      // client" — and it is not one: it is a timeout, and the test fails.
+      // Not for `[interactive]`: its REPL runs between steps, off the clock's
+      // abort, and the check at the next step decides as it always has. Not
+      // for a `runnerControl` row either: the person's own `/exit` stands.
+      let stepTimedOut = false;
+      if (
+        deadline.timedOut &&
+        stepResult.status === 'failed' &&
+        !interactiveStep &&
+        !stepResult.runnerControl
+      ) {
+        stepResult = timedOutResult(stepResult, testTimeoutError(testTimeout, `step ${i + 1}`));
+        stepTimedOut = true;
+        timedOut = true;
       }
 
       // Tag the step with its originating skill (if any) so the report can
@@ -2493,7 +2740,7 @@ export async function runTest(
           conversationHistory.push(
             `[interactive] user resumed test at step ${stepResult.runnerControl.fromStepIndex} from clarification REPL`,
           );
-          timeoutDeadline = Date.now() + testTimeout;
+          deadline.restart();
           i = stepResult.runnerControl.fromStepIndex - 2;
           tokenTracker.resetStep();
           continue;
@@ -2511,6 +2758,11 @@ export async function runTest(
         logger.info(`Run stopped at step ${i + 1}`);
         aborted = true;
         bail = true;
+      } else if (stepTimedOut) {
+        // Out of time (steptix/steptix#47): the run ends here, as the check
+        // between steps ends it — no failure REPL, no `afterEach`.
+        logger.error(stepResult.error ?? testTimeoutError(testTimeout, `step ${i + 1}`));
+        bail = true;
       } else if (stepResult.status === 'failed' && stepResult.tolerated) {
         // `otherwise continue` (stories/step-failure-outcomes.md, decision 6). The
         // row stays a failure but nothing else happens: no `bail`, no failure REPL,
@@ -2521,10 +2773,15 @@ export async function runTest(
       } else if (stepResult.status === 'failed') {
         logger.error(`Step ${i + 1} FAILED: ${stepResult.error ?? 'unknown error'}`);
 
+        // A terminal on BOTH ends (steptix/steptix#47): stdout to show the
+        // REPL, and stdin to read it. With stdout a terminal and stdin closed,
+        // the REPL's first `> ` never got an answer — the same wait forever as
+        // the AI's question.
         const canEnterRepl =
           config.execution.interactiveOnFailure &&
           config.browser.headed &&
-          Boolean(process.stdout.isTTY);
+          Boolean(process.stdout.isTTY) &&
+          canAsk;
 
         if (canEnterRepl) {
           humanIntervened = true;
@@ -2543,6 +2800,7 @@ export async function runTest(
             pageTracker: session.pageTracker,
             browserTracker,
             dismissalGuidance: hooks.hasAny,
+            ...askOpts,
             stats: statsFor(),
           };
           const adHocResults: StepResult[] = [];
@@ -2579,7 +2837,7 @@ export async function runTest(
               `[interactive] user resumed test at step ${decision.fromStepIndex}`,
             );
             // Extend the test timeout so the user's debugging time isn't billed against it
-            timeoutDeadline = Date.now() + testTimeout;
+            deadline.restart();
             // Pre-decrement so the next `i++` lands on the chosen index
             i = decision.fromStepIndex - 2;
             tokenTracker.resetStep();
@@ -2592,7 +2850,7 @@ export async function runTest(
             conversationHistory.push(
               `[interactive] user continued past failed step ${i + 1}`,
             );
-            timeoutDeadline = Date.now() + testTimeout;
+            deadline.restart();
           } else {
             // /exit — abort the run.
             bail = true;
@@ -2600,6 +2858,9 @@ export async function runTest(
         } else {
           bail = true;
         }
+      } else if (stepResult.status === 'skipped') {
+        // An `[interactive]` step with no terminal to open at — not a pass.
+        logger.info(`Step ${i + 1} skipped — ${stepResult.aiExplanation ?? 'skipped'}`);
       } else {
         logger.success(`Step ${i + 1} passed`);
       }
@@ -2691,6 +2952,10 @@ export async function runTest(
       // so aim one short. A no-op everywhere else.
       if (hasControls) i = advanceAfter(i) - 1;
     }
+
+    // The steps are over, and with them the test's clock: the `after` hooks
+    // below have never been on it, and a timer left armed could fire in them.
+    deadline.dispose();
 
     // Anything the last decision skipped and nothing has moved past yet — an
     // `Otherwise` whose body was the end of the test, most often.
@@ -2921,6 +3186,11 @@ export async function runTest(
     // loop takes it again, as the server's does.
     releaseComputerLockAtRunEnd(surfaceState, computerLockId, extras.computerLock);
 
+    // The deadline's timer, on every way out — a throw included — so it never
+    // fires after the run or holds the process (steptix/steptix#47). Cannot
+    // throw, so it does not compete with the lock above for first place.
+    deadline.dispose();
+
     // Close all tracked browsers in reverse creation order. For the
     // single-browser path (no openBrowser ever called), this is just the
     // initial session — same teardown as before. CDP sessions are handled
@@ -3047,8 +3317,21 @@ export async function expandTestInstances(
       : instances.filter((i) => i.dataRowIndex === options.row! - 1);
   }
 
-  // Single instance
-  const resolvedParameters = await resolveParameters(test.parameters, undefined, true);
+  // Single instance — the one call here that asks at the terminal, and so the
+  // one that fails when nobody is there to answer (#46). It throws, like a data
+  // file that will not load above, and `runTests` lets it end the run: the
+  // test cannot start, and every other "cannot start" — a bad `cdp:`, a tools
+  // directory that will not load — is a fatal error rather than a failed
+  // report. Its message names the parameter but not the test, and in a glob
+  // nothing printed yet says which file was being resolved: `runTest`'s
+  // banner comes after this. So the file goes in front.
+  let resolvedParameters: Record<string, string>;
+  try {
+    resolvedParameters = await resolveParameters(test.parameters, undefined, true);
+  } catch (err) {
+    const where = test.filePath ? path.relative(process.cwd(), test.filePath) : `"${test.title}"`;
+    throw new Error(`${where}: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+  }
   return [{ test, resolvedParameters }];
 }
 

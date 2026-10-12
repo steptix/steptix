@@ -378,10 +378,14 @@ describe('a tolerated failure mid-run', () => {
   });
 
   it('does NOT enter the failure REPL — and an ordinary failure still does', async () => {
-    // The REPL needs a headed, TTY run with `interactiveOnFailure`. Both halves
-    // run under the same conditions, so the contrast is the assertion.
+    // The REPL needs a headed, TTY run with `interactiveOnFailure` — a
+    // terminal on stdin as well as stdout, since it has to read its answers
+    // (steptix/steptix#47). Both halves run under the same conditions, so the
+    // contrast is the assertion.
     const isTty = process.stdout.isTTY;
+    const stdinIsTty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
     Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
     try {
       const config: Config = {
         ...makeConfig({ interactiveOnFailure: true }),
@@ -397,6 +401,8 @@ describe('a tolerated failure mid-run', () => {
       expect(replMock).toHaveBeenCalledTimes(1);
     } finally {
       Object.defineProperty(process.stdout, 'isTTY', { value: isTty, configurable: true });
+      if (stdinIsTty) Object.defineProperty(process.stdin, 'isTTY', stdinIsTty);
+      else delete (process.stdin as { isTTY?: boolean }).isTTY;
     }
   });
 

@@ -9,6 +9,7 @@ import { setVerbose, logger } from '../../utils/logger.js';
 import type { RunSummary } from '../../report/types.js';
 import { countStepOrigins, formatTokenCount } from '../../report/generator.js';
 import { resolveEnvBundle } from '../../env/resolve-bundle.js';
+import { nonNegativeInt } from '../parse-args.js';
 
 export interface RunOptions {
   config?: string;
@@ -31,7 +32,11 @@ export function registerRunCommand(program: Command): void {
     .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
     .option('-t, --tag <tags>', 'Filter tests by tag (comma-separated, AND logic)')
     .option('--headless', 'Run browser in headless mode', false)
-    .option('--timeout <ms>', 'Test timeout in milliseconds', parseInt)
+    // `nonNegativeInt`, not `parseInt`: `--timeout abc` parsed to NaN, and
+    // since the timeout became a real deadline (steptix/steptix#47) a NaN
+    // budget must not reach the runner looking like a number. Refused here
+    // with commander's usage error and exit 1, as `serve --idle-timeout` is.
+    .option('--timeout <ms>', 'Test timeout in milliseconds', nonNegativeInt)
     .option('--verbose', 'Verbose console output', false)
     .option('--bail', 'Stop on first test failure', false)
     .option('--browser <engine>', 'Browser engine: chromium, firefox, webkit')
@@ -168,6 +173,7 @@ async function runCommand(
 
   // Run tests
   let summary: RunSummary;
+  const disarmUnfinishedRunGuard = guardUnfinishedRun();
   try {
     summary = await runTests(filteredTests, config, {
       ...(opts.bail !== undefined && { bail: opts.bail }),
@@ -177,6 +183,11 @@ async function runCommand(
   } catch (err) {
     logger.error(`Fatal error during test run: ${String(err)}`);
     process.exit(1);
+  } finally {
+    // Reached when `runTests` returns. On a throw, `process.exit(1)` above has
+    // already ended the process — and an explicit exit never emits
+    // `beforeExit`, so the guard cannot fire on that path either.
+    disarmUnfinishedRunGuard();
   }
 
   // Print summary
@@ -196,6 +207,58 @@ async function runCommand(
   }
 
   process.exit(exitCodeFor(summary, opts.failOnHealed === true));
+}
+
+/** What {@link guardUnfinishedRun} needs of `process` — a stand-in in a test. */
+export interface UnfinishedRunTarget {
+  exitCode?: number | string | null | undefined;
+  once(event: 'beforeExit', listener: () => void): unknown;
+  removeListener(event: 'beforeExit', listener: () => void): unknown;
+}
+
+/** What {@link guardUnfinishedRun} logs when it fires. */
+export const UNFINISHED_RUN_MESSAGE =
+  'The run ended before it finished: it was still waiting for something ' +
+  'that can no longer arrive (input at a prompt, say). Exiting with code 1 ' +
+  'so this is not read as a pass.';
+
+/**
+ * Make sure a run that never finished cannot exit 0 (#46). Returns the disarm,
+ * for when `runTests` returns.
+ *
+ * `runCommand` ends every run that finishes with an explicit `process.exit` —
+ * the summary's code, or 1 from the catch. Node emits `beforeExit` only when
+ * the event loop runs dry WITHOUT that call: nothing left to do while the
+ * promise `runTests` returned is still pending, so nothing can ever settle it.
+ * Node's exit code for running dry is 0, and CI reads 0 as a pass. That is
+ * how a parameter prompt on an ended stdin passed a pipeline that had run
+ * nothing.
+ *
+ * That prompt no longer waits, but it was one `await` among many between here
+ * and the summary, and any of them waiting on something that cannot come would
+ * do the same. This answers the whole class: whatever the cause, a run that
+ * ends without a result exits 1 and says so. It is no help with a hang — a
+ * wait the loop is still alive for never empties it — only with a silent exit.
+ *
+ * `once`, because the log line can wake the loop again — stderr writes are
+ * asynchronous for some kinds of stream on some platforms, and one keeps the
+ * loop alive until it flushes — and the loop running dry a second time must
+ * exit, not log again. An exit code
+ * something else already set is kept: only success is wrong here. A listener
+ * holds no handle, so the guard never keeps the process alive by itself.
+ */
+export function guardUnfinishedRun(
+  proc: UnfinishedRunTarget = process,
+  log: (message: string) => void = (message) => logger.error(message),
+): () => void {
+  const onBeforeExit = (): void => {
+    if (!proc.exitCode) proc.exitCode = 1;
+    log(UNFINISHED_RUN_MESSAGE);
+  };
+  proc.once('beforeExit', onBeforeExit);
+  return () => {
+    proc.removeListener('beforeExit', onBeforeExit);
+  };
 }
 
 /**

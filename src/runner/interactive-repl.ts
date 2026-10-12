@@ -1,5 +1,3 @@
-import readline from 'node:readline/promises';
-import { stdin as defaultInput, stdout as defaultOutput } from 'node:process';
 import type { Page } from 'playwright';
 import type { StepResult } from '../report/types.js';
 import type { StepExecutorOptions } from './step-executor.js';
@@ -7,6 +5,7 @@ import { executeStep } from './step-executor.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { logger } from '../utils/logger.js';
 import { adHocStats } from './run-stats.js';
+import { createLineReader, NoAnswerError } from '../utils/ask-user.js';
 
 /**
  * Decision returned to the test-runner when the REPL loop ends.
@@ -20,9 +19,14 @@ export type InteractiveDecision =
   | { kind: 'resume'; fromStepIndex: number }
   | { kind: 'exit' };
 
-/** Minimal line-reader interface so tests can script REPL input without stdio. */
+/**
+ * Minimal line-reader interface so tests can script REPL input without stdio.
+ * The same shape as `LineReader` (src/utils/ask-user.ts), so the default one
+ * is simply that: a question rejects with `NoAnswerError` once the input has
+ * ended, and with an `AbortError` when `signal` aborts.
+ */
 export interface InteractiveReader {
-  question(prompt: string): Promise<string>;
+  question(prompt: string, options?: { signal?: AbortSignal }): Promise<string>;
   close(): void;
 }
 
@@ -55,19 +59,20 @@ export interface InteractiveReplContext {
   executorOptions: StepExecutorOptions;
   /** Accumulator for StepResults produced inside the REPL (caller merges into the run). */
   adHocResults: StepResult[];
-  /** Optional custom reader (defaults to readline against stdin/stdout). */
+  /** Optional custom reader (defaults to a line reader on stdin/stdout). */
   reader?: InteractiveReader;
   /** Optional output sink (defaults to console.log). Used by tests to capture banner / messages. */
   write?: (line: string) => void;
 }
 
+/** A reader on stdin/stdout whose questions settle when the input ends
+ *  (steptix/steptix#47) — see `createLineReader`. */
 function defaultReader(): InteractiveReader {
-  const rl = readline.createInterface({ input: defaultInput, output: defaultOutput });
-  return {
-    question: (prompt: string) => rl.question(prompt),
-    close: () => rl.close(),
-  };
+  return createLineReader();
 }
+
+/** What the REPL says when its input ends, on its way out as `/exit`. */
+export const REPL_INPUT_ENDED = 'Input ended — leaving the REPL as /exit (abort the run).';
 
 const HELP_TEXT = [
   'Interactive REPL commands:',
@@ -153,6 +158,15 @@ function firstToken(line: string): string {
  * `/resume`, or `/exit`. Ad-hoc step results are pushed into
  * `ctx.adHocResults`; the caller is responsible for merging them
  * into the final report.
+ *
+ * End of input — Ctrl+D at the prompt, or a terminal that went away —
+ * leaves as `/exit` (steptix/steptix#47). That is what end of input means at
+ * every other REPL and debugger prompt (`node`, `python`, `pdb`, `gdb`), and
+ * it is the only choice that cannot run something nobody chose: `/continue`
+ * would carry the run past a failed step, and the next prompt it reached would
+ * meet the same closed input. It also matches the run with no REPL at all,
+ * which stops at a failed step. Before this, the question never settled and
+ * the run waited forever.
  */
 export async function runInteractiveRepl(ctx: InteractiveReplContext): Promise<InteractiveDecision> {
   const reader = ctx.reader ?? defaultReader();
@@ -278,6 +292,11 @@ export async function runInteractiveRepl(ctx: InteractiveReplContext): Promise<I
         write(`✗ ad-hoc step failed: ${result.error ?? 'unknown error'} — still in REPL.`);
       }
     }
+  } catch (err) {
+    // Every `reader.question` above, the resume menu's included.
+    if (!(err instanceof NoAnswerError)) throw err;
+    write(REPL_INPUT_ENDED);
+    return { kind: 'exit' };
   } finally {
     if (!ctx.reader) {
       reader.close();

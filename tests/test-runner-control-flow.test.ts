@@ -112,16 +112,18 @@ vi.mock('../src/report/history-appender.js', () => ({
 /**
  * The one step the CLI loop answers ITSELF: `[input: name]` reads a line from
  * the terminal and writes it into the live variable map. Scripted here so the
- * write can be exercised without a tty.
+ * write can be exercised without a tty — which now also means saying there is
+ * one: `steptix run` fails an `[input:]` step when stdin is not a terminal
+ * (steptix/steptix#47), and a test worker's stdin is not.
  */
 let inputAnswer = '';
-vi.mock('node:readline/promises', () => ({
-  default: {
-    createInterface: () => ({
-      question: async () => inputAnswer,
-      close: () => {},
-    }),
-  },
+vi.mock('../src/utils/ask-user.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/utils/ask-user.js')>()),
+  canAskUser: () => true,
+  createLineReader: () => ({
+    question: async () => inputAnswer,
+    close: () => {},
+  }),
 }));
 
 import { runTest } from '../src/runner/test-runner.js';
