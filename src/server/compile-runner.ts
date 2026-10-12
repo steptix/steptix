@@ -285,6 +285,8 @@ export class CodeBehindCompiler {
     return compileTest({
       test,
       config: bundle.config,
+      // The project's context only: `compileTest` adds the test's `## Context`
+      // to its prompts, and the runner below sends it with each run.
       contextContent: context.combined,
       aiClient,
       tokenTracker,
@@ -371,6 +373,11 @@ export class CodeBehindCompiler {
         ...(envName && { envName }),
         ...(bundle.envBundle && { env: bundle.envBundle.env }),
         captureStepContext: run.captureContext,
+        // The test's own `## Context`, as a Run sends it (§2.46): the session
+        // puts it after the project's context for every step's prompt. Read
+        // from the parsed file, like the steps above — this pipeline compiles
+        // what is on disk.
+        ...(test.context !== undefined && { testContext: test.context }),
         // Config belongs to a session's first request only. A caller's session
         // that already exists has one; a fresh one — compile's own, or the
         // caller's when they never ran — takes the test's.

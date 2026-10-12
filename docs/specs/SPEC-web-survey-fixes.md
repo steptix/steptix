@@ -941,6 +941,15 @@ in the test, and this is the place for it.
   `parseContext`, which `tests/test-context.test.ts` holds to the same answer
   as the full parser. The route copies the field explicitly and refuses one
   that is not a string.
+- A compile sees it as a run does, in the recording and in the code written
+  from it. VS Code compiles on the step route above, so its requests carry
+  `testContext` like any Run, and the live compiler's generation prompts read
+  the session's context. The boxed pipeline (`compileTest`,
+  `src/codebehind/compile.ts`) takes the project's context and adds the test's
+  for its generation and repair prompts. Its runners send it with each run:
+  `runTest` adds it for `steptix compile`, and the server's compile runner
+  (`POST /codebehind/compile`) puts `test.context` on its step request as
+  `testContext`, read from the file it compiles (issue #36).
 - `{{placeholders}}` in the section are not substituted.
 - Documented in `docs/test-writing-handbook.md` and
   `docs/ai-test-authoring-guide.md`.
