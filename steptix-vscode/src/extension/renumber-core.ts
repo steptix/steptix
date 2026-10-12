@@ -17,7 +17,7 @@
  * text, so fenced lines are made invisible to it — never rewritten, never
  * feeding the counter, and a fenced `###` never restarting it.
  */
-import { classifyLines, type LineKind } from 'steptix-runner-core';
+import { classifyLines, stepOrdinal, type LineKind } from 'steptix-runner-core';
 // The `.ts` extension (not the usual `.js`) is load-bearing: this module and
 // step-region-core are the vscode-free pair the `node --test` suite imports
 // directly, and node's type stripping resolves specifiers literally — it
@@ -28,18 +28,13 @@ import { isFenceDelimiter } from './step-region-core.ts';
 export interface RenumberEdit {
   /** 1-based line. */
   line: number;
-  /** Length of the leading digit run to replace. */
+  /** 0-based column the digit run starts at: 0 unless the step is indented. */
+  column: number;
+  /** Length of the digit run to replace. */
   digits: number;
   /** The ordinal to write. */
   ordinal: number;
 }
-
-/**
- * The leading digit run of a numbered item. `classifyLines` only calls a line
- * a step when it starts this way, so on a renumberable line the match is
- * total.
- */
-const LEADING_DIGITS_RE = /^(\d+)\./;
 
 /** Main flow and section bodies are numbered; nothing else is (spec §2). */
 function isRenumberable(kind: LineKind): boolean {
@@ -101,11 +96,13 @@ export function computeRenumberEdits(text: string, selectedLines: number[]): Ren
     }
     if (!isRenumberable(entry.kind)) continue;
 
-    const match = LEADING_DIGITS_RE.exec(lines[i] ?? '');
+    // runner-core's matcher, not a local `^(\d+)\.`: a step may be indented,
+    // and a column-0 regex would renumber the steps around it and skip it.
+    const ordinal0 = stepOrdinal(lines[i] ?? '');
     // Total by construction; the guard keeps this function total rather than
     // relying on a grammar that lives in another package.
-    if (!match) continue;
-    const written = match[1]!;
+    if (!ordinal0) continue;
+    const written = ordinal0.value;
 
     if (anyStepSelected && !selected.has(entry.line)) {
       // An ordinal beyond exact float range would poison every target below
@@ -121,7 +118,7 @@ export function computeRenumberEdits(text: string, selectedLines: number[]): Ren
     // Compared as text, not as a number, so `007.` is rewritten to `7.`
     // rather than read as already correct.
     if (written !== String(ordinal)) {
-      edits.push({ line: entry.line, digits: written.length, ordinal });
+      edits.push({ line: entry.line, column: ordinal0.start, digits: written.length, ordinal });
     }
   }
 
@@ -134,13 +131,15 @@ export function computeRenumberEdits(text: string, selectedLines: number[]): Ren
  * through the editor so the result is one undo step on the live buffer.
  *
  * Splits on '\n' alone so a CRLF file keeps the '\r' at the end of each
- * piece: an edit replaces only the leading digit run, exactly as the
+ * piece: an edit replaces only the ordinal's digit run, exactly as the
  * editor-side range does, and line endings ride through untouched.
  */
 export function renumberText(text: string, selectedLines: number[]): string {
   const lines = text.split('\n');
   for (const edit of computeRenumberEdits(text, selectedLines)) {
-    lines[edit.line - 1] = String(edit.ordinal) + (lines[edit.line - 1] ?? '').slice(edit.digits);
+    const line = lines[edit.line - 1] ?? '';
+    lines[edit.line - 1] =
+      line.slice(0, edit.column) + String(edit.ordinal) + line.slice(edit.column + edit.digits);
   }
   return lines.join('\n');
 }

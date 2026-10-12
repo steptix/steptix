@@ -1,10 +1,12 @@
 /**
  * Failure text for the webview panel.
  *
- * `describeStepFailure` MIRRORS runner-core's function of the same name. The
- * webview can't import runner-core directly because Vite's CJS interop drops
- * named exports through __exportStar (same reason `step-lines-inline.js`
- * exists), so the wording is duplicated here and pinned to the original by
+ * `describeStepFailure` MIRRORS runner-core's function of the same name. It
+ * was copied because importing runner-core broke the Vite build; that turned
+ * out to be the CommonJS transform not covering runner-core's linked `dist/`,
+ * fixed in vite.config.webview.js (steptix/steptix#49), so this could now be
+ * imported the way step-lines-inline.js imports its functions. Until then the
+ * wording is duplicated here and pinned to the original by
  * `tests/failure-text-copy-parity.test.js`. Change one, change both — a
  * divergence means the Output log and the run log describe the same event in
  * different words.

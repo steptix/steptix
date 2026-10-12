@@ -173,6 +173,28 @@ test('an indented numbered item is prose and stays put', () => {
   assert.equal(renumberText(before, []), after);
 });
 
+// steptix/steptix#49: an item indented by up to three spaces, and not nested in
+// the one above it, is a step. Renumbering has to reach it at its own column,
+// or it rewrites the steps around it and leaves it with a stale number.
+test('an indented top-level step is renumbered in place, its indent kept', () => {
+  const before = doc('## Steps', '  4. Open the site', '  9. Type "Ada"', '7. Sign out');
+  const after = doc('## Steps', '  1. Open the site', '  2. Type "Ada"', '3. Sign out');
+  assert.equal(renumberText(before, []), after);
+  assert.deepEqual(computeRenumberEdits(before, []), [
+    { line: 2, column: 2, digits: 1, ordinal: 1 },
+    { line: 3, column: 2, digits: 1, ordinal: 2 },
+    { line: 4, column: 0, digits: 1, ordinal: 3 },
+  ]);
+});
+
+test('an indented step continues the count like any other', () => {
+  // Selecting only the last line: the indented steps above feed the counter
+  // as written, which they could not if they were not steps.
+  const before = doc('## Steps', ' 1. One', '   2. Two', '9. Three');
+  const after = doc('## Steps', ' 1. One', '   2. Two', '3. Three');
+  assert.equal(renumberText(before, [4]), after);
+});
+
 test('a numbered list outside the ## Steps span is prose and stays put', () => {
   const before = doc(
     '## Steps',
@@ -364,9 +386,9 @@ test('disjoint selections are honoured as a set, not as a range', () => {
 test('a multi-digit ordinal shortens, and the edit reports the digits it replaces', () => {
   const before = doc('## Steps', '12. a', '12. b', '12. c');
   assert.deepEqual(computeRenumberEdits(before, []), [
-    { line: 2, digits: 2, ordinal: 1 },
-    { line: 3, digits: 2, ordinal: 2 },
-    { line: 4, digits: 2, ordinal: 3 },
+    { line: 2, column: 0, digits: 2, ordinal: 1 },
+    { line: 3, column: 0, digits: 2, ordinal: 2 },
+    { line: 4, column: 0, digits: 2, ordinal: 3 },
   ]);
   assert.equal(renumberText(before, []), doc('## Steps', '1. a', '2. b', '3. c'));
 });
@@ -377,15 +399,15 @@ test('an ordinal lengthens past 9 without disturbing the rest of the line', () =
     '1. a', '2. b', '3. c', '4. d', '5. e', '6. f', '7. g', '8. h', '9. i',
     '9. j',
   );
-  assert.deepEqual(computeRenumberEdits(before, []), [{ line: 11, digits: 1, ordinal: 10 }]);
+  assert.deepEqual(computeRenumberEdits(before, []), [{ line: 11, column: 0, digits: 1, ordinal: 10 }]);
   assert.equal(renumberText(before, []).split('\n')[10], '10. j');
 });
 
 test('a leading-zero ordinal is replaced wholesale with the decimal ordinal', () => {
   const before = doc('## Steps', '007. a', '02. b');
   assert.deepEqual(computeRenumberEdits(before, []), [
-    { line: 2, digits: 3, ordinal: 1 },
-    { line: 3, digits: 2, ordinal: 2 },
+    { line: 2, column: 0, digits: 3, ordinal: 1 },
+    { line: 3, column: 0, digits: 2, ordinal: 2 },
   ]);
   assert.equal(renumberText(before, []), doc('## Steps', '1. a', '2. b'));
 });
@@ -432,8 +454,8 @@ test('a file with no ## Steps heading yields no edits', () => {
 test('CRLF line endings survive, and the edits address the same lines', () => {
   const before = ['## Steps', '1. One', '5. Two', '', '### Login', '3. Go'].join('\r\n');
   assert.deepEqual(computeRenumberEdits(before, []), [
-    { line: 3, digits: 1, ordinal: 2 },
-    { line: 6, digits: 1, ordinal: 1 },
+    { line: 3, column: 0, digits: 1, ordinal: 2 },
+    { line: 6, column: 0, digits: 1, ordinal: 1 },
   ]);
   const after = ['## Steps', '1. One', '2. Two', '', '### Login', '1. Go'].join('\r\n');
   assert.equal(renumberText(before, []), after);

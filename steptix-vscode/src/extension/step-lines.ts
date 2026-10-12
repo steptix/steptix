@@ -1,23 +1,13 @@
 /**
- * Find the 1-based line numbers of every numbered step under a `## Steps`
- * heading. Mirrors the webview's step-lines-inline.js so the extension
- * doesn't depend on webview source — same regex rules, same scope.
+ * Step lines for the extension host, and the resume anchor's shift maths.
  *
- * A line is a step line iff:
- *   - it lives under a `## Steps` (or deeper) heading, before the next
- *     same-or-shallower heading
- *   - it matches `^\s*\d+\.\s+\S` (numbered list item with content)
- *   - it is not inside an ignored region — a depth->=4 heading with text
- *     makes every numbered item under it inert (sections contract §5 rule
- *     4a). Those lines look like steps and are not: nothing runs them, so
- *     nothing here may offer to. The classification comes from runner-core
- *     rather than a fourth copy of the grammar.
+ * Which lines are steps is runner-core's answer, re-exported here: the gutter,
+ * breakpoints and the panel used to read a looser copy of the grammar than the
+ * one a run sends, so an indented step showed in the editor and never ran
+ * (steptix/steptix#49). What stays in this file is host-only: the anchor maths
+ * below, free of any `vscode` dependency so it is unit-testable in isolation.
  */
-import { classifyLines } from 'steptix-runner-core';
-
-const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
-const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
-const STEP_LINE_RE = /^\s*\d+\.\s+\S/;
+export { extractStepLineIds, findStepsHeadingLine } from 'steptix-runner-core';
 
 /** One content change from a `TextDocumentChangeEvent`: the 0-based
  *  `startLine`/`endLine` of the replaced range, the range's 0-based
@@ -114,47 +104,4 @@ export function shiftAnchorForChanges(
   const candidates = typeof stepLines === 'function' ? stepLines(target) : stepLines;
   const next = candidates.find((sl) => sl >= target);
   return next === undefined ? null : next - 1;
-}
-
-export function extractStepLineIds(text: string): number[] {
-  const lines = text.split(/\r?\n/);
-  const span = findStepsSpan(lines);
-  if (!span) return [];
-  const kinds = classifyLines(text);
-  const out: number[] = [];
-  for (let i = span.start; i <= span.end; i++) {
-    if (!STEP_LINE_RE.test(lines[i] || '')) continue;
-    if (kinds[i]?.kind === 'inert-step') continue;
-    out.push(i + 1);
-  }
-  return out;
-}
-
-export function findStepsHeadingLine(text: string): number | null {
-  const lines = text.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    if (STEPS_HEADING_RE.test(lines[i] || '')) return i + 1;
-  }
-  return null;
-}
-
-function findStepsSpan(lines: string[]): { start: number; end: number } | null {
-  let headingIndex = -1;
-  let headingDepth = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const m = STEPS_HEADING_RE.exec(lines[i] || '');
-    if (m) {
-      headingIndex = i;
-      headingDepth = m[1]!.length;
-      break;
-    }
-  }
-  if (headingIndex < 0) return null;
-  for (let i = headingIndex + 1; i < lines.length; i++) {
-    const m = ANY_HEADING_RE.exec(lines[i] || '');
-    if (m && m[1]!.length <= headingDepth) {
-      return { start: headingIndex + 1, end: i - 1 };
-    }
-  }
-  return { start: headingIndex + 1, end: lines.length - 1 };
 }

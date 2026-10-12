@@ -43,11 +43,25 @@ test('classifyLines: numbered items outside Steps section are prose', () => {
   assert.equal(lines[3].kind, 'step');
 });
 
-test('classifyLines: indented numbered items are not steps', () => {
-  const text = ['## Steps', '1. Outer', '  1. Sub', '2. Outer two'].join('\n');
+test('classifyLines: a nested numbered item is not a step', () => {
+  // Three spaces reach the content column of `1. `, so this is a sub-item of
+  // Outer: the CLI folds it into Outer's text and nothing runs it alone.
+  const text = ['## Steps', '1. Outer', '   1. Sub', '2. Outer two'].join('\n');
   const lines = classifyLines(text);
   assert.equal(lines[1].kind, 'step');
   assert.equal(lines[2].kind, 'prose');
+  assert.equal(lines[3].kind, 'step');
+});
+
+test('classifyLines: an indented item that is not nested is a step', () => {
+  // Expectation changed with steptix/steptix#49. This row used `  1. Sub` (two
+  // spaces) as its nested example and expected prose — but two spaces fall
+  // short of `1. `'s content column, so Markdown makes it a sibling, and the
+  // CLI ran it as a step of its own while a VS Code run skipped it.
+  const text = ['## Steps', '1. Outer', '  1. Sub', '2. Outer two'].join('\n');
+  const lines = classifyLines(text);
+  assert.equal(lines[1].kind, 'step');
+  assert.equal(lines[2].kind, 'step');
   assert.equal(lines[3].kind, 'step');
 });
 

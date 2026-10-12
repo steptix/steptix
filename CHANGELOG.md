@@ -9,6 +9,36 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — an indented step runs, from VS Code and from the CLI, on the line you see it on
+
+A numbered step that started with a space or a tab, such as `  1. Click
+Save`, was treated three ways (#49). The editor marked it as a step and gave
+it a status cell. A Run from VS Code never sent it, so the run started at the
+first unindented step further down and the indented ones never happened. The
+CLI ran it but cited the wrong line, `0` for most of them, in its reports and
+errors. Pasting steps from a nested list is an easy way to get the indent.
+
+- **One rule, Markdown's.** A numbered item indented by up to three spaces is
+  a step, just as the CLI's Markdown parser has always read it. An item
+  indented far enough to sit inside the item above it (`   1.` under
+  `1. Fill the form`) is part of that step, not a step of its own. A tab, or
+  four spaces, at the top level is indented code. Steps at the left margin
+  are read exactly as before.
+- **The editor, a Run, the CLI and the Variables panel give the same
+  answer.** The VS Code extension used to carry its own copies of the rule,
+  in the extension and in the panel's webview. They now take it from
+  `steptix-runner-core`. The server keeps its mirror, held to the same answers
+  by a test that also asks the Markdown parser.
+- **Renumber Steps renumbers an indented step in place**, keeping its indent,
+  instead of rewriting the steps around it and skipping it. While recording,
+  an indented step after the new ones keeps its number; Renumber Steps fixes
+  it.
+- **A file whose frontmatter contains a `## Steps` line shows its steps.**
+  Before, its sections were found but none of their lines got a status cell,
+  a breakpoint or a Run button.
+- **An indented step under a `### Section` is a body step.** Before, a file
+  with one was refused by the CLI with a step/line mismatch.
+
 ### Fixed — an unattended `steptix run` no longer passes without testing, or waits forever, when it needs an answer
 
 `steptix run` asks at the terminal in four places: a parameter with no

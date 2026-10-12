@@ -1304,12 +1304,13 @@ export function registerCommands(
         return;
       }
       // Every replacement in ONE edit, so the whole renumber is one undo step.
-      // Each range runs from column 0 to the end of the digit run, leaving the
-      // `.`, the spacing and the instruction text byte-identical.
+      // Each range covers the digit run alone — from its column, since a step
+      // may be indented — leaving the indent, the `.`, the spacing and the
+      // instruction text byte-identical.
       const applied = await editor.edit((builder) => {
         for (const edit of edits) {
           builder.replace(
-            new vscode.Range(edit.line - 1, 0, edit.line - 1, edit.digits),
+            new vscode.Range(edit.line - 1, edit.column, edit.line - 1, edit.column + edit.digits),
             String(edit.ordinal),
           );
         }

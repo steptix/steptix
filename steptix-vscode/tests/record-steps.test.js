@@ -291,6 +291,14 @@ test('an empty section body is filled from the blank line under its heading', ()
   assert.equal(after, doc('## Steps', '1. Main', '', '### Login', '1. Type', '2. Submit', '', '### Other', '1. X'));
 });
 
+test('an indented step after the new ones is renumbered at its own column', () => {
+  // steptix/steptix#49: `  3. C` is a step, so it is renumbered — and the
+  // edit replaces its digits, not the two spaces in front of them.
+  const text = doc('## Steps', '  1. A', '  2. B', '  3. C');
+  const { after } = recordAt(text, '  1. A', ['New']);
+  assert.equal(after, doc('## Steps', '  1. A', '2. New', '  3. B', '  4. C'));
+});
+
 test('fenced numbered lines are neither renumbered nor counted', () => {
   const text = doc('## Steps', '1. A', '```', '2. literal', '```', '2. B');
   const { after } = recordAt(text, '1. A', ['New']);

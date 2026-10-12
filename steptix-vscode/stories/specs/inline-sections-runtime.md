@@ -142,16 +142,19 @@ explicit because their call sites pull in three directions:
   `out.*` alias markers only — there is no `[store as:]` row model today,
   and adding one is out of scope here.)
 
-Copy-parity caveat: the six parsers are not rule-identical today —
-runner-core's `STEP_LINE_RE` rejects indented numbered items
-(`/^\d+\.\s+\S/`) while all **five** copies (native host included) accept
-them (`/^\s*\d+\./`). Normalizing that is out of scope; the mirrored parity
-fixtures must avoid indented numbered items so the snapshot tests pin the
-*new* rules, not the pre-existing divergence. The duplication itself is
-tracked as
-[#49](https://github.com/steptix/steptix/issues/49)
-— if that consolidation lands first, this spec's "all copies in lockstep"
-work collapses to runner-core + the host anchor file + the server mirror.
+Copy-parity caveat, as written: the parsers were not rule-identical —
+runner-core's `STEP_LINE_RE` rejected indented numbered items
+(`/^\d+\.\s+\S/`) while the editor copies accepted them (`/^\s*\d+\./`) — so
+the parity fixtures avoided indented numbered items, to pin the *new* rules
+rather than the divergence.
+
+Resolved by [#49](https://github.com/steptix/steptix/issues/49): there is one
+rule, Markdown's (a top-level item up to three spaces in is a step, a nested
+one is not), in runner-core's `createStepLineReader`. The host and both
+webview modules import runner-core instead of copying it, so the "all copies
+in lockstep" work is runner-core + the server mirror. The shared fixtures
+now include indented and nested items (`classification-indented.md`,
+`classification-nested.md`).
 
 ## 4. Request payload, expansion, caching, validation
 
@@ -567,8 +570,8 @@ implementations.
   `###` → empty-name section-heading per §3); `extractSteps` excludes
   bodies; `extractSections` shape incl. the empty-name entry; no-`###`
   files produce today's output byte-for-byte (regression corpus =
-  existing fixtures; fixtures avoid indented numbered items per §3's
-  parity caveat).
+  existing fixtures; until #49 the fixtures avoided indented numbered items
+  per §3's parity caveat).
 - **Copy-parity:** the native host copy and both webview inline copies run
   the same fixture tables (mirrored snapshot tests), including the
   match-table rows.

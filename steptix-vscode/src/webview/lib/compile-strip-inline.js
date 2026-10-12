@@ -7,9 +7,7 @@
  *
  * `stripFractionInline` MIRRORS `stripFraction` in
  * `src/extension/compile-progress-core.ts`, which the toast's increment is
- * computed from. The webview can't import from the extension side (Vite's CJS
- * interop drops runner-core's named exports through __exportStar — the same
- * reason `step-lines-inline.js` and `failure-text-inline.js` exist), so the
+ * computed from. The webview does not import from the extension side, so the
  * rule is duplicated here and pinned to the original by
  * `tests/compile-strip-copy-parity.test.js`. Change one, change both: a
  * divergence means the panel's bar and the toast's bar disagree about how far

@@ -168,7 +168,7 @@ function hasInlineDataTable(body: string): boolean {
       continue;
     }
     if (!inSteps) continue;
-    if (/^\d+\.\s+\S/.test(raw)) return false; // first step, no table above it
+    if (/^ {0,3}\d+\.\s+\S/.test(raw)) return false; // first step, no table above it
     if (/^\s*\|/.test(raw)) return true;
   }
   return false;

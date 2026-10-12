@@ -121,9 +121,13 @@ describe('genuine divergences fail loudly for sectioned files', () => {
 
   it('throws when two divergences cancel out and the counts still match', () => {
     // The case a bare count check cannot see, and the worst one to miss.
-    // A fenced numbered line the raw scan counts (+1), plus a 3-space-indented
-    // item marked counts and the anchored STEP_LINE_RE does not (+1) — equal
-    // totals, completely different pairing.
+    // A fenced numbered line the raw scan counts (+1), plus a `2)` item marked
+    // counts and the line scanner does not (+1) — equal totals, completely
+    // different pairing.
+    //
+    // (This used a 3-space-indented `   2.` item as the second divergence until
+    // steptix/steptix#49 made the scanner read indented items as marked does.
+    // `1)` items are the divergence that remains.)
     //
     // Before the per-index check this parsed "successfully": rawSteps[1]
     // became "Login" (lifted out of the code fence) while steps[1] was the
@@ -134,7 +138,7 @@ describe('genuine divergences fail loudly for sectioned files', () => {
       '# T', '', '## Steps', '',
       '1. Open the app', '',
       '```', '1. Login', '```', '',
-      '   2. Delete the production database', '',
+      '2) Delete the production database', '',
       '### Login', '',
       '1. Type the username',
     ].join('\n');
@@ -188,11 +192,16 @@ describe('genuine divergences fail loudly for sectioned files', () => {
         '# T', '', '## Steps', '',
         '1. Open', '',
         '```', `1. ${section}`, '```', '',
-        `   2. ${authored}`, '',
+        // `2)`, not an indented `   2.`: since steptix/steptix#49 the scanner
+        // counts indented items too, which would turn this into a count
+        // mismatch and stop it reaching the per-index check under test.
+        `2) ${authored}`, '',
         `### ${section}`, '',
         '1. body',
       ].join('\n');
       expect(() => parseTestContent(md, '/t/drift.md')).toThrow(/Step\/line mismatch/);
+      // The per-index check, not the count check, is what refused it.
+      expect(() => parseTestContent(md, '/t/drift.md')).toThrow(/at step 2: the markdown parser read/);
     }
   });
 });

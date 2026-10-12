@@ -9,7 +9,11 @@
  *  - Only `1.` style is recognised. `1)` is intentionally not supported.
  *  - YAML frontmatter (delimited by `---` on the first non-blank line) is
  *    excluded from classification.
- *  - Indented numbered items (e.g. nested sub-lists) are not steps.
+ *  - A step is a TOP-LEVEL list item, by Markdown's rule — the same one the
+ *    CLI's markdown parser applies. Its marker may be indented by up to three
+ *    spaces (`  1. Click Save` is a step), but an item nested inside another
+ *    item's content is not a step, and neither is a line indented by a tab or
+ *    four spaces. See `createStepLineReader` and steptix/steptix#49.
  *
  * Inline sections
  * ---------------
@@ -25,8 +29,8 @@
  *    whose `scope` argument defaults to main-flow. `resolveRunSelection` is
  *    the only function allowed to *pick* the scope; see
  *    steptix-vscode/stories/specs/sections-run-and-resume.md §4.1.
- *  - main + body     — `extractStepLineIds`, which lives in the extension
- *    hosts and webviews, not here.
+ *  - main + body     — `extractStepLineIds`, what the editor paints, anchors
+ *    and filters by.
  */
 
 import { matchText, NO_HOOKS_MARKER } from './section-match.js';
@@ -68,7 +72,29 @@ export interface ClassifiedLine {
 
 const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
 const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
-const STEP_LINE_RE = /^\d+\.\s+\S/;
+/**
+ * A numbered item with text, its marker at most three spaces in: the shape of
+ * a step before nesting is considered. Spaces only — a tab is four columns,
+ * which is indented code at the top level and nested content below an item.
+ */
+const STEP_LINE_RE = /^ {0,3}\d+\.\s+\S/;
+/** Any list item marker, at any indent: what opens an item lines can nest in. */
+const LIST_ITEM_RE = /^([ \t]*)([-*+]|\d+[.)])([ \t]+|$)/;
+/** `---`, `* * *`, `___`: a thematic break, which ends every open list. */
+const THEMATIC_BREAK_RE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+/**
+ * An ATX heading of any depth, text or not, which ends every open list — and
+ * a line of seven or more bare hashes, which Markdown calls prose but this
+ * file calls a section heading (`HASHES_ONLY_RE`), so a body opens under it.
+ */
+const ATX_HEADING_RE = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|#{7,}[ \t]*$)/;
+/**
+ * A ```` ``` ```` / `~~~` fence delimiter, opening or closing — the same
+ * naive toggle as the extension's `isFenceDelimiter` (step-region-core.ts).
+ */
+const FENCE_RE = /^\s*(```|~~~)/;
+/** The column-0 step shape, the answer inside a fence (see the reader). */
+const LEGACY_STEP_LINE_RE = /^\d+\.\s+\S/;
 /**
  * A heading line made of nothing but hashes. `ANY_HEADING_RE` demands a
  * non-space after the hashes and so cannot see these at all — without the
@@ -91,6 +117,153 @@ export function isTestFile(text: string): boolean {
     if (STEPS_HEADING_RE.test(line)) return true;
   }
   return false;
+}
+
+/**
+ * Decides, line by line, which numbered lines of a `## Steps` span are steps.
+ * Feed it every line of the span in order, blank lines and headings included;
+ * it answers true for a step line.
+ *
+ * The rule is Markdown's, because the CLI takes its steps from a Markdown
+ * parser (`marked`) and this has to find the same ones:
+ *
+ *  - a step is a top-level ordered list item with text, `N. text`;
+ *  - its marker may be indented by up to three columns, so `  1. Click Save`
+ *    is a step — pasting steps from a nested list is how files get that;
+ *  - an item whose indent reaches the content column of an item above it is
+ *    nested inside that item, not a step of its own. `marked` folds it into
+ *    the parent step's text, so a nested sub-list stays one step;
+ *  - four columns or more at the top level (a tab counts as four) is indented
+ *    code, not a list item.
+ *
+ * Measured against `marked` for steptix/steptix#49; the cases are pinned in
+ * runner-core/tests/step-line-rule.test.js and, against the CLI parser itself,
+ * in tests/step-line-span-parity.test.ts.
+ *
+ * Items stay open across a blank line only for lines indented to their
+ * content; directly below an item any line is a lazy continuation of it.
+ * Headings and thematic breaks close everything, and a code fence closes the
+ * items it is shallower than, blank line or not — a fence cannot be a lazy
+ * continuation, so `   2. B` after one is a step again.
+ *
+ * Inside a fence nothing opens or closes, and a numbered line keeps the answer
+ * this file has always given there: a step at column 0, not one indented. That
+ * column-0 answer is a known divergence from `marked`, which sees code; the
+ * CLI refuses a sectioned file over it (classification-edge.md, line 20), and
+ * changing it is not part of the indentation rule.
+ *
+ * Mirrored in src/parser/line-grammar.ts, since the server does not import
+ * runner-core; the parity tests hold the two to the same answers.
+ */
+export function createStepLineReader(): (raw: string) => boolean {
+  /** Content columns of the open list items, outermost first. */
+  const open: number[] = [];
+  let afterBlank = false;
+  let inFence = false;
+  const closeShallowerThan = (indent: number): void => {
+    while (open.length > 0 && open[open.length - 1]! > indent) open.pop();
+  };
+
+  return (raw: string): boolean => {
+    if (raw.trim() === '') {
+      afterBlank = true;
+      return false;
+    }
+    const wasBlank = afterBlank;
+    afterBlank = false;
+
+    const indent = columnsOf(/^[ \t]*/.exec(raw)![0]);
+    if (FENCE_RE.test(raw)) {
+      if (!inFence) closeShallowerThan(indent);
+      inFence = !inFence;
+      return false;
+    }
+    if (inFence) return LEGACY_STEP_LINE_RE.test(raw);
+
+    if (ATX_HEADING_RE.test(raw) || THEMATIC_BREAK_RE.test(raw)) {
+      open.length = 0;
+      return false;
+    }
+
+    const item = LIST_ITEM_RE.exec(raw);
+    if (!item) {
+      // Below a blank line, a line indented less than an item's content ends
+      // that item. Directly below an item it continues the item's paragraph.
+      if (wasBlank) closeShallowerThan(indent);
+      return false;
+    }
+
+    closeShallowerThan(indent);
+    const nested = open.length > 0;
+    // Too deep to open a list at the top level: indented code.
+    if (!nested && indent > 3) return false;
+    open.push(contentColumn(item));
+    return !nested && STEP_LINE_RE.test(raw);
+  };
+}
+
+/** Width in columns, a tab advancing to the next multiple of four. */
+function columnsOf(text: string): number {
+  let col = 0;
+  for (const ch of text) col = ch === '\t' ? col + 4 - (col % 4) : col + 1;
+  return col;
+}
+
+/**
+ * The column a list item's content starts at: past the marker and the spaces
+ * after it. Five or more of those spaces (or none, the marker ending the line)
+ * put it one column past the marker, Markdown's rule for an item that opens
+ * with indented code or is empty.
+ */
+function contentColumn(item: RegExpExecArray): number {
+  const markerEnd = columnsOf(item[1]! + item[2]!);
+  const after = columnsOf(item[1]! + item[2]! + item[3]!) - markerEnd;
+  return after === 0 || after >= 5 ? markerEnd + 1 : markerEnd + after;
+}
+
+/**
+ * Where a step line's ordinal is: `start` is its 0-based column, `length` its
+ * digit count, `value` the digits as written. Null when the line does not
+ * start with one.
+ *
+ * Anything that rewrites step numbers has to use this rather than assume the
+ * digits start in column 0 — a step may be indented, and a rewrite that missed
+ * the indented ones would renumber some steps and not others.
+ */
+export function stepOrdinal(raw: string): { start: number; length: number; value: string } | null {
+  const m = /^( {0,3})(\d+)\./.exec(raw);
+  if (!m) return null;
+  return { start: m[1]!.length, length: m[2]!.length, value: m[2]! };
+}
+
+/**
+ * 1-based lines of every step the editor shows: the main flow AND section
+ * bodies, never an inert item. The gutter paints by these, breakpoints and the
+ * resume anchor attach to them, and the panel lists them — a body line is
+ * still a line the user sees and clicks (contract §5, consumer split), which
+ * is why this is not `extractSteps`.
+ *
+ * Derived from `classifyLines` so that what the editor marks as a step is
+ * exactly what a run sends. It used to be a looser copy in the extension, and
+ * an indented step showed in the gutter while a run skipped it
+ * (steptix/steptix#49).
+ */
+export function extractStepLineIds(text: string): number[] {
+  return classifyLines(text)
+    .filter((l) => l.kind === 'step' || l.kind === 'section-step')
+    .map((l) => l.line);
+}
+
+/**
+ * 1-based line of the Steps heading whose span the step lines come from, or
+ * null. Frontmatter is skipped exactly as `classifyLines` skips it, so the
+ * heading's decoration and the steps under it always name the same span.
+ */
+export function findStepsHeadingLine(text: string): number | null {
+  const lines = text.split(/\r?\n/);
+  const span = findStepsSection(lines, findFrontmatterEnd(lines) + 1);
+  // The span starts on the line after the heading: 0-based start = 1-based heading.
+  return span === null ? null : span.start;
 }
 
 /**
@@ -125,6 +298,8 @@ export function classifyLines(text: string): ClassifiedLine[] {
   // the items beneath it run, in the main flow or in whichever body was open.
   let inIgnoredRegion = false;
 
+  const readStepLine = createStepLineReader();
+
   for (let i = 0; i < lines.length; i++) {
     const lineNumber = i + 1;
     const raw = lines[i] ?? '';
@@ -134,12 +309,16 @@ export function classifyLines(text: string): ClassifiedLine[] {
       continue;
     }
 
+    const inSteps = stepsSpan !== null && i >= stepsSpan.start && i <= stepsSpan.end;
+    // Every line of the span is fed, blanks and headings included: whether a
+    // numbered line is nested depends on what came before it.
+    const isStepLine = inSteps && readStepLine(raw);
+
     if (raw.trim() === '') {
       out[i] = { line: lineNumber, kind: 'blank' };
       continue;
     }
 
-    const inSteps = stepsSpan !== null && i >= stepsSpan.start && i <= stepsSpan.end;
     const inSectionSpan = sectionsEnabled && inSteps;
 
     if (inSectionSpan && HASHES_ONLY_RE.test(raw)) {
@@ -164,7 +343,7 @@ export function classifyLines(text: string): ClassifiedLine[] {
       continue;
     }
 
-    if (inSteps && STEP_LINE_RE.test(raw)) {
+    if (isStepLine) {
       out[i] = {
         line: lineNumber,
         kind: inIgnoredRegion ? 'inert-step' : inSectionBody ? 'section-step' : 'step',
