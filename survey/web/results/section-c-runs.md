@@ -185,7 +185,7 @@ which are about compiled code-behind, had nothing to act on in either run.
 
 | # | Test | Result | Issue |
 |---|------|--------|-------|
-| 39 | The Internet | fail | Chromium's HTTP/2 connection to this host stalls from this network, while curl and Firefox load it; cause not found. Turning HTTP/2 off makes it pass but is not a fix |
+| 39 | The Internet | removed | Test removed 2026-10-13. Chromium's HTTP/2 connection to this host stalls from this network, while curl and Firefox load it; cause not found, and nothing in Steptix to fix. Turning HTTP/2 off made it pass but was not a fix. The rows above are kept as the record |
 | 40 | Expand Testing | pass | |
 | 41 | DemoQA | pass | Needs a Book Store account as `DEMOQA_USERNAME` and `DEMOQA_PASSWORD` in `survey/web/.env` (register at demoqa.com/register; its reCAPTCHA is the invisible v3 kind, with nothing to solve). Without one the run asks for the value and ends (steptix/steptix#46) |
 | 42 | UI Testing Playground | pass | Timing-sensitive: under a ten-test load the bar once stopped at 97% |
@@ -242,7 +242,8 @@ Fixed during the survey, with a spec section each: §2.1–§2.50. Raised as iss
    curl over HTTP/2 and Firefox do. §2.37 now says so instead of a bare
    timeout, but why it happens, and what the framework should do about it, is
    still open. A documented per-test and per-project HTTP/2 setting, which
-   the timeout message would name, is steptix/steptix#20.
+   the timeout message would name, is steptix/steptix#20. The c39 test was
+   removed on 2026-10-13, since its failure said nothing about Steptix.
 6. **Conditional steps leave no per-step record.** 71's If step and the step
    after it report `unknown` in the run result, so whether the cookie dialog
    was there, and what was done about it, is not visible outside the HTML
