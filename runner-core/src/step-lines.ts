@@ -89,6 +89,13 @@ const THEMATIC_BREAK_RE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
  */
 const ATX_HEADING_RE = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|#{7,}[ \t]*$)/;
 /**
+ * A ```` ``` ```` / `~~~` fence delimiter, opening or closing — the same
+ * naive toggle as the extension's `isFenceDelimiter` (step-region-core.ts).
+ */
+const FENCE_RE = /^\s*(```|~~~)/;
+/** The column-0 step shape, the answer inside a fence (see the reader). */
+const LEGACY_STEP_LINE_RE = /^\d+\.\s+\S/;
+/**
  * A heading line made of nothing but hashes. `ANY_HEADING_RE` demands a
  * non-space after the hashes and so cannot see these at all — without the
  * dedicated rule a bare `###` would classify as prose, and Steptix would
@@ -135,8 +142,15 @@ export function isTestFile(text: string): boolean {
  *
  * Items stay open across a blank line only for lines indented to their
  * content; directly below an item any line is a lazy continuation of it.
- * Headings and thematic breaks close everything. Fenced code is not tracked,
- * as everywhere else in this file.
+ * Headings and thematic breaks close everything, and a code fence closes the
+ * items it is shallower than, blank line or not — a fence cannot be a lazy
+ * continuation, so `   2. B` after one is a step again.
+ *
+ * Inside a fence nothing opens or closes, and a numbered line keeps the answer
+ * this file has always given there: a step at column 0, not one indented. That
+ * column-0 answer is a known divergence from `marked`, which sees code; the
+ * CLI refuses a sectioned file over it (classification-edge.md, line 20), and
+ * changing it is not part of the indentation rule.
  *
  * Mirrored in src/parser/line-grammar.ts, since the server does not import
  * runner-core; the parity tests hold the two to the same answers.
@@ -145,6 +159,7 @@ export function createStepLineReader(): (raw: string) => boolean {
   /** Content columns of the open list items, outermost first. */
   const open: number[] = [];
   let afterBlank = false;
+  let inFence = false;
   const closeShallowerThan = (indent: number): void => {
     while (open.length > 0 && open[open.length - 1]! > indent) open.pop();
   };
@@ -157,12 +172,19 @@ export function createStepLineReader(): (raw: string) => boolean {
     const wasBlank = afterBlank;
     afterBlank = false;
 
+    const indent = columnsOf(/^[ \t]*/.exec(raw)![0]);
+    if (FENCE_RE.test(raw)) {
+      if (!inFence) closeShallowerThan(indent);
+      inFence = !inFence;
+      return false;
+    }
+    if (inFence) return LEGACY_STEP_LINE_RE.test(raw);
+
     if (ATX_HEADING_RE.test(raw) || THEMATIC_BREAK_RE.test(raw)) {
       open.length = 0;
       return false;
     }
 
-    const indent = columnsOf(/^[ \t]*/.exec(raw)![0]);
     const item = LIST_ITEM_RE.exec(raw);
     if (!item) {
       // Below a blank line, a line indented less than an item's content ends
@@ -230,6 +252,18 @@ export function extractStepLineIds(text: string): number[] {
   return classifyLines(text)
     .filter((l) => l.kind === 'step' || l.kind === 'section-step')
     .map((l) => l.line);
+}
+
+/**
+ * 1-based line of the Steps heading whose span the step lines come from, or
+ * null. Frontmatter is skipped exactly as `classifyLines` skips it, so the
+ * heading's decoration and the steps under it always name the same span.
+ */
+export function findStepsHeadingLine(text: string): number | null {
+  const lines = text.split(/\r?\n/);
+  const span = findStepsSection(lines, findFrontmatterEnd(lines) + 1);
+  // The span starts on the line after the heading: 0-based start = 1-based heading.
+  return span === null ? null : span.start;
 }
 
 /**

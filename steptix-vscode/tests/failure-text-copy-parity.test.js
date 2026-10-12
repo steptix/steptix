@@ -3,9 +3,8 @@
  *
  * `describeStepFailure` exists twice — once in runner-core (host surfaces: the
  * run log, the compile fold, Test Explorer) and once mirrored in
- * `src/webview/lib/failure-text-inline.js`, because Vite's CJS interop drops
- * runner-core's named exports through __exportStar (same reason
- * `step-lines-inline.js` exists).
+ * `src/webview/lib/failure-text-inline.js`, copied when importing runner-core
+ * broke the Vite build (fixed for steptix/steptix#49; see that file).
  *
  * The whole point of consolidating the wording was that the surfaces had
  * drifted — "(code-behind) X" in one place, "Code-behind failed: X" in

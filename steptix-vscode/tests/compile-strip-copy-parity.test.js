@@ -6,9 +6,7 @@
  * `stripFraction` in `src/extension/compile-progress-core.ts` (which the
  * toast's increment is computed from) and the webview's mirror,
  * `stripFractionInline` in `src/webview/lib/compile-strip-inline.js`. The
- * webview cannot import the extension side (Vite's CJS interop drops named
- * exports through __exportStar — the same reason `failure-text-inline.js`
- * exists).
+ * webview does not import the extension side.
  *
  * A mirror that drifts is the failure this file exists to catch: the panel's
  * bar full while the toast's sits at half, or a bar in one place and none in

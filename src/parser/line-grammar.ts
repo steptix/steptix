@@ -37,6 +37,10 @@ const LIST_ITEM_RE = /^([ \t]*)([-*+]|\d+[.)])([ \t]+|$)/;
 const THEMATIC_BREAK_RE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 /** An ATX heading, text or not, or seven-plus bare hashes: ends every list. */
 const ATX_HEADING_RE = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|#{7,}[ \t]*$)/;
+/** A ```` ``` ```` / `~~~` fence delimiter, opening or closing. */
+const FENCE_RE = /^\s*(```|~~~)/;
+/** The column-0 step shape, the answer inside a fence (see the reader). */
+const LEGACY_STEP_LINE_RE = /^\d+\.\s+\S/;
 
 /**
  * Decides, line by line, which numbered lines of a `## Steps` span are steps.
@@ -47,7 +51,10 @@ const ATX_HEADING_RE = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|#{7,}[ \t]*$)/;
  * a top-level `N. text` item whose marker is indented by at most three
  * columns. An item indented to the content column of an item above it is
  * nested inside that item (marked folds it into the parent step's text), and
- * four columns at the top level — a tab is four — is indented code.
+ * four columns at the top level — a tab is four — is indented code. A code
+ * fence closes the items it is shallower than; inside one, a numbered line is
+ * a step only at column 0, as it always was here (the fenced-line divergence
+ * from `marked` that the sectioned-file check refuses).
  *
  * Mirror of runner-core's `createStepLineReader`; keep the two identical.
  */
@@ -55,6 +62,7 @@ export function createStepLineReader(): (raw: string) => boolean {
   /** Content columns of the open list items, outermost first. */
   const open: number[] = [];
   let afterBlank = false;
+  let inFence = false;
   const closeShallowerThan = (indent: number): void => {
     while (open.length > 0 && open[open.length - 1]! > indent) open.pop();
   };
@@ -67,12 +75,19 @@ export function createStepLineReader(): (raw: string) => boolean {
     const wasBlank = afterBlank;
     afterBlank = false;
 
+    const indent = columnsOf(/^[ \t]*/.exec(raw)![0]);
+    if (FENCE_RE.test(raw)) {
+      if (!inFence) closeShallowerThan(indent);
+      inFence = !inFence;
+      return false;
+    }
+    if (inFence) return LEGACY_STEP_LINE_RE.test(raw);
+
     if (ATX_HEADING_RE.test(raw) || THEMATIC_BREAK_RE.test(raw)) {
       open.length = 0;
       return false;
     }
 
-    const indent = columnsOf(/^[ \t]*/.exec(raw)![0]);
     const item = LIST_ITEM_RE.exec(raw);
     if (!item) {
       // Below a blank line, a line indented less than an item's content ends

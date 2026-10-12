@@ -7,11 +7,7 @@
  * (steptix/steptix#49). What stays in this file is host-only: the anchor maths
  * below, free of any `vscode` dependency so it is unit-testable in isolation.
  */
-import { classifyLines } from 'steptix-runner-core';
-
-export { extractStepLineIds } from 'steptix-runner-core';
-
-const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
+export { extractStepLineIds, findStepsHeadingLine } from 'steptix-runner-core';
 
 /** One content change from a `TextDocumentChangeEvent`: the 0-based
  *  `startLine`/`endLine` of the replaced range, the range's 0-based
@@ -108,19 +104,4 @@ export function shiftAnchorForChanges(
   const candidates = typeof stepLines === 'function' ? stepLines(target) : stepLines;
   const next = candidates.find((sl) => sl >= target);
   return next === undefined ? null : next - 1;
-}
-
-/**
- * 1-based line of the first Steps heading, or null. Frontmatter is skipped, as
- * runner-core skips it when it finds the span the step lines come from — so
- * the heading's decoration and the steps below it name the same span.
- */
-export function findStepsHeadingLine(text: string): number | null {
-  const lines = text.split(/\r?\n/);
-  const kinds = classifyLines(text);
-  for (let i = 0; i < lines.length; i++) {
-    if (kinds[i]?.kind === 'frontmatter') continue;
-    if (STEPS_HEADING_RE.test(lines[i] || '')) return i + 1;
-  }
-  return null;
 }

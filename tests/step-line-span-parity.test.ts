@@ -224,6 +224,8 @@ const SHAPES: Record<string, string[]> = {
   'prose directly below continues the item': ['1. A', 'lazy', '  2. B'],
   'prose before an indented list': ['Intro', '  1. A', '  2. B'],
   'a thematic break closes the list': ['1. A', '', '***', '   1. B'],
+  'a fence directly under a step closes the list': ['1. A', '```', 'x', '```', '   2. B'],
+  'a fence inside an item keeps it open': ['1. A', '   ```', '   x', '   ```', '   2. B', '2. C'],
 };
 
 describe('server step-line reader vs runner-core vs marked', () => {

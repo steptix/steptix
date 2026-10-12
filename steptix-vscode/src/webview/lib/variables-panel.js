@@ -70,7 +70,7 @@ const STEP_PREFIX_RE = /^\s*\d+\.\s+(?:\[no-hooks\]\s*)?/i;
 /**
  * `[use ai] <step>` (stories/use-ai-step.md) and the names such a step can
  * pin — the runtime grammar's (`parseUseAiStep`, runner-core/src/use-step.ts),
- * copied because the webview cannot import runner-core (see
+ * copied when the webview could not import runner-core (see
  * `parseParametersInline` below). A row is seeded only for a step that names
  * exactly one value: with none, the model names it at run time and the row
  * arrives with the `capture` event; with two, the runtime refuses the line.
@@ -232,9 +232,12 @@ export function collectVariables(text, parameterValues, runtimeValues, runtimeSo
 }
 
 /**
- * Tiny inline copy of runner-core's `parseParameters`. The webview can't
- * directly import runner-core (CJS interop quirks with Vite's named-export
- * tracking), so this pulls just enough to surface declared variables.
+ * Tiny inline copy of runner-core's `parseParameters`, written when importing
+ * runner-core broke the Vite build. That was the CommonJS transform not
+ * covering runner-core's linked `dist/`, fixed in vite.config.webview.js
+ * (steptix/steptix#49) — the step-line import at the top of this file is the
+ * pattern — so this copy could now go too. It pulls just enough to surface
+ * declared variables.
  * Returns a {name → declared-value} map; values keep their `$VAR`
  * placeholders since the webview doesn't have access to .env.
  */

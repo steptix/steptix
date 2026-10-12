@@ -57,9 +57,9 @@ import {
   stepsSoFarRowsInline,
 } from "./lib/recording-panel.js";
 
-// Inline narrowing helper. The webview can't import named exports from
-// runner-core directly because Vite's CJS interop drops names through
-// __exportStar — same workaround as variables-panel.js / step-lines-inline.js.
+// Inline narrowing helper, copied when the webview could not import
+// runner-core. It can now (vite.config.webview.js, steptix/steptix#49 — see
+// lib/step-lines-inline.js); this copy predates that.
 const HOST_MSG_TYPES = new Set([
   "activeFile",
   "runEvent",

@@ -15,6 +15,7 @@ import {
   createStepLineReader,
   extractStepLineIds,
   extractSteps,
+  findStepsHeadingLine,
   stepOrdinal,
 } from '../dist/step-lines.js';
 
@@ -42,6 +43,13 @@ const CASES = [
   ['prose before an indented list', ['Intro', '  1. A', '  2. B'], [3, 4]],
   ['a bullet opens an item the next line can nest in', ['- X', '  1. A', '  2. B'], []],
   ['a thematic break closes the list', ['1. A', '', '***', '   1. B'], [2, 5]],
+  // A fence cannot be a lazy continuation, so it ends the item even with no
+  // blank line above it (code review of #49).
+  ['a fence directly under a step closes the list', ['1. A', '```', 'x', '```', '   2. B'], [2, 6]],
+  ['a fence inside an item keeps it open', ['1. A', '   ```', '   x', '   ```', '   2. B', '2. C'], [2, 7]],
+  // Inside a fence a numbered line keeps the old answer: column 0 only. The
+  // column-0 case is the known divergence the CLI's sectioned check refuses.
+  ['numbered lines inside a fence', ['```', '1. col0', '  2. indented', '```'], [3]],
 ];
 
 for (const [name, body, expected] of CASES) {
@@ -97,6 +105,13 @@ test('extractStepLineIds: main flow and bodies, indented or not, never inert or 
 test('extractStepLineIds: frontmatter is skipped', () => {
   const text = ['---', '## Steps', '---', '', '## Steps', '1. One'].join('\n');
   assert.deepEqual(extractStepLineIds(text), [6]);
+});
+
+test('findStepsHeadingLine: the heading of the span the steps come from', () => {
+  assert.equal(findStepsHeadingLine(['# T', '', '## Steps', '1. A'].join('\n')), 3);
+  // A `## Steps` line inside frontmatter is YAML, not the heading.
+  assert.equal(findStepsHeadingLine(['---', '## Steps', '---', '', '## Steps', '1. A'].join('\n')), 5);
+  assert.equal(findStepsHeadingLine(['# T', 'No steps here.'].join('\n')), null);
 });
 
 test('stepOrdinal: where the digits are, indented or not', () => {
