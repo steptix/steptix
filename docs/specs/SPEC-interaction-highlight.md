@@ -1,6 +1,6 @@
 # Interaction highlight: show which element each action touched
 
-**Status:** Proposed. Feasibility study and spec; nothing here is implemented yet.
+**Status:** Accepted 2026-10-14, with the decisions in §13. Nothing here is implemented yet.
 **Date:** 2026-10-13
 **Audience:** the person deciding whether to build it, then the implementation agent
 **Depends on:** `executeAction` (src/browser/actions.ts), the DOM capture
@@ -472,10 +472,10 @@ another platform-specific mechanism.
    be inside `screen.grab()` for the first computer turn (`desktop.settleMs`
    is 300 ms, src/config/defaults.ts:46-51). This is the same `hiddenFor`
    machinery. Without `restore`, the rings are gone for good.
-2. **Optional follow-up, not proposed for now:** mark the click point on a
-   computer-mode **report** screenshot after the fact, with jimp (already a
-   dependency). That needs no window, no capture interplay and no platform
-   code. Open question 6.
+2. **Considered and declined (§13, decision 6):** marking the click point on
+   a computer-mode **report** screenshot after the fact, with jimp (already a
+   dependency). It would need no window, no capture interplay and no platform
+   code, so it stays cheap to add later if wanted.
 
 ---
 
@@ -539,7 +539,7 @@ watch-the-run settings:
   src/cli/commands/run.ts:32-53 and `applyCliOverrides` (loader.ts:597). It
   sets `enabled` and keeps the project's other fields. Useful for "show me
   this one run".
-- **Per-run toggle for the server, MCP and VS Code: phase 3, open question 4.**
+- **Per-run toggle for the server, MCP and VS Code: phase 3 (§13, decision 4).**
   It would be a `highlight: 'default' | 'on' | 'off'` key in
   `RUN_SETTING_KEYS` (run-settings.ts:36), resolved in `resolveRunSettings`
   with a source in `EffectiveSettings`. It also needs MCP's flat args and
@@ -819,25 +819,26 @@ No new report UI is proposed beyond the screenshots themselves.
 
 ---
 
-## 13. Open questions for the user
+## 13. Decisions
 
-1. **Default off?** Recommended: off.
-2. **Rings in report screenshots by default?** Recommended: yes, with
-   `inScreenshots: false` to opt out. The model's screenshots never show them
-   either way.
-3. **Compiled code-behind and fixture tools:** is best-effort coverage through
-   a page wrapper (phase 3) worth it? Or is "AI steps, `step.read`/`count` and
-   the login broker" enough? Without phase 3, a compiled step's click shows no
-   ring.
-4. **A per-run toggle** beyond the CLI flag: a `highlight` run setting for the
-   Sessions API, MCP and a VS Code setting. Wanted, or is the config file plus
-   `--highlight` enough?
-5. **Two kinds, or more?** Blue for act and violet for read is proposed. A
-   third hue for typing (as distinct from clicking) is possible, but it
-   dilutes the act/read split.
-6. **Computer mode:** drawing is out of scope (§6). Do you want the follow-up
-   that marks click points on computer-mode report screenshots?
-7. **Cap for reads of many elements:** 20 rings. Should it be configurable?
+Decided by the user on 2026-10-14, after review of this spec.
+
+1. **Off by default.** `browser.highlight` defaults to `false` (§7.1).
+2. **Rings show in report screenshots and video by default.**
+   `inScreenshots: false` opts out. Screenshots that go to a model never show
+   them, whatever the setting (§4.2).
+3. **Compiled code-behind and fixture tools are covered** in phase 3, by the
+   best-effort page wrapper with the escape routes listed in §2.3.
+4. **There is a per-run toggle** in phase 3: a `highlight` run setting
+   (`'default' | 'on' | 'off'`) across the Sessions API, MCP (`run_steps`,
+   `run_test_file`, `get_run_settings`) and a VS Code setting (§7.2). It is in
+   addition to the config file and the `--highlight` CLI flag.
+5. **Two kinds:** blue for act, violet for read (§8). Typing gets no hue of
+   its own.
+6. **Computer mode:** no drawing (§6), and no after-the-fact click markers on
+   its report screenshots.
+7. **Reads of many elements ring at most 20,** a fixed cap that is not
+   configurable (§5.3).
 
 ---
 
@@ -847,7 +848,7 @@ No new report UI is proposed beyond the screenshots themselves.
 | --- | --- | --- |
 | 1 | `browser.highlight` type, validation, schema, docs, CLI flag; `resolveRunSettings` re-source; src/browser/highlight.ts (`resolveHighlight`, the sink, `hiddenFor`); scripts/highlight.js; marks in click (with the stand-in), type, select, hover, read, read every, count; the capture-dom.js skip; hiding for the model's pre-turn capture and diagnosis; unit tests 1–7; extension patch bump for the schema. **Frames, open shadow DOM, CDP browsers and all three engines come with this phase** (a Locator-based draw needs nothing per frame, measured in §15). | 3–4 days |
 | 2 | Remaining handlers (drag both ends, upload, dismiss, keyboard's focused element, readTable); `step.read`/`step.count` via `StepApiRuntime`; login broker; `inScreenshots`; recorder crops; hide on entering `[use computer]`; report `highlighted`; live test; measuring step-time cost on SecureBank. | 2–3 days |
-| 3 (if wanted) | Code-behind and tool page wrapper with its `instanceof`/argument-forwarding tests; the `highlight` run setting across the Sessions API, MCP, `get_run_settings` and a VS Code setting (runner-core and steptix-vscode change, so a version bump); optionally computer-mode click markers on report screenshots. | 3–4 days |
+| 3 | Code-behind and tool page wrapper with its `instanceof`/argument-forwarding tests; the `highlight` run setting across the Sessions API, MCP, `get_run_settings` and a VS Code setting (runner-core and steptix-vscode change, so a version bump). | 3–4 days |
 
 ---
 
