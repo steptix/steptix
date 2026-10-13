@@ -65,6 +65,9 @@ import { EnvSelector } from './env-selector.js';
 import { resolveProjectDirs } from './steptix-config.js';
 import {
   buildSectionsPayload,
+  detachedBodyDrift,
+  readDetachedBodies,
+  type DetachedBodies,
   preflightSections,
   sectionedSkillRefusal,
   SectionNarrowingError,
@@ -710,6 +713,14 @@ export class RunController {
    *  and so the row loop can tell this failure from an ordinary one: a fact
    *  about the file refuses identically for every row after it. */
   private narrowingRefusal: string | null = null;
+
+  /** Why the last run stopped because the file changed under its selection —
+   *  a narrowed or detached body edited mid-run — or null. Already said in
+   *  the Output as "Run stopped: …"; a caller that would otherwise explain a
+   *  missing result some other way reads it here. */
+  get staleSelectionRefusal(): string | null {
+    return this.narrowingRefusal;
+  }
 
   /**
    * The section narrowings a PAUSED run parked, for its Continue to pick up.
@@ -2798,12 +2809,6 @@ export class RunController {
        */
       compile?: 'run' | 'steps';
       /**
-       * The `### Section` the compiled steps were authored in, when they came
-       * from a body. Their ENTRIES bind under it; they still execute detached
-       * at the root frame, exactly as Run Step Here runs them.
-       */
-      compileScope?: { section: string };
-      /**
        * Run only these rows of the table under `## Steps`, by 1-based TABLE
        * position (stories/data-row-progress-and-selection.md §Running rows).
        *
@@ -2842,6 +2847,11 @@ export class RunController {
     this.compileToken += 1;
     this.compileResult = undefined;
     this.sawCompileProgress = false;
+    // …and the stale-selection refusal, which callers read after the run
+    // (`staleSelectionRefusal`). Reset here, at the start, so a run that
+    // returns before its row loop (a failed pre-flight, a Stop while the
+    // server starts) cannot answer with the previous run's.
+    this.narrowingRefusal = null;
     // A tail left up by a previous run — a stream that dropped before its
     // result — belongs to nothing now. The new run raises its own.
     this.endCompileTail();
@@ -3064,6 +3074,11 @@ export class RunController {
       selection.scope === 'section-body'
         ? ({ kind: 'section-body', callLine: null } as const)
         : undefined;
+    // …and where each of those body steps sits, read from the same `text` the
+    // steps were picked from, so an edit before a block is sent cannot move
+    // them (`readDetachedBodies`). Every block checks the buffer it sends
+    // against this reading (`detachedBodyDrift`).
+    const detachedRead = selection.scope === 'section-body' ? readDetachedBodies(text) : null;
 
     // Stale pause was already cleared at the top of runLines. The *new*
     // pause indicator (if any) is posted only when execution actually
@@ -3367,10 +3382,9 @@ export class RunController {
     // about this run's server, said once (`rowForIteration`).
     this.oldServerNumberingWarned = false;
     this.oldServerBodyStepsWarned = false;
-    // …and so is a stale narrowing, which is a fact about the FILE: it refuses
-    // identically for every block and every row after the first, so it is said
-    // once and it ends the run.
-    this.narrowingRefusal = null;
+    // A stale narrowing is a fact about the FILE too: it refuses identically
+    // for every block and every row after the first, so it is said once and it
+    // ends the run. Its field is reset where the run starts, above.
 
     const wholeFileRun =
       options.rerun === undefined &&
@@ -3738,11 +3752,6 @@ export class RunController {
             ...(rowCompile && (compileBlocksSent > 0 || options.isResume === true) && {
               compileContinues: true,
             }),
-            // Travels with `compile`, never without it — it names the section
-            // a Compile This Step's entries belong to, and a batch with no
-            // compile has nothing to scope. (`runStepBlock` narrows it again
-            // to `'steps'`; this gate is about the ROW, not the mode.)
-            ...(rowCompile && options.compileScope && { compileScope: options.compileScope }),
             // The rows that do NOT compile, saying which run they belong to —
             // and, because it is the same field, which KIND of run.
             //
@@ -3765,6 +3774,7 @@ export class RunController {
             }),
             ...(options.suppressServerBreakpoints && { suppressServerBreakpoints: true }),
             ...(sendRunStart && { runStart: true }),
+            ...(detachedRead && { detachedBody: detachedRead }),
           });
           compileBlocksSent++;
           pendingRerun = undefined;
@@ -5147,8 +5157,6 @@ export class RunController {
     /** This block is not the first of its logical run — continue the compile
      *  already open in the session rather than starting a new one. */
     compileContinues?: boolean;
-    /** Section attribution for the entries this block compiles. */
-    compileScope?: { section: string };
     /** This block belongs to a compile of this MODE but compiles nothing of
      *  its own — rows 2..N of a data-driven one. Keeps the two things the
      *  server decides per batch from the mode: the AI switch's compile
@@ -5166,8 +5174,13 @@ export class RunController {
      *  puts the session on the surface the file says this block's first step
      *  is on (SPEC-use-computer.md §4.5). */
     runStart?: boolean;
+    /** The block is `### Section` body steps run on their own, detached at
+     *  the root frame (stories/specs/sections-run-and-resume.md §4.2), and
+     *  this is the run's reading of their bodies. Each step is sent with its
+     *  section and place, so its code-behind binds under its section. */
+    detachedBody?: DetachedBodies;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, withinCompileRun, suppressServerBreakpoints, runStart } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, withinCompileRun, suppressServerBreakpoints, runStart, detachedBody } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -5209,6 +5222,19 @@ export class RunController {
       if (!(err instanceof SectionNarrowingError)) throw err;
       this.refuseStaleNarrowing(err.message, log, 'narrowed section body no longer fits');
       return false;
+    }
+    // …and so does a detached block's body positions, for the same reason:
+    // the server checks them against the `sections` just built, and a body
+    // edited since the run picked its steps no longer holds them.
+    let bodyPositions: Array<{ section: string; step: number }> | undefined;
+    if (detachedBody) {
+      const picks = stepLines.map((line) => detachedBody.at.get(line));
+      const moved = detachedBodyDrift(this.document.getText(), detachedBody, picks);
+      if (moved !== null) {
+        this.refuseStaleNarrowing(moved, log, 'detached section body changed mid-run');
+        return false;
+      }
+      bodyPositions = picks as Array<{ section: string; step: number }>;
     }
 
     // Resolve the project's skills directory so the server can expand
@@ -5270,11 +5296,14 @@ export class RunController {
         })()),
         ...(compile && { compile }),
         ...(compile && compileContinues && { compileContinues: true }),
-        ...(compile === 'steps' && compileScope && { compileScope }),
+        // Every detached body block, compile or not: a plain run of selected
+        // body lines replays the section's entries by it, and a Compile This
+        // Step of them files its entries by it.
+        ...(bodyPositions && { detachedBody: bodyPositions }),
         // Never alongside `compile` — the server refuses that pair, and the
         // caller already gates on `rowCompile === undefined`. Narrowed again
-        // here for the same reason `compileScope` is: this is the one place
-        // that knows what actually goes on the wire.
+        // here because this is the one place that knows what actually goes on
+        // the wire.
         ...(compile === undefined && withinCompileRun !== undefined && { withinCompileRun }),
         // Where this run starts, as a position in the `fullSteps` above —
         // computed from the same buffer read, so the two cannot disagree.

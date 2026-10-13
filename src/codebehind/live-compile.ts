@@ -417,6 +417,89 @@ export function endedAsWrittenReason(subject: 'run' | 'replay', step: number): s
 }
 
 /**
+ * Why a step with this TEXT is never generated, whatever happened when it ran,
+ * or undefined. The half of {@link generationRefusal} that needs no run, so a
+ * caller deciding before the run (`unplaceableRepeat`) asks the same question
+ * generation will.
+ */
+export function staticGenerationRefusal(text: string): string | undefined {
+  // `[skill` / `[tool` calls only — `[input:]`, `[output:]` and
+  // `[interactive]` DO reach generation and are declined there, with the
+  // reason, by `refuseReason`; those are still the author's step and deserve
+  // an `ai: true` entry saying why.
+  //
+  // The parser, not a look-alike pattern. The regex this replaces was wrong
+  // in both directions: `\s` claimed `[skill<NBSP>login]`, which the scanner
+  // calls prose (so the step was refused generation for a reason that wasn't
+  // true, permanently), while the `^` anchor missed every LABELLED call —
+  // `Seed the cart [tool: seed_cart]` is dispatched to the tool, yet the
+  // compiler paid to generate a Playwright entry for it on every run.
+  if (isCodeStep(text.trim())) {
+    return 'a [skill:] or [tool:] step is expanded or dispatched, never generated';
+  }
+  // Flow control is asked BEFORE the control line, because the two grammars
+  // overlap on `If <condition>, then return` and flow control owns that line
+  // (stories/control-flow.md §"Composition with `If … then return`"). Only
+  // the UNCONDITIONAL form is refused: the conditional one compiles, into
+  // `if (…) step.exit()` — or, for the `fail` verb, `if (…) step.fail('…')`
+  // (stories/step-failure-outcomes.md, decision 10).
+  const flowControl = parseFlowControlStep(text.trim());
+  if (flowControl && flowControl.body === undefined) {
+    return DISPATCHED_NOT_COMPILED;
+  }
+  // A control line, for the same reason: the framework asks a model whether a
+  // condition holds and performs nothing, so there is no transcript to
+  // generate a `run` entry from (stories/control-flow.md, decision 12). A
+  // condition line's entry is a `condition`, generated from the page the
+  // model decided on — which reaches the compiler through `offerGuard`, never
+  // through here (stories/codebehind-loops-and-conditions.md). Belt and
+  // braces — the run loops offer a guard only as a decision-skipped row,
+  // which `offer` settles before asking this — but `offer` is public, and a
+  // `run` entry generated for an `If` line would replace the decision with
+  // code that acts.
+  if (parseControlLine(text.trim())) {
+    return 'a control line is dispatched, never generated';
+  }
+  // A surface switch, for the third time and the same reason
+  // (SPEC-use-computer.md §9): `[use computer]` / `[use browser]` is a
+  // run-loop signal that performs nothing on any surface, so there is no
+  // transcript to generate an entry from. Belt and braces beside the two
+  // above — the run loops never offer one — but `offer` is public, and a
+  // generated entry for a `[use …]` line would replace the switch with code
+  // that acts on the surface the test was leaving.
+  if (parseUseStep(text)) {
+    return SURFACE_SWITCH_NOT_COMPILED;
+  }
+  // A `[use ai]` step asks the model on every run, by the author's choice
+  // (stories/use-ai-step.md, decision 1). Refused here, where it matters on
+  // its own terms: past this function the step would reach `refuseReason`,
+  // whose "no page actions" answer is DECLINED — written into the file as an
+  // `ai: true` entry for a step that must never have one.
+  if (parseUseAiStep(text)) {
+    return USE_AI_NOT_COMPILED;
+  }
+  // …and `Set`, which was missing here and is the same missing check. The
+  // boxed classifier (`describeSteps`) has always refused it; this one let a
+  // passed Set step through to generation, where the transcript's empty
+  // action list was declined and written as an `ai: true` entry — a
+  // write-off for a step that costs nothing and never had a model call to
+  // save (stories/variable-assignment.md, rule 8).
+  if (parseSetStep(text)) {
+    return SET_STEP_NOT_COMPILED;
+  }
+  return undefined;
+}
+
+/**
+ * True when no entry of any kind is ever written for a step with this text: a
+ * `run` entry is refused statically, and it is not a condition line the model
+ * decides, which gets a `condition` entry instead.
+ */
+export function neverCompiled(text: string): boolean {
+  return staticGenerationRefusal(text) !== undefined && compilableCondition(text) === undefined;
+}
+
+/**
  * Why a step is not generated from, or undefined when it is.
  *
  * Mirrors `compileTest`'s selection rules, decided per step from what the run
@@ -481,71 +564,10 @@ export function generationRefusal(input: {
   /** `unprovenListRead` of the step's result. */
   unprovenListRead?: UnprovenListRead | undefined;
 }): string | undefined {
-  // `[skill` / `[tool` calls only — `[input:]`, `[output:]` and
-  // `[interactive]` DO reach generation and are declined there, with the
-  // reason, by `refuseReason`; those are still the author's step and deserve
-  // an `ai: true` entry saying why.
-  //
-  // The parser, not a look-alike pattern. The regex this replaces was wrong
-  // in both directions: `\s` claimed `[skill<NBSP>login]`, which the scanner
-  // calls prose (so the step was refused generation for a reason that wasn't
-  // true, permanently), while the `^` anchor missed every LABELLED call —
-  // `Seed the cart [tool: seed_cart]` is dispatched to the tool, yet the
-  // compiler paid to generate a Playwright entry for it on every run.
-  if (isCodeStep(input.text.trim())) {
-    return 'a [skill:] or [tool:] step is expanded or dispatched, never generated';
-  }
-  // Flow control is asked BEFORE the control line, because the two grammars
-  // overlap on `If <condition>, then return` and flow control owns that line
-  // (stories/control-flow.md §"Composition with `If … then return`"). Only
-  // the UNCONDITIONAL form is refused: the conditional one compiles, into
-  // `if (…) step.exit()` — or, for the `fail` verb, `if (…) step.fail('…')`
-  // (stories/step-failure-outcomes.md, decision 10).
-  const flowControl = parseFlowControlStep(input.text.trim());
-  if (flowControl && flowControl.body === undefined) {
-    return DISPATCHED_NOT_COMPILED;
-  }
-  // A control line, for the same reason: the framework asks a model whether a
-  // condition holds and performs nothing, so there is no transcript to
-  // generate a `run` entry from (stories/control-flow.md, decision 12). A
-  // condition line's entry is a `condition`, generated from the page the
-  // model decided on — which reaches the compiler through `offerGuard`, never
-  // through here (stories/codebehind-loops-and-conditions.md). Belt and
-  // braces — the run loops offer a guard only as a decision-skipped row,
-  // which `offer` settles before asking this — but `offer` is public, and a
-  // `run` entry generated for an `If` line would replace the decision with
-  // code that acts.
-  if (parseControlLine(input.text.trim())) {
-    return 'a control line is dispatched, never generated';
-  }
-  // A surface switch, for the third time and the same reason
-  // (SPEC-use-computer.md §9): `[use computer]` / `[use browser]` is a
-  // run-loop signal that performs nothing on any surface, so there is no
-  // transcript to generate an entry from. Belt and braces beside the two
-  // above — the run loops never offer one — but `offer` is public, and a
-  // generated entry for a `[use …]` line would replace the switch with code
-  // that acts on the surface the test was leaving.
-  if (parseUseStep(input.text)) {
-    return SURFACE_SWITCH_NOT_COMPILED;
-  }
-  // A `[use ai]` step asks the model on every run, by the author's choice
-  // (stories/use-ai-step.md, decision 1). Refused here, where it matters on
-  // its own terms: past this function the step would reach `refuseReason`,
-  // whose "no page actions" answer is DECLINED — written into the file as an
-  // `ai: true` entry for a step that must never have one.
-  if (parseUseAiStep(input.text)) {
-    return USE_AI_NOT_COMPILED;
-  }
-  // …and `Set`, which was missing here and is the same missing check. The
-  // boxed classifier (`describeSteps`) has always refused it; this one let a
-  // passed Set step through to generation, where the transcript's empty
-  // action list was declined and written as an `ai: true` entry — a
-  // write-off for a step that costs nothing and never had a model call to
-  // save (stories/variable-assignment.md, rule 8).
-  if (parseSetStep(input.text)) {
-    return SET_STEP_NOT_COMPILED;
-  }
-  // …and the other half of §9: an ORDINARY step that ran while the surface was
+  const fixed = staticGenerationRefusal(input.text);
+  if (fixed !== undefined) return fixed;
+  // …and the other half of §9 (the surface switch itself is refused above): an
+  // ORDINARY step that ran while the surface was
   // `computer`. Ahead of the binding check, because the answer does not depend
   // on there being a file to bind into — the step stays AI either way.
   if (input.surface === 'computer') return COMPUTER_MODE_STAYS_AI;

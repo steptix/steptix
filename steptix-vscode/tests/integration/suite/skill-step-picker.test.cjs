@@ -244,7 +244,7 @@ describe('skill-file session picker', function () {
       undefined,
       'first block of an injected compile supersedes any retained compiler',
     );
-    assert.equal(req.compileScope, undefined, 'no compileScope — the real skill frame binds');
+    assert.equal(req.detachedBody, undefined, 'no detachedBody — the real skill frame binds');
     assert.equal(req.startAt.line, 12);
     assert.equal(req.endAt.line, 12);
     const sid = fake.streamSessionIds[fake.streamSessionIds.length - 1];

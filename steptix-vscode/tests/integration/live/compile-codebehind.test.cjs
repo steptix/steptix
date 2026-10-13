@@ -372,7 +372,7 @@ describe('Steptix live — run & compile, apply, replay as code', function () {
     await vscode.commands.executeCommand('steptix.restartSession');
   });
 
-it('Compile This Step on a section body binds the entry under the section', async () => {
+it('Compile This Step on a section body binds the entry under the section, and a run of that body line uses it', async () => {
     // The user hit exactly this and got a refusal. The body step runs
     // detached at the root frame, as Run Step Here runs it — only the entry's
     // binding moves under the section, which is where the runtime looks.
@@ -431,7 +431,32 @@ it('Compile This Step on a section body binds the entry under the section', asyn
     assert.equal(step.section, 'Fill the form');
     assert.equal(step.source, 'Enter "demo@example.com" in the email field');
 
-    await vscode.commands.executeCommand('steptix.discardCodeBehind');
+    // ===== Apply, then run the body line on its own =====
+    // Run Step Here on a body line sends it detached, at the root frame, with
+    // nothing invoking the section. Its entry is filed under the section, so
+    // it binds only if the request says where the step came from. Before it
+    // did, this step ran under AI every time, compiled or not.
+    await vscode.commands.executeCommand('steptix.applyCodeBehind');
+    await waitFor('Apply writes the section .steps.ts', () => fs.existsSync(sectionSteps), 15_000);
+    await waitFor(
+      'focus returns to the section fixture after Apply',
+      () => vscode.window.activeTextEditor?.document.uri.toString() === uri.toString(),
+      15_000,
+    );
+    // Same session, so the browser is still on the form this step fills.
+    void vscode.commands.executeCommand('steptix.runStepHere', { lineNumber: 21 });
+    await waitFor('the detached run starts', () => hooks.isRunning(), 60_000);
+    await waitFor('the detached run finishes', () => !hooks.isRunning(), 240_000);
+    // As in the whole-test proof above: </> when the generated code worked, ⚠
+    // when it threw and the AI covered. Either way the entry bound. A plain
+    // "pass" is the bug: the step never consulted its entry.
+    const detached = Object.fromEntries(hooks.tracker.snapshot().statuses)[21];
+    assert.ok(
+      detached === 'pass-code-behind' || detached === 'pass-stale',
+      `the body line run on its own should have run its section's entry (</> or ⚠), ` +
+        `got "${detached}". A plain "pass" means it bound nothing and ran under AI.`,
+    );
+
     fs.rmSync(sectionSteps, { force: true });
     await vscode.commands.executeCommand('steptix.restartSession');
   });

@@ -136,12 +136,15 @@ export interface StreamStepsRequest {
    */
   compileContinues?: boolean;
   /**
-   * Attribution for a `compile: 'steps'` request whose steps come from a
-   * `### Section` body. Execution is unchanged — the steps still run
-   * detached, at the root frame, as Run Step Here runs them — but the entry
-   * binds under this section's scope, which is where the runtime looks for it.
+   * Parallel to `steps`, on a batch made only of `### Section` body steps run
+   * on their own: the section each step came from, by its authored name, and
+   * its 0-based position in that body. Execution is unchanged — the steps run
+   * detached, at the root frame, as Run Step Here runs them — but their
+   * code-behind binds under their sections, at the place each holds in its
+   * body. That is where a run replays their entries from, and where a
+   * Compile This Step of them files the entries it writes.
    */
-  compileScope?: { section: string };
+  detachedBody?: Array<{ section: string; step: number }>;
   /**
    * This batch belongs to a compile of MODE `x`, but asks for no compile of
    * its own.

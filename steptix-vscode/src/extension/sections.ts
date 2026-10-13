@@ -173,6 +173,84 @@ export function buildSectionsPayload(
 }
 
 /**
+ * A run's reading of the section bodies it picks detached steps from
+ * (stories/specs/sections-run-and-resume.md §4.2): where each body step sits,
+ * by its line, and every body as it read them.
+ *
+ * Each detached step is sent with its section and its 0-based place in that
+ * body (`detachedBody`), and the server binds the step's code-behind under
+ * its section, at that place, which is where a compiled section keeps its
+ * entries. Read from the text the run picked its steps from, never from the
+ * buffer at send time: between the two the author can edit, and then a line,
+ * or even a place, can name another step. `detachedBodyDrift` is the
+ * send-time check.
+ */
+export interface DetachedBodies {
+  /** Section and place of each body step, keyed by its 1-based line. */
+  at: Map<number, { section: string; step: number }>;
+  /** Each body's instructions, keyed by `matchText` of the section name. */
+  bodies: Map<string, string[]>;
+}
+
+export function readDetachedBodies(text: string): DetachedBodies {
+  const at = new Map<number, { section: string; step: number }>();
+  const bodies = new Map<string, string[]>();
+  for (const section of extractSections(text)) {
+    section.steps.forEach((s, step) => at.set(s.line, { section: section.name, step }));
+    // First definition wins, as in `buildSectionsPayload` and the parser.
+    const key = matchText(section.name);
+    if (!bodies.has(key)) bodies.set(key, section.steps.map((s) => s.instruction));
+  }
+  return { at, bodies };
+}
+
+/**
+ * Why `picks` no longer hold in `text`, the buffer this request's `sections`
+ * payload is built from, or null when they do. A whole sentence, for
+ * `refuseStaleNarrowing`.
+ *
+ * Every body a pick comes from must be exactly as the run read it. Checking
+ * only the picked place is not enough: a step added ahead of the second of two
+ * `Click Next` lines puts the FIRST one at that place, the text still
+ * matches, and the step would bind the other one's entry. The server refuses
+ * a place that no longer holds its text; the run stops here instead, saying
+ * why, because there is no honest guess at which step the author meant once
+ * the body moved. An edit outside every picked body (a note in the main flow,
+ * a step of another section) moves lines but not places, and passes.
+ */
+export function detachedBodyDrift(
+  text: string,
+  read: DetachedBodies,
+  picks: ReadonlyArray<{ section: string; step: number } | undefined>,
+): string | null {
+  const live = readDetachedBodies(text).bodies;
+  const stale = 'so the body steps this run picked no longer name the same steps.';
+  const checked = new Set<string>();
+  for (const pick of picks) {
+    if (!pick) return 'a step this run picked is no longer in a section body.';
+    const key = matchText(pick.section);
+    if (checked.has(key)) continue;
+    checked.add(key);
+    const before = read.bodies.get(key) ?? [];
+    const now = live.get(key);
+    if (now === undefined) {
+      return `the section "${pick.section}" is gone from the file, and this run had picked steps from its body.`;
+    }
+    if (now.length !== before.length) {
+      return (
+        `the body of "${pick.section}" now has ${now.length} step${now.length === 1 ? '' : 's'} ` +
+        `where it had ${before.length} when this run picked from it, ${stale}`
+      );
+    }
+    const changed = now.findIndex((instruction, i) => instruction !== before[i]);
+    if (changed >= 0) {
+      return `body step ${changed + 1} of "${pick.section}" has been edited since this run picked from it, ${stale}`;
+    }
+  }
+  return null;
+}
+
+/**
  * Why `text`'s sections can't be run, or null if they can.
  *
  * The CLI refuses bad names at parse time, and the wire format cannot even

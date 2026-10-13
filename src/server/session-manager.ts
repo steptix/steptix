@@ -136,6 +136,11 @@ import {
   type ExpandedStepOrigin,
 } from '../skills/expander.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
+import {
+  detachedBodyExpansion,
+  detachedRowReads,
+  unplaceableRepeat,
+} from '../codebehind/detached-body.js';
 import { isStepCode } from '../codebehind/execute.js';
 import { lastRunStaleMemberRow, writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import {
@@ -378,22 +383,22 @@ export interface StepRequest {
    */
   compileContinues?: boolean;
   /**
-   * Attribution for a `compile: 'steps'` request whose steps come from a
-   * `### Section` body (stories/compile-as-you-go.md §Compile This Step).
+   * Parallel to `steps`: the `### Section` body each step was selected from,
+   * and its 0-based position there, when the batch is body steps run on their
+   * own (steptix-vscode/stories/specs/sections-run-and-resume.md §4.2).
    *
-   * EXECUTION is unchanged: the steps still run detached, at the root frame,
-   * exactly as Run Step Here runs them — a body step is a runnable unit on its
-   * own and this does not make it one that carries a frame. Only the BINDING
-   * moves: the generation registry is built against a synthesized section
-   * frame of this name, so the entry lands under `section:` in the test's own
-   * `.steps.ts`, where the runtime — which reaches that step THROUGH the
-   * section — will look for it. Without this the entry binds top-level, never
-   * matches, and can shadow a main-flow step of the same text.
+   * EXECUTION is unchanged: the steps run detached at the root frame, exactly
+   * as Run Step Here runs them. Only code-behind binding moves, for this run's
+   * steps and for any entries a Compile This Step of them writes: each step binds under its own section, at the
+   * occurrence it holds in the authored body (src/codebehind/detached-body.ts).
+   * Without it a compiled section's body never replayed when run this way. It
+   * ran under AI, or ran a top-level entry that shared its text.
    *
-   * Only meaningful with `compile: 'steps'`; the step route rejects it
-   * otherwise, because a whole-test Run & Compile has the real frames.
+   * The step route checks it against `sections`: every named section is
+   * there, every position holds that step's text, and one section's positions
+   * rise through the batch.
    */
-  compileScope?: { section: string };
+  detachedBody?: Array<{ section: string; step: number }>;
   /**
    * This batch belongs to a compile of this MODE, but asks for no compile of
    * its own (stories/data-driven-rows.md, decision 11).
@@ -4534,43 +4539,21 @@ export class SessionManager {
         frames: expandedFrames,
       };
     /**
-     * The expansion the GENERATION registry binds through.
+     * Steps of a `### Section` body that ran DETACHED — selected on their own
+     * and sent at the root frame — with the section and the place in the body
+     * each came from (`request.detachedBody`, parallel to `request.steps`).
      *
-     * Normally the run's own. For a `compile: 'steps'` request carrying
-     * `compileScope`, the steps came from a `### Section` body but ran
-     * detached at the root frame — so the run's expansion says "top level",
-     * which is not where the runtime will look for the entry. A section frame
-     * of that name is synthesized here and the binder derives file, section
-     * and scope from it exactly as it does for a real one: no special case in
-     * `buildCodeBehindRegistry`, and no second answer to "which `.steps.ts`
-     * does this step bind into".
-     *
-     * `skillName` carries the section's name — that is the field
-     * `resolveDefiningSite` reads a section frame's scope from — and
-     * `parentId: null` keeps the variable scope empty, which is right for a
-     * section of the test's own.
+     * Their run's expansion says "top level", which is not where a full run
+     * reaches them, so it is not where their entries are. Both registries bind
+     * them through `detachedBodyExpansion` instead (src/codebehind/
+     * detached-body.ts), which moves each one into a section frame of its own
+     * section's name at its authored occurrence. Execution is untouched.
      */
-    const scopedExpansionFor = (
-      section: string,
-      testFilePath: string,
-    ): Parameters<typeof buildCodeBehindRegistry>[0] => {
-      const frameId = 'compile-scope';
-      return {
-        steps: effectiveSteps,
-        rawSteps: expansionRawSteps,
-        origins: effectiveSteps.map((_, i) => ({ inputIndex: i, frameId })),
-        frames: {
-          [frameId]: {
-            id: frameId,
-            parentId: null,
-            kind: 'section' as const,
-            uri: testFilePath,
-            invocationLine: null,
-            skillName: section,
-          },
-        },
-      };
-    };
+    const detachedPicks = request.detachedBody;
+    const bindingExpansion = (testFilePath: string): Parameters<typeof buildCodeBehindRegistry>[0] =>
+      detachedPicks
+        ? detachedBodyExpansion(expansionForBinding(), detachedPicks, testFilePath, request.sections)
+        : expansionForBinding();
 
     // `compile: 'steps'` disables execution the way a Record does — a step
     // whose entry is broken has to run under AI to leave a transcript — but
@@ -4587,10 +4570,29 @@ export class SessionManager {
       request.compile === 'steps' ||
       request.withinCompileRun === 'steps';
     if (request.testFilePath && !codeBehindOff) {
-      codeBehind = await buildCodeBehindRegistry(expansionForBinding(), {
+      codeBehind = await buildCodeBehindRegistry(bindingExpansion(request.testFilePath), {
         testFilePath: request.testFilePath,
         ...(cb?.candidateFiles && { candidateFiles: cb.candidateFiles }),
       });
+      // A detached step whose entry reads a looped section's row has no row to
+      // read. It runs under AI, as it did before detached steps bound at all,
+      // and the author is told why it did not run as code.
+      if (detachedPicks) {
+        for (const [i, column] of detachedRowReads(expansionForBinding(), detachedPicks, request.sections)) {
+          const binding = codeBehind.bindingFor(i);
+          if (binding?.entry === undefined) continue;
+          binding.entry = undefined;
+          emit({
+            type: 'output',
+            kind: 'info',
+            msg:
+              `Step "${binding.source}" runs under AI, not its code-behind: it reads ` +
+              `{{${column}}}, a column of a looped section's table, and a step run on ` +
+              `its own has no row. Run the section through the step that calls it to ` +
+              `replay its entry.`,
+          });
+        }
+      }
     }
     /**
      * The code-behind a guard's condition is decided with
@@ -4622,9 +4624,8 @@ export class SessionManager {
      */
     let generationBindings: CodeBehindRegistry = codeBehind;
     if (request.compile !== undefined && codeBehindOff && request.testFilePath) {
-      const scope = request.compileScope?.section;
       generationBindings = await buildCodeBehindRegistry(
-        scope ? scopedExpansionFor(scope, request.testFilePath) : expansionForBinding(),
+        bindingExpansion(request.testFilePath),
         { testFilePath: request.testFilePath, onWarn: () => {} },
       );
     }
@@ -5407,6 +5408,30 @@ export class SessionManager {
     // selected guard runs is executed under AI and never generated, named or
     // counted. A Run & Compile continuation keeps the run's bound, as before.
     const compileEndIndex = request.compile === 'steps' ? selectedEndIndex : endIndex;
+    /**
+     * Refuse a partial compile of a repeated step before anything runs or
+     * spends a token: its entry would land on another occurrence's slot. Both
+     * guards below end here, so a refused compile reads the same whichever
+     * shape the selection had.
+     */
+    const refuseRepeat = async (message: string, step: number): Promise<StepResponse> => {
+      logger.error(`Session "${sessionId}": ${message}`);
+      emit({ type: 'output', msg: message, kind: 'error' });
+      await this.discardLiveCompile(session, 'a repeated step cannot be partially compiled');
+      emitCompileRefusal(message);
+      emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
+      return {
+        sessionId,
+        status: 'error',
+        stepsCompleted: 0,
+        stepsTotal,
+        results: [],
+        outputs: session.outputs,
+        outputSources: { ...session.outputSources },
+        error: { step, message },
+        pageTitle: '',
+      };
+    };
     if (liveCompile && (request.startAt !== undefined || request.endAt !== undefined)) {
       liveCompile.setSlice(startIndex, compileEndIndex);
 
@@ -5454,26 +5479,38 @@ export class SessionManager {
             sib.entry === undefined;
         }
         if (!blocked) continue;
-        const message =
+        return refuseRepeat(
           `"${b.source}" appears more than once in its scope, and a partial compile ` +
-          `cannot place the entry for just one of them — it would land on the wrong ` +
-          `occurrence. Include every occurrence in the selection, or compile the whole body.`;
-        logger.error(`Session "${sessionId}": ${message}`);
-        emit({ type: 'output', msg: message, kind: 'error' });
-        await this.discardLiveCompile(session, 'a repeated step cannot be partially compiled');
-        emitCompileRefusal(message);
-        emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
-        return {
-          sessionId,
-          status: 'error',
-          stepsCompleted: 0,
-          stepsTotal,
-          results: [],
-          outputs: session.outputs,
-          outputSources: { ...session.outputSources },
-          error: { step: i + 1, message },
-          pageTitle: '',
-        };
+            `cannot place the entry for just one of them — it would land on the wrong ` +
+            `occurrence. Include every occurrence in the selection, or compile the whole body.`,
+          i + 1,
+        );
+      }
+    }
+
+    // The same guard for body steps compiled on their own. They bind at their
+    // place in the authored body (`detachedBody`), so a lone second `Press
+    // Enter` is occurrence 1, and its entry has a slot only once the first one
+    // has an entry on disk or is compiled earlier in this batch
+    // (`unplaceableRepeat`). A fresh compile only, for the reason above: a
+    // continuation's earlier entries sit in the retained candidate, not on disk.
+    if (
+      liveCompile &&
+      request.compile === 'steps' &&
+      request.compileContinues !== true &&
+      request.detachedBody !== undefined
+    ) {
+      const gap = await unplaceableRepeat(generationBindings, effectiveSteps.length);
+      if (gap) {
+        const { binding } = gap;
+        const scope = binding.section !== undefined ? `"${binding.section}"` : 'its scope';
+        return refuseRepeat(
+          `"${binding.source}" appears earlier in ${scope}, as a step of its own or as ` +
+            `the step a control line names, and that earlier one has no code-behind entry ` +
+            `and is not in the selection, so there is no slot for this one yet. Compile ` +
+            `the earlier occurrence(s) too, or the whole section body.`,
+          gap.index + 1,
+        );
       }
     }
 

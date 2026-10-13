@@ -200,6 +200,35 @@ export default defineSteps([
     expect(findEntrySpans(scan(text), 'Alpha', undefined)).toHaveLength(1);
     expect(text.trimEnd().endsWith(']);')).toBe(true);
   });
+
+  it('refuses a later occurrence with no slot before it, appending or creating', () => {
+    // The runtime binds an entry by its position among same-text entries in
+    // its scope, so the second `Click Next` written as the FIRST such entry
+    // would serve the first `Click Next`. A file that holds one would take it
+    // as occurrence 1; a file that holds none — or no file at all — cannot.
+    const request = {
+      file: 'x.steps.ts',
+      source: 'Click Next',
+      section: 'Pay',
+      occurrence: 1,
+      entryCode: `{ source: 'Click Next', async run() {} }`,
+    };
+    expect(() => createFile(request)).toThrow(/occurrence 1 of "Click Next".*Compile the earlier occurrence/);
+    const none = `import { defineSteps } from 'steptix/codebehind';
+export default defineSteps([
+  { source: 'Click Next', async run() { /* top level, not Pay */ } },
+]);
+`;
+    expect(() => spliceEntry(none, request)).toThrow(/the file has 0 matching entries/);
+    const one = `import { defineSteps } from 'steptix/codebehind';
+export default defineSteps([
+  { section: 'Pay', source: 'Click Next', async run() { /* first */ } },
+]);
+`;
+    const { text, action } = spliceEntry(one, request);
+    expect(action).toBe('appended');
+    expect(findEntrySpans(scan(text), 'Click Next', 'Pay')).toHaveLength(2);
+  });
 });
 
 describe('code-behind writer — section stamping', () => {

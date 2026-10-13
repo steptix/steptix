@@ -132,6 +132,9 @@ describe('Steptix inline sections', function () {
       steps: ['Click the first product', 'Click add to cart'],
       stepLines: [22, 23],
     });
+    // A main-flow run reaches the bodies through their calls, so nothing
+    // needs telling where a body step came from.
+    assert.equal(request.detachedBody, undefined);
 
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());
@@ -509,6 +512,10 @@ describe('Steptix inline sections', function () {
     // The definitions still ride along: a body step that names a sibling
     // section has to expand server-side exactly as it would at a call site.
     assert.ok(request.sections, 'the sections map must still be sent');
+    // Where the step came from, so its code-behind binds under its section:
+    // a compiled `Sign in` keeps its entries there, and the step's own
+    // expansion says "top level".
+    assert.deepEqual(request.detachedBody, [{ section: 'Sign in', step: 0 }]);
 
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());
@@ -528,6 +535,7 @@ describe('Steptix inline sections', function () {
     await waitFor('stream active', () => fake.hasActiveStream);
 
     assert.deepEqual(fake.requests[0].sourceLines, [10, 11, 12, 13]);
+    assert.equal(fake.requests[0].detachedBody, undefined);
 
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());
@@ -539,6 +547,32 @@ describe('Steptix inline sections', function () {
 
     assert.deepEqual(fake.requests[0].steps, ['Click add to cart']);
     assert.deepEqual(fake.requests[0].sourceLines, [23]);
+    assert.deepEqual(fake.requests[0].detachedBody, [{ section: 'Add an item', step: 1 }]);
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('a selection across two bodies says which section each step came from', async () => {
+    // Lines 17-23 cover the whole of `Sign in` and `Add an item`. They run in
+    // document order, detached, and each binds under its own section.
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(
+      new vscode.Position(16, 0),
+      new vscode.Position(22, 8),
+    );
+
+    void vscode.commands.executeCommand('steptix.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const request = fake.requests[0];
+    assert.deepEqual(request.sourceLines, [17, 18, 22, 23]);
+    assert.deepEqual(request.detachedBody, [
+      { section: 'Sign in', step: 0 },
+      { section: 'Sign in', step: 1 },
+      { section: 'Add an item', step: 0 },
+      { section: 'Add an item', step: 1 },
+    ]);
 
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());

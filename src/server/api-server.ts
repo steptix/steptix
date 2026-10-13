@@ -63,7 +63,7 @@ import { HEALTH_SERVICE_ID, type HealthResponse } from './health.js';
 // Its own module so a CLIENT-side test can run a payload it just built through
 // the exact rules that would 400 it here. Behaviour is unchanged — this is the
 // same function, moved.
-import { validateSectionEntry } from './section-entry.js';
+import { validateDetachedBody, validateSectionEntry } from './section-entry.js';
 import { logger } from '../utils/logger.js';
 import { getBuildInfo, getPackageVersion } from '../utils/version.js';
 
@@ -921,30 +921,25 @@ export function createApiServer(
         // allow-list for the same reason `compile` is.
         if (body.compileContinues === true) request.compileContinues = true;
       }
-      // Section attribution for a single-step compile of a `### Section`
-      // body. Refused rather than ignored when it makes no sense: a whole-test
-      // Run & Compile has the real frames, and a caller that asked for a scope
-      // and quietly got the top level would find out when the entry never
-      // bound.
-      if (body.compileScope !== undefined) {
-        const scope = body.compileScope as { section?: unknown } | null;
-        if (request.compile !== 'steps') {
-          res.status(400).json({
-            error: '"compileScope" is only valid with "compile": "steps"',
-          });
+      // Section-body steps run on their own (sections-run-and-resume.md §4.2):
+      // where each one sits, so its code-behind binds under its section. With
+      // or without a compile: a run of selected body lines replays the
+      // section's entries, and a Compile This Step of them files its entries
+      // there.
+      //
+      // Every check refuses rather than drops, the way `sections` does. A
+      // position that does not hold the step it is sent with means the client
+      // read two different buffers, and binding by it would run some other
+      // step's entry, quietly, as code.
+      if (body.detachedBody !== undefined) {
+        const invalid = validateDetachedBody(body.detachedBody, request);
+        if (invalid) {
+          res.status(400).json({ error: invalid });
           return;
         }
-        if (
-          scope === null ||
-          typeof scope !== 'object' ||
-          Array.isArray(scope) ||
-          typeof scope.section !== 'string' ||
-          scope.section.trim() === ''
-        ) {
-          res.status(400).json({ error: '"compileScope" must be { section: <non-empty string> }' });
-          return;
-        }
-        request.compileScope = { section: scope.section };
+        request.detachedBody = (body.detachedBody as Array<{ section: string; step: number }>).map(
+          (pick) => ({ section: pick.section, step: pick.step }),
+        );
       }
       // Rows 2..N of a data-driven compile: part of a compile-mode logical
       // run, asking for no compile of its own (rows story, decision 11). It is

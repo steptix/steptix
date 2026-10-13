@@ -124,9 +124,6 @@ export function registerCommands(
     /** Lines to run. Empty means the whole test, as Run All does. */
     lines?: number[];
     mode?: 'run' | 'steps';
-    /** The `### Section` the steps were authored in, when they came from a
-     *  body. Their ENTRIES bind under it; they still execute detached. */
-    section?: string;
   } = {}): Promise<void> => {
     const controller = registry.active();
     if (!controller) return notifyNoActive();
@@ -171,7 +168,6 @@ export function registerCommands(
         ...(mode === 'run' && { breakpoints: tracker.breakpoints(controller.document.uri) }),
         ...(mode === 'steps' && { skipBreakpointAtStart: true }),
         compile: mode,
-        ...(options.section !== undefined && { compileScope: { section: options.section } }),
       });
     } finally {
       registry.notifyRunning(false);
@@ -225,6 +221,14 @@ export function registerCommands(
       // the catalogue's words and with the fix attached; a compile failure is
       // not a second vocabulary for the same problem.
       registry.lastCompileError = result.error.message;
+      await restore();
+      return;
+    }
+    if (!outcome && controller.staleSelectionRefusal !== null) {
+      // The run stopped itself because the file changed under the selection
+      // (a picked body edited mid-run), and said so: "Run stopped: …". Not the
+      // server's doing, so not the older-server question below.
+      registry.lastCompileError = controller.staleSelectionRefusal;
       await restore();
       return;
     }
@@ -375,8 +379,8 @@ export function registerCommands(
     }
     // Body steps of an inline `### Section` count: `extractSteps` reports only
     // `kind: 'step'`, and gating on it refused a line both commands used to
-    // run (Run Step Here runs body lines detached; Compile This Step resolved
-    // their section scope).
+    // run (Run Step Here runs body lines detached, and Compile This Step binds
+    // them under their section by `detachedBody`).
     const classified = classifyLines(text);
     const isStepLine = (line: number): boolean => {
       const kind = classified[line - 1]?.kind;
@@ -562,8 +566,8 @@ export function registerCommands(
     // Compile pick: the same slice with `compile: 'steps'` riding it. No
     // resolveCompileTarget gates here — occurrence is counted over the full
     // expansion server-side (the client's repeated-step gate would spuriously
-    // refuse), and no `compileScope` is sent: the run's real skill frame is
-    // the binding.
+    // refuse), and no `detachedBody` is sent: the call line runs as the main
+    // flow, so the run's real skill frame is the binding.
     if (controller.document.isDirty) await controller.document.save();
     // Same reasoning as `runAndCompile`: this path reaches `presentCompile`
     // without going through it, so without parking here a pending proposal
@@ -640,11 +644,7 @@ export function registerCommands(
       vscode.window.showWarningMessage(target.refusal);
       return;
     }
-    await runAndCompile({
-      lines: target.lines,
-      mode: 'steps',
-      ...(target.section !== undefined && { section: target.section }),
-    });
+    await runAndCompile({ lines: target.lines, mode: 'steps' });
   };
 
   /**
@@ -693,9 +693,8 @@ export function registerCommands(
     }
     // A multi-line selection that covers the clicked line compiles every
     // step in it, in order — the session advances between them, so a
-    // selection is just this flow k times. The resolver also decides the
-    // scope the entries bind under, which for a section body is not the
-    // scope the steps EXECUTE in.
+    // selection is just this flow k times. A section body's steps execute
+    // detached but bind under their section (`detachedBody`, sent by the run).
     await compileStepOnActive(editor, line);
   };
 
@@ -1531,17 +1530,20 @@ function notifyNoActive(): void {
  * (stories/compile-as-you-go.md §Compile This Step).
  *
  * What is ALLOWED: a plain step, a `### Section` or `[skill:]` call line, a
- * step below either of those, and a step inside a section body. The body case
- * is why this returns a scope rather than a boolean: the step runs detached at
- * the root frame, as Run Step Here runs it, but its ENTRY has to bind under
- * the section — that is where the runtime, which reaches the step through the
- * section, looks for it.
+ * step below either of those, and steps inside section bodies. A body step
+ * runs detached at the root frame, as Run Step Here runs it, but its ENTRY has
+ * to bind under its section — that is where the runtime, which reaches the
+ * step through the section, looks for it. The run sends `detachedBody` for it:
+ * its section and its place in the body. So a selection may take body steps
+ * from several sections, and a repeated body step may be compiled without its
+ * siblings: each entry lands in its own slot, and the server refuses a later
+ * repeat whose earlier ones have no entry and are not selected with it.
  *
  * What is refused is refused because compiling it would produce a WRONG entry,
  * not because the feature is missing — see each branch.
  */
 export type CompileTarget =
-  | { ok: true; lines: number[]; section?: string }
+  | { ok: true; lines: number[] }
   | { ok: false; refusal: string };
 
 /**
@@ -1585,26 +1587,30 @@ export function resolveCompileTarget(
       ? selected.filter((l) => kindOf(l) === 'step' || kindOf(l) === 'section-step')
       : [clicked];
 
-  // One scope per compile. A selection spanning a section body and the main
-  // flow — or two different sections — has no single `section:` to stamp, and
-  // guessing one would put half the entries where nothing looks for them.
+  // Main flow or bodies, not both. A selection that names a main-flow step
+  // runs as the main flow (`resolveRunSelection`), so a body step in it is
+  // never sent on its own and nothing could bind it by its place in the body.
   const scopes = new Set(lines.map((l) => sectionOwningLine(text, l) ?? ''));
-  if (scopes.size > 1) {
-    const named = [...scopes].map((s) => (s === '' ? 'the main flow' : `"${s}"`)).sort();
+  if (scopes.size > 1 && scopes.has('')) {
+    const named = [...scopes].filter((s) => s !== '').map((s) => `"${s}"`).sort();
     return {
       ok: false,
       refusal:
-        `Steptix: that selection spans ${named.join(' and ')}, and each entry binds to one ` +
-        'scope. Select steps from one section body, or from the main flow.',
+        `Steptix: that selection spans the main flow and ${named.join(' and ')}. ` +
+        'Select steps from the main flow, or from section bodies, not both.',
     };
   }
-  const section = [...scopes][0] ?? '';
 
-  // Occurrence is counted within the request, so a compile that sends SOME of
-  // a repeated text's occurrences numbers them from 0 — and the entry lands on
-  // the wrong one, replacing code generated from a different step. Sending all
-  // of them is fine: they number correctly.
-  const siblings = section === '' ? rootFrameSteps(text) : sectionBodySteps(text, section);
+  // Body steps only. Each binds under its own section at its own place in the
+  // body (`detachedBody`), so neither a second section nor a partial repeat is
+  // ambiguous.
+  if (!scopes.has('')) return { ok: true, lines };
+
+  // Main flow. Occurrence is counted within the request, so a compile that
+  // sends SOME of a repeated text's occurrences numbers them from 0 — and the
+  // entry lands on the wrong one, replacing code generated from a different
+  // step. Sending all of them is fine: they number correctly.
+  const siblings = rootFrameSteps(text);
   for (const line of lines) {
     const self = siblings.find((s) => s.line === line);
     if (!self) continue;
@@ -1613,14 +1619,14 @@ export function resolveCompileTarget(
       return {
         ok: false,
         refusal:
-          `Steptix: "${self.instruction}" appears more than once in ` +
-          `${section === '' ? 'this test' : `"${section}"`}, and a partial compile cannot tell ` +
-          'which one you mean — the entry would land on the first. Select them all, or use Run & Compile.',
+          `Steptix: "${self.instruction}" appears more than once in this test, and a partial ` +
+          'compile cannot tell which one you mean — the entry would land on the first. Select ' +
+          'them all, or use Run & Compile.',
       };
     }
   }
 
-  return { ok: true, lines, ...(section !== '' && { section }) };
+  return { ok: true, lines };
 }
 
 /**
@@ -1644,13 +1650,6 @@ function rootFrameSteps(text: string): { line: number; instruction: string }[] {
         parseInvocationLine(s.instruction)?.kind !== 'skill' &&
         !sectionNames.has(s.instruction.toLowerCase()),
     );
-}
-
-/** The steps of one `### Section` body — the occurrence population for an
- *  entry that binds under that section's scope. */
-function sectionBodySteps(text: string, section: string): { line: number; instruction: string }[] {
-  const found = extractSections(text).find((s) => s.name === section);
-  return (found?.steps ?? []).map((s) => ({ line: s.line, instruction: s.instruction.trim() }));
 }
 
 /** The name of the `### Section` whose body contains `line`, if any. */

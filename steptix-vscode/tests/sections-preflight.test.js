@@ -12,10 +12,12 @@ import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import {
   buildSectionsPayload,
+  detachedBodyDrift,
+  readDetachedBodies,
   preflightSections,
   sectionedSkillRefusal,
 } from "../src/extension/sections.ts";
@@ -390,5 +392,109 @@ test("refusal: an unreadable skill file does not invent an error", () => {
       skillName: "gone",
     }),
     null,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// readDetachedBodies / detachedBodyDrift
+// ---------------------------------------------------------------------------
+
+/** The server's own check of the field (src/server/section-entry.ts, built to
+ *  the repo root's dist/ by pretest), so the client's output is held to the
+ *  rule that would refuse it rather than to a copy of that rule. */
+const { validateDetachedBody } = await import(
+  pathToFileURL(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../dist/server/section-entry.js"),
+  ).href
+);
+
+const DETACHED = doc(
+  "## Steps", //                  1
+  "1. Open the shop", //          2
+  "2. Sign in", //                3
+  "", //                          4
+  "### Sign in", //               5
+  "1. Type the username", //      6
+  '2. Click "Continue"', //       7
+  '3. Click "Continue"', //       8
+  "", //                          9
+  "### Pay", //                   10
+  "1. Enter the card", //         11
+);
+
+test("detached body: each step's section and its place in the body", () => {
+  const { at } = readDetachedBodies(DETACHED);
+  assert.deepEqual(at.get(8), { section: "Sign in", step: 2 });
+  assert.deepEqual(at.get(11), { section: "Pay", step: 0 });
+  assert.equal(at.get(2), undefined, "a main-flow line is in no body");
+  // …and the server, checking them against the `sections` payload built from
+  // the same buffer, accepts them.
+  assert.equal(
+    validateDetachedBody([at.get(8), at.get(11)], {
+      steps: ['Click "Continue"', "Enter the card"],
+      sections: buildSectionsPayload(DETACHED),
+    }),
+    null,
+  );
+});
+
+/** What a run that picked line 8, the SECOND `Click "Continue"`, sends. */
+const READ = readDetachedBodies(DETACHED);
+const SECOND_CONTINUE = [{ section: "Sign in", step: 2 }];
+
+test("detached body: no drift while the picked bodies are as they were", () => {
+  assert.equal(detachedBodyDrift(DETACHED, READ, SECOND_CONTINUE), null);
+  // A note added in the main flow moves every line below it, but no body
+  // step's place. Looking the step up by its old LINE found another step
+  // there, and the step went out with no place at all; by place it holds.
+  const moved = DETACHED.replace("2. Sign in", "2. Sign in\n\nA note about the flow.");
+  assert.equal(detachedBodyDrift(moved, READ, SECOND_CONTINUE), null);
+  // So does an edit to a body nothing was picked from.
+  const other = DETACHED.replace("1. Enter the card", "1. Enter the card number");
+  assert.equal(detachedBodyDrift(other, READ, SECOND_CONTINUE), null);
+});
+
+test("detached body: drift when a step was added ahead of the picked one", () => {
+  // Place 2 now holds the FIRST `Click "Continue"`: the text at the place
+  // still matches, which is why the whole body is compared.
+  const added = DETACHED.replace("1. Type the username", "1. Wait for the form\n2. Type the username");
+  assert.match(
+    detachedBodyDrift(added, READ, SECOND_CONTINUE) ?? "",
+    /^the body of "Sign in" now has 4 steps where it had 3 when this run picked from it/,
+  );
+});
+
+test("detached body: drift when a picked body step was edited", () => {
+  const edited = DETACHED.replace("1. Type the username", "1. Type the user name");
+  assert.match(
+    detachedBodyDrift(edited, READ, SECOND_CONTINUE) ?? "",
+    /^body step 1 of "Sign in" has been edited since this run picked from it/,
+  );
+});
+
+test("detached body: the first of two same-named sections is the one read", () => {
+  // As in `buildSectionsPayload` and the parser, so the drift check compares
+  // the body the server will check against. A duplicate is refused before a
+  // run starts; one added mid-run below the original changes nothing picked.
+  const below = doc(DETACHED, "", "### sign in", "1. Something else");
+  assert.deepEqual(readDetachedBodies(below).bodies.get("sign in"), [
+    "Type the username",
+    'Click "Continue"',
+    'Click "Continue"',
+  ]);
+  assert.equal(detachedBodyDrift(below, READ, SECOND_CONTINUE), null);
+  // Added above it, the new one is what the server would read.
+  const above = DETACHED.replace(
+    "### Sign in",
+    doc("### sign in", "1. Something else", "", "### Sign in"),
+  );
+  assert.notEqual(detachedBodyDrift(above, READ, SECOND_CONTINUE), null);
+});
+
+test("detached body: drift when the section is gone", () => {
+  const gone = DETACHED.replace("### Pay", "#### Pay");
+  assert.match(
+    detachedBodyDrift(gone, READ, [{ section: "Pay", step: 0 }]) ?? "",
+    /^the section "Pay" is gone from the file/,
   );
 });

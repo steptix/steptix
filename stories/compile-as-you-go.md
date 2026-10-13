@@ -174,14 +174,30 @@ Resolving the clicked line:
   apart. It runs detached, at the root frame, exactly as Run Step Here runs a
   body line — nothing about execution changes. But its entry has to carry the
   section scope, because the runtime reaches that step through the section's
-  frame and will look for it nowhere else. The extension sends the section's
-  name alongside the step (`compileScope`), and the server binds through a
-  section frame of that name.
+  frame and will look for it nowhere else. Every detached body run, compiled
+  or not, sends `detachedBody`: each step's section and its place in the
+  body. The server binds each step through a section frame of that name, at
+  that place, so a compile files its entry where a plain run of those lines
+  replays it from (steptix-vscode/stories/specs/sections-run-and-resume.md
+  §4.2).
 - **A multi-line selection** resolves each selected step in order and
   compiles them sequentially — the session advances between steps, so a
-  selection is just this flow k times. One scope per compile: a selection
-  spanning a body and the main flow, or two different sections, has no single
-  `section:` to stamp and is refused rather than guessed at.
+  selection is just this flow k times. Body steps may come from several
+  sections: each binds under its own by `detachedBody`. A selection spanning a
+  body and the main flow is refused. It runs as the main flow, so its body
+  steps would never be sent on their own.
+- **A repeated step** compiled without its other occurrences binds by its
+  place. In a body that is `detachedBody` again: the second `Press Enter`
+  binds occurrence 1 and replaces the second entry, not the first. An entry's
+  occurrence is its position among the same-text entries of its scope, so
+  occurrence 1 has a slot only when occurrence 0 already has an entry on disk
+  or is in the same selection. Otherwise a fresh compile is refused before the
+  run (`unplaceableRepeat`). A later block of a split selection, or a
+  Continue, is not checked up front; there the writer refuses, whether it is
+  creating the file or splicing into it, so the entry never lands in another
+  occurrence's slot. In the main flow nothing says which
+  occurrence a lone step is, so a partial pick of a repeated main-flow step is
+  still refused.
 
 The old refusal ("cannot number a step below a skill or section call") goes
 away entirely. It existed because the pipeline needed expanded step
@@ -495,7 +511,9 @@ it, and the live test that asserts that is still green. Only the binding
 moves, which is what puts the entry under `section:` in the test's own file
 and what makes the recording's splice identity line up. Two refusals remain,
 both about numbering rather than scope: a partial selection of a repeated
-step, and a selection spanning two scopes.
+step, and a selection spanning two scopes. Both have since gone for body
+steps, and `compileScope` with them: `detachedBody` names each step's
+section and its place in the body (§Compile This Step).
 
 
 Verified by running: root 2891 (vitest, 145 files) including a new HTTP seam

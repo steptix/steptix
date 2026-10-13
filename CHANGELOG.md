@@ -9,6 +9,56 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Changed — Compile This Step takes body steps from two sections, and one repeat of a step
+
+Compile This Step refused two selections inside `### Section` bodies: steps
+from more than one section, and one occurrence of a step the body says more
+than once, such as the second `Press Enter`. Both now compile. Each step's
+entry lands under its own section, in the slot its place in the body gives
+it, so recompiling the second `Press Enter` after a ⚠ replaces the second
+entry and leaves the first alone.
+
+A later repeat needs a slot: the earlier repeats must already have entries,
+or be in the same selection. When they don't, Compile This Step refuses
+instead of filing the entry in the first repeat's place.
+
+- **The main flow is unchanged.** A partial pick of a repeated main-flow
+  step is still refused, and so is a selection mixing the main flow and a
+  section body.
+- **The Sessions API's `compileScope` field is gone.** It named one section
+  for a whole Compile This Step request. `detachedBody`, which names each
+  step's section and its place in the body, replaces it. The extension and
+  the server need to be from this version or later.
+
+### Fixed — steps of a compiled section replay as code when you run them on their own
+
+Select lines inside a `### Section` body and press Run, or use Run Step Here
+on one, and the steps used to run under AI every time, even when the section
+was compiled (#81). Its code-behind was only used when the section ran
+through the step that calls it. A step whose text matched a compiled
+main-flow step ran that step's code instead.
+
+- **Each step uses its own section's entry.** VS Code now tells the server
+  which section each selected step came from and where it sits in the body.
+  The steps still run on their own, outside any section call. A selection
+  across two sections, or one that skips a repeated step, gets the entry
+  for the place each step holds in its body.
+- **A step that reads a looped section's row still runs under AI.** A
+  section with a table runs once per row, and its entries read the row's
+  values. A step run on its own has no row, so a step whose text names a
+  column, such as `Type {{account}}`, runs under AI, and the Output says
+  why. The section's other steps replay their entries.
+- **Editing a picked section body while the run is going stops it.** Each
+  step's place in its body is read when the run starts. If that body changes
+  before the next request goes out (an `[input:]` prompt, the next data
+  row), the run stops with "Run stopped: … Re-run to pick again." rather
+  than run a step under another one's code.
+- **Compile This Step files entries from a body's section calls and
+  `[skill:]` calls correctly.** When a body step called another section or a
+  skill, those steps' entries were filed under the body's section in the
+  test's `.steps.ts`. They now land where the run looks for them, as a
+  whole-test Run & Compile files them.
+
 ### Fixed — the AI is told when a page opened an alert, confirm or prompt
 
 Steptix answers a browser dialog the moment it opens, and the AI was meant

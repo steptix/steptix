@@ -2014,8 +2014,9 @@ describe('compiling a file with control flow', () => {
       steps: ['Click Next'],
       sourceLines: [8],
       testFilePath,
+      sections: whileBody().sections,
       compile: 'steps',
-      compileScope: { section: 'Go to the next page' },
+      detachedBody: [{ section: 'Go to the next page', step: 0 }],
     });
 
     expect(refusalIn(events)).toBeUndefined();
