@@ -194,7 +194,8 @@ function escapeRegExp(s: string): string {
  * idempotent on a draft it already settled.
  *
  * - A parameter the file already has under the same name with a DIFFERENT
- *   value is renamed (`email` → `email_2`) and the steps rewritten to match
+ *   value is renamed (`email` → `email_2`, or the next free number) and the
+ *   steps rewritten to match — with `opts.wrote`, only the answer's own steps
  *   (decision 8: "never overwrites an existing line with a different value").
  *   Steptix keeps an existing line as it is, so without this the steps would
  *   silently type the old value. Two `.env` references under one name are the

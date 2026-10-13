@@ -1163,7 +1163,7 @@ for one call at a time:
   value the draft's steps type, so the next value is `email_3` — unless the
   draft holds a rename of the same name with exactly this value, which is
   reused (`email_2` again: the same value typed into another field of the
-  kind, P2).
+  kind, P1, §7.3).
 - **It rewrites only the steps this answer wrote.** A step from an earlier
   call, locked or not, keeps its `{{email}}`: it meant the value its own call
   gave, the file's when it reused the file's line.

@@ -163,7 +163,9 @@ interface View {
   alsoEdited?: Item[];
   fresh: boolean;
   /** The draft's parameters as the call is shown them — none for a redraft
-   *  from nothing. What its answer leaves out of them is carried. */
+   *  from nothing. What its answer leaves out of them is carried, and a
+   *  rename may not take one of their names except to reuse it for the same
+   *  value (`settleParameters`' `draft`). */
   parameters: Params;
 }
 
@@ -321,25 +323,15 @@ function placeholderRoots(text: string): Set<string> {
  * value before it was lost while its steps still named it.
  *
  * The answer's own entry wins where it names one, so the model can still
- * correct a value. `shown` is what the call was shown, under the names the
- * draft already settled (`email_2`), so a parameter is carried under its
- * settled name and never through {@link settleParameters} a second time. A
- * call shown nothing — a redraft from nothing — gets nothing carried. A
- * carried one keeps its place relative to the parameters before it.
+ * correct a value. (An empty one for a name the call was shown with a value
+ * never gets here: {@link withoutEmptyKnown} has already taken it out, so
+ * that name is carried like any other left out.) `shown` is what the call was
+ * shown, under the names the draft already settled (`email_2`), so a
+ * parameter is carried under its settled name and never through
+ * {@link settleParameters} a second time. A call shown nothing — a redraft
+ * from nothing — gets nothing carried. A carried one keeps its place relative
+ * to the parameters before it.
  */
-/**
- * The answer's parameters without an empty (or whitespace-only) value for a
- * name the call was shown with a value: that entry counts as left out, and
- * the shown value is carried ({@link withOmittedParameters}). Written, it
- * would be a line the extension leaves out for having no value — the value
- * lost again (#84, review). An empty value for a name the call was not shown
- * stays as it is.
- */
-function withoutEmptyKnown(answered: Params, shown: Params): Params {
-  const known = new Set(shown.filter((p) => p.value.trim() !== '').map((p) => p.name));
-  return answered.filter((p) => p.value.trim() !== '' || !known.has(p.name));
-}
-
 function withOmittedParameters(shown: Params, answered: Params, steps: readonly string[]): Params {
   const used = new Set<string>();
   for (const s of steps) for (const name of placeholderRoots(s)) used.add(name);
@@ -356,6 +348,19 @@ function withOmittedParameters(shown: Params, answered: Params, steps: readonly 
     at++;
   }
   return out;
+}
+
+/**
+ * The answer's parameters without an empty (or whitespace-only) value for a
+ * name the call was shown with a value: that entry counts as left out, so
+ * {@link withOmittedParameters} carries the shown value while a step still
+ * uses it. Written, it would be a line the extension leaves out for having no
+ * value — the value lost again (#84, review). An empty value for a name the
+ * call was not shown stays as it is.
+ */
+function withoutEmptyKnown(answered: Params, shown: Params): Params {
+  const known = new Set(shown.filter((p) => p.value.trim() !== '').map((p) => p.name));
+  return answered.filter((p) => p.value.trim() !== '' || !known.has(p.name));
 }
 
 export class DraftEngine {
@@ -2258,7 +2263,9 @@ export class DraftEngine {
     // and rewordings are theirs and are never rewritten by them, and a rename
     // rewrites only the steps this answer wrote: one from an earlier call,
     // locked or not, meant the value its own call gave. A rename never lands
-    // on a name the draft holds (#84, review).
+    // on a name the draft holds, except to reuse a rename of the same name
+    // holding exactly that value; and an empty value for a name the call was
+    // shown with a value counts as left out (#84, review).
     const items = this.flatItems();
     const written = new Set(wrote);
     const merged: RecordStepsAnswer = {
