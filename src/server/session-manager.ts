@@ -1076,6 +1076,17 @@ export type RunEvent =
       status: CompileStatus;
       files: Record<string, string>;
       summary: CompileSummary;
+      /**
+       * Every block of this compile carried `detachedBody`, and its entries
+       * bound by it: each under its own section, at its place in the body.
+       *
+       * Said because the client cannot tell otherwise. A server that predates
+       * the field drops it without a word and binds the old way, which puts a
+       * two-section pick's entries at the top level and a partial repeat's
+       * entry on the first slot. So a Compile This Step that needs the field
+       * refuses a result without this (steptix-vscode run-controller.ts).
+       */
+      detachedBody?: true;
     };
 
 export type RunEventListener = (event: RunEvent) => void;
@@ -1444,6 +1455,11 @@ interface OpenCompile {
   startedAt: string;
   /** True once any block of this run failed, for the recording's status. */
   anyFailed: boolean;
+  /**
+   * True while every block of this run carried `detachedBody`, so every entry
+   * it generated bound by section and position. Echoed on `compile:result`.
+   */
+  boundByDetachedBody: boolean;
 }
 
 /**
@@ -4777,6 +4793,8 @@ export class SessionManager {
         identities: session.liveCompile?.identities ?? {},
         startedAt: session.liveCompile?.startedAt ?? new Date(runStartTime).toISOString(),
         anyFailed: session.liveCompile?.anyFailed ?? false,
+        boundByDetachedBody:
+          (session.liveCompile?.boundByDetachedBody ?? true) && request.detachedBody !== undefined,
       };
     }
     // A strict run — a compile's replay — exists to find out whether the code
@@ -8761,6 +8779,7 @@ export class SessionManager {
         status: outcome.status,
         files: outcome.files,
         summary: outcome.summary,
+        ...(openCompile?.boundByDetachedBody && { detachedBody: true as const }),
       });
       // A `'steps'` compile is terminal by construction — it compiles the
       // steps it was sent and is never continued — so it must not stay on the

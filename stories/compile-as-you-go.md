@@ -183,9 +183,21 @@ Resolving the clicked line:
   (steptix-vscode/stories/specs/sections-run-and-resume.md §4.2).
 - **A multi-line selection** resolves each selected step in order and
   compiles them sequentially — the session advances between steps, so a
-  selection is just this flow k times. One scope per compile: a selection
-  spanning a body and the main flow, or two different sections, has no single
-  `section:` to stamp and is refused rather than guessed at.
+  selection is just this flow k times. Body steps may come from several
+  sections: each binds under its own by `detachedBody`. A selection spanning a
+  body and the main flow is refused. It runs as the main flow, so its body
+  steps would never be sent on their own.
+- **A repeated step** compiled without its other occurrences binds by its
+  place. In a body that is `detachedBody` again: the second `Press Enter`
+  binds occurrence 1 and replaces the second entry, not the first. In the main
+  flow nothing says which occurrence a lone step is, so a partial pick of a
+  repeated main-flow step is still refused.
+- **On an older server.** `compileScope` names one section and no places, and
+  a server that predates `detachedBody` drops it without a word. So a pick
+  only `detachedBody` can bind (two sections, or a partial repeat in a body)
+  needs the server to say it bound by it: `compile:result` carries
+  `detachedBody: true`, and without it the extension shows the compile as
+  failed and opens no diff.
 
 The old refusal ("cannot number a step below a skill or section call") goes
 away entirely. It existed because the pipeline needed expanded step

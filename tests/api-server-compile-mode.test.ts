@@ -958,6 +958,95 @@ describe('recompiling a step whose entry broke', () => {
       expect(recording!.steps[0]!.occurrence).toBe(0);
     });
 
+    /** Two bodies, one of which says `Press Enter` twice, as the client sends
+     *  them: keyed by the lower-cased name, steps as authored. */
+    const BODIES = {
+      'sign in': {
+        name: 'Sign in',
+        headingLine: 11,
+        steps: ['Press Enter', 'Type the code', 'Press Enter'],
+        stepLines: [12, 13, 14],
+      },
+      pay: { name: 'Pay', headingLine: 16, steps: ['Enter the card'], stepLines: [17] },
+    };
+
+    it('compiles body steps from two sections, each under its own', async () => {
+      // `compileScope` names one section, so this compile is attributed only by
+      // `detachedBody`, and the result says the entries were bound by it.
+      const { frames } = await runSteps(
+        requestBody({
+          steps: ['Type the code', 'Enter the card'],
+          sourceLines: [13, 17],
+          sections: BODIES,
+          detachedBody: [
+            { section: 'Sign in', step: 1 },
+            { section: 'Pay', step: 0 },
+          ],
+          compile: 'steps',
+        }),
+      );
+      const result = frames.find((f) => f.type === 'compile:result')!;
+      expect(result.detachedBody).toBe(true);
+      const proposed = result.files[stepsFilePath] as string;
+      expect(proposed).toMatch(/section: 'Sign in',\s*source: 'Type the code'/);
+      expect(proposed).toMatch(/section: 'Pay',\s*source: 'Enter the card'/);
+      expect(result.summary.compiled).toBe(2);
+
+      const recording = await readRecording(testFilePath);
+      expect(recording!.steps.map((s) => [s.section, s.source])).toEqual([
+        ['Sign in', 'Type the code'],
+        ['Pay', 'Enter the card'],
+      ]);
+    });
+
+    it('recompiles the SECOND of a repeated body step into its own slot', async () => {
+      // The repair a ⚠ on the second `Press Enter` asks for. Counted within the
+      // request it was occurrence 0, and its code replaced the FIRST entry's.
+      // Its place in the body makes it occurrence 1.
+      await fs.writeFile(
+        stepsFilePath,
+        [
+          "import { defineSteps } from 'steptix/codebehind';",
+          'export default defineSteps([',
+          "  { section: 'Sign in', source: 'Press Enter', async run(ctx) { await ctx.page.click('#first'); } },",
+          "  { section: 'Sign in', source: 'Press Enter', async run(ctx) { await ctx.page.click('#second'); } },",
+          ']);',
+          '',
+        ].join('\n'),
+      );
+      const { frames } = await runSteps(
+        requestBody({
+          steps: ['Press Enter'],
+          sourceLines: [14],
+          sections: BODIES,
+          detachedBody: [{ section: 'Sign in', step: 2 }],
+          compile: 'steps',
+          compileScope: { section: 'Sign in' },
+        }),
+      );
+      const result = frames.find((f) => f.type === 'compile:result')!;
+      expect(result.detachedBody).toBe(true);
+      const proposed = result.files[stepsFilePath] as string;
+      expect(proposed).toContain("click('#first')");
+      expect(proposed).not.toContain("click('#second')");
+      expect(proposed.indexOf("click('#first')")).toBeLessThan(proposed.indexOf("click('#go')"));
+
+      const recording = await readRecording(testFilePath);
+      expect(recording!.steps[0]!.occurrence).toBe(1);
+    });
+
+    it('does not claim `detachedBody` for a compile that did not send it', async () => {
+      const { frames } = await runSteps(
+        requestBody({
+          steps: ['Type the username'],
+          sourceLines: [12],
+          compile: 'steps',
+          compileScope: { section: 'Sign in' },
+        }),
+      );
+      expect(frames.find((f) => f.type === 'compile:result')!.detachedBody).toBeUndefined();
+    });
+
     it('files the steps of a section the body step CALLS under that section', async () => {
       // `Check out`'s body step is a call to `Sign in`, which expands into a
       // frame of its own, as it does at any call site. Only what the step

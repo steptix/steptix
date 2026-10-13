@@ -281,6 +281,15 @@ interface ResolvedClient {
   envPath: string | null;
 }
 
+/**
+ * Why a Compile This Step that needs `detachedBody` came back as a failure: the
+ * server bound it without the field. Shown after "Compile failed for <file>:".
+ */
+const BODY_POSITIONS_UNSUPPORTED =
+  'the Sessions API server does not know where each body step sits, so it would ' +
+  'file these entries in the wrong place. Restart or update the server, or ' +
+  'compile one section at a time, every repeat of a step together.';
+
 /** Phase labels for the run log, matching `steptix compile`'s output. */
 const COMPILE_PHASE_LABEL: Record<string, string> = {
   record: 'Record',
@@ -563,6 +572,10 @@ export class RunController {
   /** The compile mode of the logical run in progress, so a Continue after a
    *  breakpoint keeps compiling rather than silently becoming a plain Run. */
   private compileModeOfRun: 'run' | 'steps' | undefined;
+  /** The logical run in progress is a compile that binds right only on a
+   *  server that reads `detachedBody` (`needsBodyPositions`). Carried across
+   *  a Continue for the reason `compileModeOfRun` is. */
+  private compileNeedsBodyPositions = false;
   /**
    * The compile tail's strip state for THIS document, or null when no tail is
    * running (stories/compile-tail-progress.md §The panel strip).
@@ -1897,6 +1910,7 @@ export class RunController {
     // Deliberately NOT done in `pause()`: that parks the run for a Resume,
     // which SHOULD inherit.
     this.compileModeOfRun = undefined;
+    this.compileNeedsBodyPositions = false;
     // Same argument, same exception: a stopped run has no Continue, so the
     // narrowing it parked is spent. Leaving it would narrow the next run that
     // called itself a resume.
@@ -2805,6 +2819,15 @@ export class RunController {
        */
       compileScope?: { section: string };
       /**
+       * This compile binds right only on a server that reads `detachedBody`:
+       * Compile This Step on body steps from two sections, or on a repeated
+       * step without the earlier ones. `compileScope` cannot say either, so a
+       * server that drops `detachedBody` would file the entries at the top
+       * level, or on the first slot. Its `compile:result` is refused unless
+       * the server says it bound by `detachedBody`.
+       */
+      needsBodyPositions?: boolean;
+      /**
        * Run only these rows of the table under `## Steps`, by 1-based TABLE
        * position (stories/data-row-progress-and-selection.md §Running rows).
        *
@@ -3534,7 +3557,10 @@ export class RunController {
     // stale `'run'` from the last fresh run survived and the NEXT resume
     // inherited it — the silent inheritance `isResume` exists to stop, one
     // site short.
-    if (options.isResume !== true) this.compileModeOfRun = options.compile;
+    if (options.isResume !== true) {
+      this.compileModeOfRun = options.compile;
+      this.compileNeedsBodyPositions = options.needsBodyPositions === true;
+    }
     // Which row the recording will be of. Every row runs, but only the first
     // one's actions are recorded (rows story, decision 11) — so an entry that
     // references a column the first selected row leaves empty is a surprise
@@ -5412,7 +5438,15 @@ export class RunController {
               error: event.summary.error ?? 'the compile produced nothing',
             }),
           };
-          this.logCompileLine(compileResultLine(event), log);
+          // A proposal bound the old way, on a server that dropped
+          // `detachedBody`. Its entries sit at the top level or on the wrong
+          // slot, so it is a failure and the diff never opens.
+          if (this.compileNeedsBodyPositions && event.status !== 'failed' && event.detachedBody !== true) {
+            this.compileResult = { ok: false, status: 'failed', error: BODY_POSITIONS_UNSUPPORTED };
+            this.logCompileLine(`Compile refused: ${BODY_POSITIONS_UNSUPPORTED}`, log);
+          } else {
+            this.logCompileLine(compileResultLine(event), log);
+          }
         }
         continue;
       }

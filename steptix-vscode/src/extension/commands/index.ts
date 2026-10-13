@@ -127,6 +127,8 @@ export function registerCommands(
     /** The `### Section` the steps were authored in, when they came from a
      *  body. Their ENTRIES bind under it; they still execute detached. */
     section?: string;
+    /** A body pick only `detachedBody` binds right — see `CompileTarget`. */
+    needsBodyPositions?: boolean;
   } = {}): Promise<void> => {
     const controller = registry.active();
     if (!controller) return notifyNoActive();
@@ -172,6 +174,7 @@ export function registerCommands(
         ...(mode === 'steps' && { skipBreakpointAtStart: true }),
         compile: mode,
         ...(options.section !== undefined && { compileScope: { section: options.section } }),
+        ...(options.needsBodyPositions && { needsBodyPositions: true }),
       });
     } finally {
       registry.notifyRunning(false);
@@ -644,6 +647,7 @@ export function registerCommands(
       lines: target.lines,
       mode: 'steps',
       ...(target.section !== undefined && { section: target.section }),
+      ...(target.needsBodyPositions && { needsBodyPositions: true }),
     });
   };
 
@@ -1537,11 +1541,18 @@ function notifyNoActive(): void {
  * the section — that is where the runtime, which reaches the step through the
  * section, looks for it.
  *
+ * Body steps bind by `detachedBody`, which the run sends for every one of them:
+ * its own section and its place in the body. So a selection may take body
+ * steps from several sections, and a repeated body step may be compiled
+ * without its siblings. Neither can be said in `compileScope`, so either one
+ * sets `needsBodyPositions` and the compile is refused on a server that does
+ * not bind by the field.
+ *
  * What is refused is refused because compiling it would produce a WRONG entry,
  * not because the feature is missing — see each branch.
  */
 export type CompileTarget =
-  | { ok: true; lines: number[]; section?: string }
+  | { ok: true; lines: number[]; section?: string; needsBodyPositions?: true }
   | { ok: false; refusal: string };
 
 /**
@@ -1585,26 +1596,48 @@ export function resolveCompileTarget(
       ? selected.filter((l) => kindOf(l) === 'step' || kindOf(l) === 'section-step')
       : [clicked];
 
-  // One scope per compile. A selection spanning a section body and the main
-  // flow — or two different sections — has no single `section:` to stamp, and
-  // guessing one would put half the entries where nothing looks for them.
+  // Main flow or bodies, not both. A selection that names a main-flow step
+  // runs as the main flow (`resolveRunSelection`), so a body step in it is
+  // never sent on its own and nothing could bind it by its place in the body.
   const scopes = new Set(lines.map((l) => sectionOwningLine(text, l) ?? ''));
-  if (scopes.size > 1) {
-    const named = [...scopes].map((s) => (s === '' ? 'the main flow' : `"${s}"`)).sort();
+  if (scopes.size > 1 && scopes.has('')) {
+    const named = [...scopes].filter((s) => s !== '').map((s) => `"${s}"`).sort();
     return {
       ok: false,
       refusal:
-        `Steptix: that selection spans ${named.join(' and ')}, and each entry binds to one ` +
-        'scope. Select steps from one section body, or from the main flow.',
+        `Steptix: that selection spans the main flow and ${named.join(' and ')}. ` +
+        'Select steps from the main flow, or from section bodies, not both.',
     };
   }
-  const section = [...scopes][0] ?? '';
 
-  // Occurrence is counted within the request, so a compile that sends SOME of
-  // a repeated text's occurrences numbers them from 0 — and the entry lands on
-  // the wrong one, replacing code generated from a different step. Sending all
-  // of them is fine: they number correctly.
-  const siblings = section === '' ? rootFrameSteps(text) : sectionBodySteps(text, section);
+  if (!scopes.has('')) {
+    // Body steps only. Each binds under its own section at its own place in
+    // the body (`detachedBody`), so neither a second section nor a partial
+    // repeat is ambiguous. Both need that field: `compileScope` names one
+    // section and no places.
+    const sections = [...scopes];
+    const partialRepeat = sections.some((section) => {
+      const body = sectionBodySteps(text, section);
+      return lines.some((line) => {
+        const self = body.find((s) => s.line === line);
+        if (!self) return false;
+        const same = body.filter((s) => s.instruction === self.instruction);
+        return same.length > 1 && !same.every((s) => lines.includes(s.line));
+      });
+    });
+    return {
+      ok: true,
+      lines,
+      ...(sections.length === 1 && { section: sections[0]! }),
+      ...((sections.length > 1 || partialRepeat) && { needsBodyPositions: true as const }),
+    };
+  }
+
+  // Main flow. Occurrence is counted within the request, so a compile that
+  // sends SOME of a repeated text's occurrences numbers them from 0 — and the
+  // entry lands on the wrong one, replacing code generated from a different
+  // step. Sending all of them is fine: they number correctly.
+  const siblings = rootFrameSteps(text);
   for (const line of lines) {
     const self = siblings.find((s) => s.line === line);
     if (!self) continue;
@@ -1613,14 +1646,14 @@ export function resolveCompileTarget(
       return {
         ok: false,
         refusal:
-          `Steptix: "${self.instruction}" appears more than once in ` +
-          `${section === '' ? 'this test' : `"${section}"`}, and a partial compile cannot tell ` +
-          'which one you mean — the entry would land on the first. Select them all, or use Run & Compile.',
+          `Steptix: "${self.instruction}" appears more than once in this test, and a partial ` +
+          'compile cannot tell which one you mean — the entry would land on the first. Select ' +
+          'them all, or use Run & Compile.',
       };
     }
   }
 
-  return { ok: true, lines, ...(section !== '' && { section }) };
+  return { ok: true, lines };
 }
 
 /**

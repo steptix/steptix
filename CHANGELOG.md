@@ -9,6 +9,24 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Changed — Compile This Step takes body steps from two sections, and one repeat of a step
+
+Compile This Step refused two selections inside `### Section` bodies: steps
+from more than one section, and one occurrence of a step the body says more
+than once, such as the second `Press Enter`. Both now compile. Each step's
+entry lands under its own section, in the slot its place in the body gives
+it, so recompiling the second `Press Enter` after a ⚠ replaces the second
+entry and leaves the first alone.
+
+- **The main flow is unchanged.** A partial pick of a repeated main-flow
+  step is still refused, and so is a selection mixing the main flow and a
+  section body.
+- **An older Sessions API server can't do this.** It ignores where each
+  body step sits and would file these entries at the top level or on the
+  first slot. Steptix shows such a compile as failed and opens no diff.
+  Restart or update the server, or compile one section at a time, with
+  every repeat of the step.
+
 ### Fixed — steps of a compiled section replay as code when you run them on their own
 
 Select lines inside a `### Section` body and press Run, or use Run Step Here
