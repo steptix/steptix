@@ -192,8 +192,8 @@ Resolving the clicked line:
   occurrence is its position among the same-text entries of its scope, so
   occurrence 1 has a slot only when occurrence 0 already has an entry on disk
   or is in the same selection. Otherwise a fresh compile is refused before the
-  run (`unplaceableRepeat`). A later block of a split selection, or a later
-  data row, is not checked up front; there the writer refuses, whether it is
+  run (`unplaceableRepeat`). A later block of a split selection, or a
+  Continue, is not checked up front; there the writer refuses, whether it is
   creating the file or splicing into it, so the entry never lands in another
   occurrence's slot. In the main flow nothing says which
   occurrence a lone step is, so a partial pick of a repeated main-flow step is

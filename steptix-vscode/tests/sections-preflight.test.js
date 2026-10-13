@@ -472,6 +472,25 @@ test("detached body: drift when a picked body step was edited", () => {
   );
 });
 
+test("detached body: the first of two same-named sections is the one read", () => {
+  // As in `buildSectionsPayload` and the parser, so the drift check compares
+  // the body the server will check against. A duplicate is refused before a
+  // run starts; one added mid-run below the original changes nothing picked.
+  const below = doc(DETACHED, "", "### sign in", "1. Something else");
+  assert.deepEqual(readDetachedBodies(below).bodies.get("sign in"), [
+    "Type the username",
+    'Click "Continue"',
+    'Click "Continue"',
+  ]);
+  assert.equal(detachedBodyDrift(below, READ, SECOND_CONTINUE), null);
+  // Added above it, the new one is what the server would read.
+  const above = DETACHED.replace(
+    "### Sign in",
+    doc("### sign in", "1. Something else", "", "### Sign in"),
+  );
+  assert.notEqual(detachedBodyDrift(above, READ, SECOND_CONTINUE), null);
+});
+
 test("detached body: drift when the section is gone", () => {
   const gone = DETACHED.replace("### Pay", "#### Pay");
   assert.match(

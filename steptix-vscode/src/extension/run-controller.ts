@@ -2848,8 +2848,9 @@ export class RunController {
     this.compileResult = undefined;
     this.sawCompileProgress = false;
     // …and the stale-selection refusal, which callers read after the run
-    // (`staleSelectionRefusal`), so a run that never reached the reset below
-    // cannot answer with the previous run's.
+    // (`staleSelectionRefusal`). Reset here, at the start, so a run that
+    // returns before its row loop (a failed pre-flight, a Stop while the
+    // server starts) cannot answer with the previous run's.
     this.narrowingRefusal = null;
     // A tail left up by a previous run — a stream that dropped before its
     // result — belongs to nothing now. The new run raises its own.
