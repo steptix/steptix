@@ -21,11 +21,10 @@ entry and leaves the first alone.
 - **The main flow is unchanged.** A partial pick of a repeated main-flow
   step is still refused, and so is a selection mixing the main flow and a
   section body.
-- **An older Sessions API server can't do this.** It ignores where each
-  body step sits and would file these entries at the top level or on the
-  first slot. Steptix shows such a compile as failed and opens no diff.
-  Restart or update the server, or compile one section at a time, with
-  every repeat of the step.
+- **The Sessions API's `compileScope` field is gone.** It named one section
+  for a whole Compile This Step request. `detachedBody`, which names each
+  step's section and its place in the body, replaces it. The extension and
+  the server need to be from this version or later.
 
 ### Fixed — steps of a compiled section replay as code when you run them on their own
 

@@ -689,12 +689,6 @@ export interface CompileResultEvent {
   status: CompileStatus;
   files: Record<string, string>;
   summary: CompileSummary;
-  /**
-   * Every block of the compile carried `detachedBody` and its entries bound by
-   * it: each under its own section, at its place in the body. Absent from a
-   * server that predates the field, which drops it and binds the old way.
-   */
-  detachedBody?: true;
 }
 
 export type CompileEvent =

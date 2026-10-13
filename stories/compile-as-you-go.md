@@ -174,13 +174,12 @@ Resolving the clicked line:
   apart. It runs detached, at the root frame, exactly as Run Step Here runs a
   body line — nothing about execution changes. But its entry has to carry the
   section scope, because the runtime reaches that step through the section's
-  frame and will look for it nowhere else. The extension sends the section's
-  name alongside the step (`compileScope`), and the server binds through a
-  section frame of that name. Every detached body run, compiled or not, also
-  sends `detachedBody`: each step's section and its place in the body. The
-  server binds by that when it has it, and it is what makes a plain run of
-  those lines replay the entries a compile wrote
-  (steptix-vscode/stories/specs/sections-run-and-resume.md §4.2).
+  frame and will look for it nowhere else. Every detached body run, compiled
+  or not, sends `detachedBody`: each step's section and its place in the
+  body. The server binds each step through a section frame of that name, at
+  that place, so a compile files its entry where a plain run of those lines
+  replays it from (steptix-vscode/stories/specs/sections-run-and-resume.md
+  §4.2).
 - **A multi-line selection** resolves each selected step in order and
   compiles them sequentially — the session advances between steps, so a
   selection is just this flow k times. Body steps may come from several
@@ -192,12 +191,6 @@ Resolving the clicked line:
   binds occurrence 1 and replaces the second entry, not the first. In the main
   flow nothing says which occurrence a lone step is, so a partial pick of a
   repeated main-flow step is still refused.
-- **On an older server.** `compileScope` names one section and no places, and
-  a server that predates `detachedBody` drops it without a word. So a pick
-  only `detachedBody` can bind (two sections, or a partial repeat in a body)
-  needs the server to say it bound by it: `compile:result` carries
-  `detachedBody: true`, and without it the extension shows the compile as
-  failed and opens no diff.
 
 The old refusal ("cannot number a step below a skill or section call") goes
 away entirely. It existed because the pipeline needed expanded step
@@ -511,7 +504,9 @@ it, and the live test that asserts that is still green. Only the binding
 moves, which is what puts the entry under `section:` in the test's own file
 and what makes the recording's splice identity line up. Two refusals remain,
 both about numbering rather than scope: a partial selection of a repeated
-step, and a selection spanning two scopes.
+step, and a selection spanning two scopes. Both have since gone for body
+steps, and `compileScope` with them: `detachedBody` names each step's
+section and its place in the body (§Compile This Step).
 
 
 Verified by running: root 2891 (vitest, 145 files) including a new HTTP seam

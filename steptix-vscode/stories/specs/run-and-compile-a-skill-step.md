@@ -69,7 +69,7 @@ nothing is ever chosen silently.
   debugging a failure that happened inside a test.
 
 The wire already carries everything: `POST /sessions/:id/steps` accepts
-`startAt`, `endAt`, `seedScope`, `compile`, `compileScope` with no guard
+`startAt`, `endAt`, `seedScope` and `compile` with no guard
 against combining a slice with a compile
 ([api-server.ts:749-838](../../../src/server/api-server.ts#L749)). No
 command has ever combined them; that combination — plus the picker — is
@@ -274,7 +274,7 @@ never been sent. Server-side it decomposes into pieces that all exist:
   the **real skill frame**, so `bindingFor(i)` on a skill-body step
   resolves the defining site to the *skill* file: entries land in
   `login.steps.ts` keyed by the skill's authored text, exactly where a
-  whole-test compile binds them. **No `compileScope`, no synthesized
+  whole-test compile binds them. **No `detachedBody`, no synthesized
   frame** — the section-body special case does not apply, because unlike a
   detached section-body run this slice executes *inside* the real frame.
 - **Occurrence is counted over the full expansion**, not the sent slice —
@@ -334,11 +334,11 @@ never been sent. Server-side it decomposes into pieces that all exist:
   skill document), which is the right one: it is where that test's last
   run recorded the entry's failure.
 - **The client-side compile gates do not apply to test-session rows.**
-  `resolveCompileTarget`'s repeated-step refusal and its
-  `sectionOwningLine`-derived `compileScope` belong to the detached
-  test-file path; the slice path counts occurrence over the full
-  expansion server-side (the gate would spuriously refuse) and must send
-  **no `compileScope`**. The standalone row keeps today's gates verbatim.
+  `resolveCompileTarget`'s repeated-step refusal and the `detachedBody`
+  a detached body run sends belong to the detached test-file path; the
+  slice path counts occurrence over the full expansion server-side (the
+  gate would spuriously refuse) and sends **no `detachedBody`**. The
+  standalone row keeps today's gates verbatim.
 - **One entry, one diff**: no Review pass (`'steps'` behaviour), the diff
   proposes `login.steps.ts` with the entry spliced. The proposal
   notification names the session it recorded against ("recorded in

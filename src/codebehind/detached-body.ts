@@ -31,16 +31,11 @@ import type { CodeBehindExpansion } from './loader.js';
 /**
  * Where one step of a detached batch came from: the `### Section` whose body
  * it was selected from, by its authored name, and its 0-based position in that
- * body.
- *
- * `step` is absent on `compileScope`, the older attribution that Compile This
- * Step sends, which names one section for the whole request and no positions.
- * Without positions no occurrence can be corrected, which is why the client
- * refuses a compile that would need one.
+ * body. The step route's `detachedBody`, one per step.
  */
 export interface DetachedBodyStep {
   section: string;
-  step?: number;
+  step: number;
 }
 
 /**
@@ -53,13 +48,13 @@ export interface DetachedBodyStep {
  * skill's own frame, which binds where it should. Moving it too would file a
  * skill's entries under this section in the test's `.steps.ts`.
  *
- * `sections` supplies the authored bodies the occurrence is counted over. An
- * input with no `step`, or a section not in `sections`, keeps the occurrence
- * it counted within this batch.
+ * `sections` supplies the authored bodies the occurrence is counted over. A
+ * section not in `sections` keeps the occurrence its steps counted within this
+ * batch (the step route refuses one, so only an in-process caller can do it).
  */
 export function detachedBodyExpansion(
   expansion: CodeBehindExpansion,
-  picks: ReadonlyArray<DetachedBodyStep | undefined>,
+  picks: ReadonlyArray<DetachedBodyStep>,
   testFilePath: string,
   sections: SectionDefs = {},
 ): CodeBehindExpansion {
@@ -114,12 +109,11 @@ export function detachedBodyExpansion(
  * first.
  */
 function occurrenceOffsets(
-  picks: ReadonlyArray<DetachedBodyStep | undefined>,
+  picks: ReadonlyArray<DetachedBodyStep>,
   sections: SectionDefs,
 ): Map<number, number[]> {
   const groups = new Map<string, { section: string; inputs: number[]; steps: number[] }>();
   picks.forEach((pick, input) => {
-    if (pick?.step === undefined) return;
     const key = matchText(pick.section);
     let group = groups.get(key);
     if (!group) {
@@ -157,7 +151,7 @@ function occurrenceOffsets(
  */
 export function detachedRowReads(
   expansion: Pick<CodeBehindExpansion, 'origins' | 'rawSteps' | 'steps'>,
-  picks: ReadonlyArray<DetachedBodyStep | undefined>,
+  picks: ReadonlyArray<DetachedBodyStep>,
   sections: SectionDefs = {},
 ): Map<number, string> {
   const columns = new Set<string>();

@@ -281,15 +281,6 @@ interface ResolvedClient {
   envPath: string | null;
 }
 
-/**
- * Why a Compile This Step that needs `detachedBody` came back as a failure: the
- * server bound it without the field. Shown after "Compile failed for <file>:".
- */
-const BODY_POSITIONS_UNSUPPORTED =
-  'the Sessions API server does not know where each body step sits, so it would ' +
-  'file these entries in the wrong place. Restart or update the server, or ' +
-  'compile one section at a time, every repeat of a step together.';
-
 /** Phase labels for the run log, matching `steptix compile`'s output. */
 const COMPILE_PHASE_LABEL: Record<string, string> = {
   record: 'Record',
@@ -572,10 +563,6 @@ export class RunController {
   /** The compile mode of the logical run in progress, so a Continue after a
    *  breakpoint keeps compiling rather than silently becoming a plain Run. */
   private compileModeOfRun: 'run' | 'steps' | undefined;
-  /** The logical run in progress is a compile that binds right only on a
-   *  server that reads `detachedBody` (`needsBodyPositions`). Carried across
-   *  a Continue for the reason `compileModeOfRun` is. */
-  private compileNeedsBodyPositions = false;
   /**
    * The compile tail's strip state for THIS document, or null when no tail is
    * running (stories/compile-tail-progress.md §The panel strip).
@@ -1910,7 +1897,6 @@ export class RunController {
     // Deliberately NOT done in `pause()`: that parks the run for a Resume,
     // which SHOULD inherit.
     this.compileModeOfRun = undefined;
-    this.compileNeedsBodyPositions = false;
     // Same argument, same exception: a stopped run has no Continue, so the
     // narrowing it parked is spent. Leaving it would narrow the next run that
     // called itself a resume.
@@ -2813,21 +2799,6 @@ export class RunController {
        */
       compile?: 'run' | 'steps';
       /**
-       * The `### Section` the compiled steps were authored in, when they came
-       * from a body. Their ENTRIES bind under it; they still execute detached
-       * at the root frame, exactly as Run Step Here runs them.
-       */
-      compileScope?: { section: string };
-      /**
-       * This compile binds right only on a server that reads `detachedBody`:
-       * Compile This Step on body steps from two sections, or on a repeated
-       * step without the earlier ones. `compileScope` cannot say either, so a
-       * server that drops `detachedBody` would file the entries at the top
-       * level, or on the first slot. Its `compile:result` is refused unless
-       * the server says it bound by `detachedBody`.
-       */
-      needsBodyPositions?: boolean;
-      /**
        * Run only these rows of the table under `## Steps`, by 1-based TABLE
        * position (stories/data-row-progress-and-selection.md §Running rows).
        *
@@ -3557,10 +3528,7 @@ export class RunController {
     // stale `'run'` from the last fresh run survived and the NEXT resume
     // inherited it — the silent inheritance `isResume` exists to stop, one
     // site short.
-    if (options.isResume !== true) {
-      this.compileModeOfRun = options.compile;
-      this.compileNeedsBodyPositions = options.needsBodyPositions === true;
-    }
+    if (options.isResume !== true) this.compileModeOfRun = options.compile;
     // Which row the recording will be of. Every row runs, but only the first
     // one's actions are recorded (rows story, decision 11) — so an entry that
     // references a column the first selected row leaves empty is a surprise
@@ -3765,11 +3733,6 @@ export class RunController {
             ...(rowCompile && (compileBlocksSent > 0 || options.isResume === true) && {
               compileContinues: true,
             }),
-            // Travels with `compile`, never without it — it names the section
-            // a Compile This Step's entries belong to, and a batch with no
-            // compile has nothing to scope. (`runStepBlock` narrows it again
-            // to `'steps'`; this gate is about the ROW, not the mode.)
-            ...(rowCompile && options.compileScope && { compileScope: options.compileScope }),
             // The rows that do NOT compile, saying which run they belong to —
             // and, because it is the same field, which KIND of run.
             //
@@ -5175,8 +5138,6 @@ export class RunController {
     /** This block is not the first of its logical run — continue the compile
      *  already open in the session rather than starting a new one. */
     compileContinues?: boolean;
-    /** Section attribution for the entries this block compiles. */
-    compileScope?: { section: string };
     /** This block belongs to a compile of this MODE but compiles nothing of
      *  its own — rows 2..N of a data-driven one. Keeps the two things the
      *  server decides per batch from the mode: the AI switch's compile
@@ -5200,7 +5161,7 @@ export class RunController {
      *  section. */
     detachedBody?: boolean;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, withinCompileRun, suppressServerBreakpoints, runStart, detachedBody } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, withinCompileRun, suppressServerBreakpoints, runStart, detachedBody } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -5320,17 +5281,14 @@ export class RunController {
         })()),
         ...(compile && { compile }),
         ...(compile && compileContinues && { compileContinues: true }),
-        ...(compile === 'steps' && compileScope && { compileScope }),
-        // Every detached body block, compile or not. A plain run of selected
-        // body lines is the case it exists for: without it their compiled
-        // entries never replayed. On a compile it says what `compileScope`
-        // says, per step and with positions; `compileScope` still travels for
-        // a server that predates this field.
+        // Every detached body block, compile or not: a plain run of selected
+        // body lines replays the section's entries by it, and a Compile This
+        // Step of them files its entries by it.
         ...(bodyPositions && { detachedBody: bodyPositions }),
         // Never alongside `compile` — the server refuses that pair, and the
         // caller already gates on `rowCompile === undefined`. Narrowed again
-        // here for the same reason `compileScope` is: this is the one place
-        // that knows what actually goes on the wire.
+        // here because this is the one place that knows what actually goes on
+        // the wire.
         ...(compile === undefined && withinCompileRun !== undefined && { withinCompileRun }),
         // Where this run starts, as a position in the `fullSteps` above —
         // computed from the same buffer read, so the two cannot disagree.
@@ -5438,15 +5396,7 @@ export class RunController {
               error: event.summary.error ?? 'the compile produced nothing',
             }),
           };
-          // A proposal bound the old way, on a server that dropped
-          // `detachedBody`. Its entries sit at the top level or on the wrong
-          // slot, so it is a failure and the diff never opens.
-          if (this.compileNeedsBodyPositions && event.status !== 'failed' && event.detachedBody !== true) {
-            this.compileResult = { ok: false, status: 'failed', error: BODY_POSITIONS_UNSUPPORTED };
-            this.logCompileLine(`Compile refused: ${BODY_POSITIONS_UNSUPPORTED}`, log);
-          } else {
-            this.logCompileLine(compileResultLine(event), log);
-          }
+          this.logCompileLine(compileResultLine(event), log);
         }
         continue;
       }

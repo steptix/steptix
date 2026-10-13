@@ -923,15 +923,30 @@ describe('recompiling a step whose entry broke', () => {
   describe('a single-step compile of a section body', () => {
     // The step runs detached at the root frame, as Run Step Here runs it, but
     // its ENTRY has to bind under the section — that is where the runtime,
-    // which reaches the step through the section, looks for it. The user hit
-    // this live: our review round had refused it outright.
-    it('binds the entry under the section scope the client attributed', async () => {
+    // which reaches the step through the section, looks for it. The request
+    // says where each step sits (`detachedBody`). The user hit this live: our
+    // review round had refused it outright.
+
+    /** Two bodies, one of which says `Press Enter` twice, as the client sends
+     *  them: keyed by the lower-cased name, steps as authored. */
+    const BODIES = {
+      'sign in': {
+        name: 'Sign in',
+        headingLine: 11,
+        steps: ['Type the username', 'Press Enter', 'Type the code', 'Press Enter'],
+        stepLines: [12, 13, 14, 15],
+      },
+      pay: { name: 'Pay', headingLine: 17, steps: ['Enter the card'], stepLines: [18] },
+    };
+
+    it('binds the entry under the section the step came from', async () => {
       const { frames } = await runSteps(
         requestBody({
           steps: ['Type the username'],
           sourceLines: [12],
+          sections: BODIES,
+          detachedBody: [{ section: 'Sign in', step: 0 }],
           compile: 'steps',
-          compileScope: { section: 'Sign in' },
         }),
       );
       const result = frames.find((f) => f.type === 'compile:result')!;
@@ -948,8 +963,9 @@ describe('recompiling a step whose entry broke', () => {
         requestBody({
           steps: ['Type the username'],
           sourceLines: [12],
+          sections: BODIES,
+          detachedBody: [{ section: 'Sign in', step: 0 }],
           compile: 'steps',
-          compileScope: { section: 'Sign in' },
         }),
       );
       const recording = await readRecording(testFilePath);
@@ -958,35 +974,20 @@ describe('recompiling a step whose entry broke', () => {
       expect(recording!.steps[0]!.occurrence).toBe(0);
     });
 
-    /** Two bodies, one of which says `Press Enter` twice, as the client sends
-     *  them: keyed by the lower-cased name, steps as authored. */
-    const BODIES = {
-      'sign in': {
-        name: 'Sign in',
-        headingLine: 11,
-        steps: ['Press Enter', 'Type the code', 'Press Enter'],
-        stepLines: [12, 13, 14],
-      },
-      pay: { name: 'Pay', headingLine: 16, steps: ['Enter the card'], stepLines: [17] },
-    };
-
     it('compiles body steps from two sections, each under its own', async () => {
-      // `compileScope` names one section, so this compile is attributed only by
-      // `detachedBody`, and the result says the entries were bound by it.
       const { frames } = await runSteps(
         requestBody({
           steps: ['Type the code', 'Enter the card'],
-          sourceLines: [13, 17],
+          sourceLines: [14, 18],
           sections: BODIES,
           detachedBody: [
-            { section: 'Sign in', step: 1 },
+            { section: 'Sign in', step: 2 },
             { section: 'Pay', step: 0 },
           ],
           compile: 'steps',
         }),
       );
       const result = frames.find((f) => f.type === 'compile:result')!;
-      expect(result.detachedBody).toBe(true);
       const proposed = result.files[stepsFilePath] as string;
       expect(proposed).toMatch(/section: 'Sign in',\s*source: 'Type the code'/);
       expect(proposed).toMatch(/section: 'Pay',\s*source: 'Enter the card'/);
@@ -1001,8 +1002,8 @@ describe('recompiling a step whose entry broke', () => {
 
     it('recompiles the SECOND of a repeated body step into its own slot', async () => {
       // The repair a ⚠ on the second `Press Enter` asks for. Counted within the
-      // request it was occurrence 0, and its code replaced the FIRST entry's.
-      // Its place in the body makes it occurrence 1.
+      // request it would be occurrence 0, and its code would replace the FIRST
+      // entry's. Its place in the body makes it occurrence 1.
       await fs.writeFile(
         stepsFilePath,
         [
@@ -1017,15 +1018,13 @@ describe('recompiling a step whose entry broke', () => {
       const { frames } = await runSteps(
         requestBody({
           steps: ['Press Enter'],
-          sourceLines: [14],
+          sourceLines: [15],
           sections: BODIES,
-          detachedBody: [{ section: 'Sign in', step: 2 }],
+          detachedBody: [{ section: 'Sign in', step: 3 }],
           compile: 'steps',
-          compileScope: { section: 'Sign in' },
         }),
       );
       const result = frames.find((f) => f.type === 'compile:result')!;
-      expect(result.detachedBody).toBe(true);
       const proposed = result.files[stepsFilePath] as string;
       expect(proposed).toContain("click('#first')");
       expect(proposed).not.toContain("click('#second')");
@@ -1033,18 +1032,6 @@ describe('recompiling a step whose entry broke', () => {
 
       const recording = await readRecording(testFilePath);
       expect(recording!.steps[0]!.occurrence).toBe(1);
-    });
-
-    it('does not claim `detachedBody` for a compile that did not send it', async () => {
-      const { frames } = await runSteps(
-        requestBody({
-          steps: ['Type the username'],
-          sourceLines: [12],
-          compile: 'steps',
-          compileScope: { section: 'Sign in' },
-        }),
-      );
-      expect(frames.find((f) => f.type === 'compile:result')!.detachedBody).toBeUndefined();
     });
 
     it('files the steps of a section the body step CALLS under that section', async () => {
@@ -1060,8 +1047,8 @@ describe('recompiling a step whose entry broke', () => {
             'sign in': { name: 'Sign in', headingLine: 14, steps: ['Type the username'], stepLines: [15] },
             'check out': { name: 'Check out', headingLine: 11, steps: ['Sign in'], stepLines: [12] },
           },
+          detachedBody: [{ section: 'Check out', step: 0 }],
           compile: 'steps',
-          compileScope: { section: 'Check out' },
         }),
       );
       const result = frames.find((f) => f.type === 'compile:result')!;
@@ -1069,22 +1056,6 @@ describe('recompiling a step whose entry broke', () => {
       expect(proposed).toContain("source: 'Type the username'");
       expect(proposed).toContain("section: 'Sign in'");
       expect(proposed).not.toContain("section: 'Check out'");
-    });
-
-    it('refuses a scope on anything but a single-step compile', async () => {
-      const onRun = await runSteps(requestBody({ compile: 'run', compileScope: { section: 'X' } }));
-      expect(onRun.status).toBe(400);
-      expect(onRun.frames[0]!.error).toMatch(/only valid with "compile": "steps"/);
-
-      const bare = await runSteps(requestBody({ compileScope: { section: 'X' } }));
-      expect(bare.status).toBe(400);
-    });
-
-    it('refuses a malformed scope rather than compiling to the top level', async () => {
-      for (const bad of [{}, { section: '' }, { section: 42 }, [], null]) {
-        const res = await runSteps(requestBody({ steps: ['x'], sourceLines: [4], compile: 'steps', compileScope: bad }));
-        expect(res.status, JSON.stringify(bad)).toBe(400);
-      }
     });
   });
 
@@ -1321,7 +1292,7 @@ describe('recompiling a step whose entry broke', () => {
       ]);
 
       // The entry lands where a whole-test compile binds it: the skill's own
-      // file, from the run's real skill frame — no compileScope involved.
+      // file, from the run's real skill frame — no detachedBody involved.
       const result = frames.find((f) => f.type === 'compile:result')!;
       expect(result.status).toBe('partial');
       expect(Object.keys(result.files)).toEqual([skillStepsPath]);

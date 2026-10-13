@@ -921,35 +921,11 @@ export function createApiServer(
         // allow-list for the same reason `compile` is.
         if (body.compileContinues === true) request.compileContinues = true;
       }
-      // Section attribution for a single-step compile of a `### Section`
-      // body. Refused rather than ignored when it makes no sense: a whole-test
-      // Run & Compile has the real frames, and a caller that asked for a scope
-      // and quietly got the top level would find out when the entry never
-      // bound.
-      if (body.compileScope !== undefined) {
-        const scope = body.compileScope as { section?: unknown } | null;
-        if (request.compile !== 'steps') {
-          res.status(400).json({
-            error: '"compileScope" is only valid with "compile": "steps"',
-          });
-          return;
-        }
-        if (
-          scope === null ||
-          typeof scope !== 'object' ||
-          Array.isArray(scope) ||
-          typeof scope.section !== 'string' ||
-          scope.section.trim() === ''
-        ) {
-          res.status(400).json({ error: '"compileScope" must be { section: <non-empty string> }' });
-          return;
-        }
-        request.compileScope = { section: scope.section };
-      }
       // Section-body steps run on their own (sections-run-and-resume.md §4.2):
       // where each one sits, so its code-behind binds under its section. With
-      // or without a compile. A run of selected body lines is the case this
-      // exists for, and it compiles nothing.
+      // or without a compile: a run of selected body lines replays the
+      // section's entries, and a Compile This Step of them files its entries
+      // there.
       //
       // Every check refuses rather than drops, the way `sections` does. A
       // position that does not hold the step it is sent with means the client

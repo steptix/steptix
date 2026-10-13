@@ -136,11 +136,7 @@ import {
   type ExpandedStepOrigin,
 } from '../skills/expander.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
-import {
-  detachedBodyExpansion,
-  detachedRowReads,
-  type DetachedBodyStep,
-} from '../codebehind/detached-body.js';
+import { detachedBodyExpansion, detachedRowReads } from '../codebehind/detached-body.js';
 import { isStepCode } from '../codebehind/execute.js';
 import { lastRunStaleMemberRow, writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import {
@@ -383,34 +379,13 @@ export interface StepRequest {
    */
   compileContinues?: boolean;
   /**
-   * Attribution for a `compile: 'steps'` request whose steps come from a
-   * `### Section` body (stories/compile-as-you-go.md §Compile This Step).
-   *
-   * EXECUTION is unchanged: the steps still run detached, at the root frame,
-   * exactly as Run Step Here runs them — a body step is a runnable unit on its
-   * own and this does not make it one that carries a frame. Only the BINDING
-   * moves: the generation registry is built against a synthesized section
-   * frame of this name, so the entry lands under `section:` in the test's own
-   * `.steps.ts`, where the runtime — which reaches that step THROUGH the
-   * section — will look for it. Without this the entry binds top-level, never
-   * matches, and can shadow a main-flow step of the same text.
-   *
-   * Only meaningful with `compile: 'steps'`; the step route rejects it
-   * otherwise, because a whole-test Run & Compile has the real frames.
-   *
-   * `detachedBody` says the same thing per step, with positions, and wins
-   * when both are sent. The extension sends both on a compile, so an older
-   * server, which drops `detachedBody`, still binds the entry here.
-   */
-  compileScope?: { section: string };
-  /**
    * Parallel to `steps`: the `### Section` body each step was selected from,
    * and its 0-based position there, when the batch is body steps run on their
    * own (steptix-vscode/stories/specs/sections-run-and-resume.md §4.2).
    *
-   * Like `compileScope`, EXECUTION is unchanged: the steps run detached at the
-   * root frame. Only code-behind binding moves, for this run's steps and for
-   * any entries it compiles: each step binds under its own section, at the
+   * EXECUTION is unchanged: the steps run detached at the root frame, exactly
+   * as Run Step Here runs them. Only code-behind binding moves, for this run's
+   * steps and for any entries a Compile This Step of them writes: each step binds under its own section, at the
    * occurrence it holds in the authored body (src/codebehind/detached-body.ts).
    * Without it a compiled section's body never replayed when run this way. It
    * ran under AI, or ran a top-level entry that shared its text.
@@ -1076,17 +1051,6 @@ export type RunEvent =
       status: CompileStatus;
       files: Record<string, string>;
       summary: CompileSummary;
-      /**
-       * Every block of this compile carried `detachedBody`, and its entries
-       * bound by it: each under its own section, at its place in the body.
-       *
-       * Said because the client cannot tell otherwise. A server that predates
-       * the field drops it without a word and binds the old way, which puts a
-       * two-section pick's entries at the top level and a partial repeat's
-       * entry on the first slot. So a Compile This Step that needs the field
-       * refuses a result without this (steptix-vscode run-controller.ts).
-       */
-      detachedBody?: true;
     };
 
 export type RunEventListener = (event: RunEvent) => void;
@@ -1455,11 +1419,6 @@ interface OpenCompile {
   startedAt: string;
   /** True once any block of this run failed, for the recording's status. */
   anyFailed: boolean;
-  /**
-   * True while every block of this run carried `detachedBody`, so every entry
-   * it generated bound by section and position. Echoed on `compile:result`.
-   */
-  boundByDetachedBody: boolean;
 }
 
 /**
@@ -4577,10 +4536,8 @@ export class SessionManager {
       };
     /**
      * Steps of a `### Section` body that ran DETACHED — selected on their own
-     * and sent at the root frame — with the section each came from, parallel
-     * to `request.steps`. `detachedBody` names a section and a position per
-     * step. `compileScope`, the older form a Compile This Step also sends,
-     * names one section for all of them.
+     * and sent at the root frame — with the section and the place in the body
+     * each came from (`request.detachedBody`, parallel to `request.steps`).
      *
      * Their run's expansion says "top level", which is not where a full run
      * reaches them, so it is not where their entries are. Both registries bind
@@ -4588,9 +4545,7 @@ export class SessionManager {
      * detached-body.ts), which moves each one into a section frame of its own
      * section's name at its authored occurrence. Execution is untouched.
      */
-    const detachedPicks: ReadonlyArray<DetachedBodyStep | undefined> | undefined =
-      request.detachedBody ??
-      (request.compileScope && request.steps.map(() => request.compileScope!));
+    const detachedPicks = request.detachedBody;
     const bindingExpansion = (testFilePath: string): Parameters<typeof buildCodeBehindRegistry>[0] =>
       detachedPicks
         ? detachedBodyExpansion(expansionForBinding(), detachedPicks, testFilePath, request.sections)
@@ -4793,8 +4748,6 @@ export class SessionManager {
         identities: session.liveCompile?.identities ?? {},
         startedAt: session.liveCompile?.startedAt ?? new Date(runStartTime).toISOString(),
         anyFailed: session.liveCompile?.anyFailed ?? false,
-        boundByDetachedBody:
-          (session.liveCompile?.boundByDetachedBody ?? true) && request.detachedBody !== undefined,
       };
     }
     // A strict run — a compile's replay — exists to find out whether the code
@@ -8779,7 +8732,6 @@ export class SessionManager {
         status: outcome.status,
         files: outcome.files,
         summary: outcome.summary,
-        ...(openCompile?.boundByDetachedBody && { detachedBody: true as const }),
       });
       // A `'steps'` compile is terminal by construction — it compiles the
       // steps it was sent and is never continued — so it must not stay on the

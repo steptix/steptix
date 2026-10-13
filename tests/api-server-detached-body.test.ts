@@ -457,7 +457,6 @@ describe('a malformed `detachedBody` is refused, not ignored', () => {
     ['a position past the body', { detachedBody: [{ section: 'Sign in', step: 0 }, { section: 'Sign in', step: 9 }] }, /has 4 steps/],
     ['a position holding other text', { detachedBody: [{ section: 'Sign in', step: 2 }, { section: 'Sign in', step: 1 }] }, /reads "Type the password"/],
     ['positions out of body order', { steps: ['Click "Continue"', 'Type the username'], detachedBody: [{ section: 'Sign in', step: 1 }, { section: 'Sign in', step: 0 }] }, /must come after/],
-    ['a disagreeing compileScope', { compile: 'steps', compileScope: { section: 'Pay' } }, /send one attribution/],
   ])('refuses %s', async (_label, override, message) => {
     const { status, error } = await post({ ...base(), ...override });
     expect(status).toBe(400);

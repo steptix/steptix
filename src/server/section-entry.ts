@@ -202,17 +202,13 @@ export function validateSectionEntry(key: string, raw: unknown): string | null {
  *    both from one buffer, so a mismatch means it did not;
  *  - one section's positions strictly rise through the batch. The registry
  *    counts a section's repeated texts in batch order, and only body order
- *    gives each the slot it holds in the body;
- *  - with `compileScope` as well, every entry names that section. They are
- *    two forms of one answer, and a client sending two answers has lost track
- *    of which one it meant.
+ *    gives each the slot it holds in the body.
  */
 export function validateDetachedBody(
   raw: unknown,
   request: {
     steps: string[];
     sections?: Record<string, { name: string; steps: string[] }> | undefined;
-    compileScope?: { section: string } | undefined;
   },
 ): string | null {
   if (!Array.isArray(raw)) {
@@ -263,12 +259,6 @@ export function validateDetachedBody(
       );
     }
     lastStep.set(key, step);
-    if (request.compileScope && matchText(request.compileScope.section) !== key) {
-      return (
-        `${where} names section "${section}" but "compileScope" names ` +
-        `"${request.compileScope.section}" — send one attribution, or two that agree`
-      );
-    }
   }
   return null;
 }

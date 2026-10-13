@@ -482,8 +482,7 @@ tags: [codebehind]
 
     /**
      * A data-driven file whose steps live in a `### Section` body, so a
-     * Compile This Step on one of them carries a `compileScope` — the field
-     * whose row gate has no other way to be reached.
+     * Compile This Step on one of them runs detached, once per row.
      *
      * Line 18 is the body's first step, line 19 its second.
      */
@@ -601,10 +600,7 @@ tags: [codebehind]
     });
 
     /**
-     * Compile This Step in a data-driven file — the only shape that reaches
-     * the `rowCompile && options.compileScope` gate, since `compileScope` is
-     * set only for a `### Section` body step and a whole-test Run & Compile
-     * never carries one.
+     * Compile This Step on a body step in a data-driven file.
      *
      * The row loop is not the whole-file one here: a step selection does not
      * restart the browser between rows (`freshBrowserPerRow` is false), so the
@@ -612,7 +608,7 @@ tags: [codebehind]
      * `session.liveCompile` after every `'steps'` compile rather than from the
      * client closing the session.
      */
-    it('puts compile:"steps" and its scope on the first row only', async () => {
+    it('puts compile:"steps" on the first row only, and the body position on every row', async () => {
       await openRows('compile-rows-step.tmp.md', ROWS_SECTION_MD);
       fake.streamScripts = Array.from({ length: 3 }, () => (f) => f.end());
 
@@ -625,25 +621,23 @@ tags: [codebehind]
 
       assert.equal(fake.requests.length, 3, 'the selected step still runs once per row');
       assert.deepEqual(
-        fake.requests.map((r) => [
-          r.dataRow,
-          r.compile,
-          r.compileScope?.section,
-          r.withinCompileRun,
-        ]),
+        fake.requests.map((r) => [r.dataRow, r.compile, r.withinCompileRun]),
         [
-          [1, 'steps', 'Sign in', undefined],
-          [2, undefined, undefined, 'steps'],
-          [3, undefined, undefined, 'steps'],
+          [1, 'steps', undefined],
+          [2, undefined, 'steps'],
+          [3, undefined, 'steps'],
         ],
       );
       // `'steps'`, not `'run'`: the mode is what tells the server to keep
       // code-behind execution OFF for these rows too. With a bare `true` they
       // built the execution registry and ran the entry row 1 is repairing — it
       // threw, healed under AI, and painted ⚠ on that very step.
-      // The scope travels with the compile and never without it: a batch that
-      // compiles nothing has nothing to scope, and the server refuses a
-      // `compileScope` on anything but a `'steps'` compile.
+      // Every row is the same detached body step, so every row says where it
+      // sits: row 1's compile files its entry by it.
+      assert.deepEqual(
+        fake.requests.map((r) => r.detachedBody),
+        Array.from({ length: 3 }, () => [{ section: 'Sign in', step: 0 }]),
+      );
       assert.deepEqual(
         fake.requests.map((r) => r.steps),
         [['Enter {{email}}'], ['Enter {{email}}'], ['Enter {{email}}']],
@@ -701,10 +695,7 @@ tags: [codebehind]
       assert.equal(request.compile, 'steps');
       assert.deepEqual(request.steps, ['Type the username']);
       assert.deepEqual(request.sourceLines, [12]);
-      assert.deepEqual(request.compileScope, { section: 'Sign in' });
-      // The same attribution per step, with its place in the body. A server
-      // that knows the field binds by it; one that predates it still has
-      // `compileScope`.
+      // Its section and its place in the body: what the entry binds by.
       assert.deepEqual(request.detachedBody, [{ section: 'Sign in', step: 0 }]);
 
       fake.end();
@@ -730,7 +721,6 @@ tags: [codebehind]
 
       const request = fake.requests[0];
       assert.deepEqual(request.sourceLines, [12, 13]);
-      assert.deepEqual(request.compileScope, { section: 'Sign in' });
       assert.deepEqual(request.detachedBody, [
         { section: 'Sign in', step: 0 },
         { section: 'Sign in', step: 1 },
@@ -789,30 +779,24 @@ tags: [codebehind]
   it('compiles the second of a repeated body step by its place in the body', async () => {
     // Counted within the request, a lone second `Press Enter` was occurrence
     // 0 and its entry replaced the first one's, so this used to be refused.
-    // `detachedBody` says it is body step 3, which makes it occurrence 1. Only
-    // a server that binds by that field can be trusted with it, and it says
-    // so on its result.
+    // `detachedBody` says it is body step 3, which makes it occurrence 1.
     const repeatBody = path.resolve(FIXTURES_DIR, 'compile-body-repeat.md');
     const repeatSteps = repeatBody.replace(/\.md$/, '.steps.ts');
     fs.writeFileSync(repeatBody, REPEAT_BODY_MD, 'utf-8');
-    const proposal = {
-      type: 'compile:result',
-      status: 'partial',
-      files: { [repeatSteps]: 'export default defineSteps([]);\n' },
-      summary: summaryFor({ compiled: 1, unproven: [1] }),
-    };
     try {
       await openFixture(repeatBody);
-
-      // One script per stream, in order: a server that dropped the field and
-      // answers without `detachedBody`, then one that bound by it.
-      fake.streamScripts = [false, true].map((acknowledged) => (f) => {
-        f.push({ ...proposal, ...(acknowledged && { detachedBody: true }) });
-        f.push({ type: 'done', status: 'passed' });
-        f.end();
-      });
-
-      // The first proposal is filed the old way: refused, and no diff opens.
+      fake.streamScripts = [
+        (f) => {
+          f.push({
+            type: 'compile:result',
+            status: 'partial',
+            files: { [repeatSteps]: 'export default defineSteps([]);\n' },
+            summary: summaryFor({ compiled: 1, unproven: [1] }),
+          });
+          f.push({ type: 'done', status: 'passed' });
+          f.end();
+        },
+      ];
       void vscode.commands.executeCommand('steptix.compileStepCodeBehind', {
         lineNumber: 14,
       });
@@ -820,16 +804,6 @@ tags: [codebehind]
       const request = fake.requests[0];
       assert.deepEqual(request.steps, ['Press Enter']);
       assert.deepEqual(request.detachedBody, [{ section: 'Sign in', step: 2 }]);
-      assert.deepEqual(request.compileScope, { section: 'Sign in' });
-      await waitFor('refused', () => hooks.lastCompileError() !== null, 10_000);
-      assert.match(hooks.lastCompileError(), /does not know where each body step sits/);
-      assert.equal(hooks.pendingCodeBehind(), null, 'no diff for an entry filed in the wrong slot');
-
-      // The second server says it bound by the field, and the proposal is shown.
-      await waitFor('idle', () => !hooks.isRunning());
-      void vscode.commands.executeCommand('steptix.compileStepCodeBehind', {
-        lineNumber: 14,
-      });
       await waitFor('proposal shown', () => hooks.pendingCodeBehind() !== null, 10_000);
       assert.equal(hooks.lastCompileError(), null);
       await vscode.commands.executeCommand('steptix.discardCodeBehind');
@@ -839,31 +813,17 @@ tags: [codebehind]
   });
 
   it('compiles body steps from two sections in one pick', async () => {
-    // Each binds under its own section. `compileScope` can name only one, so
-    // none is sent; `detachedBody` carries both, and the result must say the
-    // server bound by it.
-    const repeatBody = path.resolve(FIXTURES_DIR, 'compile-body-two.md');
-    fs.writeFileSync(repeatBody, REPEAT_BODY_MD, 'utf-8');
+    // Each binds under its own section, by the place `detachedBody` gives it.
+    const twoBodies = path.resolve(FIXTURES_DIR, 'compile-body-two.md');
+    fs.writeFileSync(twoBodies, REPEAT_BODY_MD, 'utf-8');
     try {
-      const editor = await openFixture(repeatBody);
+      const editor = await openFixture(twoBodies);
       // Lines 13-17: `Type the code`, the second `Press Enter`, and `Enter
       // the card` under `### Pay`.
       editor.selection = new vscode.Selection(
         new vscode.Position(12, 0),
         new vscode.Position(16, 10),
       );
-      fake.streamScripts = [
-        (f) => {
-          f.push({
-            type: 'compile:result',
-            status: 'partial',
-            files: {},
-            summary: summaryFor({ compiled: 0 }),
-          });
-          f.push({ type: 'done', status: 'passed' });
-          f.end();
-        },
-      ];
       void vscode.commands.executeCommand('steptix.compileStepCodeBehind', {
         lineNumber: 13,
       });
@@ -875,11 +835,11 @@ tags: [codebehind]
         { section: 'Sign in', step: 2 },
         { section: 'Pay', step: 0 },
       ]);
-      assert.equal(request.compileScope, undefined);
+      assert.equal(hooks.lastCompileError(), null, 'a two-section pick is no longer refused');
+      fake.end();
       await waitFor('idle', () => !hooks.isRunning());
-      assert.match(hooks.lastCompileError() ?? '', /does not know where each body step sits/);
     } finally {
-      fs.rmSync(repeatBody, { force: true });
+      fs.rmSync(twoBodies, { force: true });
     }
   });
 
