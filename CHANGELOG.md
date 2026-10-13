@@ -9,6 +9,27 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — the AI is told when a page opened an alert, confirm or prompt
+
+Steptix answers a browser dialog the moment it opens, and the AI was meant
+to learn about it from a note at the end of its next page snapshot:
+`[alert] "Hello Ada" — dismissed by default`. It never did in a normal run.
+Straight after every action Steptix captures the page for the report, and
+that capture marked every dialog as shown, so the AI's next turn had no note
+(#31). A `get_page_content` or `peek_tab` read during a run did the same.
+
+- **Only the AI's own snapshot uses up the note,** and only once the AI has
+  replied to it. A turn whose AI call fails, or whose reply can't be read,
+  leaves the note for the retry. The report's capture
+  after an action, checks, the step-end page and a failure diagnosis show
+  the same note and mark nothing, so the AI's next turn still gets it.
+- **API readers get their own note.** `get_page_content` and `peek_tab`
+  show each dialog once to API callers, and reading never takes it away
+  from a running test's AI.
+
+Checks could already find dialogs through `window.__steptixDialogs`; that
+is unchanged.
+
 ### Fixed — an indented step runs, from VS Code and from the CLI, on the line you see it on
 
 A numbered step that started with a space or a tab, such as `  1. Click
