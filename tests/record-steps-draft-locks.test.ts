@@ -671,6 +671,101 @@ describe('parameters across draft calls (#84)', () => {
   });
 });
 
+describe('renames and empty values across draft calls (#84, review)', () => {
+  /** A file that already has `email`, with a value no recording types. */
+  const withEmail = (): ReturnType<typeof summarizeTargetFile> =>
+    summarizeTargetFile('# T\n\n## Parameters\n- email: someone@example.org\n\n## Steps\n1. Navigate to /\n', 'cursor', 7);
+  const FILE_EMAIL = { name: 'email', value: 'someone@example.org' };
+  const WREN = 'wren@example.net';
+  const BACKUP = 'Type {{email}} into the Backup email field';
+
+  it("a rename never lands on a name the draft already holds: the next one is minted, and the earlier step keeps its value", async () => {
+    const h = harness(withEmail());
+    h.script.set(1, says([TYPE_EMAIL], [EMAIL]));
+    h.script.set(2, says([BACKUP], [{ name: 'email', value: WREN }]));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    expect(h.last().parameters).toEqual([{ name: 'email_2', value: EMAIL.value }]);
+    h.engine.addAction(action(2, 'Backup'));
+    await drafted(h, 2, (d) => d.steps.length === 2);
+    expect(h.last()).toMatchObject({
+      steps: ['Type {{email_2}} into the Email field', 'Type {{email_3}} into the Backup email field'],
+      parameters: [
+        { name: 'email_2', value: EMAIL.value },
+        { name: 'email_3', value: WREN },
+      ],
+    });
+  });
+
+  it('a rename to a value the draft already holds under a renamed name reuses that name', async () => {
+    const h = harness(withEmail());
+    h.script.set(1, says([TYPE_EMAIL], [EMAIL]));
+    h.script.set(2, says(['Type {{email}} into the Confirm email field'], [EMAIL]));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    h.engine.addAction(action(2, 'Confirm'));
+    await drafted(h, 2, (d) => d.steps.length === 2);
+    expect(h.last()).toMatchObject({
+      steps: ['Type {{email_2}} into the Email field', 'Type {{email_2}} into the Confirm email field'],
+      parameters: [{ name: 'email_2', value: EMAIL.value }],
+    });
+  });
+
+  it("a rename rewrites only the answer's own steps — not a step from an earlier call that reuses the file's parameter", async () => {
+    const h = harness(withEmail());
+    h.script.set(1, says([TYPE_EMAIL], [FILE_EMAIL]));
+    h.script.set(2, says([BACKUP], [{ name: 'email', value: WREN }]));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    expect(h.last()).toMatchObject({ steps: [TYPE_EMAIL], parameters: [FILE_EMAIL] });
+    h.engine.addAction(action(2, 'Backup'));
+    await drafted(h, 2, (d) => d.steps.length === 2);
+    expect(h.last()).toMatchObject({
+      steps: [TYPE_EMAIL, 'Type {{email_2}} into the Backup email field'],
+      parameters: [FILE_EMAIL, { name: 'email_2', value: WREN }],
+    });
+  });
+
+  it('nor a locked one', async () => {
+    const h = harness(withEmail());
+    h.script.set(1, says([TYPE_EMAIL], [FILE_EMAIL]));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    await h.engine.addAuthorSteps(['Verify the form is filled'], { source: 'panel', boundary: 1, atMs: 1500 });
+    const next = h.calls.length + 1;
+    h.script.set(next, says([BACKUP], [{ name: 'email', value: WREN }]));
+    h.engine.addAction(action(2, 'Backup'));
+    await drafted(h, next, (d) => d.steps.length === 3);
+    expect(h.last()).toMatchObject({
+      steps: [TYPE_EMAIL, 'Verify the form is filled', 'Type {{email_2}} into the Backup email field'],
+      locked: 2,
+      parameters: [FILE_EMAIL, { name: 'email_2', value: WREN }],
+    });
+  });
+
+  it.each([
+    ['an empty', ''],
+    ['a whitespace-only', '  '],
+  ])('%s value for a parameter the call was shown with a value counts as left out', async (_kind, value) => {
+    const h = harness();
+    h.script.set(1, says([TYPE_EMAIL], [EMAIL]));
+    h.script.set(2, says(['Click Continue'], [{ name: 'email', value }]));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    h.engine.addAction(action(2, 'Continue'));
+    await drafted(h, 2, (d) => d.steps.length === 2);
+    expect(h.last()).toMatchObject({ steps: [TYPE_EMAIL, 'Click Continue'], parameters: [EMAIL] });
+  });
+
+  it('an empty value for a parameter the call was not shown is kept as it was', async () => {
+    const h = harness();
+    h.script.set(1, says([TYPE_EMAIL], [{ name: 'email', value: '' }]));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    expect(h.last().parameters).toEqual([{ name: 'email', value: '' }]);
+  });
+});
+
 /** Line coordinates of an offset edit, for the anchor tracker. */
 function lineChangeOf(text: string, start: number, end: number, inserted: string) {
   const pos = (off: number) => {

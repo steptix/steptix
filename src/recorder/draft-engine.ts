@@ -327,6 +327,19 @@ function placeholderRoots(text: string): Set<string> {
  * call shown nothing — a redraft from nothing — gets nothing carried. A
  * carried one keeps its place relative to the parameters before it.
  */
+/**
+ * The answer's parameters without an empty (or whitespace-only) value for a
+ * name the call was shown with a value: that entry counts as left out, and
+ * the shown value is carried ({@link withOmittedParameters}). Written, it
+ * would be a line the extension leaves out for having no value — the value
+ * lost again (#84, review). An empty value for a name the call was not shown
+ * stays as it is.
+ */
+function withoutEmptyKnown(answered: Params, shown: Params): Params {
+  const known = new Set(shown.filter((p) => p.value.trim() !== '').map((p) => p.name));
+  return answered.filter((p) => p.value.trim() !== '' || !known.has(p.name));
+}
+
 function withOmittedParameters(shown: Params, answered: Params, steps: readonly string[]): Params {
   const used = new Set<string>();
   for (const s of steps) for (const name of placeholderRoots(s)) used.add(name);
@@ -2175,6 +2188,8 @@ export class DraftEngine {
     const fresh = (work.kind === 'open-redraft' || work.kind === 'stretch') && view.fresh;
     const callIds = actions.map((a) => a.id);
     const held = this.heldActions();
+    /** The steps this answer wrote — the only ones a rename rewrites. */
+    let wrote: readonly Item[] = [];
     switch (work.kind) {
       case 'incremental': {
         const open = this.openStretch;
@@ -2200,6 +2215,7 @@ export class DraftEngine {
         const reworded = new Set(open.items.filter((i) => i.edited).map((i) => i.text.trim()));
         const made = this.mapSteps(answer.steps, answer.stepActions, region, available, held, numberOf, reworded);
         open.items = [...open.items.slice(0, tail), ...made];
+        wrote = made;
         for (const a of callIds) open.covered.add(a);
         open.version++;
         break;
@@ -2213,6 +2229,7 @@ export class DraftEngine {
         const reworded = new Set(s.items.filter((i) => i.edited).map((i) => i.text.trim()));
         const made = this.mapSteps(clean.steps, clean.stepActions, oldModel, available, held, numberOf, reworded);
         s.items = this.withKept(s.items, made);
+        wrote = made;
         const upTo = work.kind === 'open-redraft' && work.upTo !== undefined ? work.upTo : Number.POSITIVE_INFINITY;
         const heldHere = [...held].filter((a) => {
           const at = this.indexOfAction(a);
@@ -2231,20 +2248,28 @@ export class DraftEngine {
         const reworded = new Set(s.items.filter((i) => i.edited).map((i) => i.text.trim()));
         const made = this.mapSteps(clean.steps, clean.stepActions, [], available, held, numberOf, reworded);
         s.items = [...s.items.slice(0, cut), ...made, ...s.items.slice(cut)];
+        wrote = made;
         for (const a of callIds) s.covered.add(a);
         s.version++;
         break;
       }
     }
     // The parameter rules, enforced over the whole draft — the author's lines
-    // and rewordings are theirs and are never rewritten by them.
+    // and rewordings are theirs and are never rewritten by them, and a rename
+    // rewrites only the steps this answer wrote: one from an earlier call,
+    // locked or not, meant the value its own call gave. A rename never lands
+    // on a name the draft holds (#84, review).
     const items = this.flatItems();
+    const written = new Set(wrote);
     const merged: RecordStepsAnswer = {
       steps: items.map((i) => i.text),
-      parameters: answer.parameters,
+      parameters: withoutEmptyKnown(answer.parameters, view.parameters),
       notes: answer.notes,
     };
-    const settled = settleParameters(merged, this.opts.file);
+    const settled = settleParameters(merged, this.opts.file, {
+      draft: view.parameters,
+      wrote: items.map((i) => written.has(i)),
+    });
     items.forEach((item, i) => {
       if (item.authorId === undefined && !item.edited) item.text = settled.steps[i]!;
     });

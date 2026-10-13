@@ -26,8 +26,18 @@ only sign was a note in the Record panel that no parameter defined
   This holds for every kind of call: one that adds steps, a redraft of the
   steps between two of yours, and one that fills in what a failed update
   left out.
-- **An answer that names the parameter still wins,** so the AI can correct a
-  value.
+- **An answer that names the parameter with a value still wins,** so the AI
+  can correct a value. An empty or blank value for one the AI was shown with
+  a value counts as left out, since VS Code leaves a line without a value out
+  of the file.
+- **A rename never takes a name the draft already uses.** When the file has
+  `email` with another value and the draft already has `email_2`, the next
+  value becomes `email_3`. If the draft already holds the same value under
+  `email_2`, that name is reused.
+- **A rename changes only the steps from the same answer.** An earlier step,
+  locked or not, keeps its `{{email}}`. Before, a later answer that renamed
+  `email` rewrote every step in the draft, so an earlier step that typed the
+  file's value then typed the new one.
 - **A deleted or reworded step still takes its parameter with it,** as
   before: nothing is kept once no step uses it.
 - **A redraft from nothing is unchanged.** It is shown no parameters and
