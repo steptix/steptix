@@ -176,7 +176,11 @@ Resolving the clicked line:
   section scope, because the runtime reaches that step through the section's
   frame and will look for it nowhere else. The extension sends the section's
   name alongside the step (`compileScope`), and the server binds through a
-  section frame of that name.
+  section frame of that name. Every detached body run, compiled or not, also
+  sends `detachedBody`: each step's section and its place in the body. The
+  server binds by that when it has it, and it is what makes a plain run of
+  those lines replay the entries a compile wrote
+  (steptix-vscode/stories/specs/sections-run-and-resume.md §4.2).
 - **A multi-line selection** resolves each selected step in order and
   compiles them sequentially — the session advances between steps, so a
   selection is just this flow k times. One scope per compile: a selection

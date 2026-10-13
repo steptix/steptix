@@ -136,6 +136,11 @@ import {
   type ExpandedStepOrigin,
 } from '../skills/expander.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
+import {
+  detachedBodyExpansion,
+  detachedRowReads,
+  type DetachedBodyStep,
+} from '../codebehind/detached-body.js';
 import { isStepCode } from '../codebehind/execute.js';
 import { lastRunStaleMemberRow, writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import {
@@ -392,8 +397,29 @@ export interface StepRequest {
    *
    * Only meaningful with `compile: 'steps'`; the step route rejects it
    * otherwise, because a whole-test Run & Compile has the real frames.
+   *
+   * `detachedBody` says the same thing per step, with positions, and wins
+   * when both are sent. The extension sends both on a compile, so an older
+   * server, which drops `detachedBody`, still binds the entry here.
    */
   compileScope?: { section: string };
+  /**
+   * Parallel to `steps`: the `### Section` body each step was selected from,
+   * and its 0-based position there, when the batch is body steps run on their
+   * own (steptix-vscode/stories/specs/sections-run-and-resume.md §4.2).
+   *
+   * Like `compileScope`, EXECUTION is unchanged: the steps run detached at the
+   * root frame. Only code-behind binding moves, for this run's steps and for
+   * any entries it compiles: each step binds under its own section, at the
+   * occurrence it holds in the authored body (src/codebehind/detached-body.ts).
+   * Without it a compiled section's body never replayed when run this way. It
+   * ran under AI, or ran a top-level entry that shared its text.
+   *
+   * The step route checks it against `sections`: every named section is
+   * there, every position holds that step's text, and one section's positions
+   * rise through the batch.
+   */
+  detachedBody?: Array<{ section: string; step: number }>;
   /**
    * This batch belongs to a compile of this MODE, but asks for no compile of
    * its own (stories/data-driven-rows.md, decision 11).
@@ -4534,43 +4560,25 @@ export class SessionManager {
         frames: expandedFrames,
       };
     /**
-     * The expansion the GENERATION registry binds through.
+     * Steps of a `### Section` body that ran DETACHED — selected on their own
+     * and sent at the root frame — with the section each came from, parallel
+     * to `request.steps`. `detachedBody` names a section and a position per
+     * step. `compileScope`, the older form a Compile This Step also sends,
+     * names one section for all of them.
      *
-     * Normally the run's own. For a `compile: 'steps'` request carrying
-     * `compileScope`, the steps came from a `### Section` body but ran
-     * detached at the root frame — so the run's expansion says "top level",
-     * which is not where the runtime will look for the entry. A section frame
-     * of that name is synthesized here and the binder derives file, section
-     * and scope from it exactly as it does for a real one: no special case in
-     * `buildCodeBehindRegistry`, and no second answer to "which `.steps.ts`
-     * does this step bind into".
-     *
-     * `skillName` carries the section's name — that is the field
-     * `resolveDefiningSite` reads a section frame's scope from — and
-     * `parentId: null` keeps the variable scope empty, which is right for a
-     * section of the test's own.
+     * Their run's expansion says "top level", which is not where a full run
+     * reaches them, so it is not where their entries are. Both registries bind
+     * them through `detachedBodyExpansion` instead (src/codebehind/
+     * detached-body.ts), which moves each one into a section frame of its own
+     * section's name at its authored occurrence. Execution is untouched.
      */
-    const scopedExpansionFor = (
-      section: string,
-      testFilePath: string,
-    ): Parameters<typeof buildCodeBehindRegistry>[0] => {
-      const frameId = 'compile-scope';
-      return {
-        steps: effectiveSteps,
-        rawSteps: expansionRawSteps,
-        origins: effectiveSteps.map((_, i) => ({ inputIndex: i, frameId })),
-        frames: {
-          [frameId]: {
-            id: frameId,
-            parentId: null,
-            kind: 'section' as const,
-            uri: testFilePath,
-            invocationLine: null,
-            skillName: section,
-          },
-        },
-      };
-    };
+    const detachedPicks: ReadonlyArray<DetachedBodyStep | undefined> | undefined =
+      request.detachedBody ??
+      (request.compileScope && request.steps.map(() => request.compileScope!));
+    const bindingExpansion = (testFilePath: string): Parameters<typeof buildCodeBehindRegistry>[0] =>
+      detachedPicks
+        ? detachedBodyExpansion(expansionForBinding(), detachedPicks, testFilePath, request.sections)
+        : expansionForBinding();
 
     // `compile: 'steps'` disables execution the way a Record does — a step
     // whose entry is broken has to run under AI to leave a transcript — but
@@ -4587,10 +4595,29 @@ export class SessionManager {
       request.compile === 'steps' ||
       request.withinCompileRun === 'steps';
     if (request.testFilePath && !codeBehindOff) {
-      codeBehind = await buildCodeBehindRegistry(expansionForBinding(), {
+      codeBehind = await buildCodeBehindRegistry(bindingExpansion(request.testFilePath), {
         testFilePath: request.testFilePath,
         ...(cb?.candidateFiles && { candidateFiles: cb.candidateFiles }),
       });
+      // A detached step whose entry reads a looped section's row has no row to
+      // read. It runs under AI, as it did before detached steps bound at all,
+      // and the author is told why it did not run as code.
+      if (detachedPicks) {
+        for (const [i, column] of detachedRowReads(expansionForBinding(), detachedPicks, request.sections)) {
+          const binding = codeBehind.bindingFor(i);
+          if (binding?.entry === undefined) continue;
+          binding.entry = undefined;
+          emit({
+            type: 'output',
+            kind: 'info',
+            msg:
+              `Step "${binding.source}" runs under AI, not its code-behind: it reads ` +
+              `{{${column}}}, a column of a looped section's table, and a step run on ` +
+              `its own has no row. Run the section through the step that calls it to ` +
+              `replay its entry.`,
+          });
+        }
+      }
     }
     /**
      * The code-behind a guard's condition is decided with
@@ -4622,9 +4649,8 @@ export class SessionManager {
      */
     let generationBindings: CodeBehindRegistry = codeBehind;
     if (request.compile !== undefined && codeBehindOff && request.testFilePath) {
-      const scope = request.compileScope?.section;
       generationBindings = await buildCodeBehindRegistry(
-        scope ? scopedExpansionFor(scope, request.testFilePath) : expansionForBinding(),
+        bindingExpansion(request.testFilePath),
         { testFilePath: request.testFilePath, onWarn: () => {} },
       );
     }

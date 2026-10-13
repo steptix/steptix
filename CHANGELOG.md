@@ -9,6 +9,30 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — steps of a compiled section replay as code when you run them on their own
+
+Select lines inside a `### Section` body and press Run, or use Run Step Here
+on one, and the steps used to run under AI every time, even when the section
+was compiled (#81). Its code-behind was only used when the section ran
+through the step that calls it. A step whose text matched a compiled
+main-flow step ran that step's code instead.
+
+- **Each step uses its own section's entry.** VS Code now tells the server
+  which section each selected step came from and where it sits in the body.
+  The steps still run on their own, outside any section call. A selection
+  across two sections, or one that skips a repeated step, gets the entry
+  for the place each step holds in its body.
+- **A step that reads a looped section's row still runs under AI.** A
+  section with a table runs once per row, and its entries read the row's
+  values. A step run on its own has no row, so a step whose text names a
+  column, such as `Type {{account}}`, runs under AI, and the Output says
+  why. The section's other steps replay their entries.
+- **Compile This Step files entries from a body's section calls and
+  `[skill:]` calls correctly.** When a body step called another section or a
+  skill, those steps' entries were filed under the body's section in the
+  test's `.steps.ts`. They now land where the run looks for them, as a
+  whole-test Run & Compile files them.
+
 ### Fixed — the AI is told when a page opened an alert, confirm or prompt
 
 Steptix answers a browser dialog the moment it opens, and the AI was meant

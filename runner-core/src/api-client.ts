@@ -143,6 +143,15 @@ export interface StreamStepsRequest {
    */
   compileScope?: { section: string };
   /**
+   * Parallel to `steps`, on a batch made only of `### Section` body steps run
+   * on their own: the section each step came from, by its authored name, and
+   * its 0-based position in that body. Execution is unchanged — the steps run
+   * detached, at the root frame — but their code-behind binds under their
+   * sections, at the place each holds in its body. Without it a compiled body
+   * replays only when the section is reached through its call.
+   */
+  detachedBody?: Array<{ section: string; step: number }>;
+  /**
    * This batch belongs to a compile of MODE `x`, but asks for no compile of
    * its own.
    *

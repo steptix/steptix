@@ -958,6 +958,30 @@ describe('recompiling a step whose entry broke', () => {
       expect(recording!.steps[0]!.occurrence).toBe(0);
     });
 
+    it('files the steps of a section the body step CALLS under that section', async () => {
+      // `Check out`'s body step is a call to `Sign in`, which expands into a
+      // frame of its own, as it does at any call site. Only what the step
+      // emits at the root frame belongs to `Check out`; filing `Sign in`'s
+      // steps there too put their entries where no run looks for them.
+      const { frames } = await runSteps(
+        requestBody({
+          steps: ['Sign in'],
+          sourceLines: [12],
+          sections: {
+            'sign in': { name: 'Sign in', headingLine: 14, steps: ['Type the username'], stepLines: [15] },
+            'check out': { name: 'Check out', headingLine: 11, steps: ['Sign in'], stepLines: [12] },
+          },
+          compile: 'steps',
+          compileScope: { section: 'Check out' },
+        }),
+      );
+      const result = frames.find((f) => f.type === 'compile:result')!;
+      const proposed = result.files[stepsFilePath] as string;
+      expect(proposed).toContain("source: 'Type the username'");
+      expect(proposed).toContain("section: 'Sign in'");
+      expect(proposed).not.toContain("section: 'Check out'");
+    });
+
     it('refuses a scope on anything but a single-step compile', async () => {
       const onRun = await runSteps(requestBody({ compile: 'run', compileScope: { section: 'X' } }));
       expect(onRun.status).toBe(400);

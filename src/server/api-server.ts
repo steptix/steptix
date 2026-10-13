@@ -63,7 +63,7 @@ import { HEALTH_SERVICE_ID, type HealthResponse } from './health.js';
 // Its own module so a CLIENT-side test can run a payload it just built through
 // the exact rules that would 400 it here. Behaviour is unchanged — this is the
 // same function, moved.
-import { validateSectionEntry } from './section-entry.js';
+import { validateDetachedBody, validateSectionEntry } from './section-entry.js';
 import { logger } from '../utils/logger.js';
 import { getBuildInfo, getPackageVersion } from '../utils/version.js';
 
@@ -945,6 +945,25 @@ export function createApiServer(
           return;
         }
         request.compileScope = { section: scope.section };
+      }
+      // Section-body steps run on their own (sections-run-and-resume.md §4.2):
+      // where each one sits, so its code-behind binds under its section. With
+      // or without a compile. A run of selected body lines is the case this
+      // exists for, and it compiles nothing.
+      //
+      // Every check refuses rather than drops, the way `sections` does. A
+      // position that does not hold the step it is sent with means the client
+      // read two different buffers, and binding by it would run some other
+      // step's entry, quietly, as code.
+      if (body.detachedBody !== undefined) {
+        const invalid = validateDetachedBody(body.detachedBody, request);
+        if (invalid) {
+          res.status(400).json({ error: invalid });
+          return;
+        }
+        request.detachedBody = (body.detachedBody as Array<{ section: string; step: number }>).map(
+          (pick) => ({ section: pick.section, step: pick.step }),
+        );
       }
       // Rows 2..N of a data-driven compile: part of a compile-mode logical
       // run, asking for no compile of its own (rows story, decision 11). It is

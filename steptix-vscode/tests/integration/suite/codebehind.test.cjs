@@ -702,6 +702,10 @@ tags: [codebehind]
       assert.deepEqual(request.steps, ['Type the username']);
       assert.deepEqual(request.sourceLines, [12]);
       assert.deepEqual(request.compileScope, { section: 'Sign in' });
+      // The same attribution per step, with its place in the body. A server
+      // that knows the field binds by it; one that predates it still has
+      // `compileScope`.
+      assert.deepEqual(request.detachedBody, [{ section: 'Sign in', step: 0 }]);
 
       fake.end();
       await waitFor('idle', () => !hooks.isRunning());
@@ -727,6 +731,10 @@ tags: [codebehind]
       const request = fake.requests[0];
       assert.deepEqual(request.sourceLines, [12, 13]);
       assert.deepEqual(request.compileScope, { section: 'Sign in' });
+      assert.deepEqual(request.detachedBody, [
+        { section: 'Sign in', step: 0 },
+        { section: 'Sign in', step: 1 },
+      ]);
 
       fake.end();
       await waitFor('idle', () => !hooks.isRunning());

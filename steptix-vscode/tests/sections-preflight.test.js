@@ -12,10 +12,11 @@ import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import {
   buildSectionsPayload,
+  detachedBodyPayload,
   preflightSections,
   sectionedSkillRefusal,
 } from "../src/extension/sections.ts";
@@ -391,4 +392,67 @@ test("refusal: an unreadable skill file does not invent an error", () => {
     }),
     null,
   );
+});
+
+// ---------------------------------------------------------------------------
+// detachedBodyPayload
+// ---------------------------------------------------------------------------
+
+/** The server's own check of the field (src/server/section-entry.ts, built to
+ *  the repo root's dist/ by pretest), so the client's output is held to the
+ *  rule that would refuse it rather than to a copy of that rule. */
+const { validateDetachedBody } = await import(
+  pathToFileURL(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../dist/server/section-entry.js"),
+  ).href
+);
+
+const DETACHED = doc(
+  "## Steps", //                  1
+  "1. Open the shop", //          2
+  "2. Sign in", //                3
+  "", //                          4
+  "### Sign in", //               5
+  "1. Type the username", //      6
+  '2. Click "Continue"', //       7
+  '3. Click "Continue"', //       8
+  "", //                          9
+  "### Pay", //                   10
+  "1. Enter the card", //         11
+);
+
+test("detached body: names each step's section and its place in the body", () => {
+  const steps = [
+    { line: 8, instruction: 'Click "Continue"' },
+    { line: 11, instruction: "Enter the card" },
+  ];
+  const payload = detachedBodyPayload(DETACHED, steps);
+  assert.deepEqual(payload, [
+    { section: "Sign in", step: 2 },
+    { section: "Pay", step: 0 },
+  ]);
+  // …and the server, checking it against the `sections` payload built from
+  // the same buffer, accepts it.
+  assert.equal(
+    validateDetachedBody(payload, {
+      steps: steps.map((s) => s.instruction),
+      sections: buildSectionsPayload(DETACHED),
+    }),
+    null,
+  );
+});
+
+test("detached body: null when a line no longer holds its step", () => {
+  // The run picked line 7 as `Click "Continue"`, and the author has since
+  // edited it. Positions read from the edited buffer would bind some other
+  // step, so the batch goes without them.
+  const edited = DETACHED.replace('2. Click "Continue"', "2. Press Enter");
+  assert.equal(
+    detachedBodyPayload(edited, [{ line: 7, instruction: 'Click "Continue"' }]),
+    null,
+  );
+});
+
+test("detached body: null for a line outside every body", () => {
+  assert.equal(detachedBodyPayload(DETACHED, [{ line: 2, instruction: "Open the shop" }]), null);
 });

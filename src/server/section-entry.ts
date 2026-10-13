@@ -185,3 +185,90 @@ export function validateSectionEntry(key: string, raw: unknown): string | null {
   if (expected === '') return `${where} has an empty name`;
   return null;
 }
+
+/**
+ * Validate the step route's `detachedBody`, returning an error message or
+ * null: one `{ section, step }` per entry of `steps`, saying which `### Section`
+ * body each step was selected from and where in it
+ * (steptix-vscode/stories/specs/sections-run-and-resume.md §4.2).
+ *
+ * Checked against the request it rides on, because the server binds each
+ * step's code-behind by it (src/codebehind/detached-body.ts). An entry that
+ * names the wrong section or the wrong position does not fail. It binds some
+ * other step's entry and runs it as code, quietly. So:
+ *
+ *  - one entry per step, and every section named is in `sections`;
+ *  - the position holds the very text sent as that step. The client reads
+ *    both from one buffer, so a mismatch means it did not;
+ *  - one section's positions strictly rise through the batch. The registry
+ *    counts a section's repeated texts in batch order, and only body order
+ *    gives each the slot it holds in the body;
+ *  - with `compileScope` as well, every entry names that section. They are
+ *    two forms of one answer, and a client sending two answers has lost track
+ *    of which one it meant.
+ */
+export function validateDetachedBody(
+  raw: unknown,
+  request: {
+    steps: string[];
+    sections?: Record<string, { name: string; steps: string[] }> | undefined;
+    compileScope?: { section: string } | undefined;
+  },
+): string | null {
+  if (!Array.isArray(raw)) {
+    return '"detachedBody" must be an array of { section, step }, one per step';
+  }
+  if (raw.length !== request.steps.length) {
+    return (
+      `"detachedBody" must have one entry per step (got ${raw.length} for ` +
+      `${request.steps.length} steps) — they are parallel arrays`
+    );
+  }
+  const sections = request.sections ?? {};
+  const lastStep = new Map<string, number>();
+  for (const [i, entry] of raw.entries()) {
+    const where = `detachedBody[${i}]`;
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      return `${where} must be { section: <name>, step: <0-based index> }`;
+    }
+    const { section, step } = entry as Record<string, unknown>;
+    if (typeof section !== 'string' || section.trim() === '') {
+      return `${where}.section must be a non-empty string`;
+    }
+    if (typeof step !== 'number' || !Number.isInteger(step) || step < 0) {
+      return `${where}.step must be a 0-based step index`;
+    }
+    const key = matchText(section);
+    if (!Object.prototype.hasOwnProperty.call(sections, key)) {
+      return `${where} names section "${section}", which "sections" does not define`;
+    }
+    const body = sections[key]!.steps;
+    if (step >= body.length) {
+      return (
+        `${where}.step is ${step}, but "${section}" has ${body.length} ` +
+        `step${body.length === 1 ? '' : 's'}`
+      );
+    }
+    if (body[step] !== request.steps[i]) {
+      return (
+        `${where} says step ${i + 1} is step ${step + 1} of "${section}", which reads ` +
+        `${JSON.stringify(body[step])}, but step ${i + 1} is ${JSON.stringify(request.steps[i])}`
+      );
+    }
+    const previous = lastStep.get(key);
+    if (previous !== undefined && step <= previous) {
+      return (
+        `${where}.step must come after the batch's earlier steps of "${section}" ` +
+        `(got ${step} after ${previous}) — a body runs in order`
+      );
+    }
+    lastStep.set(key, step);
+    if (request.compileScope && matchText(request.compileScope.section) !== key) {
+      return (
+        `${where} names section "${section}" but "compileScope" names ` +
+        `"${request.compileScope.section}" — send one attribution, or two that agree`
+      );
+    }
+  }
+  return null;
+}

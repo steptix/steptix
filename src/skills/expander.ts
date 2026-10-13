@@ -291,6 +291,50 @@ function droppedAheadOf(
 }
 
 /**
+ * `droppedAheadOf` for body steps that run on their OWN rather than through a
+ * call of their section: selected body lines, sent detached at the root frame
+ * (steptix-vscode/stories/specs/sections-run-and-resume.md §4.2).
+ *
+ * Same question and same counting as a `runSteps` narrowing. A detached run
+ * emits each kept step at the root frame, so the expander never sees the body
+ * the step came from and cannot count it; the caller that binds the step under
+ * its section needs the slot it holds in the AUTHORED body, and this is how
+ * many same-text emissions ahead of it the run left out.
+ *
+ * One `DroppedAhead` per kept index, in ascending body order. The body is read
+ * as authored, with no row interpolated into it, because a detached run has no
+ * row; the texts counted are the match side either way, which a row never
+ * changes. Null when `section` names no section in `sections`.
+ */
+export function detachedBodyOffsets(
+  sections: SectionDefs,
+  section: string,
+  keep: number[],
+): number[][] | null {
+  const key = matchText(section);
+  if (!Object.prototype.hasOwnProperty.call(sections, key)) return null;
+  const def = sections[key]!;
+  // The two arrays the section-call branch of `expandRecursive` hands the
+  // same counter: the marker-stripped steps, and the authored match side.
+  const bodySteps = def.steps.map((s) => s.replace(NO_HOOKS_MARKER, ''));
+  const ctx: ExpandContext = {
+    skillsDir: undefined,
+    sections,
+    sectionsFilePath: '<detached>',
+    warnDeadSections: false,
+    onDeadSection: () => {},
+    deadScanned: new Set(),
+    controlNamedWarned: new Set(),
+    insideSkill: false,
+    seq: { n: 0 },
+    chainSeq: { n: 0 },
+    controlFlow: true,
+    frames: {},
+  };
+  return droppedAheadOf(ctx, bodySteps, def.rawSteps ?? def.steps, keep);
+}
+
+/**
  * `interpolate`, minus the warning on an unresolved placeholder.
  *
  * A looped section's body is interpolated with its row, and a body may

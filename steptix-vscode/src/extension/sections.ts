@@ -173,6 +173,42 @@ export function buildSectionsPayload(
 }
 
 /**
+ * The `detachedBody` request field for a batch of section-body steps run on
+ * their own (stories/specs/sections-run-and-resume.md §4.2): for each step,
+ * the section it came from and its 0-based position in that body.
+ *
+ * The steps still run detached, at the root frame. What this changes is
+ * code-behind: the server binds each one under its section, at its place in
+ * the body, which is where a compiled section keeps its entries. Without it a
+ * body run this way never replayed as code.
+ *
+ * Read from `text`, the buffer this request's `sections` payload is built
+ * from, because the server checks every position against that payload. Null
+ * when some step's line no longer holds that step in a body of `text`, which
+ * means the body was edited after the run picked its steps. The batch then
+ * goes without the field and runs as it did before the field existed, under
+ * AI, rather than have the server bind it by positions that moved.
+ */
+export function detachedBodyPayload(
+  text: string,
+  steps: ReadonlyArray<{ line: number; instruction: string }>,
+): Array<{ section: string; step: number }> | null {
+  const at = new Map<number, { section: string; step: number; instruction: string }>();
+  for (const section of extractSections(text)) {
+    section.steps.forEach((s, step) => {
+      at.set(s.line, { section: section.name, step, instruction: s.instruction });
+    });
+  }
+  const out: Array<{ section: string; step: number }> = [];
+  for (const s of steps) {
+    const found = at.get(s.line);
+    if (!found || found.instruction !== s.instruction) return null;
+    out.push({ section: found.section, step: found.step });
+  }
+  return out;
+}
+
+/**
  * Why `text`'s sections can't be run, or null if they can.
  *
  * The CLI refuses bad names at parse time, and the wire format cannot even

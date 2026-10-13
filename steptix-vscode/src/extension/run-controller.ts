@@ -65,6 +65,7 @@ import { EnvSelector } from './env-selector.js';
 import { resolveProjectDirs } from './steptix-config.js';
 import {
   buildSectionsPayload,
+  detachedBodyPayload,
   preflightSections,
   sectionedSkillRefusal,
   SectionNarrowingError,
@@ -3765,6 +3766,7 @@ export class RunController {
             }),
             ...(options.suppressServerBreakpoints && { suppressServerBreakpoints: true }),
             ...(sendRunStart && { runStart: true }),
+            ...(selection.scope === 'section-body' && { detachedBody: true }),
           });
           compileBlocksSent++;
           pendingRerun = undefined;
@@ -5166,8 +5168,13 @@ export class RunController {
      *  puts the session on the surface the file says this block's first step
      *  is on (SPEC-use-computer.md §4.5). */
     runStart?: boolean;
+    /** The block is `### Section` body steps run on their own, detached at
+     *  the root frame (stories/specs/sections-run-and-resume.md §4.2). The
+     *  request says where each came from, so its code-behind binds under its
+     *  section. */
+    detachedBody?: boolean;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, withinCompileRun, suppressServerBreakpoints, runStart } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, withinCompileRun, suppressServerBreakpoints, runStart, detachedBody } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -5209,6 +5216,23 @@ export class RunController {
       if (!(err instanceof SectionNarrowingError)) throw err;
       this.refuseStaleNarrowing(err.message, log, 'narrowed section body no longer fits');
       return false;
+    }
+    // Where each detached body step sits, from the buffer `sections` was just
+    // built from, since the server checks one against the other. A body edited
+    // since the run picked its steps gets no field, so this block binds as it
+    // did before the field existed, and runs under AI.
+    const bodyPositions = detachedBody
+      ? detachedBodyPayload(
+          this.document.getText(),
+          stepLines.map((line, i) => ({ line, instruction: stepInstructions[i]! })),
+        )
+      : null;
+    if (detachedBody && bodyPositions === null) {
+      this.postOutput(
+        'The section body was edited after this run picked its steps, so they run ' +
+          'under AI rather than their code-behind. Run them again to use it.',
+        'warn',
+      );
     }
 
     // Resolve the project's skills directory so the server can expand
@@ -5271,6 +5295,12 @@ export class RunController {
         ...(compile && { compile }),
         ...(compile && compileContinues && { compileContinues: true }),
         ...(compile === 'steps' && compileScope && { compileScope }),
+        // Every detached body block, compile or not. A plain run of selected
+        // body lines is the case it exists for: without it their compiled
+        // entries never replayed. On a compile it says what `compileScope`
+        // says, per step and with positions; `compileScope` still travels for
+        // a server that predates this field.
+        ...(bodyPositions && { detachedBody: bodyPositions }),
         // Never alongside `compile` — the server refuses that pair, and the
         // caller already gates on `rowCompile === undefined`. Narrowed again
         // here for the same reason `compileScope` is: this is the one place
