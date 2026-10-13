@@ -298,6 +298,22 @@ any selector, id, class name, URL or page text under `src/`, `runner-core/` or
 the extensions that appears on a site or app the tests drive. A name that
 appears only in a comment saying where a problem was found is not a finding.
 
+## Fix comment problems, however minor
+
+A wrong comment is worse than none, because the next reader trusts it over the
+code. When a code review, `/code-review` included, or anything else turns up a
+problem in a code comment, fix it, even when it is only a nit.
+
+- **Fix it now, not later.** A stale, inaccurate or misleading comment, a
+  typo, a comment that still names a function, file, setting or error code
+  that has since changed: fix it in the change you are making, not in a
+  follow-up. Being minor is not a reason to leave it.
+- **Fix it where you find it.** A wrong comment outside the lines you touched
+  is still yours to fix once you have seen it.
+- **Report it when reviewing.** When reviewing a diff, `/code-review`
+  included, report every comment problem as a finding, however small, instead
+  of leaving it out as not worth mentioning.
+
 ## Seed gitignored files into a new worktree
 
 After creating a worktree (via `git worktree add` or the `EnterWorktree`
