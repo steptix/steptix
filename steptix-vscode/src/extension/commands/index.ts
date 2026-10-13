@@ -224,6 +224,14 @@ export function registerCommands(
       await restore();
       return;
     }
+    if (!outcome && controller.staleSelectionRefusal !== null) {
+      // The run stopped itself because the file changed under the selection
+      // (a picked body edited mid-run), and said so: "Run stopped: …". Not the
+      // server's doing, so not the older-server question below.
+      registry.lastCompileError = controller.staleSelectionRefusal;
+      await restore();
+      return;
+    }
     if (!outcome) {
       // The run happened; the compile did not answer. An older server (one
       // that drops `compile` off the allow-list) looks exactly like this, and
@@ -371,8 +379,8 @@ export function registerCommands(
     }
     // Body steps of an inline `### Section` count: `extractSteps` reports only
     // `kind: 'step'`, and gating on it refused a line both commands used to
-    // run (Run Step Here runs body lines detached; Compile This Step resolved
-    // their section scope).
+    // run (Run Step Here runs body lines detached, and Compile This Step binds
+    // them under their section by `detachedBody`).
     const classified = classifyLines(text);
     const isStepLine = (line: number): boolean => {
       const kind = classified[line - 1]?.kind;

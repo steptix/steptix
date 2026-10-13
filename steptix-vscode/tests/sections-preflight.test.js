@@ -445,8 +445,8 @@ const SECOND_CONTINUE = [{ section: "Sign in", step: 2 }];
 test("detached body: no drift while the picked bodies are as they were", () => {
   assert.equal(detachedBodyDrift(DETACHED, READ, SECOND_CONTINUE), null);
   // A note added in the main flow moves every line below it, but no body
-  // step's place. Looking the step up by its old LINE would have found the
-  // first `Click "Continue"` there and bound its entry; by place it holds.
+  // step's place. Looking the step up by its old LINE found another step
+  // there, and the step went out with no place at all; by place it holds.
   const moved = DETACHED.replace("2. Sign in", "2. Sign in\n\nA note about the flow.");
   assert.equal(detachedBodyDrift(moved, READ, SECOND_CONTINUE), null);
   // So does an edit to a body nothing was picked from.

@@ -197,7 +197,9 @@ export function readDetachedBodies(text: string): DetachedBodies {
   const bodies = new Map<string, string[]>();
   for (const section of extractSections(text)) {
     section.steps.forEach((s, step) => at.set(s.line, { section: section.name, step }));
-    bodies.set(matchText(section.name), section.steps.map((s) => s.instruction));
+    // First definition wins, as in `buildSectionsPayload` and the parser.
+    const key = matchText(section.name);
+    if (!bodies.has(key)) bodies.set(key, section.steps.map((s) => s.instruction));
   }
   return { at, bodies };
 }

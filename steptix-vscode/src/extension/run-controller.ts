@@ -714,6 +714,14 @@ export class RunController {
    *  about the file refuses identically for every row after it. */
   private narrowingRefusal: string | null = null;
 
+  /** Why the last run stopped because the file changed under its selection —
+   *  a narrowed or detached body edited mid-run — or null. Already said in
+   *  the Output as "Run stopped: …"; a caller that would otherwise explain a
+   *  missing result some other way reads it here. */
+  get staleSelectionRefusal(): string | null {
+    return this.narrowingRefusal;
+  }
+
   /**
    * The section narrowings a PAUSED run parked, for its Continue to pick up.
    *
@@ -2839,6 +2847,10 @@ export class RunController {
     this.compileToken += 1;
     this.compileResult = undefined;
     this.sawCompileProgress = false;
+    // …and the stale-selection refusal, which callers read after the run
+    // (`staleSelectionRefusal`), so a run that never reached the reset below
+    // cannot answer with the previous run's.
+    this.narrowingRefusal = null;
     // A tail left up by a previous run — a stream that dropped before its
     // result — belongs to nothing now. The new run raises its own.
     this.endCompileTail();
@@ -3369,10 +3381,9 @@ export class RunController {
     // about this run's server, said once (`rowForIteration`).
     this.oldServerNumberingWarned = false;
     this.oldServerBodyStepsWarned = false;
-    // …and so is a stale narrowing, which is a fact about the FILE: it refuses
-    // identically for every block and every row after the first, so it is said
-    // once and it ends the run.
-    this.narrowingRefusal = null;
+    // A stale narrowing is a fact about the FILE too: it refuses identically
+    // for every block and every row after the first, so it is said once and it
+    // ends the run. Its field is reset where the run starts, above.
 
     const wholeFileRun =
       options.rerun === undefined &&

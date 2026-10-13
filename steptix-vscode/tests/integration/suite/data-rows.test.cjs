@@ -2225,6 +2225,33 @@ describe('Steptix data-row selection', function () {
     }
   });
 
+  it('a Compile This Step the body edit stopped says so, not "older server"', async () => {
+    // Row 1 carries the compile; its stream edits the body and ends without a
+    // `compile:result`. Row 2 then stops the run. With no result to present,
+    // the command used to ask whether the server was too old to compile.
+    const uri = await open('data-rows-body-loop.tmp.md');
+    try {
+      const edited = [...LOOP_LINES];
+      edited.splice(16, 0, '1. Wait for the form');
+      queueScripts(
+        async (f) => {
+          await rewrite(uri, edited);
+          f.end();
+        },
+        (f) => f.end(),
+        (f) => f.end(),
+      );
+      void vscode.commands.executeCommand('steptix.compileStepCodeBehind', { lineNumber: 18 });
+      await waitFor('one request', () => fake.requests.length >= 1);
+      await waitFor('run finished', () => hooks.isRunning() === false);
+      await waitFor('compile settled', () => hooks.lastCompileError() !== null);
+      assert.equal(fake.requests[0].compile, 'steps');
+      assert.match(hooks.lastCompileError(), /^the body of "Log In" now has 3 steps/);
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
   it('Run & Compile never carries a narrowing — it runs the whole file', async () => {
     // The spec's claim, pinned. A compile does NOT reach the server through
     // `POST /codebehind/compile` (Steptix compiles through the ordinary step
