@@ -162,6 +162,9 @@ interface View {
   alsoByAuthor?: string[];
   alsoEdited?: Item[];
   fresh: boolean;
+  /** The draft's parameters as the call is shown them — none for a redraft
+   *  from nothing. What its answer leaves out of them is carried. */
+  parameters: Params;
 }
 
 export interface DraftEngineOptions {
@@ -306,6 +309,39 @@ function sameElement(a: RecordedAction | undefined, b: RecordedAction | undefine
 function placeholderRoots(text: string): Set<string> {
   const out = new Set<string>();
   for (const m of text.matchAll(/\{\{([A-Za-z_][A-Za-z0-9_.]*)\}\}/g)) out.add(m[1]!.split('.')[0]!);
+  return out;
+}
+
+/**
+ * An answer's parameter list, settled, with every parameter the call was
+ * `shown` that the answer leaves out put back — each only while one of
+ * `steps` still uses its `{{name}}` (#84). The prompt asks for the whole list
+ * every call, but a model does not always send it: an answer that only adds
+ * steps often lists only the parameters it introduced, or none, and every
+ * value before it was lost while its steps still named it.
+ *
+ * The answer's own entry wins where it names one, so the model can still
+ * correct a value. `shown` is what the call was shown, under the names the
+ * draft already settled (`email_2`), so a parameter is carried under its
+ * settled name and never through {@link settleParameters} a second time. A
+ * call shown nothing — a redraft from nothing — gets nothing carried. A
+ * carried one keeps its place relative to the parameters before it.
+ */
+function withOmittedParameters(shown: Params, answered: Params, steps: readonly string[]): Params {
+  const used = new Set<string>();
+  for (const s of steps) for (const name of placeholderRoots(s)) used.add(name);
+  const out = answered.map((p) => ({ ...p }));
+  let at = 0;
+  for (const p of shown) {
+    const k = out.findIndex((q) => q.name === p.name);
+    if (k >= 0) {
+      at = Math.max(at, k + 1);
+      continue;
+    }
+    if (!used.has(p.name)) continue;
+    out.splice(at, 0, { ...p });
+    at++;
+  }
   return out;
 }
 
@@ -1464,7 +1500,9 @@ export class DraftEngine {
    * The draft's parameters: the model's, and those the author's steps and
    * rewordings still in the draft name (a secret they held, written as
    * `{{name}}`) that the model's list does not have — each only while some
-   * step still uses it. The model's answer replaces its list every call; the
+   * step still uses it. The model's answer replaces its list every call,
+   * except that what the call was shown and the answer leaves out is carried
+   * while a step still uses it ({@link withOmittedParameters}, #84); the
    * author's are theirs and stay while their step does. A parameter no step
    * uses any more (the step that typed it deleted, or reworded without it)
    * leaves the list (stories/steptix-record-edit-steps.md, "Delete").
@@ -1736,7 +1774,12 @@ export class DraftEngine {
    */
   private viewFor(work: Work): View {
     if (work.kind === 'incremental' || work.kind === 'gap') {
-      const view: View = { items: this.flatItems().map(cloneItem), locked: this.lockedCount, fresh: false };
+      const view: View = {
+        items: this.flatItems().map(cloneItem),
+        locked: this.lockedCount,
+        fresh: false,
+        parameters: this.allParameters(),
+      };
       if (work.kind === 'incremental') return view;
       let base = 0;
       for (const s of this.stretches) {
@@ -1768,13 +1811,17 @@ export class DraftEngine {
       shown.push(...trailing);
       if (closed) lockedShown += trailing.length;
     });
+    const fresh = shown.length === 0 && inside.length === 0 && insideEdited.length === 0;
     return {
       items: shown,
       locked: lockedShown,
       insertAt,
       ...(inside.length > 0 && { alsoByAuthor: inside }),
       ...(insideEdited.length > 0 && { alsoEdited: insideEdited }),
-      fresh: shown.length === 0 && inside.length === 0 && insideEdited.length === 0,
+      fresh,
+      // A redraft from nothing starts its parameters from nothing too: it is
+      // shown none, and none is carried into its answer.
+      parameters: fresh ? [] : this.allParameters(),
     };
   }
 
@@ -1792,8 +1839,7 @@ export class DraftEngine {
       actions,
       draft: {
         steps: view.items.map((i) => i.text),
-        // A redraft from nothing starts its parameters from nothing too.
-        parameters: view.fresh ? [] : this.allParameters(),
+        parameters: view.parameters,
         locked: view.locked,
         authored: this.authoredOf(view.items).indices,
         edited: this.editedOf(view.items),
@@ -2202,9 +2248,16 @@ export class DraftEngine {
     items.forEach((item, i) => {
       if (item.authorId === undefined && !item.edited) item.text = settled.steps[i]!;
     });
-    // The model was shown the author's own parameters and may hand them back:
-    // they stay the author's, in the draft for as long as their step is.
-    this.parameters = settled.parameters.filter((p) => !this.authorsOnly(p));
+    // What the call was shown and its answer left out stays while a step
+    // still uses it (#84). The model was shown the author's own parameters
+    // and may hand them back: they stay the author's, in the draft for as
+    // long as their step is.
+    const parameters = withOmittedParameters(
+      view.parameters,
+      settled.parameters,
+      items.map((i) => i.text),
+    );
+    this.parameters = parameters.filter((p) => !this.authorsOnly(p));
     this.keptNotes = [...new Set([...(fresh ? [] : this.keptNotes), ...settled.notes])];
     this.emitDraft();
     return true;

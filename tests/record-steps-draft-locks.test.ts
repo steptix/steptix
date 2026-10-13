@@ -9,14 +9,24 @@
  * waiting, a restore after the stretch changed — with a scripted model that
  * writes one step per action, named after its target.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { buildRecordStepsPrompt, RECORD_STEPS_SYSTEM } from '../src/ai/prompts.js';
 import type { ChatMessage, MessageContentBlock } from '../src/ai/types.js';
 import { DraftEngine } from '../src/recorder/draft-engine.js';
 import { authorStepLines, authorStepSecrets } from '../src/recorder/record-steps-run.js';
 import { summarizeTargetFile } from '../src/recorder/target-file.js';
 import type { RecordStreamEvent, RecordedAction } from '../src/recorder/types.js';
-import { splitAuthorSteps } from '../steptix-vscode/src/extension/record-steps-core.js';
+import {
+  applyOffsetEdits,
+  beginLiveRecord,
+  liveRecordWrite,
+  resolveRecordCursor,
+  splitAuthorSteps,
+  trackAnchorThroughChanges,
+  type LiveDraft,
+  type LiveRecord,
+  type RecordAnchor,
+} from '../steptix-vscode/src/extension/record-steps-core.js';
 
 const FILE = summarizeTargetFile('# T\n\n## Steps\n1. Navigate to /\n', 'cursor', 4);
 
@@ -36,14 +46,18 @@ function recordingOf(messages: ChatMessage[]): Array<Record<string, any>> {
   return JSON.parse(text.slice(start, text.lastIndexOf('--- END RECORDING ---')));
 }
 
-/** The model: one step per action, after whatever the draft says to start at. */
-function echo(messages: ChatMessage[]): string {
+/** Where the prompt says this call's steps go: the insert point, else the end. */
+function replaceFromOf(messages: ChatMessage[]): number {
   const text = textOf(messages);
   const insert = /answer with replaceFrom (\d+)/.exec(text);
   const append = /To only add steps, replaceFrom is (\d+)/.exec(text);
-  const replaceFrom = insert ? Number(insert[1]) : append ? Number(append[1]) : 0;
+  return insert ? Number(insert[1]) : append ? Number(append[1]) : 0;
+}
+
+/** The model: one step per action, after whatever the draft says to start at. */
+function echo(messages: ChatMessage[]): string {
   return JSON.stringify({
-    replaceFrom,
+    replaceFrom: replaceFromOf(messages),
     steps: recordingOf(messages).map((a) => `Step for ${a['target']?.name ?? a['kind']}`),
     parameters: [],
   });
@@ -68,15 +82,19 @@ interface Harness {
   drafts: () => Array<Extract<RecordStreamEvent, { type: 'record:draft' }>>;
   last: () => Extract<RecordStreamEvent, { type: 'record:draft' }>;
   /** Answers per call, 1-based; anything not scripted is `echo`. */
-  script: Map<number, string | Error>;
+  script: Map<number, Scripted>;
 }
 
-function harness(): Harness {
+/** A scripted answer: its text, a failure, or an answer made from the prompt. */
+type Scripted = string | Error | ((messages: ChatMessage[]) => string);
+
+function harness(file = FILE, now?: () => number): Harness {
   const calls: ChatMessage[][] = [];
   const frames: RecordStreamEvent[] = [];
-  const script = new Map<number, string | Error>();
+  const script = new Map<number, Scripted>();
   const engine = new DraftEngine({
-    file: FILE,
+    file,
+    ...(now && { now }),
     sendImages: false,
     secrets: () => [],
     settleMs: 10,
@@ -85,7 +103,7 @@ function harness(): Harness {
       calls.push(messages);
       const scripted = script.get(calls.length);
       if (scripted instanceof Error) throw scripted;
-      return { text: scripted ?? echo(messages) };
+      return { text: typeof scripted === 'function' ? scripted(messages) : (scripted ?? echo(messages)) };
     },
   });
   const drafts = (): Array<Extract<RecordStreamEvent, { type: 'record:draft' }>> =>
@@ -417,5 +435,291 @@ describe('the prompt with locks (buildRecordStepsPrompt)', () => {
       expect(RECORD_STEPS_SYSTEM).toContain(rule);
     }
     expect(RECORD_STEPS_SYSTEM).not.toContain('\\');
+  });
+});
+
+// ── Parameters across draft calls (#84) ───────────────────────────────────
+
+type Draft = Extract<RecordStreamEvent, { type: 'record:draft' }>;
+type Param = { name: string; value: string };
+
+const EMAIL: Param = { name: 'email', value: 'quill@example.net' };
+const TYPE_EMAIL = 'Type {{email}} into the Email field';
+const NO_DEFINITION = 'which no parameter defines';
+
+/** A scripted answer: these steps and this parameter list, where the prompt
+ *  says the call's steps go (as `echo` does). */
+function says(steps: string[], parameters: Param[]): (messages: ChatMessage[]) => string {
+  return (messages) => JSON.stringify({ replaceFrom: replaceFromOf(messages), steps, parameters });
+}
+
+/** Wait until the engine has made `calls` calls, none is running, and the
+ *  last draft is `ready` — the condition itself, polled under a generous
+ *  ceiling; the error says what it saw. */
+async function drafted(h: Harness, calls: number, ready: (d: Draft) => boolean): Promise<void> {
+  await vi.waitFor(
+    () => {
+      const d = h.drafts().at(-1);
+      if (h.calls.length < calls || h.engine.callsInFlight > 0 || !d || !ready(d)) {
+        throw new Error(
+          `waiting: ${h.calls.length} of ${calls} calls, ${h.engine.callsInFlight} running, ` +
+            `last draft ${JSON.stringify(d?.steps)}`,
+        );
+      }
+    },
+    { timeout: 5_000, interval: 5 },
+  );
+}
+
+/** Every draft whose steps use `{{name}}` defined it: no draft along the way
+ *  dropped it, and none said that nothing defines it. */
+function alwaysDefined(h: Harness, name: string): void {
+  const using = h.drafts().filter((d) => d.steps.some((s) => s.includes(`{{${name}}}`)));
+  expect(using.length).toBeGreaterThan(0);
+  for (const d of using) {
+    expect({ steps: d.steps, names: d.parameters.map((p) => p.name) }).toEqual({
+      steps: d.steps,
+      names: expect.arrayContaining([name]),
+    });
+    expect(d.notes ?? []).not.toContainEqual(expect.stringContaining(NO_DEFINITION));
+  }
+}
+
+describe('parameters across draft calls (#84)', () => {
+  it('a later call that leaves a parameter out keeps it while a step still uses it', async () => {
+    const h = harness();
+    h.script.set(1, says([TYPE_EMAIL], [EMAIL]));
+    h.script.set(2, says(['Click Continue'], []));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    expect(h.last().parameters).toEqual([EMAIL]);
+    h.engine.addAction(action(2, 'Continue'));
+    await drafted(h, 2, (d) => d.steps.length === 2);
+    // The call was shown the parameter, and its answer left it out.
+    expect(textOf(h.calls[1]!)).toContain(EMAIL.value);
+    expect(h.last()).toMatchObject({ steps: [TYPE_EMAIL, 'Click Continue'], parameters: [EMAIL] });
+    alwaysDefined(h, 'email');
+  });
+
+  it('an answer that names the parameter wins: the model can still correct a value', async () => {
+    const h = harness();
+    const grace = { name: 'email', value: 'grace@example.com' };
+    h.script.set(1, says([TYPE_EMAIL], [EMAIL]));
+    h.script.set(2, says(['Click Continue'], [grace]));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    h.engine.addAction(action(2, 'Continue'));
+    await drafted(h, 2, (d) => d.steps.length === 2);
+    expect(h.last().parameters).toEqual([grace]);
+  });
+
+  it('a carried parameter keeps its place in the list; new ones follow the answer', async () => {
+    const h = harness();
+    const pin = { name: 'pin', value: '4321' };
+    const city = { name: 'city', value: 'Paris' };
+    h.script.set(1, says([TYPE_EMAIL, 'Type {{pin}} into the PIN field'], [EMAIL, pin]));
+    h.script.set(2, says(['Type {{city}} into the City field'], [city]));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 2);
+    h.engine.addAction(action(2, 'City'));
+    await drafted(h, 2, (d) => d.steps.length === 3);
+    expect(h.last().parameters).toEqual([EMAIL, pin, city]);
+  });
+
+  it('a deleted step still takes its parameter with it — a later call that leaves it out does not bring it back', async () => {
+    const h = harness();
+    h.script.set(1, says([TYPE_EMAIL], [EMAIL]));
+    h.script.set(2, says(['Click Continue'], []));
+    h.script.set(3, says(['Click Done'], []));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    h.engine.addAction(action(2, 'Continue'));
+    await drafted(h, 2, (d) => d.steps.length === 2);
+    expect(h.last().parameters).toEqual([EMAIL]);
+    expect(h.engine.drop(h.last().ids[0]!)).toBe(true);
+    expect(h.last()).toMatchObject({ steps: ['Click Continue'], parameters: [] });
+    h.engine.addAction(action(3, 'Done'));
+    await drafted(h, 3, (d) => d.steps.length === 2);
+    // Not shown to the call, and not put back after it.
+    expect(textOf(h.calls[2]!)).not.toContain(EMAIL.value);
+    expect(h.last()).toMatchObject({ steps: ['Click Continue', 'Click Done'], parameters: [] });
+  });
+
+  it('so does a step reworded without it', async () => {
+    const h = harness();
+    h.script.set(1, says([TYPE_EMAIL], [EMAIL]));
+    h.script.set(2, says(['Click Done'], []));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    expect(h.engine.editStep(h.last().ids[0]!, 'Type the address into the Email field', { source: 'panel' })).toBe(
+      true,
+    );
+    expect(h.last().parameters).toEqual([]);
+    h.engine.addAction(action(2, 'Done'));
+    await drafted(h, 2, (d) => d.steps.length === 2);
+    expect(h.last()).toMatchObject({
+      steps: ['Type the address into the Email field', 'Click Done'],
+      parameters: [],
+    });
+  });
+
+  it('a parameter settled under a new name (the file has the name) is carried under that name, not renamed again', async () => {
+    const file = summarizeTargetFile(
+      '# T\n\n## Parameters\n- email: someone@example.org\n\n## Steps\n1. Navigate to /\n',
+      'cursor',
+      7,
+    );
+    const h = harness(file);
+    h.script.set(1, says([TYPE_EMAIL], [EMAIL]));
+    h.script.set(2, says(['Click Continue'], []));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    const renamed = { name: 'email_2', value: EMAIL.value };
+    expect(h.last()).toMatchObject({ steps: ['Type {{email_2}} into the Email field'], parameters: [renamed] });
+    h.engine.addAction(action(2, 'Continue'));
+    await drafted(h, 2, (d) => d.steps.length === 2);
+    expect(h.last()).toMatchObject({
+      steps: ['Type {{email_2}} into the Email field', 'Click Continue'],
+      parameters: [renamed],
+    });
+    alwaysDefined(h, 'email_2');
+  });
+
+  it('a redraft of a closed stretch that leaves the parameter out keeps it', async () => {
+    const h = harness();
+    h.script.set(1, says([TYPE_EMAIL], [EMAIL]));
+    h.script.set(2, says(['Click Extra'], [EMAIL]));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    h.engine.addAction(action(2, 'Extra'));
+    await drafted(h, 2, (d) => d.steps.length === 2);
+    await h.engine.addAuthorSteps(['Verify the form is filled'], { source: 'panel', boundary: 2, atMs: 2500 });
+    const third = h.calls.length + 1;
+    h.script.set(third, says(['Click Continue'], [EMAIL]));
+    h.engine.addAction(action(3, 'Continue'));
+    await drafted(h, third, (d) => d.steps.length === 4);
+    expect(h.last()).toMatchObject({ locked: 3, parameters: [EMAIL] });
+    // Dropping an action of the closed stretch redrafts that stretch alone.
+    const before = h.calls.length;
+    h.script.set(before + 1, says([TYPE_EMAIL], []));
+    expect(h.engine.drop('a2')).toBe(true);
+    await drafted(h, before + 1, (d) => d.steps.length === 3);
+    expect(textOf(h.calls[before]!)).toContain('They go in at index 0');
+    expect(textOf(h.calls[before]!)).toContain(EMAIL.value);
+    expect(h.last()).toMatchObject({
+      steps: [TYPE_EMAIL, 'Verify the form is filled', 'Click Continue'],
+      parameters: [EMAIL],
+    });
+    alwaysDefined(h, 'email');
+  });
+
+  it("a gap call — the actions a failed catch-up left above a step of the author's — that leaves the parameter out keeps it", async () => {
+    // The gap is due once an action comes after the failed call — compared
+    // by the engine's clock, which ticks on every reading here, so the two
+    // never share a millisecond however fast the test runs.
+    let tick = 0;
+    const h = harness(FILE, () => ++tick);
+    h.script.set(1, says([TYPE_EMAIL], [EMAIL]));
+    h.script.set(2, new Error('503 the model is down'));
+    h.script.set(3, says(['Click Two'], []));
+    h.script.set(4, says(['Click Continue'], [EMAIL]));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    h.engine.setPaused(true); // nothing drafts on its own while it arrives
+    h.engine.addAction(action(2, 'Two'));
+    h.engine.setPaused(false);
+    await h.engine.addAuthorSteps(['Verify the form is filled'], { source: 'toolbar', boundary: 2, atMs: 2500 });
+    expect(h.calls).toHaveLength(2);
+    expect(h.last().steps).toEqual([TYPE_EMAIL, 'Verify the form is filled']);
+    h.engine.addAction(action(3, 'Continue'));
+    await drafted(h, 4, (d) => d.steps.length === 4);
+    expect(textOf(h.calls[2]!)).toContain('They go in at index 1');
+    expect(h.last()).toMatchObject({
+      steps: [TYPE_EMAIL, 'Click Two', 'Verify the form is filled', 'Click Continue'],
+      parameters: [EMAIL],
+    });
+    // The draft between the gap call and the next one included.
+    alwaysDefined(h, 'email');
+  });
+
+  it('a redraft from nothing starts its parameters from nothing: it was shown none, so none is carried into it', async () => {
+    const h = harness();
+    h.script.set(1, says([TYPE_EMAIL], [EMAIL]));
+    // Reaches past the end: refused, and asked again as a redraft of the open
+    // steps — the whole draft here, so the call starts from nothing.
+    h.script.set(2, JSON.stringify({ replaceFrom: 7, steps: ['Click Continue'], parameters: [] }));
+    h.script.set(3, says([TYPE_EMAIL, 'Click Continue'], []));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    h.engine.addAction(action(2, 'Continue'));
+    await drafted(h, 3, (d) => d.steps.length === 2);
+    expect(textOf(h.calls[2]!)).not.toContain(EMAIL.value);
+    expect(h.last()).toMatchObject({ steps: [TYPE_EMAIL, 'Click Continue'], parameters: [] });
+    expect(h.last().notes).toContainEqual(expect.stringContaining(`{{email}}, ${NO_DEFINITION}`));
+  });
+
+  it('a redraft from nothing keeps what its own answer gives', async () => {
+    const h = harness();
+    h.script.set(1, says([TYPE_EMAIL], [EMAIL]));
+    h.script.set(2, JSON.stringify({ replaceFrom: 7, steps: ['Click Continue'], parameters: [] }));
+    h.script.set(3, says([TYPE_EMAIL, 'Click Continue'], [EMAIL]));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    h.engine.addAction(action(2, 'Continue'));
+    await drafted(h, 3, (d) => d.steps.length === 2);
+    expect(h.last()).toMatchObject({ steps: [TYPE_EMAIL, 'Click Continue'], parameters: [EMAIL] });
+  });
+});
+
+/** Line coordinates of an offset edit, for the anchor tracker. */
+function lineChangeOf(text: string, start: number, end: number, inserted: string) {
+  const pos = (off: number) => {
+    const before = text.slice(0, off);
+    return { line: (before.match(/\n/g) ?? []).length, char: off - (before.lastIndexOf('\n') + 1) };
+  };
+  const s = pos(start);
+  const e = pos(end);
+  return { startLine: s.line, startChar: s.char, endLine: e.line, endChar: e.char, text: inserted };
+}
+
+describe("the extension's live writer, fed the engine's drafts (#84)", () => {
+  it('keeps "- email: …" under ## Parameters after a draft whose call left the parameter out', async () => {
+    const h = harness();
+    h.script.set(1, says([TYPE_EMAIL], [EMAIL]));
+    h.script.set(2, says(['Click Continue'], []));
+    h.engine.addAction(action(1, 'Email'));
+    await drafted(h, 1, (d) => d.steps.length === 1);
+    h.engine.addAction(action(2, 'Continue'));
+    await drafted(h, 2, (d) => d.steps.length === 2);
+
+    // Every draft written in order, as the extension's draft writer does.
+    let text = '# T\n\n## Steps\n1. Navigate to /\n';
+    const cursor = resolveRecordCursor(text, 4);
+    if (!cursor.ok) throw new Error(cursor.reason);
+    let anchor: RecordAnchor = { ...cursor.anchor, tracked: true };
+    let live: LiveRecord | null = null;
+    const written: string[] = [];
+    for (const draft of h.drafts()) {
+      if (!live) {
+        const begun = beginLiveRecord(text, anchor);
+        if ('error' in begun) throw new Error(begun.error);
+        live = begun;
+      }
+      const w = liveRecordWrite(live, text, draft as LiveDraft, { anchor });
+      if ('error' in w) throw new Error(w.error);
+      anchor = trackAnchorThroughChanges(
+        anchor,
+        w.edits.map((e) => lineChangeOf(text, e.start, e.end, e.text)),
+      );
+      text = applyOffsetEdits(text, w.edits);
+      live = w.record;
+      written.push(text);
+    }
+    expect(written.length).toBeGreaterThanOrEqual(2);
+    expect(written[0]).toContain('- email: quill@example.net');
+    expect(text).toBe(
+      '# T\n\n## Parameters\n- email: quill@example.net\n\n## Steps\n1. Navigate to /\n' +
+        '2. Type {{email}} into the Email field\n3. Click Continue\n',
+    );
   });
 });

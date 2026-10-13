@@ -1139,6 +1139,21 @@ to `steps`: for each, the numbers (`n`, as the recording in the prompt gives
 them — an action's place among the ones still in) of the actions it
 describes, typing and choices included. `notes` are shown to the author.
 
+**The parameter list across calls.** `parameters` is meant to be the whole
+list, and the answer's list becomes the draft's — with one exception the
+engine enforces rather than hopes for: a parameter the call was shown that
+the answer leaves out is kept, under the name the draft already gave it
+(`email_2` when the file has `email` with another value, §7.3), never
+renamed a second time, for as long as some step in the draft
+still uses its `{{name}}`. A model answering an append often lists only the
+parameters it introduced, or none, and the value of every earlier one went
+with it while its steps still named it (#84). Where the answer does name a
+parameter its value wins, so the model can still correct one. A redraft from
+nothing (no other step left in the draft, none of the author's in what it
+rewrites) is shown no parameters and has none carried into it: it starts
+over, and its answer is the whole list. A parameter no remaining step uses
+still leaves the list ("The author's deletes", below).
+
 **Which actions a step stands for** (stories/steptix-record-edit-steps.md).
 The engine checks `stepActions`: every number one this call may give out —
 its own actions, and the ones the steps it replaces stood for — each action in

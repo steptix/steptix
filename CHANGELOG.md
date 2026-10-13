@@ -9,6 +9,31 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — Record Steps keeps a parameter's value while a step still uses it
+
+Record Steps drafts the steps with the AI in several calls as you work, and
+each answer carries a parameter list. That list replaced the draft's whole
+list every time, so a call that only added a step and listed no parameters
+dropped every value before it (#84). You typed an email, the draft said
+`Type {{email}} into the Email field`, and a moment later the
+`- email: …` line it had written under `## Parameters` was gone again. The
+only sign was a note in the Record panel that no parameter defined
+`{{email}}`, and a run of the test then failed on it.
+
+- **A parameter the AI was shown and left out of its answer is kept** for as
+  long as some step still uses its `{{name}}`, under the name the draft
+  already gave it (`email_2` when the file has `email` with another value).
+  This holds for every kind of call: one that adds steps, a redraft of the
+  steps between two of yours, and one that fills in what a failed update
+  left out.
+- **An answer that names the parameter still wins,** so the AI can correct a
+  value.
+- **A deleted or reworded step still takes its parameter with it,** as
+  before: nothing is kept once no step uses it.
+- **A redraft from nothing is unchanged.** It is shown no parameters and
+  starts over, so its answer is still the whole list, and a `{{name}}` it
+  writes without a value still gets the note.
+
 ### Fixed — typing presses no key the step did not ask for
 
 A `type` pressed End after every fill, so that a filter listening for keyup
