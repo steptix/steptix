@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SecureBank — Schedule a transfer</title>
+  <!--
+    A form whose fields react to keys (steptix/steptix#90). A `type` must put
+    in the characters its step names and press no key the step did not ask
+    for; this page shows at once when one does.
+
+      - "Find a payee" filters the list on keyup and nothing else, as many
+        live filters do. A value set without a key event leaves every payee
+        shown, so only a step that asks for its text one character at a time
+        filters the list.
+      - "Transfer date" is three segments, each a contenteditable
+        role="spinbutton" keyed as the WAI-ARIA spinbutton pattern says: Up and
+        Down step the value, Home sets the minimum and End the maximum. An End
+        pressed after the digits turns 14/03/2027 into 31/12/9999, and nothing
+        on the segment says it was not typed that way.
+      - "Schedule transfer" reads every field back into the confirmation, so a
+        test that checks it sees what the page holds rather than what was sent.
+
+    No login and no stored state: everything resets on load. Driven by
+    tests/typing-keys.test.ts and, live, by
+    templates/init/tests/securebank-schedule-transfer.md.
+  -->
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f7fa; color: #1a1a2e; }
+    .topbar { padding: 12px 40px; background: #1e3a8a; color: white; font-weight: 700; font-size: 1.1rem; }
+    .card { max-width: 540px; margin: 40px auto; background: white; border-radius: 8px; border: 1px solid #e2e8f0; padding: 32px; }
+    h1 { font-size: 1.25rem; margin-bottom: 20px; }
+    h2 { font-size: 1.1rem; margin-bottom: 8px; }
+    .field { margin-bottom: 20px; }
+    .field-label { display: block; font-weight: 600; font-size: 0.9rem; margin-bottom: 4px; }
+    .field input[type="search"], .field input[type="text"] { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 0.95rem; }
+    fieldset { border: none; }
+    #payee-count { color: #64748b; font-size: 0.85rem; margin: 6px 0; }
+    #payee-list label { display: block; padding: 6px 0; }
+    /* The filter hides a payee with `hidden`, which the rule above would undo. */
+    #payee-list label[hidden] { display: none; }
+    .date-segments { display: inline-flex; align-items: center; gap: 4px; padding: 6px 10px; border-radius: 6px; border: 1px solid #cbd5e1; }
+    [role="spinbutton"] { min-width: 2.2ch; padding: 2px; border-radius: 4px; font-variant-numeric: tabular-nums; outline: none; }
+    [role="spinbutton"]:focus { background: #dbeafe; }
+    [role="spinbutton"]:empty::before { content: attr(data-placeholder); color: #94a3b8; }
+    #form-error { color: #b91c1c; font-size: 0.9rem; min-height: 1.5em; margin-bottom: 12px; }
+    button { padding: 10px 18px; border-radius: 6px; border: 1px solid #1e3a8a; background: #1e3a8a; color: white; cursor: pointer; font-size: 0.9rem; font-weight: 500; }
+    #confirmation p { color: #475569; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <header class="topbar">SecureBank</header>
+
+  <div class="card">
+    <form id="transfer-form" novalidate>
+      <h1>Schedule a transfer</h1>
+
+      <div class="field">
+        <label class="field-label" for="payee-search">Find a payee</label>
+        <input type="search" id="payee-search" autocomplete="off" aria-controls="payee-list">
+        <p id="payee-count">5 payees</p>
+        <fieldset id="payee-list">
+          <legend class="field-label">Pay to</legend>
+          <label><input type="radio" name="payee" value="Harbour Plumbing"> Harbour Plumbing</label>
+          <label><input type="radio" name="payee" value="Northside Dental"> Northside Dental</label>
+          <label><input type="radio" name="payee" value="Greenleaf Grocers"> Greenleaf Grocers</label>
+          <label><input type="radio" name="payee" value="Riverbend Council"> Riverbend Council</label>
+          <label><input type="radio" name="payee" value="Hilltop Veterinary"> Hilltop Veterinary</label>
+        </fieldset>
+      </div>
+
+      <div class="field">
+        <label class="field-label" for="amount">Amount</label>
+        <input type="text" id="amount" name="amount" inputmode="decimal" autocomplete="off">
+      </div>
+
+      <div class="field">
+        <span class="field-label" id="transfer-date-label">Transfer date</span>
+        <div class="date-segments" role="group" aria-labelledby="transfer-date-label">
+          <div id="transfer-day" role="spinbutton" contenteditable="true" tabindex="0" aria-label="Day"
+               aria-valuemin="1" aria-valuemax="31" aria-valuetext="Empty" data-placeholder="dd" data-digits="2"></div>
+          <span aria-hidden="true">/</span>
+          <div id="transfer-month" role="spinbutton" contenteditable="true" tabindex="0" aria-label="Month"
+               aria-valuemin="1" aria-valuemax="12" aria-valuetext="Empty" data-placeholder="mm" data-digits="2"></div>
+          <span aria-hidden="true">/</span>
+          <div id="transfer-year" role="spinbutton" contenteditable="true" tabindex="0" aria-label="Year"
+               aria-valuemin="1" aria-valuemax="9999" aria-valuetext="Empty" data-placeholder="yyyy" data-digits="4"></div>
+        </div>
+      </div>
+
+      <p id="form-error" role="alert"></p>
+      <button type="submit" id="schedule-transfer">Schedule transfer</button>
+    </form>
+
+    <div id="confirmation" hidden>
+      <h2>Transfer scheduled</h2>
+      <p id="confirmation-text"></p>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('transfer-form');
+    const error = document.getElementById('form-error');
+    const search = document.getElementById('payee-search');
+    const count = document.getElementById('payee-count');
+    const payees = Array.from(document.querySelectorAll('#payee-list label'));
+
+    // The filter runs on keyup only. Setting the field's value fires `input`,
+    // which this page ignores, so the list stays as it was.
+    search.addEventListener('keyup', () => {
+      const query = search.value.trim().toLowerCase();
+      let shown = 0;
+      for (const label of payees) {
+        const match = label.textContent.toLowerCase().includes(query);
+        label.hidden = !match;
+        if (match) shown += 1;
+      }
+      count.textContent = `${shown} ${shown === 1 ? 'payee' : 'payees'}`;
+    });
+
+    // Each date segment is a spinbutton. Digits go in as text and set
+    // aria-valuenow; the keys below change the value the way the WAI-ARIA
+    // spinbutton pattern describes.
+    for (const segment of document.querySelectorAll('[role="spinbutton"]')) {
+      const min = Number(segment.getAttribute('aria-valuemin'));
+      const max = Number(segment.getAttribute('aria-valuemax'));
+      const digits = Number(segment.dataset.digits);
+      const show = (value) => {
+        segment.textContent = String(value).padStart(digits, '0');
+        segment.setAttribute('aria-valuenow', String(value));
+        segment.setAttribute('aria-valuetext', segment.textContent);
+      };
+      segment.addEventListener('keydown', (e) => {
+        const now = segment.hasAttribute('aria-valuenow') ? Number(segment.getAttribute('aria-valuenow')) : null;
+        if (e.key === 'ArrowUp') show(now === null ? min : Math.min(max, now + 1));
+        else if (e.key === 'ArrowDown') show(now === null ? max : Math.max(min, now - 1));
+        else if (e.key === 'Home') show(min);
+        else if (e.key === 'End') show(max);
+        else return;
+        e.preventDefault();
+      });
+      segment.addEventListener('input', () => {
+        const typed = segment.textContent.replace(/\D/g, '').slice(0, digits);
+        if (typed !== segment.textContent) segment.textContent = typed;
+        if (typed === '') {
+          segment.removeAttribute('aria-valuenow');
+          segment.setAttribute('aria-valuetext', 'Empty');
+          return;
+        }
+        segment.setAttribute('aria-valuenow', String(Math.min(max, Math.max(min, Number(typed)))));
+        segment.setAttribute('aria-valuetext', typed);
+      });
+    }
+
+    const part = (id) => {
+      const segment = document.getElementById(id);
+      const now = segment.getAttribute('aria-valuenow');
+      return now === null ? null : now.padStart(Number(segment.dataset.digits), '0');
+    };
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const payee = form.elements.payee.value;
+      const amount = Number(form.elements.amount.value.trim());
+      const day = part('transfer-day');
+      const month = part('transfer-month');
+      const year = part('transfer-year');
+      if (payee === '') { error.textContent = 'Choose a payee'; return; }
+      if (form.elements.amount.value.trim() === '' || !Number.isFinite(amount) || amount <= 0) {
+        error.textContent = 'Enter an amount';
+        return;
+      }
+      if (day === null || month === null || year === null) { error.textContent = 'Enter the transfer date'; return; }
+      error.textContent = '';
+      form.hidden = true;
+      document.getElementById('confirmation-text').textContent =
+        `$${amount.toFixed(2)} to ${payee} on ${day}/${month}/${year}`;
+      document.getElementById('confirmation').hidden = false;
+    });
+  </script>
+</body>
+</html>
