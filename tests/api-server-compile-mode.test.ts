@@ -1034,6 +1034,75 @@ describe('recompiling a step whose entry broke', () => {
       expect(recording!.steps[0]!.occurrence).toBe(1);
     });
 
+    it('refuses a lone later repeat before running when the earlier one has no entry', async () => {
+      // No `.steps.ts` yet: the second `Press Enter` is occurrence 1, and a
+      // file created around it would hold it as the ONLY `Press Enter` entry,
+      // which every run then binds to the first one. Refused before the
+      // browser runs or the model is asked.
+      const { status, frames } = await runSteps(
+        requestBody({
+          steps: ['Press Enter'],
+          sourceLines: [15],
+          sections: BODIES,
+          detachedBody: [{ section: 'Sign in', step: 3 }],
+          compile: 'steps',
+        }),
+      );
+      expect(status).toBe(200);
+      const result = frames.find((f) => f.type === 'compile:result')!;
+      expect(result.status).toBe('failed');
+      expect(result.summary.error).toMatch(/repeat 2 of its text in "Sign in", and repeat 1 has no code-behind entry/);
+      expect(stepCalls).toEqual([]);
+      expect(aiPrompts).toEqual([]);
+      await expect(fs.access(stepsFilePath)).rejects.toThrow();
+    });
+
+    it('compiles a later repeat when the earlier one is in the same selection', async () => {
+      const { frames } = await runSteps(
+        requestBody({
+          steps: ['Press Enter', 'Press Enter'],
+          sourceLines: [13, 15],
+          sections: BODIES,
+          detachedBody: [
+            { section: 'Sign in', step: 1 },
+            { section: 'Sign in', step: 3 },
+          ],
+          compile: 'steps',
+        }),
+      );
+      const result = frames.find((f) => f.type === 'compile:result')!;
+      expect(result.summary.compiled).toBe(2);
+      const proposed = result.files[stepsFilePath] as string;
+      expect(proposed.match(/source: 'Press Enter'/g)).toHaveLength(2);
+    });
+
+    it('compiles a later repeat into slot 1 when slot 0 is already on disk', async () => {
+      await fs.writeFile(
+        stepsFilePath,
+        [
+          "import { defineSteps } from 'steptix/codebehind';",
+          'export default defineSteps([',
+          "  { section: 'Sign in', source: 'Press Enter', async run(ctx) { await ctx.page.click('#first'); } },",
+          ']);',
+          '',
+        ].join('\n'),
+      );
+      const { frames } = await runSteps(
+        requestBody({
+          steps: ['Press Enter'],
+          sourceLines: [15],
+          sections: BODIES,
+          detachedBody: [{ section: 'Sign in', step: 3 }],
+          compile: 'steps',
+        }),
+      );
+      const result = frames.find((f) => f.type === 'compile:result')!;
+      const proposed = result.files[stepsFilePath] as string;
+      // Appended after the first, so it is occurrence 1 and the first is kept.
+      expect(proposed.indexOf("click('#first')")).toBeGreaterThan(-1);
+      expect(proposed.indexOf("click('#first')")).toBeLessThan(proposed.indexOf("click('#go')"));
+    });
+
     it('files the steps of a section the body step CALLS under that section', async () => {
       // `Check out`'s body step is a call to `Sign in`, which expands into a
       // frame of its own, as it does at any call site. Only what the step

@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import { placeholderRoot } from '../parser/parameters.js';
 import { matchText } from '../parser/section-match.js';
 import {
@@ -7,7 +8,8 @@ import {
   type ExpandedStepOrigin,
   type SectionDefs,
 } from '../skills/expander.js';
-import type { CodeBehindExpansion } from './loader.js';
+import type { CodeBehindBinding, CodeBehindExpansion } from './loader.js';
+import { entryTextIn } from './writer.js';
 
 /**
  * Code-behind for `### Section` body steps that run on their own
@@ -64,7 +66,8 @@ export function detachedBodyExpansion(
     // One frame per section, however many of its steps the batch holds, so
     // they count occurrences together, as they would inside one call of it.
     // The expander mints `f<n>`, so this prefix cannot collide with its ids.
-    const id = `detached:${matchText(section)}`;
+    const key = matchText(section);
+    const id = `detached:${key}`;
     frames[id] ??= {
       id,
       parentId: null,
@@ -72,8 +75,11 @@ export function detachedBodyExpansion(
       uri: testFilePath,
       invocationLine: null,
       // The field a section frame carries its name in, and the one
-      // `resolveDefiningSite` reads the entry's `section:` scope from.
-      skillName: section,
+      // `resolveDefiningSite` reads the entry's `section:` scope from. The
+      // heading's own spelling, as a full run stamps it, not the request's.
+      skillName: Object.prototype.hasOwnProperty.call(sections, key)
+        ? sections[key]!.name
+        : section,
     };
     return id;
   };
@@ -172,4 +178,51 @@ export function detachedRowReads(
     if (column !== undefined) reads.set(i, column);
   });
   return reads;
+}
+
+/**
+ * The first step of a Compile This Step on detached body steps whose entry has
+ * no slot to land in, or undefined when every one can be placed.
+ *
+ * A body step selected on its own binds at its place in the authored body, so
+ * a lone second `Press Enter` is occurrence 1. An entry's occurrence IS its
+ * position among the same-text entries of its scope in the `.steps.ts`, so the
+ * writer can place occurrence 1 only after slot 0 exists (`slotRefusal` in
+ * writer.ts). Slot k exists when the file on disk already has it, or when this
+ * batch writes it first: an earlier step of the batch with the same file,
+ * scope, text and occurrence k, which the queue generates before this one.
+ * Asked before the run, so a compile that would end in the writer's refusal
+ * spends neither a browser run nor a model call.
+ *
+ * `bindings` is the GENERATION registry; a step that already has an entry is a
+ * replacement, which always has its slot.
+ */
+export async function unplaceableRepeat(
+  bindings: { bindingFor(index: number): CodeBehindBinding | undefined },
+  count: number,
+): Promise<{ index: number; binding: CodeBehindBinding; missing: number } | undefined> {
+  const files = new Map<string, string | null>();
+  const fileText = async (file: string): Promise<string | null> => {
+    if (!files.has(file)) files.set(file, await fs.readFile(file, 'utf-8').catch(() => null));
+    return files.get(file) ?? null;
+  };
+  const sameEntry = (a: CodeBehindBinding, b: CodeBehindBinding): boolean =>
+    a.file === b.file && (a.section ?? '') === (b.section ?? '') && a.source === b.source;
+
+  for (let i = 0; i < count; i++) {
+    const binding = bindings.bindingFor(i);
+    if (!binding || binding.occurrence === 0 || binding.entry !== undefined) continue;
+    const queued = new Set<number>();
+    for (let j = 0; j < i; j++) {
+      const earlier = bindings.bindingFor(j);
+      if (earlier && sameEntry(earlier, binding)) queued.add(earlier.occurrence);
+    }
+    const text = await fileText(binding.file);
+    for (let k = 0; k < binding.occurrence; k++) {
+      if (queued.has(k)) continue;
+      if (text !== null && entryTextIn(text, binding.source, binding.section, k) !== undefined) continue;
+      return { index: i, binding, missing: k };
+    }
+  }
+  return undefined;
 }

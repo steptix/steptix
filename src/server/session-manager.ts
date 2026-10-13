@@ -136,7 +136,11 @@ import {
   type ExpandedStepOrigin,
 } from '../skills/expander.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
-import { detachedBodyExpansion, detachedRowReads } from '../codebehind/detached-body.js';
+import {
+  detachedBodyExpansion,
+  detachedRowReads,
+  unplaceableRepeat,
+} from '../codebehind/detached-body.js';
 import { isStepCode } from '../codebehind/execute.js';
 import { lastRunStaleMemberRow, writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import {
@@ -5404,6 +5408,30 @@ export class SessionManager {
     // selected guard runs is executed under AI and never generated, named or
     // counted. A Run & Compile continuation keeps the run's bound, as before.
     const compileEndIndex = request.compile === 'steps' ? selectedEndIndex : endIndex;
+    /**
+     * Refuse a partial compile of a repeated step before anything runs or
+     * spends a token: its entry would land on another occurrence's slot. Both
+     * guards below end here, so a refused compile reads the same whichever
+     * shape the selection had.
+     */
+    const refuseRepeat = async (message: string, step: number): Promise<StepResponse> => {
+      logger.error(`Session "${sessionId}": ${message}`);
+      emit({ type: 'output', msg: message, kind: 'error' });
+      await this.discardLiveCompile(session, 'a repeated step cannot be partially compiled');
+      emitCompileRefusal(message);
+      emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
+      return {
+        sessionId,
+        status: 'error',
+        stepsCompleted: 0,
+        stepsTotal,
+        results: [],
+        outputs: session.outputs,
+        outputSources: { ...session.outputSources },
+        error: { step, message },
+        pageTitle: '',
+      };
+    };
     if (liveCompile && (request.startAt !== undefined || request.endAt !== undefined)) {
       liveCompile.setSlice(startIndex, compileEndIndex);
 
@@ -5451,26 +5479,38 @@ export class SessionManager {
             sib.entry === undefined;
         }
         if (!blocked) continue;
-        const message =
+        return refuseRepeat(
           `"${b.source}" appears more than once in its scope, and a partial compile ` +
-          `cannot place the entry for just one of them — it would land on the wrong ` +
-          `occurrence. Include every occurrence in the selection, or compile the whole body.`;
-        logger.error(`Session "${sessionId}": ${message}`);
-        emit({ type: 'output', msg: message, kind: 'error' });
-        await this.discardLiveCompile(session, 'a repeated step cannot be partially compiled');
-        emitCompileRefusal(message);
-        emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
-        return {
-          sessionId,
-          status: 'error',
-          stepsCompleted: 0,
-          stepsTotal,
-          results: [],
-          outputs: session.outputs,
-          outputSources: { ...session.outputSources },
-          error: { step: i + 1, message },
-          pageTitle: '',
-        };
+            `cannot place the entry for just one of them — it would land on the wrong ` +
+            `occurrence. Include every occurrence in the selection, or compile the whole body.`,
+          i + 1,
+        );
+      }
+    }
+
+    // The same guard for body steps compiled on their own. They bind at their
+    // place in the authored body (`detachedBody`), so a lone second `Press
+    // Enter` is occurrence 1, and its entry has a slot only once the first one
+    // has an entry on disk or is compiled earlier in this batch
+    // (`unplaceableRepeat`). A fresh compile only, for the reason above: a
+    // continuation's earlier entries sit in the retained candidate, not on disk.
+    if (
+      liveCompile &&
+      request.compile === 'steps' &&
+      request.compileContinues !== true &&
+      request.detachedBody !== undefined
+    ) {
+      const gap = await unplaceableRepeat(generationBindings, effectiveSteps.length);
+      if (gap) {
+        const { binding, missing } = gap;
+        const scope = binding.section !== undefined ? `"${binding.section}"` : 'its scope';
+        return refuseRepeat(
+          `"${binding.source}" is repeat ${binding.occurrence + 1} of its text in ${scope}, ` +
+            `and repeat ${missing + 1} has no code-behind entry and is not in the selection, ` +
+            `so there is no slot for this one yet. Compile the earlier occurrence(s) too, ` +
+            `or the whole section body.`,
+          gap.index + 1,
+        );
       }
     }
 

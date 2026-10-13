@@ -1528,7 +1528,8 @@ function notifyNoActive(): void {
  * step through the section, looks for it. The run sends `detachedBody` for it:
  * its section and its place in the body. So a selection may take body steps
  * from several sections, and a repeated body step may be compiled without its
- * siblings; each entry lands in its own slot.
+ * siblings: each entry lands in its own slot, and the server refuses a later
+ * repeat whose earlier ones have no entry and are not selected with it.
  *
  * What is refused is refused because compiling it would produce a WRONG entry,
  * not because the feature is missing — see each branch.

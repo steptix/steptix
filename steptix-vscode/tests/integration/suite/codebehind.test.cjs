@@ -780,6 +780,9 @@ tags: [codebehind]
     // Counted within the request, a lone second `Press Enter` was occurrence
     // 0 and its entry replaced the first one's, so this used to be refused.
     // `detachedBody` says it is body step 3, which makes it occurrence 1.
+    // Whether that slot exists is the server's to check against the file
+    // (tests/api-server-compile-mode.test.ts); this fake answers as a server
+    // does when the first `Press Enter` already has an entry.
     const repeatBody = path.resolve(FIXTURES_DIR, 'compile-body-repeat.md');
     const repeatSteps = repeatBody.replace(/\.md$/, '.steps.ts');
     fs.writeFileSync(repeatBody, REPEAT_BODY_MD, 'utf-8');

@@ -18,6 +18,11 @@ entry lands under its own section, in the slot its place in the body gives
 it, so recompiling the second `Press Enter` after a ⚠ replaces the second
 entry and leaves the first alone.
 
+A later repeat needs a slot: the earlier repeats must already have entries,
+or be in the same selection. When they don't, Compile This Step says so
+before it runs anything, instead of filing the entry in the first repeat's
+place.
+
 - **The main flow is unchanged.** A partial pick of a repeated main-flow
   step is still refused, and so is a selection mixing the main flow and a
   section body.
