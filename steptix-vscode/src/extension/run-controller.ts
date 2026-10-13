@@ -65,7 +65,9 @@ import { EnvSelector } from './env-selector.js';
 import { resolveProjectDirs } from './steptix-config.js';
 import {
   buildSectionsPayload,
-  detachedBodyPayload,
+  detachedBodyDrift,
+  readDetachedBodies,
+  type DetachedBodies,
   preflightSections,
   sectionedSkillRefusal,
   SectionNarrowingError,
@@ -3059,6 +3061,11 @@ export class RunController {
       selection.scope === 'section-body'
         ? ({ kind: 'section-body', callLine: null } as const)
         : undefined;
+    // …and where each of those body steps sits, read from the same `text` the
+    // steps were picked from, so an edit before a block is sent cannot move
+    // them (`readDetachedBodies`). Every block checks the buffer it sends
+    // against this reading (`detachedBodyDrift`).
+    const detachedRead = selection.scope === 'section-body' ? readDetachedBodies(text) : null;
 
     // Stale pause was already cleared at the top of runLines. The *new*
     // pause indicator (if any) is posted only when execution actually
@@ -3755,7 +3762,7 @@ export class RunController {
             }),
             ...(options.suppressServerBreakpoints && { suppressServerBreakpoints: true }),
             ...(sendRunStart && { runStart: true }),
-            ...(selection.scope === 'section-body' && { detachedBody: true }),
+            ...(detachedRead && { detachedBody: detachedRead }),
           });
           compileBlocksSent++;
           pendingRerun = undefined;
@@ -5156,10 +5163,10 @@ export class RunController {
      *  is on (SPEC-use-computer.md §4.5). */
     runStart?: boolean;
     /** The block is `### Section` body steps run on their own, detached at
-     *  the root frame (stories/specs/sections-run-and-resume.md §4.2). The
-     *  request says where each came from, so its code-behind binds under its
-     *  section. */
-    detachedBody?: boolean;
+     *  the root frame (stories/specs/sections-run-and-resume.md §4.2), and
+     *  this is the run's reading of their bodies. Each step is sent with its
+     *  section and place, so its code-behind binds under its section. */
+    detachedBody?: DetachedBodies;
   }): Promise<boolean> {
     const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, withinCompileRun, suppressServerBreakpoints, runStart, detachedBody } = args;
     const includeConfig = !this.configSentForSession;
@@ -5204,22 +5211,18 @@ export class RunController {
       this.refuseStaleNarrowing(err.message, log, 'narrowed section body no longer fits');
       return false;
     }
-    // Where each detached body step sits, from the buffer `sections` was just
-    // built from, since the server checks one against the other. A body edited
-    // since the run picked its steps gets no field, so this block binds as it
-    // did before the field existed, and runs under AI.
-    const bodyPositions = detachedBody
-      ? detachedBodyPayload(
-          this.document.getText(),
-          stepLines.map((line, i) => ({ line, instruction: stepInstructions[i]! })),
-        )
-      : null;
-    if (detachedBody && bodyPositions === null) {
-      this.postOutput(
-        'The section body was edited after this run picked its steps, so they run ' +
-          'under AI rather than their code-behind. Run them again to use it.',
-        'warn',
-      );
+    // …and so does a detached block's body positions, for the same reason:
+    // the server checks them against the `sections` just built, and a body
+    // edited since the run picked its steps no longer holds them.
+    let bodyPositions: Array<{ section: string; step: number }> | undefined;
+    if (detachedBody) {
+      const picks = stepLines.map((line) => detachedBody.at.get(line));
+      const moved = detachedBodyDrift(this.document.getText(), detachedBody, picks);
+      if (moved !== null) {
+        this.refuseStaleNarrowing(moved, log, 'detached section body changed mid-run');
+        return false;
+      }
+      bodyPositions = picks as Array<{ section: string; step: number }>;
     }
 
     // Resolve the project's skills directory so the server can expand

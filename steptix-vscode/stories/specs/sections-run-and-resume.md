@@ -247,14 +247,22 @@ through the section. A detached step's own expansion says "top level", so
 until [#81](https://github.com/steptix/steptix/issues/81) it bound nothing and
 ran under AI, or bound a main-flow entry with the same text and ran that. Each
 detached request now carries `detachedBody`, parallel to `steps`: the section
-each step came from and its 0-based place in that body
-(`detachedBodyPayload` in `src/extension/sections.ts`). The server checks it
-against `sections`, then binds each step under its own section at the
-occurrence it holds in the authored body, so a selection across two sections,
-or one that skips a repeated step, binds the same entries a full run would
-(`src/codebehind/detached-body.ts`). Only steps the pick emits at the root
-frame move: a body step that calls a sibling section or a skill still binds
-in that section's or skill's frame. Execution is unchanged.
+each step came from and its 0-based place in that body, read from the text
+the run picked its steps from (`readDetachedBodies` in
+`steptix-vscode/src/extension/sections.ts`). The server checks it against
+`sections`, then binds each step under its own section at the occurrence it
+holds in the authored body, so a selection across two sections, or one that
+skips a repeated step, binds the same entries a full run would
+(`src/codebehind/detached-body.ts` at the repo root). Only steps the pick
+emits at the root frame move: a body step that calls a sibling section or a
+skill still binds in that section's or skill's frame. Execution is
+unchanged.
+
+A body edited while the run is going is not followed. Every request checks
+that each body it picks from is exactly as the run read it
+(`detachedBodyDrift`); when one is not, the run stops with "Run stopped: …
+Re-run to pick again.", as a stale body narrowing does. An edit outside those
+bodies moves lines but not places, and the run carries on.
 
 One exception: a step whose text reads a column of a looped section's table,
 such as `Type {{account}}`, runs under AI. Its entry reads the row with
@@ -479,6 +487,7 @@ to guess about. The user gets the existing refusal message and Run All.
 | Select body lines from two sections | Both run, in document order, detached |
 | The section is compiled, then a body line runs on its own | Its entry replays (`</>`), bound under its section at its place in the body |
 | A body line that reads a looped section's column runs on its own | Runs under AI; the Output says it has no row |
+| A picked body is edited while its detached run is going | The next request stops the run: "Run stopped: … Re-run to pick again." |
 | Selection spans main flow **and** a body | Main-flow steps only — today's behaviour exactly (§4.1 rung 2) |
 | Cursor (no highlight) on a body line, Run Selected | Runs everything — `selectionLines` returns `[]` for an empty selection, which has always meant Run All |
 | "Run This Step" on a body line | That one body step, detached |

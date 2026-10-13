@@ -16,7 +16,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import {
   buildSectionsPayload,
-  detachedBodyPayload,
+  detachedBodyDrift,
+  readDetachedBodies,
   preflightSections,
   sectionedSkillRefusal,
 } from "../src/extension/sections.ts";
@@ -395,7 +396,7 @@ test("refusal: an unreadable skill file does not invent an error", () => {
 });
 
 // ---------------------------------------------------------------------------
-// detachedBodyPayload
+// readDetachedBodies / detachedBodyDrift
 // ---------------------------------------------------------------------------
 
 /** The server's own check of the field (src/server/section-entry.ts, built to
@@ -421,38 +422,60 @@ const DETACHED = doc(
   "1. Enter the card", //         11
 );
 
-test("detached body: names each step's section and its place in the body", () => {
-  const steps = [
-    { line: 8, instruction: 'Click "Continue"' },
-    { line: 11, instruction: "Enter the card" },
-  ];
-  const payload = detachedBodyPayload(DETACHED, steps);
-  assert.deepEqual(payload, [
-    { section: "Sign in", step: 2 },
-    { section: "Pay", step: 0 },
-  ]);
-  // …and the server, checking it against the `sections` payload built from
-  // the same buffer, accepts it.
+test("detached body: each step's section and its place in the body", () => {
+  const { at } = readDetachedBodies(DETACHED);
+  assert.deepEqual(at.get(8), { section: "Sign in", step: 2 });
+  assert.deepEqual(at.get(11), { section: "Pay", step: 0 });
+  assert.equal(at.get(2), undefined, "a main-flow line is in no body");
+  // …and the server, checking them against the `sections` payload built from
+  // the same buffer, accepts them.
   assert.equal(
-    validateDetachedBody(payload, {
-      steps: steps.map((s) => s.instruction),
+    validateDetachedBody([at.get(8), at.get(11)], {
+      steps: ['Click "Continue"', "Enter the card"],
       sections: buildSectionsPayload(DETACHED),
     }),
     null,
   );
 });
 
-test("detached body: null when a line no longer holds its step", () => {
-  // The run picked line 7 as `Click "Continue"`, and the author has since
-  // edited it. Positions read from the edited buffer would bind some other
-  // step, so the batch goes without them.
-  const edited = DETACHED.replace('2. Click "Continue"', "2. Press Enter");
-  assert.equal(
-    detachedBodyPayload(edited, [{ line: 7, instruction: 'Click "Continue"' }]),
-    null,
+/** What a run that picked line 8, the SECOND `Click "Continue"`, sends. */
+const READ = readDetachedBodies(DETACHED);
+const SECOND_CONTINUE = [{ section: "Sign in", step: 2 }];
+
+test("detached body: no drift while the picked bodies are as they were", () => {
+  assert.equal(detachedBodyDrift(DETACHED, READ, SECOND_CONTINUE), null);
+  // A note added in the main flow moves every line below it, but no body
+  // step's place. Looking the step up by its old LINE would have found the
+  // first `Click "Continue"` there and bound its entry; by place it holds.
+  const moved = DETACHED.replace("2. Sign in", "2. Sign in\n\nA note about the flow.");
+  assert.equal(detachedBodyDrift(moved, READ, SECOND_CONTINUE), null);
+  // So does an edit to a body nothing was picked from.
+  const other = DETACHED.replace("1. Enter the card", "1. Enter the card number");
+  assert.equal(detachedBodyDrift(other, READ, SECOND_CONTINUE), null);
+});
+
+test("detached body: drift when a step was added ahead of the picked one", () => {
+  // Place 2 now holds the FIRST `Click "Continue"`: the text at the place
+  // still matches, which is why the whole body is compared.
+  const added = DETACHED.replace("1. Type the username", "1. Wait for the form\n2. Type the username");
+  assert.match(
+    detachedBodyDrift(added, READ, SECOND_CONTINUE) ?? "",
+    /^the body of "Sign in" now has 4 steps where it had 3 when this run picked from it/,
   );
 });
 
-test("detached body: null for a line outside every body", () => {
-  assert.equal(detachedBodyPayload(DETACHED, [{ line: 2, instruction: "Open the shop" }]), null);
+test("detached body: drift when a picked body step was edited", () => {
+  const edited = DETACHED.replace("1. Type the username", "1. Type the user name");
+  assert.match(
+    detachedBodyDrift(edited, READ, SECOND_CONTINUE) ?? "",
+    /^body step 1 of "Sign in" has been edited since this run picked from it/,
+  );
+});
+
+test("detached body: drift when the section is gone", () => {
+  const gone = DETACHED.replace("### Pay", "#### Pay");
+  assert.match(
+    detachedBodyDrift(gone, READ, [{ section: "Pay", step: 0 }]) ?? "",
+    /^the section "Pay" is gone from the file/,
+  );
 });

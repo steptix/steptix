@@ -5502,13 +5502,13 @@ export class SessionManager {
     ) {
       const gap = await unplaceableRepeat(generationBindings, effectiveSteps.length);
       if (gap) {
-        const { binding, missing } = gap;
+        const { binding } = gap;
         const scope = binding.section !== undefined ? `"${binding.section}"` : 'its scope';
         return refuseRepeat(
-          `"${binding.source}" is repeat ${binding.occurrence + 1} of its text in ${scope}, ` +
-            `and repeat ${missing + 1} has no code-behind entry and is not in the selection, ` +
-            `so there is no slot for this one yet. Compile the earlier occurrence(s) too, ` +
-            `or the whole section body.`,
+          `"${binding.source}" appears earlier in ${scope}, as a step of its own or as ` +
+            `the step a control line names, and that earlier one has no code-behind entry ` +
+            `and is not in the selection, so there is no slot for this one yet. Compile ` +
+            `the earlier occurrence(s) too, or the whole section body.`,
           gap.index + 1,
         );
       }

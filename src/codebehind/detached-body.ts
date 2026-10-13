@@ -9,6 +9,7 @@ import {
   type SectionDefs,
 } from '../skills/expander.js';
 import type { CodeBehindBinding, CodeBehindExpansion } from './loader.js';
+import { neverCompiled } from './live-compile.js';
 import { entryTextIn } from './writer.js';
 
 /**
@@ -195,7 +196,9 @@ export function detachedRowReads(
  * spends neither a browser run nor a model call.
  *
  * `bindings` is the GENERATION registry; a step that already has an entry is a
- * replacement, which always has its slot.
+ * replacement, which always has its slot. A step that never gets an entry (a
+ * `[tool:]` call, a `Set`, a dispatched control line: `neverCompiled`) needs
+ * none, and neither does any earlier step with its text.
  */
 export async function unplaceableRepeat(
   bindings: { bindingFor(index: number): CodeBehindBinding | undefined },
@@ -212,6 +215,7 @@ export async function unplaceableRepeat(
   for (let i = 0; i < count; i++) {
     const binding = bindings.bindingFor(i);
     if (!binding || binding.occurrence === 0 || binding.entry !== undefined) continue;
+    if (neverCompiled(binding.source)) continue;
     const queued = new Set<number>();
     for (let j = 0; j < i; j++) {
       const earlier = bindings.bindingFor(j);

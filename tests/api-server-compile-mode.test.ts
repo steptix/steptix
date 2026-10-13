@@ -1051,10 +1051,40 @@ describe('recompiling a step whose entry broke', () => {
       expect(status).toBe(200);
       const result = frames.find((f) => f.type === 'compile:result')!;
       expect(result.status).toBe('failed');
-      expect(result.summary.error).toMatch(/repeat 2 of its text in "Sign in", and repeat 1 has no code-behind entry/);
+      expect(result.summary.error).toMatch(
+        /"Press Enter" appears earlier in "Sign in".*has no code-behind entry and is not in the selection/,
+      );
       expect(stepCalls).toEqual([]);
       expect(aiPrompts).toEqual([]);
       await expect(fs.access(stepsFilePath)).rejects.toThrow();
+    });
+
+    it('asks no slot of a repeated step that never gets an entry', async () => {
+      // A `Set` is performed by the framework and never compiled, so its first
+      // occurrence will never have an entry. Asking for one refused a pick the
+      // author cannot fix by selecting more.
+      const { frames } = await runSteps(
+        requestBody({
+          steps: ['Set {{count}} to "1"', 'Click Save'],
+          sourceLines: [24, 25],
+          sections: {
+            reset: {
+              name: 'Reset',
+              headingLine: 21,
+              steps: ['Set {{count}} to "1"', 'Type the name', 'Set {{count}} to "1"', 'Click Save'],
+              stepLines: [22, 23, 24, 25],
+            },
+          },
+          detachedBody: [
+            { section: 'Reset', step: 2 },
+            { section: 'Reset', step: 3 },
+          ],
+          compile: 'steps',
+        }),
+      );
+      const result = frames.find((f) => f.type === 'compile:result')!;
+      expect(result.summary.error ?? '').not.toMatch(/appears earlier/);
+      expect(stepCalls.map((c) => c.instruction)).toContain('Click Save');
     });
 
     it('compiles a later repeat when the earlier one is in the same selection', async () => {

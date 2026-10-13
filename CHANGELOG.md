@@ -19,9 +19,8 @@ it, so recompiling the second `Press Enter` after a ⚠ replaces the second
 entry and leaves the first alone.
 
 A later repeat needs a slot: the earlier repeats must already have entries,
-or be in the same selection. When they don't, Compile This Step says so
-before it runs anything, instead of filing the entry in the first repeat's
-place.
+or be in the same selection. When they don't, Compile This Step refuses
+instead of filing the entry in the first repeat's place.
 
 - **The main flow is unchanged.** A partial pick of a repeated main-flow
   step is still refused, and so is a selection mixing the main flow and a
@@ -49,6 +48,11 @@ main-flow step ran that step's code instead.
   values. A step run on its own has no row, so a step whose text names a
   column, such as `Type {{account}}`, runs under AI, and the Output says
   why. The section's other steps replay their entries.
+- **Editing a picked section body while the run is going stops it.** Each
+  step's place in its body is read when the run starts. If that body changes
+  before the next request goes out (an `[input:]` prompt, the next data
+  row), the run stops with "Run stopped: … Re-run to pick again." rather
+  than run a step under another one's code.
 - **Compile This Step files entries from a body's section calls and
   `[skill:]` calls correctly.** When a body step called another section or a
   skill, those steps' entries were filed under the body's section in the

@@ -2161,6 +2161,70 @@ describe('Steptix data-row selection', function () {
     }
   });
 
+  /**
+   * The same hazard for a DETACHED run: a selection of body lines only, sent
+   * with where each step sits in its body (`detachedBody`) so its code-behind
+   * binds under its section. The places are the run's own reading; an edit
+   * from inside row 1's stream is what row 2 meets. Body step 2 of `Log In`
+   * is line 18.
+   */
+  async function detachedDuringLoop(mutated) {
+    const uri = await open('data-rows-body-loop.tmp.md');
+    const mark = hooks.hostMessageCount();
+    queueScripts(
+      async (f) => {
+        await rewrite(uri, mutated);
+        f.end();
+      },
+      (f) => f.end(),
+      (f) => f.end(),
+    );
+    const editor = vscode.window.activeTextEditor;
+    editor.selections = [range(18)];
+    void vscode.commands.executeCommand('steptix.runSelected');
+    await waitFor('one request', () => fake.requests.length >= 1);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+    assert.deepEqual(fake.requests[0].detachedBody, [{ section: 'Log In', step: 1 }]);
+    return {
+      stopped: outputSince(mark).filter((l) => l.startsWith('Run stopped: ')),
+      sent: fake.requests.map((r) => r.detachedBody),
+    };
+  }
+
+  it('a detached body run stops when a step is added ahead of the one it picked', async () => {
+    // The added step pushes `Enter the email` to place 1, where the picked
+    // `Enter the password` was. Sent as it stood, row 2 would name a place
+    // that now holds another step.
+    try {
+      const edited = [...LOOP_LINES];
+      edited.splice(16, 0, '1. Wait for the form');
+      const { stopped, sent } = await detachedDuringLoop(edited);
+      assert.deepEqual(stopped, [
+        'Run stopped: the body of "Log In" now has 3 steps where it had 2 when this ' +
+          'run picked from it, so the body steps this run picked no longer name the ' +
+          'same steps. Re-run to pick again.',
+      ]);
+      assert.equal(sent.length, 1, 'nothing was sent after the edit');
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
+  it('a detached body run keeps its places when only lines above the section move', async () => {
+    // A note in the main flow moves line 18 down two lines but leaves the
+    // body as it was. Looking the step up by its line in the edited buffer
+    // found nothing there (or another step); by its place it still holds.
+    try {
+      const edited = [...LOOP_LINES];
+      edited.splice(14, 0, '', 'A note about the flow.');
+      const { stopped, sent } = await detachedDuringLoop(edited);
+      assert.deepEqual(stopped, []);
+      assert.deepEqual(sent, Array.from({ length: 3 }, () => [{ section: 'Log In', step: 1 }]));
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
   it('Run & Compile never carries a narrowing — it runs the whole file', async () => {
     // The spec's claim, pinned. A compile does NOT reach the server through
     // `POST /codebehind/compile` (Steptix compiles through the ordinary step
