@@ -1109,12 +1109,14 @@ describe('run settings on the wire', () => {
     sendScreenshots: false,
     ai: 'on' as const,
     aiOffReason: null,
+    highlight: 'off' as const,
     sources: {
       model: 'session' as const,
       capture: 'session' as const,
       fullPage: 'server' as const,
       sendScreenshots: 'server' as const,
       ai: 'server' as const,
+      highlight: 'server' as const,
     },
   };
 
@@ -1156,6 +1158,43 @@ describe('run settings on the wire', () => {
     });
 
     expect(harness.calls[0]?.body.runSettings).toEqual({ ai: 'off' });
+  });
+
+  it('puts highlight on the wire for both run tools (SPEC-interaction-highlight.md §7.2)', async () => {
+    const harness = await connect({
+      script: { events: [{ type: 'done', status: 'passed' }] },
+    });
+
+    await harness.client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['do a thing'], project_root: PROJECT_ROOT, highlight: 'on' },
+    });
+    expect(harness.calls[0]?.body.runSettings).toEqual({ highlight: 'on' });
+
+    await harness.client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['do a thing'], project_root: PROJECT_ROOT, highlight: 'default' },
+    });
+    expect(harness.calls[1]?.body.runSettings).toEqual({ highlight: 'default' });
+  });
+
+  it('tells the server its screenshots go to a model unless none will come back (§4.2)', async () => {
+    const harness = await connect({
+      script: { events: [{ type: 'done', status: 'passed' }] },
+    });
+
+    await harness.client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['do a thing'], project_root: PROJECT_ROOT },
+    });
+    // The default return is on-failure: a picture may come back.
+    expect(harness.calls[0]?.body.screenshotsToModel).toBe(true);
+
+    await harness.client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['do a thing'], project_root: PROJECT_ROOT, screenshots_return: 'none' },
+    });
+    expect('screenshotsToModel' in (harness.calls[1]?.body ?? {})).toBe(false);
   });
 
   it('forwards "default" rather than swallowing it, so an override can be cleared', async () => {
@@ -1425,8 +1464,12 @@ describe('get_run_settings', () => {
       fullPage: null,
       sendScreenshots: null,
       ai: null,
+      highlight: null,
     });
     expect(structured.serverDefaults.capture).toBe('on-failure');
+    // An older server's payload (no highlight anywhere) answers null, not "off".
+    expect(structured.highlight).toBeNull();
+    expect(structured.sources.highlight).toBeNull();
     expect(harness.configCalls).toEqual(['mcp:x']);
   });
 

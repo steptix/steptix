@@ -337,6 +337,14 @@ export interface StreamStepsRequest {
    * like any other.
    */
   runStart?: { stepIndex?: number };
+  /**
+   * Per-session run settings (the server's `runSettings`, stories/run-settings.md).
+   * RETAINED by the server: an absent key leaves what the session already has,
+   * and `'default'` clears an override. Steptix sends only `highlight`
+   * (the `steptix.highlight` setting, docs/specs/SPEC-interaction-highlight.md
+   * §7.2); the other keys are the MCP tools'.
+   */
+  runSettings?: { highlight?: 'on' | 'off' | 'default' };
 }
 
 export type ApiErrorKind =

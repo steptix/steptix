@@ -23,6 +23,8 @@ export interface RunOptions {
   env?: string;
   failOnHealed?: boolean;
   row?: number;
+  /** `--highlight` / `--no-highlight`; undefined when neither was given. */
+  highlight?: boolean;
 }
 
 export function registerRunCommand(program: Command): void {
@@ -51,6 +53,12 @@ export function registerRunCommand(program: Command): void {
     // healed under AI" as a build failure
     // (stories/codebehind-selector-ambiguity.md).
     .option('--fail-on-healed', 'Exit non-zero when a step healed under AI after its code-behind failed', false)
+    // Both forms, so the default stays undefined: with only `--no-highlight`
+    // commander would default to true and switch the rings on for every run.
+    // Either one sets `browser.highlight.enabled` for this run and keeps the
+    // project's duration and colours (SPEC-interaction-highlight.md §7.2).
+    .option('--highlight', 'Ring each element an action touches (browser.highlight)')
+    .option('--no-highlight', 'Draw no rings, whatever browser.highlight says')
     .action(async (target: string | undefined, opts: RunOptions) => {
       await runCommand(target, opts);
     });
@@ -77,6 +85,7 @@ async function runCommand(
     ...(opts.headless !== undefined && { headless: opts.headless }),
     ...(opts.timeout !== undefined && { timeout: opts.timeout }),
     ...(opts.browser !== undefined && { browser: opts.browser }),
+    ...(opts.highlight !== undefined && { highlight: opts.highlight }),
   });
 
   spinner.succeed('Configuration loaded');

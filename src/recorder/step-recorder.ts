@@ -6,6 +6,7 @@ import { MASK, RECORD_SECRET_MIN_LENGTH, redact, redactDeep } from '../utils/sec
 import { cropAround } from './crop.js';
 import { RECORD_BINDING_NAME, RECORD_CONTROL_NAME, recordStepsPageScript } from './page-script.js';
 import { ACTION_KINDS, TOOLBAR_DOCKS } from './types.js';
+import { hiddenFor } from '../browser/highlight.js';
 import type {
   ActionCrop,
   Box,
@@ -1659,8 +1660,12 @@ export class StepRecorder {
         pageBox.x += origin.x;
         pageBox.y += origin.y;
       }
+      // The crop goes to a model with the target outlined in red, so no
+      // highlight ring of Steptix's may be in it
+      // (docs/specs/SPEC-interaction-highlight.md §4.2). Free unless a run
+      // drew on this page in the last few seconds.
       const [png, paintOut] = await Promise.all([
-        source.page.screenshot({ type: 'png', scale: 'css', timeout: 5_000 }),
+        hiddenFor(source.page, () => source.page.screenshot({ type: 'png', scale: 'css', timeout: 5_000 })),
         this.secretBoxes(source.page),
       ]);
       return cropAround(png, pageBox, paintOut);

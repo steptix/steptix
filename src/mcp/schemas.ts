@@ -279,6 +279,18 @@ const aiMode = z
       `repairing a step are NOT gated by it — those are requests for AI. ${settingsNote}`,
   );
 
+const highlightMode = z
+  .enum(['on', 'off', 'default'])
+  .optional()
+  .describe(
+    'Whether the browser rings each element a step clicks, types into, reads ' +
+      'or counts, for about three seconds, so a person watching the run (or its ' +
+      'video, or the report) can see what each action touched. `on` / `off` ' +
+      'switch it and keep the project\'s duration and colours; `default` uses ' +
+      'the project\'s `browser.highlight`. Screenshots you or the model are ' +
+      `sent never show the rings, whatever this says. ${settingsNote}`,
+  );
+
 const screenshotsReturn = z
   .enum(['none', 'on-failure', 'final', 'default'])
   .optional()
@@ -321,6 +333,7 @@ export const runStepsInput = toolSchema({
   full_page: fullPage,
   send_screenshots: sendScreenshots,
   ai: aiMode,
+  highlight: highlightMode,
   screenshots_return: screenshotsReturn,
 });
 
@@ -337,6 +350,7 @@ export const runTestFileInput = toolSchema({
   full_page: fullPage,
   send_screenshots: sendScreenshots,
   ai: aiMode,
+  highlight: highlightMode,
   screenshots_return: screenshotsReturn,
 });
 
@@ -723,6 +737,13 @@ export const getRunSettingsOutput = toolSchema({
         'on. Policy is reported first when both hold, so "policy" says ' +
         'nothing either way about whether a key exists.',
     ),
+  highlight: z
+    .enum(['on', 'off'])
+    .nullable()
+    .describe(
+      'Whether the next run on this session rings the elements it touches. ' +
+        'Null from a server that predates the setting.',
+    ),
   sources: z
     .object({
       model: settingSource,
@@ -730,6 +751,7 @@ export const getRunSettingsOutput = toolSchema({
       fullPage: settingSource,
       sendScreenshots: settingSource,
       ai: settingSource.nullable(),
+      highlight: settingSource.nullable(),
     })
     .nullable(),
   overrides: z
@@ -739,6 +761,7 @@ export const getRunSettingsOutput = toolSchema({
       fullPage: z.boolean().nullable(),
       sendScreenshots: z.boolean().nullable(),
       ai: z.enum(['on', 'off']).nullable(),
+      highlight: z.enum(['on', 'off']).nullable(),
     })
     .nullable()
     .describe(
@@ -754,6 +777,7 @@ export const getRunSettingsOutput = toolSchema({
       // Nullable where its neighbours are not, for the reason `sources.ai` is:
       // a server predating the AI switch reports the rest and omits this.
       ai: z.enum(['on', 'off']).nullable(),
+      highlight: z.enum(['on', 'off']).nullable(),
     })
     .nullable()
     .describe('What a run with no project config and no overrides would use.'),
@@ -1243,6 +1267,10 @@ const effectiveSettings = z
           '"policy" says nothing either way about whether a key exists. Null ' +
           'when ai is on.',
       ),
+    highlight: z
+      .enum(['on', 'off'])
+      .nullable()
+      .describe('Whether the run rang the elements it touched. Null from an older server.'),
     sources: z
       .object({
         model: settingSource,
@@ -1252,6 +1280,7 @@ const effectiveSettings = z
         // Nullable where the other four are not: a Sessions API server that
         // predates the AI switch reports the four and omits this one.
         ai: settingSource.nullable(),
+        highlight: settingSource.nullable(),
       })
       .nullable(),
     screenshotsReturn: z.enum(['none', 'on-failure', 'final']),

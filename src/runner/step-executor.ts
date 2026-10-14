@@ -36,6 +36,7 @@ import { describeWhereExpectedIs } from '../browser/locate-text.js';
 import { resolveFrame } from '../browser/actions.js';
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
+import { createHighlighter, reportAudience, resolveHighlight, type Highlighter } from '../browser/highlight.js';
 import { executeAction } from '../browser/actions.js';
 import { disarmDialog, markDialogsShown, type DialogRecord } from '../browser/dialogs.js';
 import type {
@@ -1202,6 +1203,15 @@ function localFlowControlDecision(opts: StepExecutorOptions): LocalDecision | nu
 }
 
 /**
+ * `{ highlight }` for this config's `browser.highlight`, or nothing when it is
+ * off — spread into the options of whatever acts on the page.
+ */
+function highlightOption(config: Config): { highlight?: Highlighter } {
+  const settings = resolveHighlight(config.browser);
+  return settings === null ? {} : { highlight: createHighlighter(settings) };
+}
+
+/**
  * The picture a failed step carries, or undefined when the config says not to
  * take one (`execution.screenshotOnFailure`).
  *
@@ -1218,7 +1228,7 @@ function localFlowControlDecision(opts: StepExecutorOptions): LocalDecision | nu
  */
 async function failureShot(opts: StepExecutorOptions): Promise<string | undefined> {
   if (!opts.config.execution.screenshotOnFailure) return undefined;
-  const shot = await captureScreenshot(opts.page, opts.config.browser.fullPageScreenshots);
+  const shot = await captureScreenshot(opts.page, opts.config.browser.fullPageScreenshots, reportAudience(opts.config.browser));
   return shot?.base64;
 }
 
@@ -1577,6 +1587,10 @@ async function runCodeBehindStepArmed(
     // waits for its matches to hold still (§6.6).
     activePage: () => activePageOf(opts) ?? page,
     readTimeoutMs: actionSettleBudgetMs(opts.config),
+    // A compiled `step.read` / `step.count` rings what it reads, as the AI's
+    // read did (docs/specs/SPEC-interaction-highlight.md §7.3). Not on the
+    // computer surface, where the next screen grab would photograph it.
+    ...(opts.computer ? {} : highlightOption(opts.config)),
   });
   // Read straight away: a navigation that lands during the wait below did
   // not happen while the entry ran.
@@ -1641,7 +1655,7 @@ async function runCodeBehindStepArmed(
   const wantShot = opts.config.browser.captureScreenshotsPerAction !== false
     || outcome.status === 'failed';
   const shot = wantShot
-    ? await captureScreenshot(page, opts.config.browser.fullPageScreenshots)
+    ? await captureScreenshot(page, opts.config.browser.fullPageScreenshots, reportAudience(opts.config.browser))
     : null;
 
   const base: StepResult = {
@@ -2770,9 +2784,13 @@ async function executeStepAttempt(
     );
     const wantPreTurnShot =
       config.ai.sendScreenshots || config.browser.captureScreenshotsPerAction !== false;
+    // With `ai.sendScreenshots` this picture is the model's input, so a ring
+    // left from the last action must not be in it: the model would read it as
+    // page state the page does not have (SPEC-interaction-highlight.md §4.2).
+    // Without it the shot is the report's alone, where the ring is the point.
     const screenshot = wantPreTurnShot
       ? await traceOp(`captureScreenshot (turn ${currentTurn})`, () =>
-          captureScreenshot(page, config.browser.fullPageScreenshots),
+          captureScreenshot(page, config.browser.fullPageScreenshots, config.ai.sendScreenshots ? 'model' : reportAudience(config.browser)),
         )
       : null;
     const screenshotBase64 = screenshot?.base64;
@@ -3503,7 +3521,7 @@ async function executeStepAttempt(
         let openShot: string | undefined;
         let openUrl: string | undefined;
         if (openError) {
-          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots, reportAudience(config.browser));
           openShot = shot?.base64;
           openUrl = page.url();
         } else {
@@ -3702,7 +3720,7 @@ async function executeStepAttempt(
         let switchShot: string | undefined;
         let switchUrl: string | undefined;
         if (switchError) {
-          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots, reportAudience(config.browser));
           switchShot = shot?.base64;
           switchUrl = page.url();
         }
@@ -3750,7 +3768,7 @@ async function executeStepAttempt(
         let closeShot: string | undefined;
         let closeUrl: string | undefined;
         if (closeError) {
-          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots, reportAudience(config.browser));
           closeShot = shot?.base64;
           closeUrl = page.url();
         }
@@ -3799,7 +3817,7 @@ async function executeStepAttempt(
           csrfTokens['__latest__'] = csrfResult.token;
         } else {
           subActionResult.error = 'CSRF token could not be extracted';
-          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots, reportAudience(config.browser));
           if (shot) { subActionResult.screenshotBase64 = shot.base64; }
           subActionResult.pageUrl = page.url();
           turnFailed = true;
@@ -3858,7 +3876,7 @@ async function executeStepAttempt(
         };
 
         if (apiSubResult.failed) {
-          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots);
+          const shot = await captureScreenshot(page, config.browser.fullPageScreenshots, reportAudience(config.browser));
           if (shot) { subActionResult.screenshotBase64 = shot.base64; }
           subActionResult.pageUrl = page.url();
         }
@@ -3934,10 +3952,14 @@ async function executeStepAttempt(
       // `browser.ambiguousTarget: 'fail'` is the stated exception: it decides
       // by reading the visible count, so it turns that one call on whatever
       // the mode.
+      // `browser.highlight` reaches the handlers the way `ambiguousTarget`
+      // does, and on the server path only because `resolveRunSettings`
+      // re-sources it from the project (SPEC-interaction-highlight.md §7.3).
       const execOptions: ExecuteActionOptions = {
         measure: opts.captureStepContext === true,
         ambiguousTarget: config.browser.ambiguousTarget,
         ...(opts.uploadPaths !== undefined && { uploadPaths: opts.uploadPaths }),
+        ...highlightOption(config),
       };
       /** Set when a readTable's error quotes the model's structure answer. */
       let errorQuotesModel = false;
@@ -4059,7 +4081,7 @@ async function executeStepAttempt(
       // on captureScreenshotsPerAction, not on ai.sendScreenshots.
       const postShot = config.browser.captureScreenshotsPerAction !== false
         ? await traceOp(`captureScreenshot (post-${action.action})`, () =>
-            captureScreenshot(page, config.browser.fullPageScreenshots),
+            captureScreenshot(page, config.browser.fullPageScreenshots, reportAudience(config.browser)),
           )
         : null;
       const postShotBase64 = postShot?.base64;
@@ -4085,6 +4107,9 @@ async function executeStepAttempt(
         ...(result.upload !== undefined && { upload: result.upload }),
         // How a key-by-key `type` typed, for the report and for generation.
         ...(result.typed !== undefined && { typed: result.typed }),
+        // Whether the highlight was asked to ring what it touched (§11 of
+        // docs/specs/SPEC-interaction-highlight.md).
+        ...(result.highlighted !== undefined && { highlighted: result.highlighted }),
         // The first-party requests the action started, observed on a compile
         // run (§6.9). `actionsOf` merges them onto the action, before the
         // recording's redaction, for the generator to read as evidence.
@@ -4514,7 +4539,7 @@ async function executeStepAttempt(
   // Gated by captureScreenshotsPerAction so users can fully suppress non-failure
   // captures. On-failure / diagnose captures still fire.
   const endScreenshot = config.browser.captureScreenshotsPerAction !== false
-    ? await captureScreenshot(page, config.browser.fullPageScreenshots)
+    ? await captureScreenshot(page, config.browser.fullPageScreenshots, reportAudience(config.browser))
     : null;
   const endScreenshotBase64 = endScreenshot?.base64;
   const endPageUrl = page.url();
@@ -4672,8 +4697,9 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
             useDomAttributeAllowlist: false,
             dropUnstableIds: false,
           });
+      // The model's picture, so no highlight ring in it (SPEC-interaction-highlight.md §4.2).
       const finalShot = p.sendScreenshots && !skipDomAndScreenshot
-        ? await captureScreenshot(p.page, p.fullPageScreenshots)
+        ? await captureScreenshot(p.page, p.fullPageScreenshots, 'model')
         : null;
 
       const apiHistory = p.apiResponseStore?.hasResponses()
@@ -4985,15 +5011,6 @@ function extractEndpointPath(url: string): string {
 }
 
 /**
- * Execute a group of conditional steps as a multi-outcome branch.
- *
- * Waits for the page to settle, then asks the AI which outcome appeared and
- * executes the matching step. Steps that don't match are marked "skipped".
- *
- * Returns one StepResult per step in the group plus the index of the last
- * step consumed (so the caller can skip ahead).
- */
-/**
  * A branch step's substituted form. `identifyStepGroups` reads the raw step
  * list and never interpolates, so before this a matched branch step typed
  * `{{email}}` into the page as six literal characters
@@ -5152,8 +5169,9 @@ export async function evaluateConditions(
         maxIframeDepth: config.browser.maxIframeDepth,
         domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
       });
+      // The model's picture, so no highlight ring in it (SPEC-interaction-highlight.md §4.2).
       const screenshot = config.ai.sendScreenshots
-        ? await captureScreenshot(page!, config.browser.fullPageScreenshots)
+        ? await captureScreenshot(page!, config.browser.fullPageScreenshots, 'model')
         : null;
       screenshotBase64 = screenshot?.base64 ?? null;
 
@@ -5305,6 +5323,14 @@ export async function evaluateConditions(
   );
 }
 
+/**
+ * Execute a group of conditional steps as a multi-outcome branch.
+ *
+ * Waits for the page to settle, then asks the AI which outcome appeared and
+ * executes the matching step. Steps that don't match are marked "skipped".
+ *
+ * Returns one StepResult per step in the group.
+ */
 export async function executeBranchedStep(
   group: StepGroup,
   totalSteps: number,
@@ -5362,8 +5388,9 @@ export async function executeBranchedStep(
     // Capture if either consumer needs it: AI (sees this frame on this poll)
     // or report (per-action filmstrip via captureScreenshotsPerAction).
     const wantPollShot = config.ai.sendScreenshots || config.browser.captureScreenshotsPerAction !== false;
+    // No highlight ring when the model sees it (SPEC-interaction-highlight.md §4.2).
     const screenshot = wantPollShot
-      ? await captureScreenshot(page, config.browser.fullPageScreenshots)
+      ? await captureScreenshot(page, config.browser.fullPageScreenshots, config.ai.sendScreenshots ? 'model' : reportAudience(config.browser))
       : null;
     const screenshotBase64 = screenshot?.base64;
 

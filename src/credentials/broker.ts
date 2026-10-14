@@ -20,6 +20,7 @@
 // stored for that page.
 
 import type { Frame, Page } from 'playwright';
+import type { HighlightSink } from '../browser/highlight.js';
 import {
   isRealPasswordField,
   scanForLogin,
@@ -230,8 +231,13 @@ export class LoginBroker {
    * One `log_into_site` call: fill what this page asks for, and say what
    * happened. Never fills more than one page — the agent drives between them
    * (§8), and every call re-runs the domain rule from scratch.
+   *
+   * @param highlight Rings the fields typed into and the control pressed,
+   *   when the session's project turned `browser.highlight` on
+   *   (docs/specs/SPEC-interaction-highlight.md §2.3). The caller resolves
+   *   it: the broker knows a page, not a project.
    */
-  async attemptLogin(page: Page, hint?: FieldHint): Promise<LoginResult> {
+  async attemptLogin(page: Page, hint?: FieldHint, highlight?: HighlightSink): Promise<LoginResult> {
     // ---- Gate 1: read the page. No secret is involved and nothing is opened.
     const scan = await scanForLogin(page);
     const host = hostOf(scan.url) ?? '';
@@ -346,7 +352,7 @@ export class LoginBroker {
 
     // ---- Gate 6: fill. Only now does a secret exist in this process.
     try {
-      return await this.fill(scan, item, host, framedBy, hint);
+      return await this.fill(scan, item, host, framedBy, hint, highlight);
     } catch (err) {
       // A throw from here is a page that would not be typed into — a field that
       // never became actionable, a navigation mid-fill, a detached frame.
@@ -403,6 +409,7 @@ export class LoginBroker {
     host: string,
     framedBy: string | undefined,
     hint: FieldHint | undefined,
+    highlight: HighlightSink | undefined,
   ): Promise<LoginResult> {
     const frame = scan.frame;
     const base = { item: item.name, ...(framedBy ? { framedBy } : {}) };
@@ -418,8 +425,8 @@ export class LoginBroker {
       if (!code) {
         return result('stuck', host, `Bitwarden could not produce a one-time code for "${item.name}".`, base);
       }
-      await typeInto(frame, otpSelector, code);
-      await this.submit(frame, scan, otpSelector);
+      await typeInto(frame, otpSelector, code, highlight);
+      await this.submit(frame, scan, otpSelector, highlight);
       return result('otp-entered-continue', host, `Entered the one-time code from "${item.name}".`, {
         ...base,
         continues: true,
@@ -436,8 +443,8 @@ export class LoginBroker {
       if (secret.username === '') {
         return result('stuck', host, `"${item.name}" has no username saved.`, base);
       }
-      await typeInto(frame, usernameSelector, secret.username);
-      await this.submit(frame, scan, usernameSelector);
+      await typeInto(frame, usernameSelector, secret.username, highlight);
+      await this.submit(frame, scan, usernameSelector, highlight);
       return result(
         'username-entered-continue',
         host,
@@ -468,10 +475,10 @@ export class LoginBroker {
     }
 
     if (usernameSelector && secret.username !== '') {
-      await typeInto(frame, usernameSelector, secret.username);
+      await typeInto(frame, usernameSelector, secret.username, highlight);
     }
-    await typeInto(frame, passwordSelector, secret.password);
-    await this.submit(frame, scan, passwordSelector);
+    await typeInto(frame, passwordSelector, secret.password, highlight);
+    await this.submit(frame, scan, passwordSelector, highlight);
 
     // "Submitted", not "signed in" — whether the site accepted the credential
     // is the next page's news, and claiming success here would have the agent
@@ -485,9 +492,14 @@ export class LoginBroker {
     );
   }
 
-  private async submit(frame: Frame, scan: LoginScan, fallbackSelector: string): Promise<void> {
+  private async submit(
+    frame: Frame,
+    scan: LoginScan,
+    fallbackSelector: string,
+    highlight: HighlightSink | undefined,
+  ): Promise<void> {
     try {
-      await submitLogin(frame, scan.submit?.selector ?? null, fallbackSelector);
+      await submitLogin(frame, scan.submit?.selector ?? null, fallbackSelector, highlight);
     } catch {
       // A form that would not submit is not a filled-nothing failure: the
       // values ARE in the fields, and the agent can press the button itself.

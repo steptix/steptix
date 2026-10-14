@@ -100,6 +100,16 @@ export interface SubActionResult {
    */
   typed?: TypedRoute;
   /**
+   * The action asked the interaction highlight to ring what it touched, in
+   * the `act` or `read` colour (docs/specs/SPEC-interaction-highlight.md
+   * §11). A request, not proof of a drawing — the draw is fire-and-forget,
+   * and draws nothing when the target is absent or has no box (a keyboard
+   * action with nothing focused). Tells "this action asked to ring an
+   * element" from "this action had no element to ask about".
+   * Absent when `browser.highlight` is off.
+   */
+  highlighted?: 'act' | 'read';
+  /**
    * The first-party requests the action started, as a compile run's wait
    * observed them (docs/specs/SPEC-codebehind-robustness.md §6.9) — evidence
    * for the generator of what the action does on the network. Absent on an

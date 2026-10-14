@@ -3,6 +3,7 @@ import type { AiClient } from './client.js';
 import type { ChatMessage, MessageContentBlock } from './types.js';
 import type { StepResult, TestReport, FailureDiagnosis, AiInteraction } from '../report/types.js';
 import { captureScreenshot } from '../browser/screenshot.js';
+import { pageEverRinged } from '../browser/highlight.js';
 import { captureDomSnapshot, type CaptureDomOptions } from '../browser/dom-cleaner.js';
 import { contentBlocksToText } from './prompts.js';
 import { logger } from '../utils/logger.js';
@@ -43,12 +44,19 @@ export async function diagnoseFailure(
 
     // Grab a fresh snapshot of where the test ended up. Best-effort — if the browser
     // is already closed or unresponsive we fall back to what the step captured.
+    // The model reads the picture, so a highlight ring from the last action is
+    // kept out of it (docs/specs/SPEC-interaction-highlight.md §4.2).
     const [screenshot, domSnapshot] = await Promise.all([
-      captureScreenshot(page).catch(() => null),
+      captureScreenshot(page, false, 'model').catch(() => null),
       captureDomSnapshot(page, opts).catch(() => ''),
     ]);
 
-    const finalScreenshot = screenshot?.base64 ?? subject.screenshotBase64;
+    // The step's own picture is the fallback only for a page no highlight ring
+    // was ever drawn on: it was taken for the report, where a ring may show,
+    // and this one goes to a model (docs/specs/SPEC-interaction-highlight.md
+    // §4.2). Better no image than one showing page state the page lacks.
+    const finalScreenshot = screenshot?.base64
+      ?? (pageEverRinged(page) ? undefined : subject.screenshotBase64);
     const finalDom = domSnapshot || subject.domSnapshot || '';
     const pageUrl = safeUrl(page) ?? subject.pageUrl;
 

@@ -85,6 +85,7 @@ import {
   type RowSkipReason,
   type RowTableKind,
 } from './row-summary-core.js';
+import { highlightRunSettings, readHighlightSetting, type HighlightSetting } from './run-settings-core.js';
 import {
   calledSectionNames,
   chainMembersKeptLogLine,
@@ -529,6 +530,13 @@ export class RunController {
   private runGeneration = 0;
   private lastResolvedEnvPath: string | null = null;
   private configSentForSession = false;
+  /**
+   * The `steptix.highlight` value each session was last sent, by session id
+   * (docs/specs/SPEC-interaction-highlight.md §7.2). The server retains run
+   * settings per session, so this is what decides whether a `default` has an
+   * override to clear — see run-settings-core.ts.
+   */
+  private readonly highlightSent = new Map<string, HighlightSetting>();
   /**
    * WHICH viewport spec the live session was created with — the value that
    * rode its (write-once) `config` block, or `null` when that block carried no
@@ -2494,6 +2502,31 @@ export class RunController {
   }
 
   /**
+   * The `steptix.highlight` part of ONE request: `body` to spread into it
+   * (`{ runSettings }`, or nothing), and `commit` to call on that request's
+   * first frame. The decision is run-settings-core.ts's; this reads the
+   * setting, for the test file's own folder, against what this session was
+   * last sent. Owned by the request, so a request an older server refused —
+   * no frame, no commit — is never remembered as an override a later
+   * `default` has to clear, and no other request can commit it.
+   */
+  private highlightRequestFor(sessionId: string): {
+    body: { runSettings?: { highlight: HighlightSetting } };
+    commit: () => void;
+  } {
+    const setting = readHighlightSetting(
+      vscode.workspace.getConfiguration('steptix', this.document.uri).get<string>('highlight'),
+    );
+    const runSettings = highlightRunSettings(setting, this.highlightSent.get(sessionId));
+    return {
+      body: runSettings ? { runSettings } : {},
+      commit: () => {
+        this.highlightSent.set(sessionId, setting);
+      },
+    };
+  }
+
+  /**
    * Record that a session now exists on the server, and — the FIRST time it is
    * called for that session — which viewport spec the `config` block that
    * created it named (`undefined` ⇒ none).
@@ -2521,6 +2554,8 @@ export class RunController {
   private forgetSentConfig(): void {
     this.configSentForSession = false;
     this.viewportSentForSession = null;
+    // No session of ours is live, so none holds a highlight override either.
+    this.highlightSent.clear();
   }
 
   /**
@@ -4185,6 +4220,8 @@ export class RunController {
         } catch {
           /* swallow — teardown must not break the run */
         }
+        // A batch session is unique to its run; its override goes with it.
+        this.highlightSent.delete(sessionId);
         // The session that `config` was sent for no longer exists, and the
         // next batch run of this file gets a NEW `::run-N` id — so the block
         // must ride again, or that run's browser would launch without the
@@ -5252,9 +5289,11 @@ export class RunController {
     // The test's own `## Context`, for the AI on every step (§2.46).
     const testContext = parseContext(this.document.getText());
 
+    const highlightRequest = this.highlightRequestFor(sessionId);
     const events = client.streamSteps(
       sessionId,
       {
+        ...highlightRequest.body,
         steps: stepInstructions,
         fullSteps: fullStepInstructions,
         sourceLines: stepLines,
@@ -5376,6 +5415,8 @@ export class RunController {
       // the value on every later call, which is what keeps the remembered
       // viewport describing the live browser rather than the current file.
       this.markConfigSent(sessionConfig.viewport);
+      // And the request's steptix.highlight value now counts as sent.
+      highlightRequest.commit();
       // The compile riding this run (stories/compile-as-you-go.md). Logged,
       // never folded into the gutter: by the time an entry is generated its
       // step has already painted ✓, and repainting ▶ on it would undo that.
@@ -5604,6 +5645,7 @@ export class RunController {
         const text = this.document.getText();
         const runStart = takeRunStart() ? runStartFor(text, line) : undefined;
         try {
+          const interactiveHighlight = this.highlightRequestFor(sessionId);
           const events = client.streamSteps(
             sessionId,
             {
@@ -5619,6 +5661,7 @@ export class RunController {
               testFilePath: this.document.uri.fsPath,
               env,
               ...(envName && { envName }),
+              ...interactiveHighlight.body,
               ...(() => {
                 const ds = parseFrontmatter(this.document.getText()).dataSources;
                 return ds && Object.keys(ds).length > 0 ? { dataSources: ds } : {};
@@ -5639,6 +5682,7 @@ export class RunController {
             // interactive turn that omitted `config` never overwrites the
             // viewport the session's browser actually launched with.
             this.markConfigSent(sessionConfig.viewport);
+            interactiveHighlight.commit();
             if (event.type === 'done') continue;
             this.emitRunEvent(event);
           }

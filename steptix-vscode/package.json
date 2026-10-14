@@ -2,7 +2,7 @@
   "name": "steptix-vscode",
   "displayName": "Steptix (Beta)",
   "publisher": "pkent",
-  "version": "0.5.201",
+  "version": "0.5.202",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -173,6 +173,21 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Show the Record Steps toolbar inside the recorded page: Pause, Add check, Add step, Undo, Stop and Cancel without leaving the browser. Turn it off to steer recordings from the Steptix panel only. Where you dock the toolbar is remembered between recordings."
+        },
+        "steptix.highlight": {
+          "type": "string",
+          "enum": [
+            "default",
+            "on",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Use the project's `browser.highlight` from steptix.config.json (off unless the project turns it on).",
+            "Ring each element a run clicks, types into, reads or counts, keeping the project's duration and colours.",
+            "Draw no rings, whatever the project says."
+          ],
+          "default": "default",
+          "markdownDescription": "Ring each element a run touches for about three seconds, so you can see what each step clicked, typed into, read or counted, live, in the video and in the report's screenshots. `default` follows the project's `browser.highlight`; `on` and `off` override it for runs started from this window. Screenshots sent to the AI never show the rings."
         }
       }
     },

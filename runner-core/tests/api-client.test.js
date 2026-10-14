@@ -79,6 +79,26 @@ test('streamSteps: the per-session config block rides the body verbatim, viewpor
   });
 });
 
+test('streamSteps: runSettings ride the body verbatim, "default" included', async () => {
+  // docs/specs/SPEC-interaction-highlight.md §7.2. The server retains these per
+  // session, and only an explicit "default" clears one, so the client must
+  // neither drop the key nor the clearing value.
+  const bodies = [];
+  const fetchImpl = async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return streamingResponse(['event: done\ndata: {"type":"done","status":"passed"}\n\n']);
+  };
+  const client = new ApiClient({ serverUrl: 'http://x:1', apiKey: 'k', fetch: fetchImpl });
+
+  await collect(client.streamSteps('sess-1', { steps: ['s1'], runSettings: { highlight: 'on' } }, new AbortController().signal));
+  await collect(client.streamSteps('sess-1', { steps: ['s1'], runSettings: { highlight: 'default' } }, new AbortController().signal));
+  await collect(client.streamSteps('sess-1', { steps: ['s1'] }, new AbortController().signal));
+
+  assert.deepEqual(bodies[0].runSettings, { highlight: 'on' });
+  assert.deepEqual(bodies[1].runSettings, { highlight: 'default' });
+  assert.equal('runSettings' in bodies[2], false);
+});
+
 test('streamSteps: yields ordered events', async () => {
   const chunks = [
     'event: step:start\ndata: {"type":"step:start","line":2}\n\n',

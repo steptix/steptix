@@ -142,12 +142,14 @@ describe('resolveRunSettings', () => {
       sendScreenshots: false,
       ai: 'on',
       aiOffReason: null,
+      highlight: 'off',
       sources: {
         model: 'server',
         capture: 'server',
         fullPage: 'server',
         sendScreenshots: 'server',
         ai: 'server',
+        highlight: 'server',
       },
     });
   });
@@ -396,5 +398,47 @@ describe('resolveRunSettings — the AI switch', () => {
     expect(config.ai.maxInputTokens).toBe(server.ai.maxInputTokens);
     expect(config.ai.diagnoseFailures).toBe(server.ai.diagnoseFailures);
     expect(config.browser.captureScreenshotsPerAction).toBe(false);
+  });
+});
+
+describe('resolveRunSettings — the highlight run setting', () => {
+  // docs/specs/SPEC-interaction-highlight.md §7.2: on / off set `enabled` and
+  // keep the project's duration and colours, as the CLI flags do.
+  const project = (highlight: Config['browser']['highlight']): Config => ({
+    ...server,
+    browser: { ...server.browser, highlight },
+  });
+
+  it('is the project\'s value by default, sourced from the project', () => {
+    const { config, effective } = resolve({}, project({ enabled: true, durationMs: 5000 }));
+    expect(config.browser.highlight).toEqual({ enabled: true, durationMs: 5000 });
+    expect(effective.highlight).toBe('on');
+    expect(effective.sources.highlight).toBe('project');
+  });
+
+  it('"off" switches a project that rings off, keeping its settings', () => {
+    const { config, effective } = resolve({ highlight: 'off' }, project({ enabled: true, durationMs: 5000 }));
+    expect(config.browser.highlight).toEqual({ enabled: false, durationMs: 5000 });
+    expect(effective.highlight).toBe('off');
+    expect(effective.sources.highlight).toBe('session');
+  });
+
+  it('"on" switches a project that does not ring on', () => {
+    const { config, effective } = resolve({ highlight: 'on' }, project(false));
+    expect(config.browser.highlight).toBe(true);
+    expect(effective.highlight).toBe('on');
+  });
+
+  it('"default" is the base, not the last override', () => {
+    const { effective } = resolve({ highlight: 'default' }, project(false));
+    expect(effective.highlight).toBe('off');
+    expect(effective.sources.highlight).toBe('server');
+  });
+
+  it('merges like the AI switch: retained, and "default" deletes it', () => {
+    const held = mergeRunSettings({}, { highlight: 'on' });
+    expect(held).toEqual({ highlight: 'on' });
+    expect(mergeRunSettings(held, { capture: 'none' })).toEqual({ highlight: 'on', capture: 'none' });
+    expect(mergeRunSettings(held, { highlight: 'default' })).toEqual({});
   });
 });

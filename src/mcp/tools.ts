@@ -81,6 +81,7 @@ import {
   DEFAULT_SCREENSHOTS_RETURN,
   PreflightFailure,
   type AiMode,
+  type HighlightMode,
   type ApiClient,
   type AssembledRun,
   type CaptureMode,
@@ -336,6 +337,7 @@ function readRunSettings(args: {
   full_page?: boolean | null | undefined;
   send_screenshots?: boolean | null | undefined;
   ai?: AiMode | undefined;
+  highlight?: HighlightMode | undefined;
   screenshots_return?: ScreenshotsReturn | 'default' | undefined;
 }): { runSettings: RunSettings; screenshotsReturn: ScreenshotsReturn } {
   const runSettings: RunSettings = {};
@@ -344,6 +346,7 @@ function readRunSettings(args: {
   if (args.full_page !== undefined) runSettings.fullPage = args.full_page;
   if (args.send_screenshots !== undefined) runSettings.sendScreenshots = args.send_screenshots;
   if (args.ai !== undefined) runSettings.ai = args.ai;
+  if (args.highlight !== undefined) runSettings.highlight = args.highlight;
   // `default` is `on-failure` (DEFAULT_SCREENSHOTS_RETURN): an image comes
   // back only for a failed step. A screenshot is a picture of a live signed-in
   // session — of the whole desktop on the computer surface — and it is charged
@@ -491,6 +494,10 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
       }
     };
 
+    // Any screenshot this run may hand back is read by the calling model, so
+    // the server must take it without highlight rings — the report's copy
+    // included, since it is the same image.
+    if (ctx.screenshotsReturn !== 'none') request.screenshotsToModel = true;
     const withConfig = { ...request };
     if (!isFirstCall) delete withConfig.config;
 
@@ -2387,8 +2394,8 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'in play should not cause a server to exist. If nothing is running you ' +
         'get running: false rather than an error.\n\n' +
         'Change any of these by passing model / capture / full_page / ' +
-        'send_screenshots / ai to run_steps or run_test_file; they stick to the ' +
-        'session from then on.',
+        'send_screenshots / ai / highlight to run_steps or run_test_file; they ' +
+        'stick to the session from then on.',
       inputSchema: schemas.getRunSettingsInput,
       outputSchema: schemas.getRunSettingsOutput,
     },
@@ -2469,6 +2476,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
               sendScreenshots: null,
               ai: null,
               aiOffReason: null,
+              highlight: null,
               sources: null,
               overrides: null,
               serverDefaults: null,
@@ -2498,7 +2506,15 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           // missing key fails output validation outright.
           ai: effective.ai ?? null,
           aiOffReason: effective.aiOffReason ?? null,
-          sources: effective.sources ? { ...effective.sources, ai: effective.sources.ai ?? null } : null,
+          // `?? null` for the AI pair's reason: an older server omits it.
+          highlight: effective.highlight ?? null,
+          sources: effective.sources
+            ? {
+                ...effective.sources,
+                ai: effective.sources.ai ?? null,
+                highlight: effective.sources.highlight ?? null,
+              }
+            : null,
           overrides:
             overrides === undefined
               ? null
@@ -2510,6 +2526,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
                   fullPage: overrides.fullPage ?? null,
                   sendScreenshots: overrides.sendScreenshots ?? null,
                   ai: overrides.ai === 'default' ? null : (overrides.ai ?? null),
+                  highlight: overrides.highlight === 'default' ? null : (overrides.highlight ?? null),
                 },
           serverDefaults: {
             model: report.server.model,
@@ -2517,6 +2534,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             fullPage: report.server.fullPage,
             sendScreenshots: report.server.sendScreenshots,
             ai: report.server.ai ?? null,
+            highlight: report.server.highlight ?? null,
           },
         };
         return validated(

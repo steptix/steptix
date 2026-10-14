@@ -32,6 +32,7 @@ import {
   resolveCompileParameters,
 } from '../src/codebehind/compile.js';
 import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
+import { reportAudience, resolveHighlight } from '../src/browser/highlight.js';
 
 /** This run's own directory, with the house Prettier style pinned at its root
  *  (tests/codebehind-scratch.ts says why both matter). */
@@ -133,5 +134,30 @@ describe("the default runner — the CLI's", () => {
     const [instance, , , extras] = runTestMock.mock.calls[0]!;
     expect(instance.resolvedParameters).toEqual({ username: 'octocat' });
     expect(extras).toMatchObject({ codeBehindStrict: true, stopAfterStep: 1 });
+  });
+
+  it('runs with highlight rings kept out of every capture, for the repair model (§4.2)', async () => {
+    // A compile run's failure screenshot is the image `buildRepairPrompt`
+    // attaches; docs/specs/SPEC-interaction-highlight.md §4.2.
+    await fs.writeFile(path.join(dir, 'go.md'), ['# Go', '', '## Steps', '1. Click Go'].join('\n'));
+    const test = await parseTestFile(path.join(dir, 'go.md'));
+    runTestMock.mockResolvedValue({
+      status: 'passed', steps: [], totalSteps: 1, passedSteps: 1, failedSteps: 0,
+      totalSubActions: 0, durationMs: 1, tokensUsed: 0, inputTokens: 0, outputTokens: 0,
+      date: '', testName: 'Login', filePath: test.filePath, tags: [],
+    });
+    const ringing: Config = { ...CONFIG, browser: { ...CONFIG.browser, highlight: true } };
+
+    await createTestFileRunner({ test, config: ringing, contextContent: '', aiClient: {} as never })({
+      purpose: 'replay',
+      parameters: {},
+      strict: true,
+      captureContext: false,
+    });
+
+    const config = runTestMock.mock.calls[0]![1] as Config;
+    expect(reportAudience(config.browser)).toBe('model');
+    // Still drawn on screen: only the pictures leave the rings out.
+    expect(resolveHighlight(config.browser)?.inScreenshots).toBe(false);
   });
 });

@@ -659,6 +659,10 @@ describe('recording in the caller\'s session', () => {
     const [sessionId, request, , , internal] = run.mock.calls[0]!;
     expect(sessionId).toBe('editor-session');
     expect(request.captureStepContext).toBe(true);
+    // Its failure screenshot is what the repair model is sent, so the batch
+    // takes every capture without highlight rings
+    // (docs/specs/SPEC-interaction-highlight.md §4.2).
+    expect(request.screenshotsToModel).toBe(true);
     expect(request.config).toBeDefined();
     expect(internal?.codeBehind?.disabled).toBeUndefined();
     expect(internal?.codeBehind?.strict).toBe(false);

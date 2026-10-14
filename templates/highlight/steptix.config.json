@@ -1,0 +1,9 @@
+{
+  "ai": {
+    "sendScreenshots": true
+  },
+  "browser": {
+    "highlight": true,
+    "captureScreenshotsPerAction": true
+  }
+}

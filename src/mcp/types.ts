@@ -15,6 +15,7 @@ import type {
   AiOffReason,
   CaptureMode,
   EffectiveSettings,
+  HighlightMode,
   RunSettings,
   SettingSource,
 } from '../config/types.js';
@@ -37,7 +38,7 @@ export type { ErrandSummary, ErrandTab, RunEvent, TabHolder };
 // — `runSettings` out on the request, `effectiveSettings` back on `done` and on
 // `GET /config` — and two hand-kept copies of a wire shape drift, silently, in
 // the direction of the half that gets edited.
-export type { AiMode, AiOffReason, CaptureMode, EffectiveSettings, RunSettings, SettingSource };
+export type { AiMode, AiOffReason, CaptureMode, EffectiveSettings, HighlightMode, RunSettings, SettingSource };
 
 /**
  * What comes back to the CALLER, as distinct from what gets captured into the
@@ -220,6 +221,13 @@ export interface McpStepRequest {
    * between calls, surface included, by design.
    */
   runStart?: { stepIndex?: number };
+  /**
+   * This batch's screenshots come back to the agent (`screenshots_return` is
+   * not `none`), so the server keeps the highlight rings out of every capture
+   * it takes (`StepRequest.screenshotsToModel`,
+   * docs/specs/SPEC-interaction-highlight.md §4.2). Per request, not retained.
+   */
+  screenshotsToModel?: boolean;
 }
 
 /**

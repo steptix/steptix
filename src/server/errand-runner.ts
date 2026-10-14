@@ -17,6 +17,7 @@ import { AiClient } from '../ai/client.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { ApiResponseStore } from '../api/response-store.js';
 import { captureScreenshot } from '../browser/screenshot.js';
+import { ringsOutOfScreenshots } from '../browser/highlight.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
@@ -512,7 +513,10 @@ export class ErrandRunner {
           outcome,
           ownTabs,
           steps: request.steps,
-          runConfig: settings.config,
+          // An errand writes no report: every picture it takes goes back to
+          // the agent in its receipt, so none may carry a highlight ring
+          // (docs/specs/SPEC-interaction-highlight.md §4.2).
+          runConfig: { ...settings.config, browser: ringsOutOfScreenshots(settings.config.browser) },
           uploadPaths: {
             baseDir: dirname(request.testFilePath),
             projectRoot: bundle.projectRoot,
@@ -886,7 +890,7 @@ export class ErrandRunner {
         );
         if (args.runConfig.execution.screenshotOnFailure) {
           try {
-            const shot = await captureScreenshot(active.pageTracker.getActive());
+            const shot = await captureScreenshot(active.pageTracker.getActive(), false, 'model');
             if (shot?.base64) stepResult.screenshotBase64 = shot.base64;
           } catch {
             // A missing screenshot must not turn the author's failure into an
@@ -1015,7 +1019,7 @@ export class ErrandRunner {
           }
           let errorScreenshot = '';
           try {
-            const shot = await captureScreenshot(active.pageTracker.getActive());
+            const shot = await captureScreenshot(active.pageTracker.getActive(), false, 'model');
             errorScreenshot = shot?.base64 ? `data:image/png;base64,${shot.base64}` : '';
           } catch {
             // ignore

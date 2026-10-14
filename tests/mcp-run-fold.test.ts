@@ -929,12 +929,14 @@ describe('effectiveSettings on the done event', () => {
     sendScreenshots: false,
     ai: 'on' as const,
     aiOffReason: null,
+    highlight: 'on' as const,
     sources: {
       model: 'session' as const,
       capture: 'session' as const,
       fullPage: 'project' as const,
       sendScreenshots: 'server' as const,
       ai: 'server' as const,
+      highlight: 'project' as const,
     },
   };
 
@@ -963,6 +965,7 @@ describe('effectiveSettings on the done event', () => {
       sendScreenshots: null,
       ai: null,
       aiOffReason: null,
+      highlight: null,
       sources: null,
       // Never null: this side always knows what it was told, whatever the
       // server did or did not report.
@@ -995,6 +998,29 @@ describe('effectiveSettings on the done event', () => {
     expect(result.effectiveSettings?.ai).toBeNull();
     expect(result.effectiveSettings?.aiOffReason).toBeNull();
     expect(result.effectiveSettings?.sources?.ai).toBeNull();
+  });
+
+  it('keeps the rest when a server predating the highlight setting omits it', () => {
+    // docs/specs/SPEC-interaction-highlight.md §7.2: the AI switch's rule, for
+    // the highlight's addition. Null is "the server did not say", not "off".
+    const { highlight: _h, sources, ...older } = settings;
+    const { highlight: _hs, ...olderSources } = sources;
+    const result = fold({
+      events: [
+        {
+          type: 'done',
+          status: 'passed',
+          effectiveSettings: { ...older, sources: olderSources },
+        } as unknown as RunEvent,
+      ],
+      screenshotsReturn: 'none',
+    });
+
+    expect(result.effectiveSettings?.model).toBe(settings.model);
+    expect(result.effectiveSettings?.ai).toBe('on');
+    expect(result.effectiveSettings?.highlight).toBeNull();
+    expect(result.effectiveSettings?.sources?.highlight).toBeNull();
+    expect(result.effectiveSettings?.sources?.ai).toBe('server');
   });
 
   it('carries the off reason through, so policy and no-key stay apart', () => {

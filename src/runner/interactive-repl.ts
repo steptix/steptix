@@ -3,6 +3,7 @@ import type { StepResult } from '../report/types.js';
 import type { StepExecutorOptions } from './step-executor.js';
 import { executeStep } from './step-executor.js';
 import { captureScreenshot } from '../browser/screenshot.js';
+import { reportAudience } from '../browser/highlight.js';
 import { logger } from '../utils/logger.js';
 import { adHocStats } from './run-stats.js';
 import { createLineReader, NoAnswerError } from '../utils/ask-user.js';
@@ -235,6 +236,7 @@ export async function runInteractiveRepl(ctx: InteractiveReplContext): Promise<I
             const shot = await captureScreenshot(
               ctx.page,
               ctx.executorOptions.config.browser.fullPageScreenshots,
+              reportAudience(ctx.executorOptions.config.browser),
             );
             const entry: StepResult = {
               index: adHocStepIndex(),

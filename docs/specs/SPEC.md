@@ -578,6 +578,15 @@ Field notes:
 
 - `browser.headed` defaults to `true`; override with `--headless`.
 - `browser.slowMo` adds a ms delay between actions (for debugging).
+- `browser.highlight` rings each element an action clicks, types into,
+  selects, hovers, reads or counts, for about 3 s. Off by default; `true`, or
+  `{ "enabled": true, "durationMs": 3000, "colors": { "act": "#3b82f6",
+  "read": "#a855f7" }, "inScreenshots": true }`. Screenshots sent to a model
+  never show it; `inScreenshots: false` keeps it out of report screenshots. `steptix
+  run --highlight` / `--no-highlight` overrides it for one run, the
+  `highlight` run setting (MCP `run_steps` / `run_test_file`) for a session,
+  and the `steptix.highlight` VS Code setting for runs from that window. See
+  [SPEC-interaction-highlight.md](SPEC-interaction-highlight.md).
 - `browser.browser` is one of `'chromium' | 'firefox' | 'webkit'`.
 - `execution.promptOnAmbiguity` asks the user when the AI is unsure.
 - `execution.defaultHooks` can declare project-level hooks, e.g.
@@ -608,6 +617,9 @@ npx steptix run --tag "smoke,critical"   # AND logic
 
 # Run headless
 npx steptix run --headless
+
+# Ring each element an action touches, this run only (or --no-highlight)
+npx steptix run --highlight
 
 # Specify config
 npx steptix run --config ./custom.config.ts

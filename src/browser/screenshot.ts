@@ -1,5 +1,6 @@
 import type { CDPSession, Page } from 'playwright';
 import { logger } from '../utils/logger.js';
+import { hiddenFor, hiddenForReport } from './highlight.js';
 
 export interface ScreenshotResult {
   base64: string;
@@ -24,17 +25,35 @@ function pngSize(buffer: Buffer): { width: number; height: number } {
 }
 
 /**
+ * Who looks at a screenshot, which decides whether Steptix's own highlight
+ * rings may be in it (docs/specs/SPEC-interaction-highlight.md §4.2):
+ *
+ *   - `'report'` (the default): the HTML report, its filmstrip, a step's
+ *     failure picture. The ring shows unless `browser.highlight.inScreenshots`
+ *     is `false`.
+ *   - `'model'`: anything a model reads — the acting model's pre-turn
+ *     capture, diagnosis, an MCP agent's `get_page_content`. Never a ring: it
+ *     would be page state the page does not have.
+ */
+export type ScreenshotAudience = 'report' | 'model';
+
+/**
  * Capture a PNG screenshot and return it as base64.
  * @param page - Playwright page
  * @param fullPage - When true, captures the entire scrollable page instead of just the viewport.
+ * @param audience - Who reads it; see {@link ScreenshotAudience}.
  * Returns null if capture fails (non-fatal).
  */
-export async function captureScreenshot(page: Page, fullPage = false): Promise<ScreenshotResult | null> {
+export async function captureScreenshot(
+  page: Page,
+  fullPage = false,
+  audience: ScreenshotAudience = 'report',
+): Promise<ScreenshotResult | null> {
   try {
-    const buffer = await page.screenshot({
-      type: 'png',
-      fullPage,
-    });
+    const shoot = (): Promise<Buffer> => page.screenshot({ type: 'png', fullPage });
+    // Both are free when no ring was drawn on this page lately: a run with the
+    // highlight off pays nothing here.
+    const buffer = audience === 'model' ? await hiddenFor(page, shoot) : await hiddenForReport(page, shoot);
 
     // The header is read for BOTH shapes, not just the full-page one. The
     // viewport branch used to ask Playwright for the page's viewport instead,

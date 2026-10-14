@@ -111,6 +111,64 @@ export interface CdpBrowserConfig {
   hideAutomation?: boolean | undefined;
 }
 
+/**
+ * Ring each element an action touches, for about three seconds, so a person
+ * watching a run — live, in its video or in the report's screenshots — can see
+ * what each step clicked, typed into or read
+ * (docs/specs/SPEC-interaction-highlight.md). `"highlight": true` is sugar for
+ * `{ "enabled": true }`.
+ *
+ * Off by default: the ring is painted over the page under test and its host
+ * element sits in that page's DOM, however carefully, and that should be a
+ * choice (§13, decision 1). Screenshots sent to a model never show it,
+ * whatever this says (§4.2).
+ *
+ * The footprint, so nobody has to rediscover it: while a ring is live, one
+ * `<steptix-highlight>` element sits under `<html>`, beside `<body>`. A test
+ * whose own selector is `*` or `html > *`, or which counts `:popover-open`
+ * elements, counts one more during a ring (§12). Selectors under `body` do
+ * not see it.
+ *
+ * The full doc lives here, on the interface, which the generated schema
+ * shows for the object form; `BrowserConfig.highlight` keeps one line for the
+ * boolean form. Same placement as `DesktopConfig`, whose comment says why
+ * the generator prefers it.
+ */
+export interface HighlightConfig {
+  /** Draw the rings. Default true once the object is written: writing it is
+   *  turning the rings on. `false` keeps the other settings for
+   *  `steptix run --highlight` to switch on. */
+  enabled?: boolean;
+  /** How long one ring lasts, in milliseconds, from appearing to faded out.
+   *  500–10000; default 3000.
+   *  @minimum 500
+   *  @maximum 10000 */
+  durationMs?: number;
+  /** Ring colours, as `#rgb` or `#rrggbb` hex. Hex only, because Node cannot
+   *  ask a browser whether a CSS colour parses. `act` rings what a step
+   *  clicks, types into, selects or hovers (default `#3b82f6`, blue); `read`
+   *  rings what it reads or counts (default `#a855f7`, violet). Avoid red,
+   *  green and amber, which read as failed, passed and warning (§8). */
+  colors?: HighlightColors;
+  /** Show the rings in the report's screenshots. Default true: in a report
+   *  picture the ring answers "what did this step click?" without the log.
+   *  `false` hides them from report captures too, for people who diff report
+   *  screenshots or reuse them in docs; the video still shows them, since it
+   *  records the screen as it is. Screenshots sent to a model never show
+   *  them, whatever this says. */
+  inScreenshots?: boolean;
+}
+
+/** The two ring colours of `browser.highlight.colors`. */
+export interface HighlightColors {
+  /** Click, type, select, hover. Default `#3b82f6`.
+   *  @pattern ^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$ */
+  act?: string;
+  /** Read, read of every match, count. Default `#a855f7`.
+   *  @pattern ^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$ */
+  read?: string;
+}
+
 export interface BrowserConfig {
   /** Show browser window (false = headless) */
   headed: boolean;
@@ -234,6 +292,9 @@ export interface BrowserConfig {
    *  `UserConfig`) accepts `"video": true/false` instead of enum-rejecting it.
    *  Default 'off'. */
   video?: 'off' | 'on' | 'retain-on-failure' | boolean | undefined;
+  /** Ring each element an action touches. `true` is `{ "enabled": true }`.
+   *  Default false. See HighlightConfig. */
+  highlight?: boolean | HighlightConfig | undefined;
   /** Extra Chromium command-line arguments, appended to the `--window-size`
    *  the launcher already passes (docs/specs/SPEC-use-computer.md §5.10).
    *
@@ -537,6 +598,15 @@ export type AiMode = 'on' | 'off' | 'default';
 export type AiOffReason = 'policy' | 'no-key';
 
 /**
+ * Whether the interaction highlight rings what this session's runs touch
+ * (docs/specs/SPEC-interaction-highlight.md §7.2, §13 decision 4). `on` and
+ * `off` set `browser.highlight.enabled` and keep the project's duration and
+ * colours, exactly as `steptix run --highlight` / `--no-highlight` do;
+ * `default` clears the override and falls back to the project's value.
+ */
+export type HighlightMode = 'on' | 'off' | 'default';
+
+/**
  * Per-session overrides for how a run behaves, applied per request and
  * RETAINED on the session (stories/run-settings.md §1–§2).
  *
@@ -560,6 +630,9 @@ export interface RunSettings {
   /** Whether AI may be used at all during the run. `'default'` falls back to
    *  the project's `ai.allowInRuns`. */
   ai?: AiMode;
+  /** Whether the interaction highlight is on. `'default'` falls back to the
+   *  project's `browser.highlight`. */
+  highlight?: HighlightMode;
 }
 
 /** Which layer decided a setting's value. */
@@ -590,6 +663,9 @@ export interface EffectiveSettings {
    *  inferred because the two states need opposite advice, and a key IS present
    *  on the policy path. */
   aiOffReason: AiOffReason | null;
+  /** Whether this run rings what it touches (`browser.highlight` after any
+   *  session override). */
+  highlight: 'on' | 'off';
   sources: {
     model: SettingSource;
     capture: SettingSource;
@@ -598,6 +674,7 @@ export interface EffectiveSettings {
     /** Which layer decided the AI POLICY. A missing key does not move this:
      *  it is not a setting anybody chose. */
     ai: SettingSource;
+    highlight: SettingSource;
   };
 }
 

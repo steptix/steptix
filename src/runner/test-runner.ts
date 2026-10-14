@@ -15,6 +15,7 @@ import { AiClient } from '../ai/client.js';
 import { aiConfigured, useStepInHookError } from '../config/loader.js';
 import { TokenTracker } from '../utils/tokens.js';
 import { launchBrowser, closeBrowser, BrowserTracker, resolveVideoMode, finalizeMainPageVideo, type BrowserSession, type CdpLaunchOptions } from '../browser/manager.js';
+import { endRings, highlighterFor, pagesOf, reportAudience } from '../browser/highlight.js';
 import { executeStep, executeBranchedStep } from './step-executor.js';
 import type { StepExecutorOptions } from './step-executor.js';
 import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
@@ -663,6 +664,7 @@ export async function runTest(
       // request goes out on. Keyless skips the check.
       ai: keyless ? undefined : config.ai,
       ...(extras.checkVisionRoute && { checkVisionRoute: extras.checkVisionRoute }),
+      endBrowserRings: () => endRings(pagesOf(browserTracker)),
     });
   /** Put the caller back on its surface on return from a skill: `[use
    *  browser]`'s transition, or `[use computer]`'s through
@@ -1034,6 +1036,11 @@ export async function runTest(
         resolvedParameters,
         catalogue: toolCatalogue,
         ...(baseUrl !== undefined && { baseUrl }),
+        // The tool's own Playwright calls ring what they touch
+        // (docs/specs/SPEC-interaction-highlight.md §2.3) — on the browser
+        // surface only: on the computer surface the next screen grab would
+        // photograph the ring.
+        ...(surfaceState.surface === 'browser' && { highlight: highlighterFor(config.browser) }),
       });
       const passed = outcome.status === 'passed';
       if (passed) {
@@ -2211,7 +2218,7 @@ export async function runTest(
         // …when there is a page to shoot. A computer-surface run may have
         // launched no browser at all (§4.6).
         if (config.execution.screenshotOnFailure && browserTracker.hasActive()) {
-          const shot = await captureScreenshot(session.page, config.browser.fullPageScreenshots);
+          const shot = await captureScreenshot(session.page, config.browser.fullPageScreenshots, reportAudience(config.browser));
           if (shot?.base64) stepResult.screenshotBase64 = shot.base64;
         }
       } else if (unconditionalFlowControl) {

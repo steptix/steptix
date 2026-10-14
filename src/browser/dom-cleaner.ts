@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Frame, Page } from 'playwright';
 import { describeDialogs, takeUnshownDialogs, unshownDialogs, type DialogReader, type DialogRecord } from './dialogs.js';
+import { HIGHLIGHT_REGISTRY_KEY, HIGHLIGHT_TAG } from './highlight.js';
 
 /** Default maximum character length for DOM snapshots (prevents token blowup).
  *  Overridable per-call via CaptureDomOptions.domSnapshotCharLimit. */
@@ -806,6 +807,8 @@ function buildDomCleanerScript(opts: ResolvedDomOptions): string {
     ALLOWED_ATTRS_JSON: JSON.stringify(ALLOWED_DOM_ATTRIBUTES),
     DROP_UNSTABLE_IDS: opts.dropUnstableIds ? 'true' : 'false',
     UNSTABLE_ID_PATTERNS_JSON: JSON.stringify(UNSTABLE_ID_PATTERNS),
+    HIGHLIGHT_TAG_JSON: JSON.stringify(HIGHLIGHT_TAG.toLowerCase()),
+    HIGHLIGHT_KEY_JSON: JSON.stringify(HIGHLIGHT_REGISTRY_KEY),
   });
 }
 
