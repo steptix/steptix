@@ -179,9 +179,15 @@ so no list of safe types makes a key nobody asked for safe.
   reads (`entryFromRecording`, SPEC-codebehind-robustness.md §6.6), types
   nothing.
 
-The survey's two sites now ask for keys where the page needs them: c53 types
+The survey's tests now ask for keys where the page needs them: c53 types
 "test" and "zzzz" into the filter box one character at a time, and c58 types
-"Testing" into the tasks table's search the same way.
+"Testing" into the tasks table's search the same way. c62's PrimeFaces table
+filter (`onkeyup` and nothing else) had relied on End too, unmeasured until
+#90: its step 14 asks for "India" one character at a time. A probe of the
+survey's other steps that type into a live widget found none that needed
+End: each widget reacts to `fill`, or behaved the same with End. c47's map
+suggestions are switched off by the site, and the recorded runs of c46 and
+c60 never chose their datalist option, End or not.
 
 **Still pressed without being asked**, each left for a decision of its own:
 

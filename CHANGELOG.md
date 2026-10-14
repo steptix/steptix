@@ -28,8 +28,8 @@ every step passed (#90).
   typed.
 - **A step that typed into a live filter may need those words now.** A
   filter or autocomplete that listens only for keys does not react to
-  `Type "lamp" into the Search field`. Add "one character at a time". The two
-  survey tests that relied on End, c53 and c58, say so now.
+  `Type "lamp" into the Search field`. Add "one character at a time". The
+  three survey tests that relied on End, c53, c58 and c62, say so now.
 - **Code-behind types the same way.** A compiled `type` is `.fill(…)`, or
   `clear()` then `pressSequentially(…)` where the step asked for key by key.
   Generation and repair are told never to add a key press the step or the

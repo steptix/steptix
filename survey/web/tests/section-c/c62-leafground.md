@@ -13,6 +13,9 @@ widgets, and AJAX partial page updates.
 a native select, checkboxes drawn over hidden inputs, a sortable and filterable
 DataTable, PrimeFaces dialogs and alerts, windows opened by buttons.
 
+The table's filter box filters on keyup only, so the step that filters asks
+for one character at a time.
+
 ## Config
 - baseUrl: https://www.leafground.com/
 
@@ -30,7 +33,7 @@ DataTable, PrimeFaces dialogs and alerts, windows opened by buttons.
 11. Tick "Basic" and "Ajax"
 12. Verify a message confirms the Ajax checkbox was checked
 13. Navigate to table.xhtml
-14. Filter the table by the country "India"
+14. Filter the table by the country "India", typing it one character at a time
 15. Verify every row shown has the country India
 16. Sort the table by the representative's name
 17. Navigate to alert.xhtml
