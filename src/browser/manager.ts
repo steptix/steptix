@@ -10,6 +10,7 @@ import { logger } from '../utils/logger.js';
 import { loopbackFetch } from './loopback-fetch.js';
 import { installNoticeRecorder } from './notices.js';
 import { answerDialog } from './dialogs.js';
+import { pagesDetaching, registerCdpBrowser } from './highlight.js';
 
 /**
  * How much bigger the headed OS window is than the page inside it, when
@@ -1635,6 +1636,10 @@ async function connectOverCdpSession(
 
   logger.info(`Connecting to Chrome over CDP on port ${cdp.port}`);
   const browser = await chromium.connectOverCDP(`http://localhost:${cdp.port}`);
+  // Another connection to this browser can hold a Page on the same tab: the
+  // highlight's hiding has to know (docs/specs/SPEC-interaction-highlight.md
+  // §4.3 rule 9). A JavaScript listener only; nothing is sent to the browser.
+  registerCdpBrowser(browser, `localhost:${cdp.port}`);
 
   // Everything after the connect is inside this `try`, and the reason is the
   // websocket above: a failure between here and the `return` leaves NOBODY
@@ -1784,7 +1789,15 @@ export async function closeBrowser(session: BrowserSession): Promise<void> {
       if (session.cdpTabOpenedByUs) {
         try { await session.page.close(); } catch { /* tab may already be gone */ }
       }
-      // Severs the CDP WebSocket without killing the user's Chrome.
+      // Severs the CDP WebSocket without killing the user's Chrome. Every
+      // tab still open stays open, so a highlight ring drawn through this
+      // connection must stay known to the other connections on those tabs
+      // (docs/specs/SPEC-interaction-highlight.md §4.3 rule 10).
+      try {
+        pagesDetaching(session.browser.contexts().flatMap((context) => context.pages()));
+      } catch {
+        // A connection already gone has no pages to name.
+      }
       await session.browser.close().catch(() => {});
       logger.debug('CDP browser session detached');
       return;

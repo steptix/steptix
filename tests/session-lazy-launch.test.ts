@@ -206,6 +206,8 @@ vi.mock('../src/utils/logger.js', () => ({
 import { SessionManager } from '../src/server/session-manager.js';
 import { NoBrowserLaunchedError } from '../src/browser/manager.js';
 import { COMPUTER_DISABLED_MESSAGE } from '../src/runner/computer-step.js';
+import { captureScreenshot } from '../src/browser/screenshot.js';
+import { executeStep } from '../src/runner/step-executor.js';
 
 const testConfig: Config = {
   ai: {
@@ -449,5 +451,73 @@ describe('closing an unlaunched session', () => {
     await manager.executeSteps('s-b', { steps: ['click'] });
 
     await expect(manager.closeAll()).resolves.toBeUndefined();
+  });
+});
+
+describe('the login broker\'s highlight follows the session (SPEC-interaction-highlight.md §2.3, §7.2)', () => {
+  // `log_into_site` has no test file, so `highlighterFor` resolves from the
+  // session's retained browser section, with the session's `highlight` run
+  // setting folded over it — before or after any batch has run.
+  it('is off by default, on with highlight "on", and off again with "default"', async () => {
+    await manager.executeSteps('s-hl', { steps: [] });
+    expect(manager.highlighterFor('s-hl')).toBeUndefined();
+
+    await manager.executeSteps('s-hl', { steps: [], runSettings: { highlight: 'on' } });
+    expect(manager.highlighterFor('s-hl')?.settings.durationMs).toBe(3000);
+
+    await manager.executeSteps('s-hl', { steps: [], runSettings: { highlight: 'default' } });
+    expect(manager.highlighterFor('s-hl')).toBeUndefined();
+  });
+
+  it('"off" wins over a project that rings', async () => {
+    const ringing = new SessionManager({
+      ...testConfig,
+      browser: { ...testConfig.browser, highlight: { enabled: true, durationMs: 4000 } },
+    } as Config);
+    await ringing.executeSteps('s-hl-off', { steps: [] });
+    expect(ringing.highlighterFor('s-hl-off')?.settings.durationMs).toBe(4000);
+    await ringing.executeSteps('s-hl-off', { steps: [], runSettings: { highlight: 'off' } });
+    expect(ringing.highlighterFor('s-hl-off')).toBeUndefined();
+  });
+
+  it('is undefined for a session that is not there', () => {
+    expect(manager.highlighterFor('nobody')).toBeUndefined();
+  });
+});
+
+describe('GET /sessions/:id takes its picture for a model (SPEC-interaction-highlight.md §4.2)', () => {
+  // What `get_page_content` and `peek_tab` hand an agent: never a ring.
+  it('asks captureScreenshot for the model audience', async () => {
+    await manager.executeSteps('s-shot', { steps: ['click the button'] });
+    vi.mocked(captureScreenshot).mockClear();
+    await manager.getSession('s-shot');
+    expect(captureScreenshot).toHaveBeenCalledWith(mockPage, false, 'model');
+  });
+});
+
+describe('a batch whose pictures go to a model (SPEC-interaction-highlight.md §4.2)', () => {
+  // `screenshotsToModel`: the session's own error capture asks for the model
+  // audience too, not only the executor's (review round 2, item E).
+  it('takes the error capture of a step that threw for the model', async () => {
+    vi.mocked(executeStep).mockRejectedValueOnce(new Error('the step blew up'));
+    vi.mocked(captureScreenshot).mockClear();
+    await manager.executeSteps('s-err-model', { steps: ['click the button'], screenshotsToModel: true });
+    expect(captureScreenshot).toHaveBeenCalledWith(mockPage, false, 'model');
+  });
+
+  it('and for the report when nothing asked otherwise — the control', async () => {
+    vi.mocked(executeStep).mockRejectedValueOnce(new Error('the step blew up'));
+    vi.mocked(captureScreenshot).mockClear();
+    await manager.executeSteps('s-err-report', { steps: ['click the button'] });
+    expect(captureScreenshot).toHaveBeenCalledWith(mockPage, false, 'report');
+  });
+});
+
+describe('the login broker draws nothing on the computer surface (SPEC-interaction-highlight.md §16.7)', () => {
+  it('highlighterFor answers undefined while the session is on the computer surface', async () => {
+    await manager.executeSteps('s-hl-computer', { steps: [], runSettings: { highlight: 'on' } });
+    expect(manager.highlighterFor('s-hl-computer')).toBeDefined();
+    managedSession(manager, 's-hl-computer').surface = 'computer';
+    expect(manager.highlighterFor('s-hl-computer')).toBeUndefined();
   });
 });

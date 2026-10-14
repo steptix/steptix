@@ -250,6 +250,7 @@ import { createApiServer } from '../src/server/api-server.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { executeStep } from '../src/runner/step-executor.js';
 import { listenFetchable } from './listen-fetchable.cjs';
+import { reportAudience, resolveHighlight } from '../src/browser/highlight.js';
 
 const stepMock = vi.mocked(executeStep);
 
@@ -1130,6 +1131,7 @@ describe('the echo on the done event', () => {
       sendScreenshots: false,
       ai: 'on',
       aiOffReason: null,
+      highlight: 'off',
       sources: {
         model: 'session',
         capture: 'session',
@@ -1138,6 +1140,7 @@ describe('the echo on the done event', () => {
         fullPage: 'server',
         sendScreenshots: 'server',
         ai: 'server',
+        highlight: 'server',
       },
     });
   });
@@ -1169,12 +1172,14 @@ describe('GET /config', () => {
       sendScreenshots: false,
       ai: 'on',
       aiOffReason: null,
+      highlight: 'off',
       sources: {
         model: 'server',
         capture: 'server',
         fullPage: 'server',
         sendScreenshots: 'server',
         ai: 'server',
+        highlight: 'server',
       },
     });
     expect(body.session).toBeNull();
@@ -1239,5 +1244,60 @@ describe('the project bundle as a source', () => {
 
     const second = await api('GET', '/config?sessionId=rs-project');
     expect(second.body.session.effective.sources.fullPage).toBe('session');
+  });
+});
+
+describe('the highlight run setting (docs/specs/SPEC-interaction-highlight.md §7.2)', () => {
+  it('turns the rings on for this session, retains it, and clears it with "default"', async () => {
+    await run('rs-highlight', { runSettings: { highlight: 'on' } });
+    expect(configAt(0).browser.highlight).toBe(true);
+
+    // Retained: the next batch sends nothing and still rings.
+    await run('rs-highlight');
+    expect(configAt(1).browser.highlight).toBe(true);
+    const { body } = await api('GET', '/config?sessionId=rs-highlight');
+    expect(body.session.overrides).toEqual({ highlight: 'on' });
+    expect(body.session.effective.highlight).toBe('on');
+    expect(body.session.effective.sources.highlight).toBe('session');
+
+    await run('rs-highlight', { runSettings: { highlight: 'default' } });
+    expect(configAt(2).browser.highlight).toBe(false);
+  });
+
+  it('400s an unknown value, naming the valid ones, and runs nothing', async () => {
+    const { status, body } = await api('POST', '/sessions/rs-bad-highlight/steps', {
+      steps: ['do a thing'],
+      runSettings: { highlight: 'yes' },
+    });
+    expect(status).toBe(400);
+    expect(String(body.error)).toContain('runSettings.highlight');
+    expect(String(body.error)).toContain('"default"');
+    expect(stepMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('screenshotsToModel (docs/specs/SPEC-interaction-highlight.md §4.2)', () => {
+  it('keeps the rings out of every capture of THIS batch, and only this one', async () => {
+    await run('rs-to-model', { runSettings: { highlight: 'on' }, screenshotsToModel: true });
+    expect(configAt(0).browser.highlight).toEqual({
+      enabled: true,
+      durationMs: 3000,
+      colors: { act: '#3b82f6', read: '#a855f7' },
+      inScreenshots: false,
+    });
+
+    // Not retained: the next batch's pictures are a person's again.
+    await run('rs-to-model');
+    expect(configAt(1).browser.highlight).toBe(true);
+  });
+
+  it('draws nothing while the highlight is off, and still marks the pictures as the model\'s', async () => {
+    // Off is written as `{ enabled: false, inScreenshots: false }`: the batch
+    // draws no ring, but its captures still hide one another caller drew on
+    // the same page (review round 1, finding 6).
+    await run('rs-to-model-off', { screenshotsToModel: true });
+    expect(configAt(0).browser.highlight).toEqual({ enabled: false, inScreenshots: false });
+    expect(resolveHighlight(configAt(0).browser)).toBeNull();
+    expect(reportAudience(configAt(0).browser)).toBe('model');
   });
 });

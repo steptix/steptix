@@ -23,6 +23,7 @@ import { expandTestInstances, parseTimeoutMs } from '../../runner/test-runner.js
 import { executeStep } from '../../runner/step-executor.js';
 import { launchBrowser, closeBrowser } from '../../browser/manager.js';
 import { captureScreenshot } from '../../browser/screenshot.js';
+import { reportAudience } from '../../browser/highlight.js';
 import { loadContextFiles } from '../../context/loader.js';
 import { withTestContext } from '../../context/test-context.js';
 import { bindVariable, interpolate } from '../../parser/parameters.js';
@@ -1163,7 +1164,7 @@ export class UIRunnerAdapter {
         );
         if (this.config?.execution.screenshotOnFailure && this.page) {
           try {
-            const shot = await captureScreenshot(this.page, this.config.browser.fullPageScreenshots);
+            const shot = await captureScreenshot(this.page, this.config.browser.fullPageScreenshots, reportAudience(this.config.browser));
             if (shot?.base64) stepResult.screenshotBase64 = shot.base64;
           } catch {
             // A missing screenshot must not turn the author's failure into a

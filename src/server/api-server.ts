@@ -2,8 +2,8 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { url as inspectorUrl } from 'node:inspector';
 import path from 'node:path';
-import type { AiMode, CaptureMode, Config, RunSettings } from '../config/types.js';
-import { AI_MODES, CAPTURE_MODES, RUN_SETTING_KEYS } from '../config/run-settings.js';
+import type { AiMode, CaptureMode, Config, HighlightMode, RunSettings } from '../config/types.js';
+import { AI_MODES, CAPTURE_MODES, HIGHLIGHT_MODES, RUN_SETTING_KEYS } from '../config/run-settings.js';
 import {
   knownProfilesAcross,
   startCdpBrowser,
@@ -56,6 +56,7 @@ import { ErrandLocks } from './errand-locks.js';
 import { ProjectBundleResolver } from './project-bundle.js';
 import { capturePageContent, readPageIdentity, type PageContentOptions } from './page-capture.js';
 import { captureTabScreenshot } from '../browser/screenshot.js';
+import { hiddenFor } from '../browser/highlight.js';
 import { PageCaptureError } from '../browser/dom-cleaner.js';
 import { createLoginBroker, type FieldHint, type LoginBroker } from '../credentials/index.js';
 import { IdleMonitor, startIdleReaper } from './idle-monitor.js';
@@ -1055,6 +1056,9 @@ export function createApiServer(
           request.runStart = {};
         }
       }
+      // Who reads this batch's screenshots (`StepRequest.screenshotsToModel`).
+      // Only `true` means anything; anything else is the ordinary report run.
+      if (body.screenshotsToModel === true) request.screenshotsToModel = true;
       if (body.logging !== undefined && body.logging !== null && typeof body.logging === 'object') {
         const lg = body.logging as { consoleLogLevel?: unknown; serverFileLogLevel?: unknown };
         const validLevels = new Set(['silent', 'error', 'warn', 'info', 'debug']);
@@ -1547,7 +1551,9 @@ export function createApiServer(
         return;
       }
 
-      const result = await loginBroker().attemptLogin(page, hint);
+      // Rings what the broker types into and presses, when this session's
+      // project turned the highlight on (SPEC-interaction-highlight.md §2.3).
+      const result = await loginBroker().attemptLogin(page, hint, sessionManager.highlighterFor(sessionId));
       // Always 200. Every outcome here — denied, no credential, stuck — is a
       // thing that legitimately happened, not a failed request, and the
       // `outcome` field is what the caller reads. The same reasoning the MCP
@@ -2258,7 +2264,19 @@ export function createApiServer(
             // window never produces, so it hangs and times out. Driving
             // `Page.captureScreenshot` directly skips that wait — see the table
             // on `captureTabScreenshot` (stories/cdp-tab-screenshot.md W1).
-            const shot = await captureTabScreenshot(attached.page, plan.fullPage);
+            // An agent reads this picture, so no highlight ring in it
+            // (docs/specs/SPEC-interaction-highlight.md §4.2). Forced: this
+            // Page was attached just now, so it has no record of the rings a
+            // session driving the same tab may have drawn a moment ago.
+            // A ring of this process's that could not be hidden in time
+            // means no picture, as a failed capture does.
+            const shot = await hiddenFor(attached.page, () => captureTabScreenshot(attached.page, plan.fullPage), {
+              force: true,
+            }).catch((err: unknown): Awaited<ReturnType<typeof captureTabScreenshot>> => ({
+              ok: false,
+              reason: 'failed',
+              detail: err instanceof Error ? err.message : String(err),
+            }));
             if (!shot.ok) {
               // Never an empty picture: that would report a blank page, a claim
               // about the page nobody downstream can correct. And the two
@@ -2857,6 +2875,17 @@ function parseRunSettings(raw: unknown): RunSettings | string {
     out.ai = ai as AiMode;
   }
 
+  if ('highlight' in input) {
+    const highlight = input.highlight;
+    if (typeof highlight !== 'string' || !HIGHLIGHT_MODES.includes(highlight as HighlightMode)) {
+      return (
+        `Invalid runSettings.highlight ${JSON.stringify(highlight)}. ` +
+        `Valid values are ${HIGHLIGHT_MODES.map((m) => `"${m}"`).join(', ')}.`
+      );
+    }
+    out.highlight = highlight as HighlightMode;
+  }
+
   if ('model' in input) {
     const model = input.model;
     if (model === null) {
@@ -2887,18 +2916,6 @@ function parseRunSettings(raw: unknown): RunSettings | string {
   return out;
 }
 
-/**
- * Parse an errand request off a request body, or return the 400 message.
- *
- * An explicit per-field allow-list, like the steps route's request builder and
- * for the same reason: `ErrandRequest` is BUILT here, so widening the type
- * alone compiles cleanly and drops the field at runtime — which is exactly how
- * `envName` was lost once.
- *
- * Every refusal names what was wrong. An errand is one request with no state
- * behind it, so a caller that guessed a field name has nothing to inspect
- * afterwards; the refusal is the only feedback there is.
- */
 /**
  * The compile request's per-field allow-list (stories/codebehind-compile.md
  * §Server).
@@ -3010,6 +3027,18 @@ export function parseCompileRequest(raw: unknown): CompileRequest | string {
   return request;
 }
 
+/**
+ * Parse an errand request off a request body, or return the 400 message.
+ *
+ * An explicit per-field allow-list, like the steps route's request builder and
+ * for the same reason: `ErrandRequest` is BUILT here, so widening the type
+ * alone compiles cleanly and drops the field at runtime — which is exactly how
+ * `envName` was lost once.
+ *
+ * Every refusal names what was wrong. An errand is one request with no state
+ * behind it, so a caller that guessed a field name has nothing to inspect
+ * afterwards; the refusal is the only feedback there is.
+ */
 function parseErrandRequest(raw: unknown): ErrandRequest | string {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return 'Request body must be an object';

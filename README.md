@@ -40,6 +40,9 @@ npx steptix run --headless
 # Use a specific browser
 npx steptix run --browser firefox
 
+# Ring each element an action touches, for this run only (or --no-highlight)
+npx steptix run --highlight
+
 # Load environment variables from .env.staging
 npx steptix run --env staging
 ```
@@ -925,6 +928,45 @@ Create `steptix.config.json` in your project root:
 `While` or `Repeat … until` step line may make before the framework gives up
 and fails that line; a line can override it with `, up to N times`. See
 [stories/control-flow.md](./stories/control-flow.md).
+
+`browser.highlight` rings each element a step clicks, types into, selects,
+hovers, drags, uploads to, reads or counts, for about three seconds, so you can see what each
+action touched while you watch a run, in its video and in the report's
+screenshots. It is off by default. `true` turns it on; the object form sets
+the details:
+
+```json
+{
+  "browser": {
+    "highlight": { "enabled": true, "durationMs": 3000, "colors": { "act": "#3b82f6", "read": "#a855f7" } }
+  }
+}
+```
+
+`durationMs` is 500–10000, and the colours are hex: `act` for what a step
+acts on, `read` for what it reads or counts. A read of every match, or a
+count, rings the first 20. Screenshots sent to the AI, and to an MCP agent
+reading the page, never show the rings; `"inScreenshots": false` keeps them
+out of the report's screenshots too.
+`steptix run --highlight` or `--no-highlight` switches it for one run and
+keeps the project's duration and colours. The same switch is the `highlight`
+run setting (`on`, `off` or `default`): the `highlight` argument of the MCP
+tools `run_steps` and `run_test_file`, which sticks to the session like the
+other run settings, and the `steptix.highlight` setting in VS Code.
+Compiled code-behind steps and `[tool:]` steps ring what their own
+Playwright calls touch too, as far as a wrapped `page` can see: a page
+reached through `ctx.context.pages()`, mouse and keyboard input at
+coordinates, and `page.evaluate` go unringed. While a ring is showing, one
+`<steptix-highlight>` element sits under `<html>`, so a test's own `*` or
+`html > *` selector counts one more element, and showing it fires
+`beforetoggle` and `toggle` events on it, which a page listening on
+`document` in the capture phase sees. The page's own popovers, dialogs,
+focus and clicks are not affected. Two gaps remain. `peek_tab` on a
+CDP tab where another Steptix process drew a ring inside a busy cross-origin
+frame can show that ring. And with Firefox or WebKit, `[use computer]`'s first
+screen grab could show a ring if the page's main thread was blocked past the
+ring's lifetime: only Chromium was measured fading it on time. See
+[docs/specs/SPEC-interaction-highlight.md](./docs/specs/SPEC-interaction-highlight.md).
 
 Editing `steptix.config.json` inside VS Code with the Steptix extension gives you
 autocomplete, enum-checking, and hover docs automatically — the extension ships

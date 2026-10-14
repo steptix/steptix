@@ -153,6 +153,9 @@ export interface FoldedEffectiveSettings {
    *  which is a different statement from `'on'`, and worth keeping apart. */
   ai: EffectiveSettings['ai'] | null;
   aiOffReason: EffectiveSettings['aiOffReason'];
+  /** Whether the run rang what it touched (docs/specs/SPEC-interaction-highlight.md
+   *  §7.2). Null from a server that predates the setting. */
+  highlight: EffectiveSettings['highlight'] | null;
   sources: FoldedSettingSources | null;
   screenshotsReturn: ScreenshotsReturn;
 }
@@ -168,6 +171,7 @@ export interface FoldedSettingSources {
   fullPage: EffectiveSettings['sources']['fullPage'];
   sendScreenshots: EffectiveSettings['sources']['sendScreenshots'];
   ai: EffectiveSettings['sources']['ai'] | null;
+  highlight: EffectiveSettings['sources']['highlight'] | null;
 }
 
 /**
@@ -185,6 +189,7 @@ interface WireEffectiveSettings {
   sendScreenshots: boolean;
   ai: EffectiveSettings['ai'] | null;
   aiOffReason: EffectiveSettings['aiOffReason'];
+  highlight: EffectiveSettings['highlight'] | null;
   sources: FoldedSettingSources;
 }
 
@@ -745,6 +750,7 @@ export function foldRun(input: FoldInput): FoldedRun {
       sendScreenshots: serverSettings?.sendScreenshots ?? null,
       ai: serverSettings?.ai ?? null,
       aiOffReason: serverSettings?.aiOffReason ?? null,
+      highlight: serverSettings?.highlight ?? null,
       sources: serverSettings?.sources ?? null,
       screenshotsReturn,
     },
@@ -766,6 +772,9 @@ function readSources(value: unknown): FoldedSettingSources | null {
     out[key] = from;
   }
   out.ai = typeof record.ai === 'string' && valid.has(record.ai) ? record.ai : null;
+  // Permissive for `ai`'s reason: a server that predates the highlight
+  // setting sends the rest and not this.
+  out.highlight = typeof record.highlight === 'string' && valid.has(record.highlight) ? record.highlight : null;
   return out as unknown as FoldedSettingSources;
 }
 
@@ -802,6 +811,7 @@ function readEffectiveSettings(value: unknown): WireEffectiveSettings | null {
     sendScreenshots: record.sendScreenshots,
     ai,
     aiOffReason: reason,
+    highlight: record.highlight === 'on' || record.highlight === 'off' ? record.highlight : null,
     sources,
   };
 }

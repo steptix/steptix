@@ -5,6 +5,8 @@ import { createCapturingLog, type CapturedLog } from '../tools/step-api.js';
 import type { CodeBehindBinding, CodeBehindVarScope } from './loader.js';
 import { entryFunctionActs } from './entry-actions.js';
 import { executeAction } from '../browser/actions.js';
+import type { HighlightSink } from '../browser/highlight.js';
+import { highlightingApi, highlightingPage } from '../browser/highlight-page.js';
 import { storeCapture } from '../runner/store-capture.js';
 import { runSecrets } from '../utils/secrets.js';
 import { WIDE_PLACEHOLDER_SOURCE } from '../parser/parameters.js';
@@ -240,6 +242,9 @@ export interface RunCodeBehindOptions {
   /** How long a count or a read of every match waits for its matches to hold
    *  still (§6.6). Defaults to 10 s. */
   readTimeoutMs?: number | undefined;
+  /** `browser.highlight`'s sink, absent when it is off: what a `step.read` /
+   *  `step.count` rings (docs/specs/SPEC-interaction-highlight.md §7.3). */
+  highlight?: HighlightSink | undefined;
 }
 
 export interface CodeBehindOutcome {
@@ -306,8 +311,16 @@ export async function runCodeBehindEntry(
     };
   }
 
+  // With the highlight on, the entry's own Playwright calls ring what they
+  // touch too: its page, and every page the tab and browser APIs hand it, are
+  // proxies that mark (src/browser/highlight-page.ts,
+  // docs/specs/SPEC-interaction-highlight.md §2.3). Off, the entry gets the
+  // real objects, exactly as before.
+  const sink = options.highlight;
+  const tabs = options.tabs ?? unavailableTabApi();
+  const browsers = options.browsers ?? unavailableBrowserApi();
   const ctx: CodeBehindContext = {
-    page: options.page,
+    page: sink ? highlightingPage(options.page, sink) : options.page,
     context: options.context,
     browser: options.browser,
     step: makeStepApi(
@@ -328,11 +341,12 @@ export async function runCodeBehindEntry(
         page: () => options.activePage?.() ?? options.page,
         signal: options.signal,
         readTimeoutMs: options.readTimeoutMs,
+        highlight: options.highlight,
       },
     ),
     log: createCapturingLog(options.label, logs),
-    tabs: options.tabs ?? unavailableTabApi(),
-    browsers: options.browsers ?? unavailableBrowserApi(),
+    tabs: sink ? highlightingApi(tabs, sink) : tabs,
+    browsers: sink ? highlightingApi(browsers, sink) : browsers,
     ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
   };
 
@@ -577,6 +591,9 @@ interface StepApiRuntime {
   /** How long a count or a read of every match waits for its matches to
    *  stop changing (§6.6). */
   readTimeoutMs?: number | undefined;
+  /** What a `step.read` / `step.count` rings with — the run's highlight sink,
+   *  lent like `page` and `signal`. Absent when the highlight is off. */
+  highlight?: HighlightSink | undefined;
 }
 
 /**
@@ -834,6 +851,7 @@ async function recordedRead(
   const kinds = options.kinds ?? [];
   const result = await executeAction(page, action, undefined, ctx.runtime.signal, {
     ...(kinds.length > 0 && { kinds: true }),
+    ...(ctx.runtime.highlight !== undefined && { highlight: ctx.runtime.highlight }),
     ...(plural && {
       settleMatches: { quietMs: MATCHES_QUIET_MS, timeoutMs: ctx.runtime.readTimeoutMs ?? 10_000 },
     }),

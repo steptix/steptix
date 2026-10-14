@@ -1325,7 +1325,11 @@ function renderSubAction(
     ? renderApiCallData(sub.apiCallData)
     : '';
 
-  return `<div class="sub-action">
+  // Which highlight ring the action asked for (SPEC-interaction-highlight.md
+  // §11), as an attribute and nothing visible: the screenshots already show
+  // the ring, and this is what a check of a report can read without pixels.
+  const highlighted = sub.highlighted !== undefined ? ` data-highlighted="${escapeHtml(sub.highlighted)}"` : '';
+  return `<div class="sub-action"${highlighted}>
   <div class="sub-action-header">
     <span class="sub-action-index">${sub.index}</span>
     <span class="action-badge">${escapeHtml(actionName)}</span>

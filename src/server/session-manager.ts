@@ -23,7 +23,7 @@ import type { LoopMarker, StepResult, TestReport } from '../report/types.js';
 // api-server suites replace wholesale with a three-export `vi.mock`.
 import { isHealedStep } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
-import { aiConfigured } from '../config/loader.js';
+import { aiConfigured, switchHighlight } from '../config/loader.js';
 import { TokenTracker } from '../utils/tokens.js';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import {
@@ -168,6 +168,7 @@ import type { ToolStepOutcome } from '../tools/types.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { captureScreenshot } from '../browser/screenshot.js';
+import { createHighlighter, endRings, highlighterFor, pagesOf, reportAudience, resolveHighlight, ringsOutOfScreenshots, type Highlighter } from '../browser/highlight.js';
 import { gotoWithDiagnosis } from '../browser/navigate-diagnosis.js';
 import {
   capturePageContent,
@@ -625,6 +626,20 @@ export interface StepRequest {
    * keep the surface exactly as before.
    */
   runStart?: { stepIndex?: number };
+  /**
+   * This batch's screenshots go back to a model: the MCP client hands a step's
+   * picture to the agent that called `run_steps` / `run_test_file`
+   * (`screenshots_return`), and that picture is also the report's. The rule
+   * is that a model never sees a highlight ring
+   * (docs/specs/SPEC-interaction-highlight.md §4.2), so with this set the
+   * batch runs with `browser.highlight.inScreenshots: false` and every capture
+   * it takes hides the rings, report ones included. The rings still show on
+   * screen and in the video.
+   *
+   * Per request and NOT retained, unlike `runSettings`: it describes who reads
+   * this batch's output, and the next batch on the session may be a person's.
+   */
+  screenshotsToModel?: boolean;
 }
 
 /**
@@ -2790,7 +2805,10 @@ export class SessionManager {
       if (!page) throw new NoBrowserLaunchedError();
       currentUrl = page.url();
       pageTitle = await page.title();
-      const shot = await captureScreenshot(page);
+      // `GET /sessions/:id` is what an MCP agent's `get_page_content` and
+      // `peek_tab` read, so a model looks at this picture: no highlight ring
+      // in it (docs/specs/SPEC-interaction-highlight.md §4.2).
+      const shot = await captureScreenshot(page, false, 'model');
       screenshotBase64 = shot?.base64
         ? `data:image/png;base64,${shot.base64}`
         : '';
@@ -2890,6 +2908,37 @@ export class SessionManager {
   }
 
   /**
+   * The ring the login broker draws for this session (`log_into_site`,
+   * docs/specs/SPEC-interaction-highlight.md §2.3), or undefined when the
+   * highlight is off or the session is unknown.
+   *
+   * Read off `browserConfig`, the project's browser section this session's
+   * last batch retained — a login has no test file to resolve a project from,
+   * which is that field's reason to exist, and the server's own config would
+   * be the wrong project's answer. A session that has run no batch carries the
+   * server's section, the same fallback every out-of-band read gets.
+   *
+   * The session's `highlight` run setting is folded over it here, the way
+   * `resolveRunSettings` folds it over a batch's config: a session told
+   * `highlight: 'off'` must not ring a login, and one told `'on'` must,
+   * whether or not a batch has run since.
+   */
+  highlighterFor(sessionId: string): Highlighter | undefined {
+    const session = this.sessions.get(this.sessionKey(sessionId));
+    if (!session || session.status === 'closed') return undefined;
+    // On the computer surface the next screen grab would photograph the
+    // ring, and `endRings` runs only on entering it: a login between batches
+    // of a session left there must draw nothing (§16.7).
+    if (session.surface === 'computer') return undefined;
+    const mode = session.runSettings.highlight;
+    const value = mode === 'on' || mode === 'off'
+      ? switchHighlight(session.browserConfig.highlight, mode === 'on')
+      : session.browserConfig.highlight;
+    const settings = resolveHighlight({ highlight: value });
+    return settings === null ? undefined : createHighlighter(settings);
+  }
+
+  /**
    * Record the finalized-run info for a session (issue 021). Bounded LRU-ish:
    * re-inserting moves the key to the end; we evict the oldest once over the cap.
    */
@@ -2982,19 +3031,6 @@ export class SessionManager {
   }
 
   /**
-   * Last finalized-run info for a session — report path + frozen token totals.
-   * Served by `GET /sessions/:id/last-run` so a client that stopped the run can
-   * recover what the dropped `done` event carried (issue 021). Returns
-   * `{ finalized: false, tokens: 0s }` when nothing is recorded yet (the run
-   * hasn't finalized), so the client polls until `finalized` rather than
-   * guessing a timeout. Survives session deletion (a browser-closing stop).
-   */
-  /**
-   * The last completed run of an OPEN session, in full — the `sessionId`
-   * input to a compile. Null when the session is gone, closed, or has not run,
-   * which is the compile endpoint's cue to record instead.
-   */
-  /**
    * Is this session open, and is a run in flight in it?
    *
    * `null` when there is no such open session. Unlike `getSession` this touches
@@ -3008,6 +3044,14 @@ export class SessionManager {
     return session.status === 'executing' ? 'executing' : 'active';
   }
 
+  /**
+   * Last finalized-run info for a session — report path + frozen token totals.
+   * Served by `GET /sessions/:id/last-run` so a client that stopped the run can
+   * recover what the dropped `done` event carried (issue 021). Returns
+   * `{ finalized: false, tokens: 0s }` when nothing is recorded yet (the run
+   * hasn't finalized), so the client polls until `finalized` rather than
+   * guessing a timeout. Survives session deletion (a browser-closing stop).
+   */
   getLastRun(sessionId: string): LastRunInfo {
     return (
       this.lastRunInfo.get(this.sessionKey(sessionId)) ?? {
@@ -4113,11 +4157,14 @@ export class SessionManager {
       request.config?.tableStructure,
       tableStructureOf(projectConfig),
     );
+    // A batch whose pictures go back to an agent keeps the highlight rings out
+    // of every capture (`StepRequest.screenshotsToModel`).
+    const batchBrowser = request.screenshotsToModel === true
+      ? ringsOutOfScreenshots(resolvedSettings.config.browser)
+      : resolvedSettings.config.browser;
     const runConfig: Config = {
       ...resolvedSettings.config,
-      ...(sessionViewport
-        ? { browser: { ...resolvedSettings.config.browser, fixedViewport: sessionViewport } }
-        : {}),
+      browser: sessionViewport ? { ...batchBrowser, fixedViewport: sessionViewport } : batchBrowser,
       tables: { ...resolvedSettings.config.tables, structure: tableStructure },
     };
     session.lastEffectiveSettings = resolvedSettings.effective;
@@ -4868,6 +4915,7 @@ export class SessionManager {
         // the message that fits the reason.
         ai: runKeyless ? undefined : effectiveAiRoute,
         ...(this.deps.checkVisionRoute && { checkVisionRoute: this.deps.checkVisionRoute }),
+        endBrowserRings: () => endRings(pagesOf(session.browserTracker)),
       });
     /** Put the caller back on its surface on return from a skill: `[use
      *  browser]`'s transition, or `[use computer]`'s through
@@ -7105,6 +7153,7 @@ export class SessionManager {
                 const shot = await captureScreenshot(
                   session.browserSession!.pageTracker.getActive(),
                   runConfig.browser.fullPageScreenshots,
+                  reportAudience(runConfig.browser),
                 );
                 if (shot?.base64) stepResult.screenshotBase64 = shot.base64;
               } catch {
@@ -7284,6 +7333,12 @@ export class SessionManager {
               browser: session.browserSession?.browser as Browser,
               resolvedParameters,
               catalogue: toolCatalogue,
+              // The tool's own Playwright calls ring what they touch
+              // (docs/specs/SPEC-interaction-highlight.md §2.3), under this
+              // batch's resolved setting — on the browser surface only: on
+              // the computer surface the next screen grab would photograph
+              // the ring.
+              ...(session.surface !== 'computer' && { highlight: highlighterFor(runConfig.browser) }),
               ...(session.sessionConfig.baseUrl !== undefined && {
                 baseUrl: session.sessionConfig.baseUrl,
               }),
@@ -7530,6 +7585,8 @@ export class SessionManager {
           try {
             const shot = await captureScreenshot(
               session.browserSession!.pageTracker.getActive(),
+              false,
+              reportAudience(runConfig.browser),
             );
             errorScreenshot = shot?.base64
               ? `data:image/png;base64,${shot.base64}`

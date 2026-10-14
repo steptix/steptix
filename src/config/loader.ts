@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { AIGateway } from '@pkent/aigateway';
 import { DEFAULT_CONFIG } from './defaults.js';
-import type { AiConfig, Config, UserConfig } from './types.js';
+import type { AiConfig, BrowserConfig, Config, UserConfig } from './types.js';
 import { parseBoolEnv } from '../env/loader.js';
 import {
   parseFlowControlStep,
@@ -344,6 +344,7 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
   assertDesktopSection(userConfig['desktop'], resolvedPath);
   assertStatsSection(userConfig['stats'], resolvedPath);
   assertBlockAds(userConfig['browser'], resolvedPath);
+  assertHighlight(userConfig['browser'], resolvedPath);
   const typed = userConfig as UserConfig;
   const merged = withMachineAiFloor(
     withEnvDefaults(mergeConfig(baseDefaults, typed)),
@@ -531,6 +532,84 @@ function assertBlockAds(browser: unknown, configPath: string): void {
   }
 }
 
+/** The keys `browser.highlight`'s object form takes, and its colour keys. */
+const HIGHLIGHT_KEYS = ['enabled', 'durationMs', 'colors', 'inScreenshots'] as const;
+const HIGHLIGHT_COLOR_KEYS = ['act', 'read'] as const;
+/** `#rgb` or `#rrggbb`: the only colours checked here, because Node cannot ask
+ *  a browser whether any other CSS colour parses. */
+const HEX_COLOUR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+
+/**
+ * `browser.highlight` (docs/specs/SPEC-interaction-highlight.md §7.1), checked
+ * at LOAD for `assertDesktopSection`'s reason: the switch is read as truthy,
+ * so the string `"false"` would turn the rings ON. A refusal naming the file,
+ * the key and the value costs one edit.
+ *
+ * Stricter than the other sections on unknown keys, and deliberately: the
+ * object is small and new, so a misspelt `duration` or `colours` would
+ * otherwise be a setting that silently does nothing. The generated schema
+ * refuses the same things in the editor.
+ */
+function assertHighlight(browser: unknown, configPath: string): void {
+  if (!isPlainObject(browser)) return;
+  const value = browser['highlight'];
+  if (value === undefined || typeof value === 'boolean') return;
+  const where = `Invalid browser.highlight in ${configPath}`;
+  if (!isPlainObject(value)) {
+    throw new Error(
+      `${where}: expected true, false or an object, got ${describeValue(value)}. ` +
+        'Write the JSON boolean, without quotes, or { "enabled": true, "durationMs": 3000 }.',
+    );
+  }
+  const unknown = Object.keys(value).filter((k) => !(HIGHLIGHT_KEYS as readonly string[]).includes(k));
+  if (unknown.length > 0) {
+    throw new Error(
+      `${where}: expected only ${HIGHLIGHT_KEYS.join(', ')}, got ${unknown.map((k) => JSON.stringify(k)).join(', ')}.`,
+    );
+  }
+  for (const key of ['enabled', 'inScreenshots'] as const) {
+    const flag = value[key];
+    if (flag !== undefined && typeof flag !== 'boolean') {
+      throw new Error(
+        `Invalid browser.highlight.${key} in ${configPath}: expected true or false, got ${describeValue(flag)}. ` +
+          'Write the JSON boolean, without quotes.',
+      );
+    }
+  }
+  const durationMs = value['durationMs'];
+  if (
+    durationMs !== undefined
+    && (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 500 || durationMs > 10_000)
+  ) {
+    throw new Error(
+      `Invalid browser.highlight.durationMs in ${configPath}: expected a number of milliseconds from 500 to 10000, ` +
+        `got ${describeValue(durationMs)}.`,
+    );
+  }
+  const colors = value['colors'];
+  if (colors === undefined) return;
+  if (!isPlainObject(colors)) {
+    throw new Error(
+      `Invalid browser.highlight.colors in ${configPath}: expected an object, got ${describeValue(colors)}. ` +
+        'Write { "act": "#3b82f6", "read": "#a855f7" }.',
+    );
+  }
+  for (const key of Object.keys(colors)) {
+    if (!(HIGHLIGHT_COLOR_KEYS as readonly string[]).includes(key)) {
+      throw new Error(
+        `Invalid browser.highlight.colors in ${configPath}: expected only act, read, got ${JSON.stringify(key)}.`,
+      );
+    }
+    const colour = colors[key];
+    if (typeof colour !== 'string' || !HEX_COLOUR.test(colour)) {
+      throw new Error(
+        `Invalid browser.highlight.colors.${key} in ${configPath}: expected a hex colour such as "#3b82f6", ` +
+          `got ${describeValue(colour)}.`,
+      );
+    }
+  }
+}
+
 /**
  * A project default hook may not be a flow-control step
  * (stories/step-flow-control.md, decision 8).
@@ -593,6 +672,17 @@ export function useStepInHookError(instruction: string, where = ''): string {
   );
 }
 
+/**
+ * `browser.highlight` with its switch set to `on`, keeping the rest of what
+ * the project wrote: an object keeps its duration and colours, a boolean
+ * becomes the other boolean. One rule for `--highlight` / `--no-highlight`
+ * and for the `highlight` run setting (SPEC-interaction-highlight.md §7.2),
+ * so "show me this one run" looks the way the project chose either way.
+ */
+export function switchHighlight(value: BrowserConfig['highlight'], on: boolean): BrowserConfig['highlight'] {
+  return typeof value === 'object' && value !== null ? { ...value, enabled: on } : on;
+}
+
 /** Apply CLI flag overrides onto an already-loaded config */
 export function applyCliOverrides(
   config: Config,
@@ -601,9 +691,18 @@ export function applyCliOverrides(
     timeout?: number;
     browser?: 'chromium' | 'firefox' | 'webkit';
     verbose?: boolean;
+    /** `--highlight` / `--no-highlight` (SPEC-interaction-highlight.md §7.2). */
+    highlight?: boolean;
   },
 ): Config {
   const result = { ...config };
+
+  if (overrides.highlight !== undefined) {
+    result.browser = {
+      ...result.browser,
+      highlight: switchHighlight(result.browser.highlight, overrides.highlight),
+    };
+  }
 
   if (overrides.headless === true) {
     result.browser = { ...result.browser, headed: false };

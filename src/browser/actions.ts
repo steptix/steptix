@@ -17,6 +17,7 @@ import { logger } from '../utils/logger.js';
 import { resolveUploadPaths, uploadPathsOf, type UploadPathContext } from './upload-paths.js';
 import { armDialog, describeDialogs, takeUnreportedDefaultAnswers } from './dialogs.js';
 import { gotoWithDiagnosis } from './navigate-diagnosis.js';
+import { HIGHLIGHT_MANY_MAX, type HighlightKind, type HighlightSink, type MarkOptions } from './highlight.js';
 
 /**
  * Resolves the locator root for an action.
@@ -744,7 +745,22 @@ export interface ExecuteActionOptions {
    * thought; a compiled one arrives milliseconds after the step before it.
    */
   settleMatches?: { quietMs: number; timeoutMs: number } | undefined;
+  /**
+   * `browser.highlight`'s sink, absent when the highlight is off
+   * (docs/specs/SPEC-interaction-highlight.md §2.2). Each handler calls `mark`
+   * on the final Locator at its act: immediately before the Playwright call
+   * that acts or reads, except a count, which marks what it counted right
+   * after the counts that are the action itself, so a count of 0 rings
+   * nothing. Never from a probe, so every ring is an action, and never
+   * awaited.
+   */
+  highlight?: HighlightSink | undefined;
 }
+
+/** {@link HighlightSink.mark}, or nothing when the highlight is off. */
+type Mark = (target: Locator, kind: HighlightKind, max?: number, options?: MarkOptions) => void;
+
+const NO_MARK: Mark = () => {};
 
 /** The elements of one kind a list read or count matched ({@link ListMatches}). */
 export interface MatchGroup {
@@ -836,6 +852,16 @@ export interface ActionExecutionResult {
    *  in. Absent on a plain type, which fills. */
   typed?: TypedRoute;
   /**
+   * The highlight was asked to ring what this action touched, and in which
+   * colour (docs/specs/SPEC-interaction-highlight.md §11). A REQUEST, not a
+   * drawing: the draw is fire-and-forget, so this cannot say the ring
+   * appeared, and it may draw nothing at all when the target is absent or has
+   * no box — a keyboard action with nothing focused, a hidden match. `read`
+   * when the action asked for any read ring, else `act`. Absent when the
+   * highlight is off or the action has no element to ask about.
+   */
+  highlighted?: HighlightKind;
+  /**
    * What the region holds, on a `readTable` that failed for a SHAPE reason
    * (§7.10) — nothing with data rows under it, two things with them, no
    * header found by any path, two header-only candidates, or a pairing whose
@@ -863,8 +889,45 @@ export type TypedRoute = { by: 'keys' } | { by: 'fill'; inputType: string };
 /**
  * Execute a single AI action via Playwright.
  * Maps each action type to the corresponding Playwright API call.
+ *
+ * With a highlight sink, the result says whether the action asked for a ring
+ * (`highlighted`, SPEC-interaction-highlight.md §11). Recorded here, around
+ * every return path the action has, by passing the handlers a sink that
+ * notes the request before forwarding it.
  */
 export async function executeAction(
+  page: Page,
+  action: AIAction,
+  baseUrl?: string,
+  signal?: AbortSignal,
+  options?: ExecuteActionOptions,
+): Promise<ActionExecutionResult> {
+  const sink = options?.highlight;
+  if (sink === undefined) return executeActionMarked(page, action, baseUrl, signal, options);
+  let highlighted: HighlightKind | undefined;
+  // When this action is over, and whether it worked: what a mark that found
+  // nothing waits on before it may ring a late element (`MarkOptions.settled`),
+  // so an element that arrives after the action is never taken for its target.
+  let settle: (ok: boolean) => void = () => {};
+  const settled = new Promise<boolean>((resolve) => {
+    settle = resolve;
+  });
+  const noting: HighlightSink = {
+    mark(target, kind, max, markOptions) {
+      if (highlighted !== 'read') highlighted = kind;
+      sink.mark(target, kind, max, { ...markOptions, settled });
+    },
+  };
+  let result: ActionExecutionResult | undefined;
+  try {
+    result = await executeActionMarked(page, action, baseUrl, signal, { ...options, highlight: noting });
+  } finally {
+    settle(result?.success === true);
+  }
+  return highlighted === undefined ? result : { ...result, highlighted };
+}
+
+async function executeActionMarked(
   page: Page,
   action: AIAction,
   baseUrl?: string,
@@ -982,6 +1045,19 @@ export async function executeAction(
   // the cheap half on by itself.
   const wantMeasure = options?.measure === true;
   const wantGate = options?.ambiguousTarget === 'fail';
+  /** Ring what the action touches (SPEC-interaction-highlight.md §2.2). Handed
+   *  to the handlers below, which call it at the act and nowhere else. A sink
+   *  that throws is swallowed here too: a ring must never fail a step. */
+  const sink = options?.highlight;
+  const mark: Mark = sink === undefined
+    ? NO_MARK
+    : (target, kind, max, markOptions) => {
+        try {
+          sink.mark(target, kind, max, markOptions);
+        } catch {
+          // Nothing to report: the ring is decoration.
+        }
+      };
   /** Collect what kinds of element a read or count matched (§6.6). */
   const wantKinds = wantMeasure || options?.kinds === true;
   /** What the runtime found. Absent unless we measured and the numbers held. */
@@ -1099,13 +1175,13 @@ export async function executeAction(
       case 'click': {
         // §2.10: the selector as written reaches only a hidden input on
         // replay, so a compile must see what the runtime clicked instead.
-        const standIn = await executeClick(page, root, eff, remainingMs, wantMeasure);
+        const standIn = await executeClick(page, root, eff, remainingMs, wantMeasure, mark);
         if (standIn !== undefined) targeting = { ...(targeting ?? {}), ...standIn };
         break;
       }
 
       case 'type':
-        typed = await executeType(page, root, eff, remainingMs);
+        typed = await executeType(page, root, eff, remainingMs, mark);
         break;
 
       case 'dialog': {
@@ -1118,7 +1194,7 @@ export async function executeAction(
       }
 
       case 'select':
-        await executeSelect(root, eff, remainingMs);
+        await executeSelect(root, eff, remainingMs, mark);
         break;
 
       case 'navigate':
@@ -1141,15 +1217,15 @@ export async function executeAction(
         break;
 
       case 'drag':
-        await executeDrag(page, root, eff, remainingMs);
+        await executeDrag(page, root, eff, remainingMs, mark);
         break;
 
       case 'upload':
-        uploadRoute = await executeUpload(page, root, eff, uploadFiles ?? [], remainingMs);
+        uploadRoute = await executeUpload(page, root, eff, uploadFiles ?? [], remainingMs, mark);
         break;
 
       case 'hover':
-        await executeHover(root, eff, remainingMs);
+        await executeHover(root, eff, remainingMs, mark);
         break;
 
       case 'wait':
@@ -1166,13 +1242,13 @@ export async function executeAction(
         break;
 
       case 'dismiss':
-        await executeDismiss(root, eff);
+        await executeDismiss(root, eff, mark);
         break;
 
       case 'keyboard':
       case 'keypress':
         // Keyboard events go to the focused element — always page-level
-        await executeKeyboard(page, eff);
+        await executeKeyboard(page, eff, mark);
         break;
 
       case 'read': {
@@ -1182,7 +1258,7 @@ export async function executeAction(
           // free here (the page already returned every element), and there is
           // no `resolvedSelector` because there is no single element.
           if (options?.settleMatches) await settleMatchCount(root, requireSelector(eff), options.settleMatches, signal);
-          const list = await executeReadMultiple(root, eff);
+          const list = await executeReadMultiple(root, eff, mark);
           // The kinds come from the same page call as the values, so they are
           // the kinds of exactly the elements read — what `matchedKinds`
           // would answer, one round trip sooner.
@@ -1201,7 +1277,7 @@ export async function executeAction(
             listMatches: list.listMatches,
           };
         }
-        const captured = await executeRead(root, eff, remainingMs);
+        const captured = await executeRead(root, eff, remainingMs, mark);
         // The kind of the element read: the first match, as the read took.
         const kinds = wantKinds ? await matchedKinds(root, requireSelector(eff), 1) : undefined;
         const measured = targeting !== undefined || (wantMeasure && kinds !== undefined)
@@ -1234,7 +1310,7 @@ export async function executeAction(
           ...(options?.maskValues !== undefined && { maskValues: options.maskValues }),
           ...(options?.structureSource !== undefined
             && { structureSource: options.structureSource }),
-        });
+        }, mark);
         logger.info(formatTableReadSummary(table, columns.length, eff.as, eff.limit));
         return { success: true, capturedRecords: table.records };
       }
@@ -1242,7 +1318,7 @@ export async function executeAction(
       case 'count': {
         // Also plural, and its count IS its result — free, and never gated.
         if (options?.settleMatches) await settleMatchCount(root, requireSelector(eff), options.settleMatches, signal);
-        const counted = await executeCount(root, eff);
+        const counted = await executeCount(root, eff, mark);
         const total = Number(counted.value);
         // What the count counted — the visible matches unless it was asked for
         // hidden ones too — kind by kind, for a count shown to the model
@@ -1455,6 +1531,7 @@ async function executeClick(
   action: AIAction,
   timeoutMs?: number,
   measure = false,
+  mark: Mark = NO_MARK,
 ): Promise<ActionTargeting | undefined> {
   const selector = requireSelector(action);
   const hold = action.clickCount === 2 ? 0 : (action.holdMs ?? 0);
@@ -1462,6 +1539,10 @@ async function executeClick(
   /** Spent waiting for a hidden toggle's container, out of the click's budget. */
   let waited = 0;
   const press = (target: Locator): Promise<void> => {
+    // Every click goes through here, on what is actually clicked: the
+    // stand-in label or box for a hidden toggle, not the invisible input
+    // (SPEC-interaction-highlight.md §2.2).
+    mark(target, 'act');
     const options = {
       // The hold is part of the click, so it is added to the time allowed.
       timeout: Math.max(budget - waited, MIN_ACTION_TIMEOUT_MS) + hold,
@@ -1875,6 +1956,7 @@ async function executeType(
   root: Page | FrameLocator,
   action: AIAction,
   clearTimeoutMs?: number,
+  mark: Mark = NO_MARK,
 ): Promise<TypedRoute | undefined> {
   const selector = requireSelector(action);
   let value = action.value ?? '';
@@ -1882,6 +1964,10 @@ async function executeType(
   const keyByKey = action.sequential === true && value !== '';
   const locator = root.locator(selector).locator('visible=true').first();
   await uncoverForTyping(locator);
+  // Once, for whichever way the text goes in below: `fill`,
+  // `pressSequentially` key by key, or the click and keyboard of §2.27. After
+  // the uncovering scroll, which is a probe.
+  mark(locator, 'act');
   // A custom element whose field lives in a CLOSED shadow root, a canvas
   // editor, anything `fill` refuses as "not an <input>": click it and type,
   // which is how a person reaches a field nothing can query
@@ -2120,10 +2206,12 @@ async function executeSelect(
   root: Page | FrameLocator,
   action: AIAction,
   byValueTimeoutMs?: number,
+  mark: Mark = NO_MARK,
 ): Promise<void> {
   const selector = requireSelector(action);
   const value = action.value ?? '';
   const locator = root.locator(selector).locator('visible=true').first();
+  mark(locator, 'act');
   // A `<select multiple>` takes every option in one call (§2.8). Split only
   // when the element is a multi-select: a single select's option can contain
   // a comma ("Washington, DC").
@@ -2344,6 +2432,7 @@ async function executeDrag(
   root: Page | FrameLocator,
   action: AIAction,
   timeoutMs?: number,
+  mark: Mark = NO_MARK,
 ): Promise<void> {
   const selector = requireSelector(action);
   const target = action.target !== undefined ? sanitizeCssSelector(action.target) : '';
@@ -2391,6 +2480,11 @@ async function executeDrag(
       to = await destination.boundingBox({ timeout }).catch(() => null);
     }
   }
+  // Both ends, source first, once the pair is where the drag will happen:
+  // after the scrolling above, before either way of dragging below
+  // (SPEC-interaction-highlight.md §2.2). `pointerReaches` is a probe.
+  mark(source, 'act');
+  mark(destination, 'act');
   if (from === null || to === null || !inView(from) || !inView(to)) {
     await source.dragTo(destination, { timeout });
     return;
@@ -2621,6 +2715,7 @@ async function executeUpload(
   action: AIAction,
   files: string[],
   timeoutMs?: number,
+  mark: Mark = NO_MARK,
 ): Promise<UploadRoute> {
   const selector = requireSelector(action);
   // ONE budget for the whole action, spent down as it goes. Each wait below
@@ -2639,6 +2734,9 @@ async function executeUpload(
    *  input (or a label for one), otherwise click it and answer the picker. */
   const useVisibleTarget = async (): Promise<UploadRoute> => {
     const target = visible.first();
+    // The visible input or the control that opens the chooser. A hidden
+    // file input, below, has no box to ring and is not marked (§2.2).
+    mark(target, 'act');
     const kind = await classifyUploadTarget(target);
     if (kind.isFileInput) {
       assertMultipleAllowed(selector, files, kind.multiple);
@@ -2683,13 +2781,12 @@ async function executeHover(
   root: Page | FrameLocator,
   action: AIAction,
   timeoutMs?: number,
+  mark: Mark = NO_MARK,
 ): Promise<void> {
   const selector = requireSelector(action);
-  await root
-    .locator(selector)
-    .locator('visible=true')
-    .first()
-    .hover({ timeout: timeoutMs ?? HOVER_TIMEOUT_MS });
+  const target = root.locator(selector).locator('visible=true').first();
+  mark(target, 'act');
+  await target.hover({ timeout: timeoutMs ?? HOVER_TIMEOUT_MS });
 }
 
 /**
@@ -3653,13 +3750,14 @@ async function executeScroll(page: Page, root: Page | FrameLocator, action: AIAc
   await page.mouse.wheel(deltaX, deltaY);
 }
 
-async function executeDismiss(root: Page | FrameLocator, action: AIAction): Promise<void> {
+async function executeDismiss(root: Page | FrameLocator, action: AIAction, mark: Mark = NO_MARK): Promise<void> {
   const selector = action.selector;
 
   if (selector) {
     try {
       const locator = root.locator(selector).locator('visible=true').first();
       if (await locator.isVisible({ timeout: 3_000 })) {
+        mark(locator, 'act');
         await locator.click({ timeout: 5_000 });
         return;
       }
@@ -3685,6 +3783,7 @@ async function executeDismiss(root: Page | FrameLocator, action: AIAction): Prom
     try {
       const el = root.locator(pattern).first();
       if (await el.isVisible({ timeout: 1_000 })) {
+        mark(el, 'act');
         await el.click({ timeout: 3_000 });
         logger.debug(`Dismissed element matching: ${pattern}`);
         return;
@@ -3697,7 +3796,15 @@ async function executeDismiss(root: Page | FrameLocator, action: AIAction): Prom
   logger.debug('No dismiss target found — continuing');
 }
 
-async function executeKeyboard(page: Page, action: AIAction): Promise<void> {
+async function executeKeyboard(page: Page, action: AIAction, mark: Mark = NO_MARK): Promise<void> {
+  // What has the focus, which is where the keys go (SPEC-interaction-highlight.md
+  // §2.2). The LAST match: a shadow host matches `:focus` along with the
+  // element focused inside it, and the host comes first in document order.
+  // Focus inside a frame rings the <iframe>, the deepest this page-level
+  // locator can name; nothing focused rings nothing.
+  // No late wait: an element focused after this action is not what its keys
+  // went to.
+  mark(page.locator('*:focus').last(), 'act', undefined, { wait: false });
   // `text` types into whatever has focus (§2.27): after a click on a canvas,
   // an editor, or a field inside a closed shadow root.
   if (action.text !== undefined && action.text !== '') {
@@ -3770,6 +3877,7 @@ function requireSelector(action: AIAction): string {
 async function executeCount(
   root: Page | FrameLocator,
   action: AIAction,
+  mark: Mark = NO_MARK,
 ): Promise<{ value: string; counted: Locator; total: number }> {
   const selector = requireSelector(action);
   logger.subAction(`count ${selector} → ${action.as ?? '(unnamed)'}`);
@@ -3795,6 +3903,9 @@ async function executeCount(
       counted = visibleMatches;
     }
   }
+  // What was counted, the first twenty of it (§5.3). After the counts, which
+  // ARE this action, so a count of 0 rings nothing and asks the page nothing.
+  if (count > 0) mark(counted, 'read', HIGHLIGHT_MANY_MAX);
   const result = String(count);
   logger.info(
     `count: ${count} ${action.includeHidden ? '' : 'visible '}elements matching "${selector}"`
@@ -3909,15 +4020,16 @@ async function executeRead(
   root: Page | FrameLocator,
   action: AIAction,
   timeoutMs?: number,
+  mark: Mark = NO_MARK,
 ): Promise<string> {
   const selector = requireSelector(action);
   const attribute = action.attribute;
   const target = attribute ? `@${attribute}` : 'text';
   logger.subAction(`read ${selector} ${target} → ${action.as ?? '(unnamed)'}`);
 
-  let value = await root
-    .locator(selector)
-    .first()
+  const element = root.locator(selector).first();
+  mark(element, 'read');
+  let value = await element
     .evaluate(extractValueInPage, attribute, timeoutMs !== undefined ? { timeout: timeoutMs } : undefined);
 
   // Optional substring extraction (issue 020). Applied in Node after capture so
@@ -3981,11 +4093,15 @@ async function executeRead(
 async function executeReadMultiple(
   root: Page | FrameLocator,
   action: AIAction,
+  mark: Mark = NO_MARK,
 ): Promise<{ values: string[]; matchCount: number; listMatches: ListMatches }> {
   const selector = requireSelector(action);
   const attribute = action.attribute;
   const target = attribute ? `@${attribute}` : 'text';
   logger.subAction(`read[multiple] ${selector} ${target} → ${action.as ?? '(unnamed)'}`);
+  // Every match is read, hidden ones included; the first twenty are ringed,
+  // and the page skips any with no box (§5.3).
+  mark(root.locator(selector), 'read', HIGHLIGHT_MANY_MAX);
 
   // Single round-trip: ship the extractor source to the page and run it
   // across every match. The extractor body is duplicated literally inside
@@ -4481,6 +4597,9 @@ const readTableInPage = new Function(
 export async function readTableRecords(
   root: Page | FrameLocator,
   request: TableReadRequest,
+  /** The highlight's mark (SPEC-interaction-highlight.md §2.2): one ring, on
+   *  the element the selector names, never one per cell. */
+  mark: (target: Locator, kind: HighlightKind, max?: number) => void = NO_MARK,
 ): Promise<TableReadResult> {
   const { selector } = request;
   // §6.2 in full, not just the column cap: the same validator the parser runs,
@@ -4497,6 +4616,7 @@ export async function readTableRecords(
     + (request.mapping !== undefined ? ` (structure: ${request.mapping.kind})` : ''),
   );
 
+  mark(root.locator(selector), 'read', 1);
   const outcome = await root.locator(selector).evaluateAll(readTableInPage, {
     selector,
     // Only the fields the page needs. `mode` is phase 1's `'text'` by
@@ -4545,6 +4665,18 @@ export async function readTableRecords(
 }
 
 /**
+ * How the summary line names each source (§7.6).
+ *
+ * "the run" rather than "the memo": the reader of a run log has never heard of
+ * a memo, and what the phrase has to say is that an EARLIER STEP of this same
+ * run paid for the answer. The debug line beside it names the step.
+ */
+const STRUCTURE_SOURCE_WORDS: Record<TableStructureSource, string> = {
+  model: 'the model',
+  memo: 'the run',
+};
+
+/**
  * The one summary line a `readTable` writes to the run log (§7.6): counts, not
  * contents. The captured cells belong in the variable and the report, not in
  * every console the run passes through.
@@ -4559,18 +4691,6 @@ export async function readTableRecords(
  * header was paired with the wrong rows returns records that look exactly like
  * a correct read, and this line is the only place the pairing is visible.
  */
-/**
- * How the summary line names each source (§7.6).
- *
- * "the run" rather than "the memo": the reader of a run log has never heard of
- * a memo, and what the phrase has to say is that an EARLIER STEP of this same
- * run paid for the answer. The debug line beside it names the step.
- */
-const STRUCTURE_SOURCE_WORDS: Record<TableStructureSource, string> = {
-  model: 'the model',
-  memo: 'the run',
-};
-
 export function formatTableReadSummary(
   result: TableReadResult,
   columnCount: number,

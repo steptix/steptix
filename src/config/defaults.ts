@@ -29,6 +29,9 @@ export const DEFAULT_CONFIG: Config = {
     domSnapshotCharLimit: 300_000,
     captureScreenshotsPerAction: false,
     video: 'off',
+    // Off: the rings paint over the page under test and put a host element in
+    // its DOM, which should be a choice (SPEC-interaction-highlight.md §13).
+    highlight: false,
     cdp: { hideAutomation: false },
     domNoiseReduction: {
       collapseRepetitiveDom: true,

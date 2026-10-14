@@ -3,6 +3,8 @@ import { bindVariable, interpolate } from '../parser/parameters.js';
 import { logger } from '../utils/logger.js';
 import { createCapturingLog } from './step-api.js';
 import type { ToolCatalogue } from './registry.js';
+import type { HighlightSink } from '../browser/highlight.js';
+import { highlightingPage } from '../browser/highlight-page.js';
 import type {
   ToolCall,
   ToolContext,
@@ -37,6 +39,13 @@ export interface ExecuteToolStepOptions {
    * time we get here the debugger is guaranteed to be listening.
    */
   pauseBeforeRun?: boolean;
+  /**
+   * `browser.highlight`'s sink, absent when it is off. With it the tool's
+   * `ctx.page` is a proxy that rings what the tool's own Playwright calls act
+   * on or read (src/browser/highlight-page.ts,
+   * docs/specs/SPEC-interaction-highlight.md §2.3).
+   */
+  highlight?: HighlightSink | undefined;
 }
 
 /**
@@ -159,7 +168,7 @@ export async function executeToolStep(
   };
 
   const ctx: ToolContext = {
-    page: options.page,
+    page: options.highlight ? highlightingPage(options.page, options.highlight) : options.page,
     context: options.context,
     browser: options.browser,
     step: stepApi,

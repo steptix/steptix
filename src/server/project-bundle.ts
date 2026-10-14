@@ -59,8 +59,11 @@ export interface ProjectBundle {
    * per-test `## Config: viewport`), `browser.launchArgs`, `browser.blockAds` and the whole
    * `desktop` section (both stored on the session by the steps handler from
    * `projectBundle.config`, then read at LAUNCH time and at `[use computer]`
-   * respectively). Every other `browser.*` key on the server path is the
-   * SERVER's. `desktop` was the measured case: a project with
+   * respectively). `browser.highlight` reaches the executor the way
+   * this key does, re-sourced in `resolveRunSettings`, and is not hoisted
+   * here: it is read per action, never at session creation
+   * (docs/specs/SPEC-interaction-highlight.md §7.3).
+   * Every other `browser.*` key on the server path is the SERVER's. `desktop` was the measured case: a project with
    * `desktop.enabled: true` was refused because the server's own config —
    * which is what `resolveRunSettings` spreads into `runConfig` — said
    * nothing.

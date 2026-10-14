@@ -1,6 +1,7 @@
 import path from 'node:path';
 import type { AiClient } from '../ai/client.js';
 import type { Config } from '../config/types.js';
+import { ringsOutOfScreenshots } from '../browser/highlight.js';
 import type { ParsedTest } from '../parser/types.js';
 import type { StepResult, TestReport } from '../report/types.js';
 import type { TokenTracker } from '../utils/tokens.js';
@@ -3593,7 +3594,11 @@ export function createTestFileRunner(options: CompileOptions): CompileRunner {
         // record's leftovers.
         resolvedParameters: { ...request.parameters },
       },
-      options.config,
+      // A compile run's failure screenshot is the picture the repair model is
+      // sent (`buildRepairPrompt`), so no capture it takes may carry a
+      // highlight ring (docs/specs/SPEC-interaction-highlight.md §4.2). The
+      // rings still show on screen.
+      { ...options.config, browser: ringsOutOfScreenshots(options.config.browser) },
       options.contextContent,
       {
         ...(request.candidateFiles && { codeBehindCandidates: request.candidateFiles }),

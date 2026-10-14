@@ -17,6 +17,11 @@
 //   __ALLOWED_ATTRS_JSON__    → JSON-stringified string[]
 //   __DROP_UNSTABLE_IDS__     → `true` / `false`        (boolean literal)
 //   __UNSTABLE_ID_PATTERNS_JSON__ → JSON-stringified string[] of regex sources
+//   __HIGHLIGHT_TAG_JSON__    → JSON-stringified lower-case tag of the
+//                               interaction highlight's host (HIGHLIGHT_TAG,
+//                               src/browser/highlight.ts)
+//   __HIGHLIGHT_KEY_JSON__    → JSON-stringified registry key the host carries
+//                               (HIGHLIGHT_REGISTRY_KEY, same file)
 //   SECRET_FIELD_RULE (double-underscored, like the others; not spelled out
 //   here because the splice would land in this comment too)
 //                             → the text of ./secret-field.js, spliced in once
@@ -68,6 +73,24 @@
   var USE_ATTR_ALLOWLIST = __USE_ATTR_ALLOWLIST__;
   var ALLOWED_ATTRS = new Set(__ALLOWED_ATTRS_JSON__);
   var DROP_UNSTABLE_IDS = __DROP_UNSTABLE_IDS__;
+  // Steptix's own ring overlay (docs/specs/SPEC-interaction-highlight.md §4.1).
+  // It is not the page: a snapshot taken while a ring is live would otherwise
+  // carry it, the AI would read it, and stall detection would see the page
+  // change when a ring came or went. Skipped by tag and handle (below); the
+  // recorder's hosts are not, because they are removed before a run rather
+  // than filtered.
+  var HIGHLIGHT_TAG = __HIGHLIGHT_TAG_JSON__;
+  var HIGHLIGHT_KEY = Symbol.for(__HIGHLIGHT_KEY_JSON__);
+  // Only Steptix's own host is skipped: a direct child of <html> carrying the
+  // registry handle. A page's own element of the same name — anywhere, or
+  // without the handle — is the page's, and the AI reads it like any other.
+  function isHighlightHost(el) {
+    try {
+      return el.tagName.toLowerCase() === HIGHLIGHT_TAG && !!el[HIGHLIGHT_KEY];
+    } catch (err) {
+      return false;
+    }
+  }
   var UNSTABLE_ID_REGEXES = __UNSTABLE_ID_PATTERNS_JSON__.map(function (s) { return new RegExp(s); });
 
   function isUnstableId(value) {
@@ -648,6 +671,8 @@
     for (var t = 0; t < top.length; t++) {
       var child = top[t];
       if (child.tagName === 'HEAD') continue;
+      // Not the page, though it sits beside <body> like the ads above do.
+      if (isHighlightHost(child)) continue;
       result += processElement(child, 0);
     }
     return result || '<body>(no content)</body>';

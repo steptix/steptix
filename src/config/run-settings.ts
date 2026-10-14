@@ -12,10 +12,12 @@ import type {
   CaptureMode,
   Config,
   EffectiveSettings,
+  HighlightMode,
   RunSettings,
   SettingSource,
 } from './types.js';
-import { aiConfigured } from './loader.js';
+import { aiConfigured, switchHighlight } from './loader.js';
+import { resolveHighlight } from '../browser/highlight.js';
 
 /** Accepted `capture` values, in the order an error message should list them. */
 export const CAPTURE_MODES: readonly CaptureMode[] = [
@@ -30,6 +32,10 @@ export const CAPTURE_MODES: readonly CaptureMode[] = [
  *  overriding" is inexpressible. */
 export const AI_MODES: readonly AiMode[] = ['on', 'off', 'default'];
 
+/** Accepted `highlight` values (docs/specs/SPEC-interaction-highlight.md
+ *  §7.2), same shape as {@link AI_MODES}. */
+export const HIGHLIGHT_MODES: readonly HighlightMode[] = ['on', 'off', 'default'];
+
 /** Keys `runSettings` accepts on the wire. An unknown one is refused rather
  *  than dropped — a caller who misspelled `sendScreenshots` and silently got
  *  nothing has no way to notice. */
@@ -39,6 +45,7 @@ export const RUN_SETTING_KEYS: readonly string[] = [
   'fullPage',
   'sendScreenshots',
   'ai',
+  'highlight',
 ];
 
 /** §3's table, in one place so the route, the resolver and the echo agree. */
@@ -109,6 +116,10 @@ export function mergeRunSettings(
     if (incoming.ai !== undefined && incoming.ai !== 'default') next.ai = incoming.ai;
     else delete next.ai;
   }
+  if ('highlight' in incoming) {
+    if (incoming.highlight !== undefined && incoming.highlight !== 'default') next.highlight = incoming.highlight;
+    else delete next.highlight;
+  }
 
   return next;
 }
@@ -141,7 +152,8 @@ export interface ResolvedRunSettings {
    *
    * `serverConfig` spread with ONLY named values re-sourced: run-settings' own
    * four, plus `browser.ambiguousTarget`
-   * (stories/codebehind-selector-ambiguity.md). It has to be complete rather
+   * (stories/codebehind-selector-ambiguity.md) and `browser.highlight`
+   * (docs/specs/SPEC-interaction-highlight.md §7.3). It has to be complete rather
    * than partial — both executor call sites take the whole object — and it
    * deliberately leaves every other value exactly as the server startup config
    * has it. Re-basing the executor on the project bundle wholesale is the
@@ -247,6 +259,21 @@ export function resolveRunSettings(
     serverConfig.browser.ambiguousTarget,
     projectConfig.browser.ambiguousTarget,
   );
+  // `browser.highlight` for the same reason, and the same trap: whether the
+  // rings show is the project's choice (docs/specs/SPEC-interaction-highlight.md
+  // §7.3), and spread from the server's config it would be whatever the
+  // checkout that started the server says. Not normalised here either:
+  // `resolveHighlight` reads it where the executor builds its options.
+  const highlightBase = base(
+    serverConfig.browser.highlight,
+    projectConfig.browser.highlight,
+  );
+  let highlight = highlightBase.value;
+  let highlightFrom = highlightBase.from;
+  if (overrides.highlight !== undefined && overrides.highlight !== 'default') {
+    highlight = switchHighlight(highlight, overrides.highlight === 'on');
+    highlightFrom = 'session';
+  }
 
   const sendBase = base(serverConfig.ai.sendScreenshots, projectConfig.ai.sendScreenshots);
   let sendScreenshots = sendBase.value;
@@ -310,6 +337,7 @@ export function resolveRunSettings(
         captureScreenshotsPerAction: perAction,
         fullPageScreenshots: fullPage,
         ambiguousTarget: ambiguousBase.value,
+        highlight,
       },
       execution: { ...serverConfig.execution, screenshotOnFailure: onFailure },
     },
@@ -320,12 +348,14 @@ export function resolveRunSettings(
       sendScreenshots,
       ai,
       aiOffReason,
+      highlight: resolveHighlight({ highlight }) === null ? 'off' : 'on',
       sources: {
         model: modelFrom,
         capture: captureFrom,
         fullPage: fullPageFrom,
         sendScreenshots: sendFrom,
         ai: aiFrom,
+        highlight: highlightFrom,
       },
     },
   };

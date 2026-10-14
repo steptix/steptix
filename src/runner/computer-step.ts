@@ -221,6 +221,15 @@ export interface EnterComputerModeInput {
   /** §15.4's check, injectable so no test reaches the network. Defaults to
    *  {@link checkVisionRoute}. */
   checkVisionRoute?: ((ai: VisionRouteAi) => Promise<VisionRouteResult>) | undefined;
+  /**
+   * Take the browser's highlight rings down for good before the screen is
+   * first read (docs/specs/SPEC-interaction-highlight.md §6 item 1). The
+   * browser is usually on screen, `screen.grab()` leaves nothing out, and a
+   * ring from the last browser action would otherwise be in the first
+   * computer turn's picture. Each runner knows its own pages; absent, nothing
+   * is done. Must not throw.
+   */
+  endBrowserRings?: (() => Promise<void>) | undefined;
 }
 
 /**
@@ -289,6 +298,10 @@ export async function enterComputerMode(
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+
+  // Before the first grab, probe included: what it sees is what the first
+  // turn will.
+  await input.endBrowserRings?.().catch(() => undefined);
 
   // 4. A capture succeeds. One grab, as a probe — the measured
   //    read-screen-right failure is this check's whole reason for existing.

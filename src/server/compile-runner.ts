@@ -371,6 +371,10 @@ export class CodeBehindCompiler {
         ...(envName && { envName }),
         ...(bundle.envBundle && { env: bundle.envBundle.env }),
         captureStepContext: run.captureContext,
+        // The run's failure screenshot is what the repair model is sent, so
+        // no capture of this batch may carry a highlight ring
+        // (docs/specs/SPEC-interaction-highlight.md §4.2).
+        screenshotsToModel: true,
         // Config belongs to a session's first request only. A caller's session
         // that already exists has one; a fresh one — compile's own, or the
         // caller's when they never ran — takes the test's.

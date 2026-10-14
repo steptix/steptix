@@ -9,6 +9,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Frame, Page } from 'playwright';
+import type { HighlightSink } from '../browser/highlight.js';
 
 /** Keyword lists handed to the scan. Lowercase, matched as substrings.
  *
@@ -276,8 +277,16 @@ const SUBMIT_CLICK_TIMEOUT_MS = 5_000;
  * this deletes a step that was never load-bearing rather than fixing an
  * understood bug, and those six failures deserve watching for again.
  */
-export async function typeInto(frame: Frame, selector: string, value: string): Promise<void> {
+export async function typeInto(
+  frame: Frame,
+  selector: string,
+  value: string,
+  /** The run's highlight sink, when the session's project turned it on
+   *  (docs/specs/SPEC-interaction-highlight.md §2.3). */
+  highlight?: HighlightSink,
+): Promise<void> {
   const field = frame.locator(selector).first();
+  highlight?.mark(field, 'act');
   await field.focus({ timeout: INTERACT_TIMEOUT_MS });
   await field.fill('');
   await field.pressSequentially(value, { delay: 12, timeout: TYPE_TIMEOUT_MS });
@@ -297,15 +306,20 @@ export async function submitLogin(
   frame: Frame,
   submitSelector: string | null,
   fallbackFieldSelector: string,
+  highlight?: HighlightSink,
 ): Promise<void> {
   if (submitSelector) {
     try {
-      await frame.locator(submitSelector).first().click({ timeout: SUBMIT_CLICK_TIMEOUT_MS });
+      const control = frame.locator(submitSelector).first();
+      highlight?.mark(control, 'act');
+      await control.click({ timeout: SUBMIT_CLICK_TIMEOUT_MS });
       return;
     } catch {
       // Fall through. The fields are filled either way, and Enter is a second
       // way to submit rather than a worse one.
     }
   }
-  await frame.locator(fallbackFieldSelector).first().press('Enter', { timeout: INTERACT_TIMEOUT_MS });
+  const field = frame.locator(fallbackFieldSelector).first();
+  highlight?.mark(field, 'act');
+  await field.press('Enter', { timeout: INTERACT_TIMEOUT_MS });
 }

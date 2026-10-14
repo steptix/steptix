@@ -9,6 +9,53 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Added — see which element each action touched
+
+Set `"browser": { "highlight": true }` in `steptix.config.json`, or run
+`steptix run --highlight`, and each element a step clicks, types into,
+selects, hovers, drags or uploads to gets a blue ring for about three
+seconds; what it reads, counts or reads a table from gets a violet one.
+`log_into_site` rings the fields it fills too. You can see it while you watch a run, in its video
+and in the report's screenshots.
+
+- **Off by default.** `{ "enabled": true, "durationMs": 3000, "colors": {
+  "act": "#3b82f6", "read": "#a855f7" } }` sets the details, and
+  `--no-highlight` turns it off for one run. A quoted `"true"`, a duration
+  outside 500–10000 or a colour that is not hex is refused when the config
+  loads.
+- **The AI never sees the rings.** Screenshots sent to a model hide them,
+  and so do the pictures `get_page_content`, `peek_tab`, errands and
+  `run_steps` / `run_test_file` hand an MCP agent; a run that returns
+  screenshots to an agent takes every capture without them, its report's
+  included. So does a compile, whose failure pictures go to the repair
+  model. The page snapshot the AI reads leaves out the ring's element.
+  `[use computer]` takes any rings down before it first reads the screen.
+  A ring fades on schedule even while its page is busy, since the fade runs
+  on the compositor (measured in Chromium). With Firefox or WebKit, the
+  first screen grab could still show a ring if the page stayed blocked past
+  it.
+- **Report screenshots show them by default.** `"inScreenshots": false`
+  hides them there too. Each action in the report records which ring it
+  asked for.
+- **The page under test keeps working.** Clicks go through the ring, it
+  works under a strict Content-Security-Policy, and it rings elements in
+  frames and open shadow roots in Chromium, Firefox and WebKit. While a ring
+  shows, one `<steptix-highlight>` element sits under `<html>`, so a test's
+  own `*` selector counts one more.
+- **Projects run by the server get their own setting.** The Sessions API,
+  MCP and VS Code use the project's `browser.highlight`, not the server's.
+- **Switch it per session or per window.** The MCP tools `run_steps` and
+  `run_test_file` take `highlight: "on" | "off" | "default"`, kept for the
+  session like the other run settings and reported by `get_run_settings`.
+  In VS Code, the `steptix.highlight` setting does the same for runs
+  started from that window.
+- **Code-behind and tools ring too.** A compiled step's own Playwright calls
+  and a `[tool:]` step's are ringed through a wrapped `page`. Mouse and
+  keyboard input at coordinates, `page.evaluate`, and pages reached through
+  `ctx.context.pages()` are not.
+
+See docs/specs/SPEC-interaction-highlight.md.
+
 ### Fixed — Record Steps keeps a parameter's value while a step still uses it
 
 Record Steps drafts the steps with the AI in several calls as you work, and
