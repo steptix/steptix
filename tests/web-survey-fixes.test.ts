@@ -371,6 +371,15 @@ describe('§2.7 inputs that cannot be cleared', () => {
     await page.close();
   });
 
+  it('clamps a range value typed through its label to the range\'s own ends', async () => {
+    const page = await pageWith(`<label for="r">Volume</label><input id="r" type="range" min="0" max="10" value="5">`);
+    expect((await executeAction(page, act({ action: 'type', selector: 'label[for="r"]', value: '7' }))).success).toBe(true);
+    expect(await page.inputValue('#r')).toBe('7');
+    expect((await executeAction(page, act({ action: 'type', selector: 'label[for="r"]', value: 'max' }))).success).toBe(true);
+    expect(await page.inputValue('#r')).toBe('10');
+    await page.close();
+  });
+
   it('clamps a range value to the slider\'s own ends, and reads max and min as words', async () => {
     const page = await pageWith(`<input id="r" type="range" min="0" max="10" value="5">`);
     expect((await executeAction(page, act({ action: 'type', selector: '#r', value: '100' }))).success).toBe(true);

@@ -1853,6 +1853,9 @@ const MALFORMED_WHEN_EMPTY = /Malformed value/i;
  */
 const KEY_BY_KEY_KINDS = new Set(['text', 'search', 'email', 'password', 'url', 'tel', 'number', 'textarea', 'contenteditable']);
 
+/** What a key-by-key `type` adds to its budget for each character. */
+const KEY_BY_KEY_MS_PER_CHARACTER = 100;
+
 /**
  * Type the action's value into its field, and return how, when the action
  * asked for its text key by key (`sequential`).
@@ -1910,7 +1913,11 @@ async function executeType(
   if (kind === 'range') value = await clampToRange(locator, value);
   // A kind that cannot be read is typed as the step asked.
   if (keyByKey && (kind === undefined || KEY_BY_KEY_KINDS.has(kind))) {
-    await locator.pressSequentially(value, { timeout: TYPE_FILL_TIMEOUT_MS });
+    // One budget covers every key, and a page doing work on each one (a
+    // filter re-rendering its list) takes time per key that a fill never
+    // spends, so the budget grows with the text.
+    const timeout = TYPE_FILL_TIMEOUT_MS + value.length * KEY_BY_KEY_MS_PER_CHARACTER;
+    await locator.pressSequentially(value, { timeout });
     return { by: 'keys' };
   }
   await locator.fill(value, { timeout: TYPE_FILL_TIMEOUT_MS });
@@ -2067,17 +2074,21 @@ async function inputKindOf(locator: Locator): Promise<string | undefined> {
 /**
  * A range input refuses a value outside its own min and max as malformed, and
  * "set the slider to its maximum" was typed as 100 into a slider that stops at
- * 10. Clamp a number to the range, and read "max"/"min" as the ends.
+ * 10. Clamp a number to the range, and read "max"/"min" as the ends. The
+ * range is the element, or the control it labels, as `inputKindOf` reads it.
  */
 async function clampToRange(locator: Locator, value: string): Promise<string> {
   let bounds: { min: number; max: number };
   try {
     bounds = await locator.evaluate(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (el: any) => ({
-        min: el.min === '' ? 0 : Number(el.min),
-        max: el.max === '' ? 100 : Number(el.max),
-      }),
+      (el: any) => {
+        const range = el.tagName === 'LABEL' && el.control ? el.control : el;
+        return {
+          min: range.min === '' ? 0 : Number(range.min),
+          max: range.max === '' ? 100 : Number(range.max),
+        };
+      },
       undefined,
       { timeout: MEASUREMENT_TIMEOUT_MS },
     );

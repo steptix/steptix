@@ -160,11 +160,12 @@ describe('Steptix live — typing presses only what the step asks for', function
       `these step lines did not pass: ${bad.map((l) => `${l}=${statuses[l]}`).join(', ')}. ` +
         `A red last step that read 31/12/9999 means a key changed the date segments after they were typed.`,
     );
-    // Step 2 asked for key by key, and nothing else did.
-    assert.equal(
-      occurrences(html, TYPED_KEY_BY_KEY), 1,
-      'exactly one type, step 2\'s, should be typed key by key: the model marks a type `sequential` ' +
-        'when its step asks for it, and for no other',
+    // Step 2 asked for key by key. At least once rather than exactly once: a
+    // model may type it again in a second turn, which is still right. That a
+    // step which does not ask gets no flag is what the companion pins.
+    assert.ok(
+      occurrences(html, TYPED_KEY_BY_KEY) >= 1,
+      'step 2 asks for its text one character at a time, so the model must mark its type `sequential`',
     );
   });
 
