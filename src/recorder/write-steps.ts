@@ -194,7 +194,8 @@ function escapeRegExp(s: string): string {
  * idempotent on a draft it already settled.
  *
  * - A parameter the file already has under the same name with a DIFFERENT
- *   value is renamed (`email` → `email_2`) and the steps rewritten to match
+ *   value is renamed (`email` → `email_2`, or the next free number) and the
+ *   steps rewritten to match — with `opts.wrote`, only the answer's own steps
  *   (decision 8: "never overwrites an existing line with a different value").
  *   Steptix keeps an existing line as it is, so without this the steps would
  *   silently type the old value. Two `.env` references under one name are the
@@ -206,13 +207,34 @@ function escapeRegExp(s: string): string {
  * Its `notes` say what it CHANGED — they are kept with the draft for the rest
  * of the recording. What is merely TRUE of the draft right now is
  * {@link draftStateNotes}, recomputed every time.
+ *
+ * For one call of a recording that drafts in several (`opts`, #84):
+ * - `draft` is the draft's own parameter list, as the call was shown it. A
+ *   rename never lands on one of its names — that name already means a value
+ *   steps of the draft type — except to reuse one that is a rename of the same
+ *   name (`email_2` for `email`) holding exactly the renamed value.
+ * - `wrote` marks which of `answer.steps` this answer wrote. Only those have
+ *   a renamed `{{name}}` rewritten: a step from an earlier call meant the
+ *   value its own call gave (the file's, when it reused the file's line).
  */
-export function settleParameters(answer: RecordStepsAnswer, file: TargetFileSummary): RecordStepsAnswer {
+export function settleParameters(
+  answer: RecordStepsAnswer,
+  file: TargetFileSummary,
+  opts: { draft?: ReadonlyArray<{ name: string; value: string }>; wrote?: readonly boolean[] } = {},
+): RecordStepsAnswer {
   const existing = new Map(file.parameters.map((p) => [p.name, p.value.trim()]));
   let steps = [...answer.steps];
   const notes = [...answer.notes];
-  const taken = new Set([...existing.keys(), ...answer.parameters.map((p) => p.name)]);
+  const draft = opts.draft ?? [];
+  const taken = new Set([...existing.keys(), ...answer.parameters.map((p) => p.name), ...draft.map((p) => p.name)]);
   const parameters: Array<{ name: string; value: string }> = [];
+  // A name reused from the draft can arrive twice — as the answer named it,
+  // and by the rename — as the same entry: the list holds it once.
+  const reused = new Set<string>();
+  const add = (name: string, value: string): void => {
+    if (reused.has(name) && parameters.some((q) => q.name === name && q.value === value)) return;
+    parameters.push({ name, value });
+  };
 
   for (const p of answer.parameters) {
     let value = p.value;
@@ -226,21 +248,29 @@ export function settleParameters(answer: RecordStepsAnswer, file: TargetFileSumm
       continue;
     }
     if (had !== undefined && had !== value.trim()) {
-      let n = 2;
-      while (taken.has(`${p.name}_${n}`)) n++;
-      const renamed = `${p.name}_${n}`;
-      taken.add(renamed);
+      const family = new RegExp(`^${escapeRegExp(p.name)}_(\\d+)$`);
+      const same = draft.find((d) => family.test(d.name) && d.value.trim() === value.trim());
+      let renamed: string;
+      if (same) {
+        renamed = same.name;
+      } else {
+        let n = 2;
+        while (taken.has(`${p.name}_${n}`)) n++;
+        renamed = `${p.name}_${n}`;
+        taken.add(renamed);
+      }
       const pattern = new RegExp(`\\{\\{${escapeRegExp(p.name)}\\}\\}`, 'g');
-      steps = steps.map((s) => s.split(pattern).join(`{{${renamed}}}`));
+      steps = steps.map((s, i) => (opts.wrote && !opts.wrote[i] ? s : s.split(pattern).join(`{{${renamed}}}`)));
       // SPEC-record-steps.md §10's sentence, finished with what the server did
       // instead of dropping the value: the steps now name the new parameter.
       notes.push(
         `Parameter ${p.name} already exists with a different value; the recorded value was added as ${renamed} instead.`,
       );
-      parameters.push({ name: renamed, value });
+      if (same) reused.add(renamed);
+      add(renamed, value);
       continue;
     }
-    parameters.push({ name: p.name, value });
+    add(p.name, value);
   }
   return { steps, parameters, notes };
 }

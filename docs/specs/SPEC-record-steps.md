@@ -1139,6 +1139,35 @@ to `steps`: for each, the numbers (`n`, as the recording in the prompt gives
 them — an action's place among the ones still in) of the actions it
 describes, typing and choices included. `notes` are shown to the author.
 
+**The parameter list across calls.** `parameters` is meant to be the whole
+list, and the answer's list becomes the draft's — with one exception the
+engine enforces rather than hopes for: a parameter the call was shown that
+the answer leaves out is kept, under the name the draft already gave it
+(`email_2` when the file has `email` with another value, §7.3), never
+renamed a second time, for as long as some step in the draft
+still uses its `{{name}}`. A model answering an append often lists only the
+parameters it introduced, or none, and the value of every earlier one went
+with it while its steps still named it (#84). Where the answer does name a
+parameter with a value its value wins, so the model can still correct one;
+an empty or blank value for a name the call was shown with a value counts as
+left out (written, it would be a line left out for having no value). A
+redraft from nothing (no other step left in the draft, none of the author's
+in what it rewrites) is shown no parameters and has none carried into it: it
+starts over, and its answer is the whole list. A parameter no remaining step
+uses still leaves the list ("The author's deletes", below).
+
+A rename for a name the file already has with another value (§7.3) is made
+for one call at a time:
+
+- **It never lands on a name the draft holds.** `email_2` already means the
+  value the draft's steps type, so the next value is `email_3` — unless the
+  draft holds a rename of the same name with exactly this value, which is
+  reused (`email_2` again: the same value typed into another field of the
+  kind, P1, §7.3).
+- **It rewrites only the steps this answer wrote.** A step from an earlier
+  call, locked or not, keeps its `{{email}}`: it meant the value its own call
+  gave, the file's when it reused the file's line.
+
 **Which actions a step stands for** (stories/steptix-record-edit-steps.md).
 The engine checks `stepActions`: every number one this call may give out —
 its own actions, and the ones the steps it replaces stood for — each action in
