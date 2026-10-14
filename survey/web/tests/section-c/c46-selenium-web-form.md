@@ -13,6 +13,10 @@ everywhere.
 field, a native select, a datalist, a file input, checkboxes and radios, a
 colour picker, a date picker, a range slider.
 
+The date picker reads typed text on keyup only, and when it closes it writes
+its own date back into the field, so step 10 asks for one character at a
+time and step 12 checks the date stayed.
+
 ## Config
 - baseUrl: https://www.selenium.dev/selenium/web/web-form.html
 
@@ -26,8 +30,9 @@ colour picker, a date picker, a range slider.
 7. Untick the checked checkbox and tick the default checkbox
 8. Choose the default radio button
 9. Set the colour picker to #00ff00
-10. Set the date picker to 01/15/2026
+10. Set the date picker to 01/15/2026, typing it one character at a time
 11. Set the range slider to its maximum
-12. Verify the dropdown (select) shows "Two"
-13. Click Submit
-14. Verify the page says "Form submitted" and "Received!"
+12. Verify the date picker shows 01/15/2026
+13. Verify the dropdown (select) shows "Two"
+14. Click Submit
+15. Verify the page says "Form submitted" and "Received!"

@@ -11,6 +11,8 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Frame, type Page } from 'playwright';
 import { executeAction, explainEnclosedToggle, hiddenToggleOf, normaliseColour, normaliseKeyName, resolveRoleName, scrollToFitBoth, waitForThreshold } from '../src/browser/actions.js';
 import { parseAIResponse, parseAssertionCode } from '../src/ai/action-parser.js';
+import { buildStepCodePrompt, buildSystemPrompt, contentBlocksToText } from '../src/ai/prompts.js';
+import { buildRepairPrompt } from '../src/codebehind/repair.js';
 import { classifyOutcome } from '../src/stats/classify.js';
 import { addLogCallback } from '../src/utils/logger.js';
 import { installDialogGuard } from '../src/browser/manager.js';
@@ -89,20 +91,206 @@ describe('§2.2 double-click and right-click — the executor', () => {
   });
 });
 
-describe('§2.3 typing fires key events', () => {
-  it('a filter that listens for keyup sees the typed text', async () => {
-    const page = await pageWith(`
+describe('§2.3 typing presses only the keys the step asks for', () => {
+  /** A filter that reacts to keyup and nothing else, as the survey's two
+   *  sites did, beside a log of every key the field receives. */
+  const filterPage = (): Promise<Page> => pageWith(`
       <input id="filter"><ul><li>Testing</li><li>Development</li><li>Content</li></ul>
       <script>
-        document.getElementById('filter').addEventListener('keyup', (e) => {
+        window.keys = [];
+        const filter = document.getElementById('filter');
+        for (const name of ['keydown', 'keyup']) filter.addEventListener(name, (e) => window.keys.push(name + ' ' + e.key));
+        filter.addEventListener('keyup', (e) => {
           const q = e.target.value.toLowerCase();
           for (const li of document.querySelectorAll('li')) li.style.display = li.textContent.toLowerCase().includes(q) ? '' : 'none';
         });
       </script>`);
-    expect((await executeAction(page, act({ action: 'type', selector: '#filter', value: 'test' }))).success).toBe(true);
+  const keysOf = (page: Page): Promise<string[]> => page.evaluate(() => (window as unknown as { keys: string[] }).keys);
+  /** Playwright's `clear()` is `fill('')`, which presses Delete to empty the
+   *  field. It runs before any fill and is outside steptix/steptix#90. */
+  const clearKeys = ['keydown Delete', 'keyup Delete'];
+
+  // Changed on purpose (steptix/steptix#90). This test used to require that a
+  // plain type make a keyup-only filter react, which the End pressed after the
+  // fill did. End also set a spinbutton date segment to its maximum, and no
+  // list of input types can say what a key does to a field. A plain type now
+  // fills and presses nothing after the value; a step that needs the filter
+  // to react asks for its text one character at a time (the next test).
+  it('a plain type fills and presses no key after the value, so a keyup-only filter keeps every row', async () => {
+    const page = await filterPage();
+    const result = await executeAction(page, act({ action: 'type', selector: '#filter', value: 'test' }));
+    expect(result.success).toBe(true);
+    expect(result.typed).toBeUndefined();
     expect(await page.inputValue('#filter')).toBe('test');
-    expect(await page.locator('li:visible').count()).toBe(1);
+    expect(await page.locator('li:visible').count()).toBe(3);
+    expect(await keysOf(page)).toEqual(clearKeys);
     await page.close();
+  });
+
+  it('a sequential type presses each character, and the keyup-only filter sees the text', async () => {
+    const page = await filterPage();
+    const result = await executeAction(page, act({ action: 'type', selector: '#filter', value: 'test', sequential: true }));
+    expect(result.success).toBe(true);
+    expect(result.typed).toEqual({ by: 'keys' });
+    expect(await page.inputValue('#filter')).toBe('test');
+    expect(await page.locator('li:visible').allTextContents()).toEqual(['Testing']);
+    expect(await keysOf(page)).toEqual([
+      ...clearKeys,
+      'keydown t', 'keyup t', 'keydown e', 'keyup e', 'keydown s', 'keyup s', 'keydown t', 'keyup t',
+    ]);
+    await page.close();
+  });
+
+  it('fills a date, time, colour or range input even when sequential, and says so', async () => {
+    const values: Record<string, string> = {
+      date: '2027-03-14', time: '10:30', 'datetime-local': '2027-03-14T10:30', month: '2027-03', week: '2027-W11',
+      color: '#00ff00', range: '7',
+    };
+    const page = await pageWith(Object.keys(values).map((t) => `<input id="${t}" type="${t}">`).join(''));
+    try {
+      for (const [inputType, value] of Object.entries(values)) {
+        const result = await executeAction(page, act({ action: 'type', selector: `#${inputType}`, value, sequential: true }));
+        expect(result.success, inputType).toBe(true);
+        expect(result.typed, inputType).toEqual({ by: 'fill', inputType });
+        expect(await page.inputValue(`#${inputType}`), inputType).toBe(value);
+      }
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('decides by the field a label stands for: keys into a text input, a fill into a date input', async () => {
+    const page = await pageWith(`
+      <label for="who">Who</label><input id="who">
+      <label for="when">When</label><input id="when" type="date">`);
+    try {
+      const who = await executeAction(page, act({ action: 'type', selector: 'label[for="who"]', value: 'Ada', sequential: true }));
+      expect(who.typed).toEqual({ by: 'keys' });
+      expect(await page.inputValue('#who')).toBe('Ada');
+      const when = await executeAction(page, act({ action: 'type', selector: 'label[for="when"]', value: '2027-03-14', sequential: true }));
+      expect(when.typed).toEqual({ by: 'fill', inputType: 'date' });
+      expect(await page.inputValue('#when')).toBe('2027-03-14');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('into an element fill cannot reach, types on the keyboard as before, and says so only when asked (§2.27)', async () => {
+    const page = await pageWith(`
+      <x-field style="display: block; width: 300px"></x-field>
+      <script>
+        const root = document.querySelector('x-field').attachShadow({ mode: 'closed' });
+        root.innerHTML = '<input style="width: 290px">';
+        window.__value = () => root.querySelector('input').value;
+      </script>`);
+    try {
+      const plain = await executeAction(page, act({ action: 'type', selector: 'x-field', value: 'Ada' }));
+      expect(plain.success).toBe(true);
+      expect(plain.typed).toBeUndefined();
+      const keyed = await executeAction(page, act({ action: 'type', selector: 'x-field', value: 'Lin', sequential: true }));
+      expect(keyed.typed).toEqual({ by: 'keys' });
+      expect(await page.evaluate(() => (window as unknown as { __value: () => string }).__value())).toBe('Lin');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('a sequential clear has no keys to press, so it is a plain one', async () => {
+    const page = await filterPage();
+    try {
+      await page.fill('#filter', 'old');
+      const result = await executeAction(page, act({ action: 'type', selector: '#filter', value: '', sequential: true }));
+      expect(result.success).toBe(true);
+      expect(result.typed).toBeUndefined();
+      expect(await page.inputValue('#filter')).toBe('');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('parses sequential on a type only, and only when it is true', () => {
+    expect(one({ action: 'type', selector: '#f', value: 'x', sequential: true }).sequential).toBe(true);
+    expect(one({ action: 'type', selector: '#f', value: 'x', sequential: 'true' }).sequential).toBeUndefined();
+    expect(one({ action: 'type', selector: '#f', value: 'x', sequential: false }).sequential).toBeUndefined();
+    expect(one({ action: 'click', selector: '#f', sequential: true }).sequential).toBeUndefined();
+    // A plain type carries nothing new, so it is exactly the action it always was.
+    expect(one({ action: 'type', selector: '#f', value: 'x' })).toEqual({ action: 'type', selector: '#f', value: 'x', description: 'x' });
+  });
+
+  // The model decides from the step's words, so what is pinned here is what
+  // it is told: the flag for a step that asks to type key by key, the same
+  // action without it for a step that does not, and never for a page that
+  // merely looks live. The live suites check a real model follows it
+  // (templates/init/tests/securebank-schedule-transfer.md).
+  it('rule 10 sets sequential for a step that asks for key by key, and not for one that does not', () => {
+    const text = contentBlocksToText(buildSystemPrompt(''));
+    const rule = text.slice(text.indexOf('\n10. '), text.indexOf('\n10a. '));
+    for (const words of ['one character at a time', 'each character in sequence', 'key by key']) {
+      expect(rule).toContain(`"${words}"`);
+    }
+    expect(rule).toContain('Step "Type Ada into the lookup box one character at a time" is { "action": "type", "selector": "#lookup", "value": "Ada", "sequential": true,');
+    expect(rule).toContain('step "Type Ada into the lookup box" is the same action without "sequential"');
+    expect(rule).toMatch(/The step's words decide, never the page: do NOT add "sequential" because the page looks live/);
+  });
+
+  describe('code generation types the way the run typed', () => {
+    const prompt = (actions: Parameters<typeof buildStepCodePrompt>[0]['actions']): string =>
+      contentBlocksToText(buildStepCodePrompt({ rawStepText: 'x', parameters: [], actions }).content);
+    const plain = { action: 'type' as const, selector: '#lookup', value: 'Ada', description: 'Type Ada' };
+    const keyed = { ...plain, sequential: true, typed: { by: 'keys' as const } };
+
+    it('tells the model fill for a plain type, and clear then pressSequentially for a sequential one', () => {
+      const text = prompt([keyed]);
+      expect(text).toContain('"sequential": true');
+      expect(text).toContain('`await page.locator(<selector>).fill(<value>)`');
+      expect(text).toContain('`await <locator>.clear()` and then `await <locator>.pressSequentially(<value>)`');
+      // A sequential type the run filled, into a date input, is filled again.
+      expect(text).toContain('unless its `"typed"` says `"by": "fill"`');
+      expect(prompt([plain])).toContain('.fill(<value>)');
+    });
+
+    it('forbids a key the transcript does not record, and never itself asks for End', () => {
+      for (const actions of [[plain], [keyed], []]) {
+        const text = prompt(actions);
+        expect(text).not.toMatch(/press\(\s*['"]End['"]\s*\)/);
+        if (actions.length > 0) expect(text).toContain('Never press a key the transcript does not record, such as End, Tab or Enter after the text');
+      }
+    });
+
+    it('says nothing about typing to a step that typed nothing', () => {
+      // The control: without it the assertions above hold on a constant.
+      expect(prompt([{ action: 'click', selector: '#go', description: 'Click Go' }])).not.toContain('pressSequentially');
+    });
+
+    it('letters rule 7\'s additions once each, in order', () => {
+      const text = prompt([
+        { action: 'switchPage', page: 'page:2', description: 'Switch' },
+        { action: 'reload', description: 'Reload' },
+        { action: 'drag', selector: '#card', target: '#bin', description: 'Drag' },
+        keyed,
+      ]);
+      const letters = [...text.matchAll(/^7([a-z])\. /gm)].map((m) => m[1]);
+      expect(letters).toEqual(['a', 'b', 'c', 'd', 'e']);
+    });
+  });
+
+  describe('a repair types the way the step asks', () => {
+    const repair = (entryCode: string, rawStepText = 'Type Ada into the lookup box'): string =>
+      contentBlocksToText(buildRepairPrompt({ rawStepText, stepIndex: 1, entryCode, error: 'x', parameters: [] }).content);
+    const typing = `{ source: 'x', async run({ page }) { await page.locator('#lookup').fill('Ada'); } }`;
+
+    it('carries the typing rule for an entry that types, without asking for End', () => {
+      const text = repair(typing);
+      expect(text).toContain('7. Type the way the step asks.');
+      expect(text).toContain('`await <locator>.clear()` and then `await <locator>.pressSequentially(<value>)`');
+      expect(text).toContain('Never press a key the step does not ask for, such as End, Tab or Enter after the text');
+      expect(text).not.toMatch(/press\(\s*['"]End['"]\s*\)/);
+    });
+
+    it('leaves the prompt as it was for an entry that types nothing', () => {
+      expect(repair(`{ source: 'x', async run({ page }) { await page.locator('#go').click(); } }`, 'Click Go'))
+        .not.toContain('7. Type the way the step asks.');
+    });
   });
 });
 
@@ -185,6 +373,22 @@ describe('§2.7 inputs that cannot be cleared', () => {
     expect((await executeAction(page, act({ action: 'type', selector: '#c', value: '#00FF00' }))).success).toBe(true);
     expect(await page.inputValue('#c')).toBe('#00ff00');
     expect((await executeAction(page, act({ action: 'type', selector: '#r', value: '10' }))).success).toBe(true);
+    expect(await page.inputValue('#r')).toBe('10');
+    await page.close();
+  });
+
+  it('normalises a colour typed through its label, as the input the label stands for', async () => {
+    const page = await pageWith(`<label for="c">Colour</label><input id="c" type="color" value="#563d7c">`);
+    expect((await executeAction(page, act({ action: 'type', selector: 'label[for="c"]', value: '#F00' }))).success).toBe(true);
+    expect(await page.inputValue('#c')).toBe('#ff0000');
+    await page.close();
+  });
+
+  it('clamps a range value typed through its label to the range\'s own ends', async () => {
+    const page = await pageWith(`<label for="r">Volume</label><input id="r" type="range" min="0" max="10" value="5">`);
+    expect((await executeAction(page, act({ action: 'type', selector: 'label[for="r"]', value: '7' }))).success).toBe(true);
+    expect(await page.inputValue('#r')).toBe('7');
+    expect((await executeAction(page, act({ action: 'type', selector: 'label[for="r"]', value: 'max' }))).success).toBe(true);
     expect(await page.inputValue('#r')).toBe('10');
     await page.close();
   });

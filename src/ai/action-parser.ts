@@ -270,16 +270,16 @@ const FOLDED_ACTION_TYPES: ReadonlyMap<string, ActionType> = new Map<string, Act
   ...[...VALID_ACTION_TYPES].map((type) => [foldActionName(type), type] as [string, ActionType]),
 ]);
 
-/**
- * The field an alias implies, keyed by FOLDED alias. `doubleClick` is a
- * `click`, but a single click would be the wrong action: the alias has to say
- * how many. A field the model sent itself wins over the default.
- */
 /** How long a press-and-hold holds when the step does not say (§2.24). */
 const DEFAULT_HOLD_MS = 2000;
 /** The longest hold accepted; a press nobody would make is a model mistake. */
 const MAX_HOLD_MS = 30_000;
 
+/**
+ * The field an alias implies, keyed by FOLDED alias. `doubleClick` is a
+ * `click`, but a single click would be the wrong action: the alias has to say
+ * how many. A field the model sent itself wins over the default.
+ */
 const ALIAS_DEFAULTS: ReadonlyMap<string, Partial<AIAction>> = new Map<string, Partial<AIAction>>([
   ['doubleclick', { clickCount: 2 }],
   ['dblclick', { clickCount: 2 }],
@@ -1003,6 +1003,8 @@ function parseAction(raw: unknown, index: number): AIAction {
     if (values.length > 0) action.values = values;
   }
   if (actionType === 'count' && obj['includeHidden'] === true) action.includeHidden = true;
+  // §2.3: key by key only when the step asked, and only on a type.
+  if (actionType === 'type' && obj['sequential'] === true) action.sequential = true;
   if (actionType === 'dialog') {
     const text = [obj['text'], obj['promptText'], obj['input']]
       .find((v): v is string => typeof v === 'string');

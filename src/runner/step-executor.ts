@@ -4083,6 +4083,8 @@ async function executeStepAttempt(
         // `targeting` exists, so an upload carrying only a route would read as
         // measured and take the wrong selector rules.
         ...(result.upload !== undefined && { upload: result.upload }),
+        // How a key-by-key `type` typed, for the report and for generation.
+        ...(result.typed !== undefined && { typed: result.typed }),
         // The first-party requests the action started, observed on a compile
         // run (§6.9). `actionsOf` merges them onto the action, before the
         // recording's redaction, for the generator to read as evidence.

@@ -16,7 +16,7 @@ in the test files, not here.
 |---|-----|-----------------|-------------------------|-----|
 | 2.1 | No way to answer a browser dialog | 43, 48, 50, 54, 57, 60, 61 (7) | Dismisses every alert, confirm and prompt by itself. A step cannot accept a confirm, type into a prompt, or read the dialog's text | A `dialog` action that sets how the next dialog is answered, and a record of every dialog the model and assertions can see |
 | 2.2 | No double-click or right-click | 41, 49, 60 (3) | `click` always does one left click. The model sent `doubleClick`, was refused, then declared the step impossible | `clickCount` and `button` on `click`, with the parser mapping `doubleClick`, `rightClick` and similar names onto them |
-| 2.3 | Typing does not fire key events | 53, 58 (2) | `type` uses Playwright's `fill`, which fires only `input`. Filters that listen for `keyup` never react | After `fill`, press `End` on the field, which fires `keydown` and `keyup` without changing the text |
+| 2.3 | Typing does not fire key events | 53, 58 (2) | `type` uses Playwright's `fill`, which fires only `input`. Filters that listen for `keyup` never react | A `type` presses only the keys its step asks for. A step that asks for its text key by key ("one character at a time") gets `"sequential": true`, typed with `pressSequentially`; any other `type` fills. **Replaces** the first fix, End pressed after every fill, which set a spinbutton date segment to its maximum (issue #90) |
 | 2.4 | `count` counts hidden elements | 53 | `count` counts every match, so a filtered list counts the same before and after | Count visible matches by default. `includeHidden: true` keeps the old behaviour |
 | 2.5 | Ads block clicks | 44, 59 (2) | A Google ad iframe that covers the target makes the click time out after 10 s | When the element blocking the click is an ad, hide the page's ad frames and retry once. An opt-in `browser.blockAds` stops ad requests at the network **Superseded by §2.47:** the ad hiding is removed. |
 | 2.6 | Key names are case-sensitive | 62, 71 (2) | `keyboard.press("END")` and `press("CTRL+A")` throw "Unknown key" | Map key names to Playwright's spelling, including chords such as `ctrl+a` and `Control+A` |
@@ -127,19 +127,83 @@ on a page that opens an alert, a confirm and a prompt (`page.setContent`).
 The action prompt documents both fields. Code-behind generation emits
 `dblclick()` or `click({ button: 'right' })` for them.
 
-### 2.3 Typing fires key events
+### 2.3 Typing presses only the keys the step asks for
 
-**What happens today.** `executeType` calls `locator.clear()` then
+**What happened.** `executeType` calls `locator.clear()` then
 `locator.fill(value)`. `fill` sets the value and fires `input`. It fires no
 `keydown`, `keypress` or `keyup`. Measured on both sites: the Automation
 Bookstore filter and the LambdaTest task filter showed every row after
-`input`, and the filtered rows only after `keyup`.
+`input`, and the filtered rows only after `keyup`. (Rechecked on 2026-10-14
+for #90, the Automation Bookstore filter reacts to `input` too: a fill alone
+takes it from 8 books to 5.)
 
-**Fix.** After `fill`, press `End` on the same element. `End` moves the caret
-and leaves the text alone, and it fires `keydown` and `keyup` on the field, so
-key-driven widgets see a key event after the value has changed. It is skipped
-for input types where `End` would change the value (`range`, `number`, `date`,
-`time` and similar) and for `<select>`.
+**The first fix, withdrawn.** `executeType` pressed `End` on the field after
+`fill`. In a text box End moves the caret, and its `keydown` and `keyup` made
+the two filters react. It skipped input types where End changes the value
+(`range`, `number`, `date`, `time` and similar) and `<select>`, but took every
+contenteditable for text. A date built as three contenteditable
+`role="spinbutton"` segments is one, and End is the spinbutton key for "set to
+the maximum": a date of birth typed as 01, 01 and 1982 went in as 31/12/9999,
+and every step passed, because no step read the field back
+([issue #90](https://github.com/steptix/steptix/issues/90)). What a key does
+to a field depends on its role and its scripts, not on its tag or input type,
+so no list of safe types makes a key nobody asked for safe.
+
+**Fix.** Typing presses only the keys the step asks for, in any field.
+
+- A plain `type` clears the field and fills it, as it did before End was
+  added. No key reaches the field after its value is in.
+- When the step asks for its text key by key ("one character at a time",
+  "each character in sequence", "key by key" and the like), the model adds
+  `"sequential": true` to the `type` action (action prompt rule 10).
+  `executeType` then clears the field and calls
+  `locator.pressSequentially(value)`, which fires `keydown`, `keypress`,
+  `input` and `keyup` for each character. The step's words decide, never the
+  page: rule 10 tells the model not to add the flag because a page looks live,
+  has a filter or did not react to an earlier type.
+- Date, time, datetime-local, month, week, colour and range inputs are filled
+  even with the flag. A date or time input takes its keys segment by segment,
+  in the order the browser's locale shows them, and a colour or range input
+  takes none. The action result records it (`typed: { by: 'fill', inputType }`)
+  and the action's row in the report says "filled, not typed key by key". A
+  key-by-key type's row says "typed key by key". A `type` aimed at a
+  `<label>` is judged by the control the label stands for, which is where
+  the text goes. A key-by-key type with nothing to type, a clear, is a plain
+  one.
+- A target `fill` cannot reach (§2.27) is still clicked and typed on the
+  keyboard, flag or not; with the flag its row says it was typed key by key.
+- Code-behind types the same way. The generation prompt's rule 7e writes a
+  plain recorded `type` as `.fill(…)`, and one with `"sequential": true` as
+  `clear()` then `pressSequentially(…)`, unless its `typed` records that the
+  run filled a native input. The repair prompt's rule 7 says the same from the
+  step's words. Neither ever adds a key press the step or the transcript does
+  not have. The one compile written without a model, for a step that only
+  reads (`entryFromRecording`, SPEC-codebehind-robustness.md §6.6), types
+  nothing.
+
+The survey's tests now ask for keys where the page needs them. For #90 a
+probe replayed every section C run, typed each of its 145 fields the new way,
+then pressed End as the old code did. Three steps had relied on End:
+
+- c58 step 19, the LambdaTest tasks table's search, which listens for keyup;
+- c62 step 14, Leafground's PrimeFaces table filter (an inline `onkeyup`);
+- c46 step 10, the Selenium web form's date picker, which reads typed text on
+  keyup and, when it closes, writes its own date back: still empty after a
+  fill. The form then submitted no date, and the test passed, because nothing
+  checked it. Step 12 now does.
+
+Each now asks for its text one character at a time. c53 does too, though it
+turned out not to need it. Three of c49's fields sit behind its shop login and
+were not reached.
+
+**Still pressed without being asked**, each left for a decision of its own:
+
+- `clear()` before `fill`. It is Playwright's `fill('')`, which selects the
+  text and presses Delete, so a plain type fires one `keydown` and `keyup`
+  for Delete before the value goes in. It dates from the first version, when
+  typing went through the keyboard; `fill` replaces the value by itself.
+- §2.27's fallback presses `ControlOrMeta+A` before typing, so the text
+  replaces what the field holds.
 
 ### 2.4 `count` counts what is shown
 
@@ -180,11 +244,11 @@ keeps its case.
 
 ### 2.7 Inputs that cannot be cleared
 
-**Fix.** `executeType` reads the input type first. For `color`, `date`,
-`datetime-local`, `month`, `time`, `week` and `range` it skips `clear()`,
-because an empty value is malformed for them and `fill` replaces the value
-anyway. A colour value is normalised to lowercase `#rrggbb`, and a three-digit
-`#rgb` is expanded.
+**Fix.** `executeType` still clears first, and when the clear throws
+"Malformed value" it goes on to `fill`, which replaces the value anyway. Only
+`color` and `range` inputs throw: neither can be empty. A date or time input
+can, so its clear works. A colour value is normalised to lowercase `#rrggbb`,
+and a three-digit `#rgb` is expanded.
 
 ### 2.8 Multi-selects
 

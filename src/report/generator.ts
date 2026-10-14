@@ -1267,6 +1267,9 @@ function renderSubAction(
       ? `<div class="sub-action-detail">dragged: ${escapeHtml(sub.action.selector ?? '?')} → onto: `
         + `${escapeHtml(sub.action.target ?? '?')}</div>`
       : '';
+  // A type the step asked to make key by key, and whether it went in that way
+  // (SPEC-web-survey-fixes.md §2.3). A plain type fills and has no line.
+  const typedHtml = describeTyped(sub.typed);
   // A list read that came back empty or mixed, and what the model made of it
   // (src/runner/list-read-review.ts): without it a read that stored nothing
   // looks like any other read that worked.
@@ -1283,7 +1286,7 @@ function renderSubAction(
     ? undefined
     : sub.screenshotBase64;
   const hasBody = ownShot || sub.domSnapshot || sub.aiReasoning || sub.error || sub.apiCallData
-    || uploadHtml !== '' || mappingHtml !== '' || dragHtml !== '' || listReviewHtml !== '';
+    || uploadHtml !== '' || mappingHtml !== '' || dragHtml !== '' || typedHtml !== '' || listReviewHtml !== '';
 
   const subUrlHtml = sub.pageUrl ? `<div class="screenshot-url">${escapeHtml(sub.pageUrl)}</div>` : '';
   const screenshotHtml = onComputerTurn && !ownShot
@@ -1329,8 +1332,18 @@ function renderSubAction(
     <span class="sub-action-desc">${escapeHtml(description)}</span>
     ${timeLabel}
   </div>
-  ${hasBody ? `<div class="sub-action-body">${uploadHtml}${dragHtml}${mappingHtml}${listReviewHtml}${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
+  ${hasBody ? `<div class="sub-action-body">${uploadHtml}${dragHtml}${typedHtml}${mappingHtml}${listReviewHtml}${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
 </div>`;
+}
+
+/** A key-by-key type's line: typed key by key, or why the value was set
+ *  whole instead. Empty for a plain type. */
+function describeTyped(typed: SubActionResult['typed']): string {
+  if (typed === undefined) return '';
+  const text = typed.by === 'keys'
+    ? 'typed key by key'
+    : `filled, not typed key by key: an <input type="${typed.inputType}"> takes its value whole`;
+  return `<div class="sub-action-detail">${escapeHtml(text)}</div>`;
 }
 
 /** A reviewed list read's line: what happened to it, then what it matched. */

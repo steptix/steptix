@@ -53,6 +53,13 @@
  *                                accounts with balances (capture + For each).
  *                                All state is client-side, so it resets on load
  *                                and concurrent shards cannot disturb one another.
+ *
+ *   Schedule a transfer test page — steptix/steptix#90:
+ *     GET    /schedule-transfer → a payee filter that reacts on keyup only, an
+ *                                amount, and a transfer date in three
+ *                                spinbutton segments where End sets the
+ *                                maximum. Scheduling reads every value back.
+ *                                No login; client-side state, reset on load.
  */
 
 import http from 'node:http';
@@ -1506,6 +1513,9 @@ async function handleRequest(
       '/aria-grid': 'aria-grid.html',
       // Four shapes no structural rule reads, for the structure question.
       '/odd-tables': 'odd-tables.html',
+      // Fields that react to keys: a keyup-only filter and a date in three
+      // spinbutton segments, where End sets the maximum (steptix/steptix#90).
+      '/schedule-transfer': 'schedule-transfer.html',
       // The one NON-html static asset (docs/specs/SPEC-use-computer.md §7).
       // It is in this map rather than reached by the `.html` fallback below
       // because that fallback is what keeps the static path from serving

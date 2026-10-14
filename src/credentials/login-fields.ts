@@ -272,8 +272,8 @@ const SUBMIT_CLICK_TIMEOUT_MS = 5_000;
  * real Chrome over CDP, and an occluded/minimised Chrome window — all clicked
  * in under 90ms, so the original failure is NOT diagnosed. What was measured is
  * the cost of being wrong: `focus` took 6–16ms in every scenario where `click`
- * took 86–2001ms, and it cannot fail for any reason `focus` does not share. So
- * this deletes a step that was never load-bearing rather than fixing a
+ * took 86–2001ms, and it cannot fail for any reason `click` does not share. So
+ * this deletes a step that was never load-bearing rather than fixing an
  * understood bug, and those six failures deserve watching for again.
  */
 export async function typeInto(frame: Frame, selector: string, value: string): Promise<void> {

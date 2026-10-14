@@ -1,5 +1,5 @@
 import type { AIAction, ChatMessage, MessageContentBlock, TableReadColumn } from './types.js';
-import type { ActionTargeting } from '../browser/actions.js';
+import type { ActionTargeting, TypedRoute } from '../browser/actions.js';
 import type { PageInfo } from '../browser/manager.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
 import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
@@ -242,7 +242,7 @@ Plan your next action based on the observed result — do not batch multiple act
 9. For "navigate" actions, set "url" to the full or relative URL
 9a. CLICK VARIANTS. A double-click is a "click" with "clickCount": 2, and a right-click (context menu) is a "click" with "button": "right": { "action": "click", "selector": "#item", "clickCount": 2, "description": "Double-click the item" }. A press-and-hold (long press) is a "click" with "holdMs", the milliseconds to keep the button down: the time the step names, else 2000. There is no separate double-click, right-click or long-press action
 9b. TYPING WITHOUT A FIELD. "type" into an element that is not an input — a custom element whose field sits in a closed shadow root, a canvas, an editor surface — clicks that element and types on the keyboard, so give that element as the "selector". To type into whatever already has focus, use { "action": "keyboard", "text": "Ada", "description": "Type Ada" }; "key" alone presses one key
-10. For "type" actions, set "value" to the text to type
+10. For "type" actions, set "value" to the text to type. A "type" fills the field: it sets the whole value at once, pressing no key for its characters. When the step asks for the text to be typed key by key — "one character at a time", "each character in sequence", "key by key", "letter by letter" and the like — add "sequential": true, and the framework clears the field and presses each character's key, for a page that reacts to keys as they are typed. Step "Type Ada into the lookup box one character at a time" is { "action": "type", "selector": "#lookup", "value": "Ada", "sequential": true, "description": "Type Ada one character at a time" }; step "Type Ada into the lookup box" is the same action without "sequential". The step's words decide, never the page: do NOT add "sequential" because the page looks live, has a filter, a search box or an autocomplete, or did not react to an earlier type
 10a. UPLOADING A FILE. A step that names a file PATH — a token with a file extension or a folder separator, e.g. "Upload file \\attachments\\logo.png", "Attach receipt-1.png and receipt-2.png", "Use the Choose file button to upload id.pdf" — is an upload. (A "choose"/"select" with no path is a dropdown: rule 11.) Emit an "upload" action: { "action": "upload", "selector": "#statement-file", "filePath": "attachments/logo.png", "description": "Upload logo.png as the statement" }.
    "filePath" RULES: copy the path exactly as the step wrote it, with backslashes turned into forward slashes and a leading slash kept only when the step has one — "\\attachments\\logo.png" becomes "/attachments/logo.png" and "attachments\\logo.png" becomes "attachments/logo.png"; never write a backslash (a lone backslash is invalid JSON and costs the whole turn), and never make a path absolute that the step did not write that way. Do NOT guess a folder and do NOT check whether the file exists: the framework resolves the path against the test file's own folder and fails the step itself, with a clear message, if it is missing. For SEVERAL files into one field use "filePaths": ["attachments/receipt-1.png", "attachments/receipt-2.png"] instead of "filePath".
    "selector" RULES: when the step names a control — "use the Choose file button", "click Browse", "drop it on the upload area" — target THAT control; the framework clicks it and answers the file picker it opens. When the step names no control, target the field's <input type="file">. A file input shown as \`<input id="..." type="file"> <!-- hidden: display:none -->\` is NORMAL for a styled uploader and is still the right target (the exception to rule 4) — do not try to make it visible first. Never "type" a path into a text field, and never "click" a file input.
@@ -1196,6 +1196,8 @@ export function formatStepHistoryEntry(
  */
 export type TranscriptAction = AIAction & {
   targeting?: ActionTargeting;
+  /** How a key-by-key `type` typed (SPEC-web-survey-fixes.md §2.3). */
+  typed?: TypedRoute;
   /** The page's URL changed while the action ran
    *  (docs/specs/SPEC-codebehind-robustness.md §6.7). */
   navigated?: { from: string; to: string };
@@ -1835,46 +1837,17 @@ const CLOSING_ACTIONS: ReadonlySet<string> = new Set(['closePage', 'closeBrowser
  * Rule 7a: the stale-handle rule, emitted only for a transcript that actually
  * moved a tab or a browser (stories/codebehind-framework-actions.md).
  *
- * Numbered `7a` rather than `8` because the selector rules below are numbered
- * from 8 and the post-condition rule's number is COMPUTED from the last one
- * they emit — inserting a rule 8 here would collide with them and shift a
- * number the computation depends on.
+ * Rule 7's additions are lettered rather than numbered `8` because the
+ * selector rules below are numbered from 8 and the post-condition rule's
+ * number is COMPUTED from the last one they emit — inserting a rule 8 here
+ * would collide with them and shift a number the computation depends on. The
+ * letters run in the order the prompt shows them: 7a here, the upload rule's
+ * 7b in the prompt's own text, then 7c, 7d and 7e below.
  *
  * A rule the transcript cannot trigger is pure cost on every compile, so a
  * step that touched no tab never sees it. Same principle as
  * `measuredSelectorRules`.
  */
-/**
- * How a recorded history move becomes code (SPEC-browser-history.md §7).
- *
- * Conditional for `tabHandleRule`'s reason, stated above it: a rule the
- * transcript cannot trigger is pure cost on every compile. Numbered `7b` so it
- * sits beside `7a` without disturbing the selector rules, whose numbering the
- * post-condition rule computes from.
- */
-function historyRule(actions: TranscriptAction[]): string {
-  if (!actions.some((a) => a.action === 'back' || a.action === 'forward' || a.action === 'reload')) return '';
-  return (
-    `\n7b. **A recorded \`back\`, \`forward\` or \`reload\` is the browser's own button.** ` +
-    `Write \`await page.goBack()\`, \`await page.goForward()\` or \`await page.reload()\`. Never a ` +
-    `keyboard shortcut: a key event is delivered to the focused element inside the page, not to the ` +
-    `browser, so it does nothing at all — quietly, since the press itself succeeds.`
-  );
-}
-
-/**
- * How a recorded drag becomes code (docs/specs/SPEC-record-steps.md §4).
- * Conditional for `historyRule`'s reason.
- */
-function dragRule(actions: TranscriptAction[]): string {
-  if (!actions.some((a) => a.action === 'drag')) return '';
-  return (
-    `\n7c. **A recorded \`drag\` moves \`selector\` onto \`target\`.** Write ` +
-    `\`await page.locator(<selector>).dragTo(page.locator(<target>))\`, with each selector chosen by ` +
-    `rule 7 from the transcript. One call: never rebuild it from \`page.mouse\` moves, hovers or clicks.`
-  );
-}
-
 function tabHandleRule(actions: TranscriptAction[]): string {
   if (!actions.some((a) => TAB_ACTIONS.has(a.action))) return '';
   return (
@@ -1888,6 +1861,52 @@ function tabHandleRule(actions: TranscriptAction[]): string {
     `\`tabs.open\`, \`tabs.openedBy\`, \`tabs.switchTo\`, \`tabs.close\`, \`browsers.open\` and ` +
     `\`browsers.switchTo\` all return the page that is active afterwards. Using \`page\` BEFORE the first ` +
     `switch is correct — that is where \`tabs.openedBy(() => page.click(...))\`'s trigger lives.`
+  );
+}
+
+/**
+ * Rule 7c: how a recorded history move becomes code (SPEC-browser-history.md
+ * §7). Conditional for `tabHandleRule`'s reason.
+ */
+function historyRule(actions: TranscriptAction[]): string {
+  if (!actions.some((a) => a.action === 'back' || a.action === 'forward' || a.action === 'reload')) return '';
+  return (
+    `\n7c. **A recorded \`back\`, \`forward\` or \`reload\` is the browser's own button.** ` +
+    `Write \`await page.goBack()\`, \`await page.goForward()\` or \`await page.reload()\`. Never a ` +
+    `keyboard shortcut: a key event is delivered to the focused element inside the page, not to the ` +
+    `browser, so it does nothing at all — quietly, since the press itself succeeds.`
+  );
+}
+
+/**
+ * Rule 7d: how a recorded drag becomes code (docs/specs/SPEC-record-steps.md
+ * §4). Conditional for `tabHandleRule`'s reason.
+ */
+function dragRule(actions: TranscriptAction[]): string {
+  if (!actions.some((a) => a.action === 'drag')) return '';
+  return (
+    `\n7d. **A recorded \`drag\` moves \`selector\` onto \`target\`.** Write ` +
+    `\`await page.locator(<selector>).dragTo(page.locator(<target>))\`, with each selector chosen by ` +
+    `rule 7 from the transcript. One call: never rebuild it from \`page.mouse\` moves, hovers or clicks.`
+  );
+}
+
+/**
+ * Rule 7e: how a recorded `type` becomes code (SPEC-web-survey-fixes.md
+ * §2.3). It types the way the run typed: a fill, or key by key where the step
+ * asked for that, and it presses no key the transcript does not record.
+ * Conditional for `tabHandleRule`'s reason.
+ */
+function typeRule(actions: TranscriptAction[]): string {
+  if (!actions.some((a) => a.action === 'type')) return '';
+  return (
+    `\n7e. **A recorded \`type\` puts its \`value\` into its field the way the run did.** Write ` +
+    `\`await page.locator(<selector>).fill(<value>)\`. A \`type\` with \`"sequential": true\` was typed key ` +
+    `by key because its step asked for that: write \`await <locator>.clear()\` and then ` +
+    `\`await <locator>.pressSequentially(<value>)\` — unless its \`"typed"\` says \`"by": "fill"\`, which means ` +
+    `the run filled that date, time, colour or range input whole, so fill it too. Never press a key the ` +
+    `transcript does not record, such as End, Tab or Enter after the text: a key nobody asked for can ` +
+    `change what the field holds, as End sets a date segment to its maximum.`
   );
 }
 
@@ -2219,7 +2238,7 @@ Rules — all of them are enforced:
 4. **Turn assertions into \`step.expect(condition, message)\`**, with a message that names what was compared.
 5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake. After an action that changes the page — a click that submits or navigates, anything that starts a request — \`await step.settle()\` before you read or assert anything: a locator's auto-wait finds the OLD page's element just as happily, and a title or URL read does not wait at all.
 6. **No imports.** Everything you need arrives via the context object — and everything you use must be in \`run\`'s destructured parameter list. The shape above shows \`{ page, step, log }\` because that is the common case, not because it is the whole context: an entry that calls \`tabs.open(...)\` must be written \`async run({ page, step, log, tabs })\`. A name you use but do not destructure is a \`ReferenceError\` on the first replay.
-7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.${readSelectorRule7(input.actions)} A \`role=…[name="…"]\` selector from the transcript matches the WHOLE name: keep it as written in \`page.locator(…)\`, or pass \`exact: true\` if you rewrite it as \`getByRole\` — without it \`getByRole\` matches any name that contains the text, in any capitalisation.${historyRule(input.actions)}${dragRule(input.actions)}${tabHandleRule(input.actions)}
+7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.${readSelectorRule7(input.actions)} A \`role=…[name="…"]\` selector from the transcript matches the WHOLE name: keep it as written in \`page.locator(…)\`, or pass \`exact: true\` if you rewrite it as \`getByRole\` — without it \`getByRole\` matches any name that contains the text, in any capitalisation.${tabHandleRule(input.actions)}
 7b. **Files come through \`step.filePath\`.** An \`upload\` action's \`filePath\` / \`filePaths\` in the transcript are relative to the test file, so pass each through \`step.filePath('…')\` — the verbatim string — and give the result to Playwright. When the action's \`upload.via\` is \`"input"\`, that is \`await page.locator('#statement-file').setInputFiles(step.filePath('attachments/logo.png'))\`. When it is \`"chooser"\`, the action clicked a control that opened a picker, so write:
 \`\`\`
 const chooser = page.waitForEvent('filechooser');
@@ -2227,7 +2246,7 @@ chooser.catch(() => {});
 await page.locator('#identity-choose').click();
 await (await chooser).setFiles(step.filePath('attachments/statement.pdf'));
 \`\`\`
-(the \`.catch\` matters: without it a failing click leaves the waiter rejecting with nobody listening, which can end the run.) A parameterised path is \`step.filePath(step.getVar('name'))\`. NEVER write an absolute path, and never hand a bare string literal to \`setInputFiles\` or \`setFiles\`.
+(the \`.catch\` matters: without it a failing click leaves the waiter rejecting with nobody listening, which can end the run.) A parameterised path is \`step.filePath(step.getVar('name'))\`. NEVER write an absolute path, and never hand a bare string literal to \`setInputFiles\` or \`setFiles\`.${historyRule(input.actions)}${dragRule(input.actions)}${typeRule(input.actions)}
 ${selectorRules}
 ${postConditionNumber}. **End with a post-condition, and make it wait.** The last thing \`run\` does must check that the page shows the step succeeded: on replay, "did not throw" has to mean "the step worked", and without this it only means "the code ran".
 

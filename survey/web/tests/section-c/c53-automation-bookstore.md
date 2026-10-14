@@ -11,13 +11,17 @@ the survey list, whose practice page now redirects to an unrelated site.
 **Probes:** a list that changes on every keystroke, counting items that are
 hidden rather than removed, reading text off cards, clearing a filter.
 
+The steps that type into the filter ask for one character at a time, as a
+person types into a live filter. They would pass without it: the filter reacts
+to a value set in the field (`input`) as well as to keys.
+
 ## Config
 - baseUrl: https://automationbookstore.dev/
 
 ## Steps
 1. Navigate to the baseUrl
 2. Count the books shown [as: all_books]
-3. Type "test" into the filter box
+3. Type "test" into the filter box one character at a time
 4. Count the books shown [as: filtered_books]
 5. Verify that {{filtered_books}} is less than {{all_books}}
 6. Verify every book shown has "test" in its title, ignoring case
@@ -25,5 +29,5 @@ hidden rather than removed, reading text off cards, clearing a filter.
 8. Clear the filter box
 9. Count the books shown [as: books_after_clear]
 10. Verify that {{books_after_clear}} equals {{all_books}}
-11. Type "zzzz" into the filter box
+11. Type "zzzz" into the filter box one character at a time
 12. Verify no books are shown

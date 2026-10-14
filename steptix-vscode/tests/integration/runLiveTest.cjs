@@ -60,9 +60,12 @@ const SHARD_PORT_BASE = 3200;
 // (and into every tests/integration/*.md in the repo root), so it is pinned
 // rather than allocated. That is also why we adopt an already-listening
 // server instead of failing on EADDRINUSE: a developer with the app already
-// running — or a concurrent live run in another worktree — is serving the
-// same static fixture, and two runs sharing it is harmless. It holds no
-// per-run state that one run could corrupt for another.
+// running — or a concurrent live run in another worktree — is usually serving
+// the same pages, and two runs sharing them is harmless. Not always: the app
+// serves the files of the checkout that started it, so a branch that adds or
+// changes a page under fixtures/test-app sees the other checkout's version
+// until that app stops. Its one piece of per-run state is the
+// `/api/documents` list (see startTestApp).
 const TEST_APP_PORT = 8787;
 const TEST_APP_URL = `http://127.0.0.1:${TEST_APP_PORT}`;
 
@@ -83,7 +86,9 @@ async function isTestAppUp() {
  *
  * One app for every shard, on purpose: the pages are static markup, so the
  * shards contend on nothing. The one exception is the `/api/documents` list
- * behind the Documents page, which no live suite in this directory drives.
+ * behind the Documents page, which data-rows.test.cjs drives
+ * (securebank-upload-rows.md) and clears before it counts; two runs uploading
+ * at the same moment can still see each other's rows.
  */
 async function startTestApp(repoRoot) {
   if (await isTestAppUp()) {

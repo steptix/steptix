@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AIAction } from '../ai/types.js';
-import type { ActionTargeting } from '../browser/actions.js';
+import type { ActionTargeting, TypedRoute } from '../browser/actions.js';
 import type { ObservedRequest } from '../browser/page-state.js';
 import type { AssertionResult, StepResult, StepStatus, SubActionResult } from '../report/types.js';
 import { logger } from '../utils/logger.js';
@@ -51,6 +51,10 @@ export type RecordedAction = AIAction & {
    *  worked: `setInputFiles` for `'input'`, the file-chooser pattern for
    *  `'chooser'`. */
   upload?: { via: 'input' | 'chooser' };
+  /** How a key-by-key `type` typed, so generation writes the same: key by
+   *  key, or a fill into a date, time, colour or range input
+   *  (SPEC-web-survey-fixes.md §2.3). */
+  typed?: TypedRoute;
   /**
    * The page's URL changed while this action ran: from the page it ran on to
    * the one the run was on after it (docs/specs/SPEC-codebehind-robustness.md
@@ -859,13 +863,15 @@ export function actionsOf(result: StepResult | undefined): RecordedAction[] {
       // secret, and the recording redacts what this returns.
       const navigated = navigationOf(sa);
       const requests = sa.requests !== undefined && sa.requests.length > 0 ? sa.requests : undefined;
-      if (sa.targeting === undefined && sa.upload === undefined && navigated === undefined && requests === undefined) {
+      if (sa.targeting === undefined && sa.upload === undefined && sa.typed === undefined
+        && navigated === undefined && requests === undefined) {
         return sa.action;
       }
       return {
         ...sa.action,
         ...(sa.targeting !== undefined && { targeting: sa.targeting }),
         ...(sa.upload !== undefined && { upload: sa.upload }),
+        ...(sa.typed !== undefined && { typed: sa.typed }),
         ...(navigated !== undefined && { navigated }),
         ...(requests !== undefined && { requests }),
       };
