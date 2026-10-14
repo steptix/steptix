@@ -133,7 +133,9 @@ The action prompt documents both fields. Code-behind generation emits
 `locator.fill(value)`. `fill` sets the value and fires `input`. It fires no
 `keydown`, `keypress` or `keyup`. Measured on both sites: the Automation
 Bookstore filter and the LambdaTest task filter showed every row after
-`input`, and the filtered rows only after `keyup`.
+`input`, and the filtered rows only after `keyup`. (Rechecked on 2026-10-14
+for #90, the Automation Bookstore filter reacts to `input` too: a fill alone
+takes it from 8 books to 5.)
 
 **The first fix, withdrawn.** `executeType` pressed `End` on the field after
 `fill`. In a text box End moves the caret, and its `keydown` and `keyup` made
@@ -179,15 +181,20 @@ so no list of safe types makes a key nobody asked for safe.
   reads (`entryFromRecording`, SPEC-codebehind-robustness.md §6.6), types
   nothing.
 
-The survey's tests now ask for keys where the page needs them: c53 types
-"test" and "zzzz" into the filter box one character at a time, and c58 types
-"Testing" into the tasks table's search the same way. c62's PrimeFaces table
-filter (`onkeyup` and nothing else) had relied on End too, unmeasured until
-#90: its step 14 asks for "India" one character at a time. A probe of the
-survey's other steps that type into a live widget found none that needed
-End: each widget reacts to `fill`, or behaved the same with End. c47's map
-suggestions are switched off by the site, and the recorded runs of c46 and
-c60 never chose their datalist option, End or not.
+The survey's tests now ask for keys where the page needs them. For #90 a
+probe replayed every section C run, typed each of its 145 fields the new way,
+then pressed End as the old code did. Three steps had relied on End:
+
+- c58 step 19, the LambdaTest tasks table's search, which listens for keyup;
+- c62 step 14, Leafground's PrimeFaces table filter (an inline `onkeyup`);
+- c46 step 10, the Selenium web form's date picker, which reads typed text on
+  keyup and, when it closes, writes its own date back: still empty after a
+  fill. The form then submitted no date, and the test passed, because nothing
+  checked it. Step 12 now does.
+
+Each now asks for its text one character at a time. c53 does too, though it
+turned out not to need it. Three of c49's fields sit behind its shop login and
+were not reached.
 
 **Still pressed without being asked**, each left for a decision of its own:
 

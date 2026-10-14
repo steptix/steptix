@@ -11,8 +11,9 @@ the survey list, whose practice page now redirects to an unrelated site.
 **Probes:** a list that changes on every keystroke, counting items that are
 hidden rather than removed, reading text off cards, clearing a filter.
 
-The filter reacts to keys, not to a value set in the field, so the steps that
-type into it ask for one character at a time.
+The steps that type into the filter ask for one character at a time, as a
+person types into a live filter. They would pass without it: the filter reacts
+to a value set in the field (`input`) as well as to keys.
 
 ## Config
 - baseUrl: https://automationbookstore.dev/
