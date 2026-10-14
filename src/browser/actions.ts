@@ -1878,7 +1878,8 @@ async function executeType(
 ): Promise<TypedRoute | undefined> {
   const selector = requireSelector(action);
   let value = action.value ?? '';
-  const keyByKey = action.sequential === true;
+  // A key-by-key clear has no keys to press, so it is a plain one.
+  const keyByKey = action.sequential === true && value !== '';
   const locator = root.locator(selector).locator('visible=true').first();
   await uncoverForTyping(locator);
   // A custom element whose field lives in a CLOSED shadow root, a canvas
@@ -1908,9 +1909,10 @@ async function executeType(
   } catch (err) {
     if (!MALFORMED_WHEN_EMPTY.test(err instanceof Error ? err.message : String(err))) throw err;
   }
-  const kind = await inputKindOf(locator);
+  const field = await fieldOf(locator);
+  const kind = field?.kind;
   if (kind === 'color') value = normaliseColour(value);
-  if (kind === 'range') value = await clampToRange(locator, value);
+  if (field?.range !== undefined) value = clampToRange(field.range, value);
   // A kind that cannot be read is typed as the step asked.
   if (keyByKey && (kind === undefined || KEY_BY_KEY_KINDS.has(kind))) {
     // One budget covers every key, and a page doing work on each one (a
@@ -2049,19 +2051,36 @@ async function focusRefusingText(root: Page | FrameLocator): Promise<string | nu
   }
 }
 
-/** The kind of field the element is, or of the control it labels: its input
- *  type in lower case, `textarea`, `contenteditable`, another tag name, or
- *  `undefined` when it cannot be read. A `<label>` stands for its control
- *  because that is where `fill` and `pressSequentially` put the text. */
-async function inputKindOf(locator: Locator): Promise<string | undefined> {
+/** What `executeType` reads of the field it types into. */
+interface TypedField {
+  /** Its input type in lower case, `textarea`, `contenteditable`, or
+   *  another tag name. */
+  kind: string;
+  /** A range input's own ends, the browser's defaults where it sets none.
+   *  Absent on any other field. */
+  range?: { min: number; max: number };
+}
+
+/**
+ * The field the element is, or the control it labels, in one page call, or
+ * `undefined` when it cannot be read. A `<label>` stands for its control
+ * because that is where `fill` and `pressSequentially` put the text, so its
+ * kind and a range's ends are the control's.
+ */
+async function fieldOf(locator: Locator): Promise<TypedField | undefined> {
   try {
     return await locator.evaluate(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (el: any) => {
         const field = el.tagName === 'LABEL' && el.control ? el.control : el;
-        if (field.tagName === 'INPUT') return String(field.type || 'text').toLowerCase();
-        if (field.isContentEditable) return 'contenteditable';
-        return String(field.tagName).toLowerCase();
+        const kind = field.tagName === 'INPUT'
+          ? String(field.type || 'text').toLowerCase()
+          : field.isContentEditable ? 'contenteditable' : String(field.tagName).toLowerCase();
+        if (kind !== 'range') return { kind };
+        return {
+          kind,
+          range: { min: field.min === '' ? 0 : Number(field.min), max: field.max === '' ? 100 : Number(field.max) },
+        };
       },
       undefined,
       { timeout: MEASUREMENT_TIMEOUT_MS },
@@ -2074,27 +2093,9 @@ async function inputKindOf(locator: Locator): Promise<string | undefined> {
 /**
  * A range input refuses a value outside its own min and max as malformed, and
  * "set the slider to its maximum" was typed as 100 into a slider that stops at
- * 10. Clamp a number to the range, and read "max"/"min" as the ends. The
- * range is the element, or the control it labels, as `inputKindOf` reads it.
+ * 10. Clamp a number to the range, and read "max"/"min" as the ends.
  */
-async function clampToRange(locator: Locator, value: string): Promise<string> {
-  let bounds: { min: number; max: number };
-  try {
-    bounds = await locator.evaluate(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (el: any) => {
-        const range = el.tagName === 'LABEL' && el.control ? el.control : el;
-        return {
-          min: range.min === '' ? 0 : Number(range.min),
-          max: range.max === '' ? 100 : Number(range.max),
-        };
-      },
-      undefined,
-      { timeout: MEASUREMENT_TIMEOUT_MS },
-    );
-  } catch {
-    return value;
-  }
+function clampToRange(bounds: { min: number; max: number }, value: string): string {
   const word = value.trim().toLowerCase();
   if (/^max(imum)?$/.test(word)) return String(bounds.max);
   if (/^min(imum)?$/.test(word)) return String(bounds.min);

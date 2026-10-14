@@ -164,8 +164,10 @@ so no list of safe types makes a key nobody asked for safe.
   in the order the browser's locale shows them, and a colour or range input
   takes none. The action result records it (`typed: { by: 'fill', inputType }`)
   and the action's row in the report says "filled, not typed key by key". A
-  key-by-key type's row says "typed key by key". A target labelled by a
-  `<label>` is judged by the control the label stands for.
+  key-by-key type's row says "typed key by key". A `type` aimed at a
+  `<label>` is judged by the control the label stands for, which is where
+  the text goes. A key-by-key type with nothing to type, a clear, is a plain
+  one.
 - A target `fill` cannot reach (§2.27) is still clicked and typed on the
   keyboard, flag or not; with the flag its row says it was typed key by key.
 - Code-behind types the same way. The generation prompt's rule 7e writes a

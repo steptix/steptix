@@ -195,6 +195,19 @@ describe('§2.3 typing presses only the keys the step asks for', () => {
     }
   });
 
+  it('a sequential clear has no keys to press, so it is a plain one', async () => {
+    const page = await filterPage();
+    try {
+      await page.fill('#filter', 'old');
+      const result = await executeAction(page, act({ action: 'type', selector: '#filter', value: '', sequential: true }));
+      expect(result.success).toBe(true);
+      expect(result.typed).toBeUndefined();
+      expect(await page.inputValue('#filter')).toBe('');
+    } finally {
+      await page.close();
+    }
+  });
+
   it('parses sequential on a type only, and only when it is true', () => {
     expect(one({ action: 'type', selector: '#f', value: 'x', sequential: true }).sequential).toBe(true);
     expect(one({ action: 'type', selector: '#f', value: 'x', sequential: 'true' }).sequential).toBeUndefined();
