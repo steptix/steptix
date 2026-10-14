@@ -2116,9 +2116,6 @@ export interface SteptixTestHooks {
   /** Force a full re-scan of the workspace; useful for tests that write
    *  fixture files synchronously and can't wait on the watcher. */
   discoveryRefresh: () => Promise<void>;
-  /** The Variables view's current description string. Sections and skills
-   *  both carry `skillName`, so the label has to key on `kind` — this hook
-   *  is how a test proves a paused section reads "section:" not "skill:". */
   /** The N/M pass-summary counts for a document. M must be the author's
    *  main-flow step count: a section body can run zero times or many, so
    *  counting body lines makes M meaningless and lets N exceed it. */
@@ -2136,6 +2133,9 @@ export interface SteptixTestHooks {
     statuses: Array<string | null>;
     summary: string;
   }>;
+  /** The Variables view's current description string. Sections and skills
+   *  both carry `skillName`, so the label has to key on `kind` — this hook
+   *  is how a test proves a paused section reads "section:" not "skill:". */
   variablesDescription: () => string;
   /** Run-state signature for arbitrary text. Statuses are pinned to line
    *  numbers and a section heading decides which body a line belongs to, so

@@ -1,5 +1,5 @@
 import type { AIAction, AssertionEvaluation } from '../ai/types.js';
-import type { ActionTargeting } from '../browser/actions.js';
+import type { ActionTargeting, TypedRoute } from '../browser/actions.js';
 import type { ObservedRequest } from '../browser/page-state.js';
 
 export type StepStatus = 'passed' | 'failed' | 'skipped';
@@ -91,6 +91,14 @@ export interface SubActionResult {
    *  action was not measured", so a route stored in there would misclassify
    *  every upload (stories/upload-action.md, decision 14). */
   upload?: { via: 'input' | 'chooser' };
+  /**
+   * How a `type` that asked for its text key by key (`sequential`) put it in:
+   * each character with its own key events, or the value set whole into a
+   * date, time, colour or range input (SPEC-web-survey-fixes.md §2.3). The
+   * report says which, and generation writes the same. A sibling of
+   * `targeting` for `upload`'s reason. Absent on a plain type, which fills.
+   */
+  typed?: TypedRoute;
   /**
    * The first-party requests the action started, as a compile run's wait
    * observed them (docs/specs/SPEC-codebehind-robustness.md §6.9) — evidence

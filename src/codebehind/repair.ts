@@ -91,6 +91,30 @@ function recordedReadsBlock(actions: readonly RecordedAction[] | undefined, secr
   );
 }
 
+/** A call that types or presses keys, in the entry being repaired. */
+const TYPING_CALL = /\.\s*(?:fill|pressSequentially|type|press|insertText)\s*\(/;
+
+/**
+ * Rule 7: type the way the step asks, and press no key it does not
+ * (SPEC-web-survey-fixes.md §2.3) — the generation prompt's rule 7e, keyed on
+ * the step's words because a repair may have no recording. A repair is where
+ * a page that ignored a filled value tempts a fix that presses keys. Only for
+ * an entry or a recording that types, so every other repair prompt is as it
+ * was.
+ */
+function typingRule(input: RepairPromptInput): string {
+  const types = (input.actions ?? []).some((a) => a.action === 'type') || TYPING_CALL.test(input.entryCode);
+  if (!types) return '';
+  return (
+    '\n7. Type the way the step asks. Text goes into a field with `.fill(<value>)`. Only when the step asks ' +
+    'for it key by key ("one character at a time", "key by key") does it go in as `await <locator>.clear()` ' +
+    'and then `await <locator>.pressSequentially(<value>)`, and a date, time, colour or range input takes ' +
+    '`.fill` even then. Never press a key the step does not ask for, such as End, Tab or Enter after the ' +
+    'text: a key nobody asked for can change what the field holds, as End sets a date segment to its ' +
+    'maximum. A page that reacts only to keys needs a step that asks for them, not code that adds them.'
+  );
+}
+
 export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
   const paramBlock = formatParameterBlock(
     input.parameters,
@@ -173,7 +197,7 @@ Rules:
 3. Read parameters via \`step.getVar\`, never inline their values — and an environment placeholder by the name inside its braces: \`\${data.url}\` is \`step.getVar('data.url')\`. Its value is this environment's; the file must run against the others.
 4. Compute dynamic values (dates, derived codes) at runtime.
 ${postConditionRule}
-6. No imports; everything arrives via the context object.
+6. No imports; everything arrives via the context object.${typingRule(input)}
 
 If this step genuinely cannot be expressed as code, decline instead:
 

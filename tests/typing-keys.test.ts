@@ -259,9 +259,9 @@ describe('the whole transfer, with the model scripted', () => {
     expect(day!.sequential).toBeUndefined();
     expect(day!.typed).toBeUndefined();
 
-    // And the report says which way each field was typed.
-    const filteredHtml = renderReport(reportOf([results[0]!]));
-    expect(filteredHtml).toContain('typed key by key');
-    expect(renderReport(reportOf([results[3]!]))).not.toContain('key by key');
+    // And the report says which way each field was typed. (Its rows only: the
+    // report also shows what the model was sent, and rule 10 says "key by key".)
+    expect(renderReport(reportOf([results[0]!]))).toContain('<div class="sub-action-detail">typed key by key</div>');
+    expect(renderReport(reportOf([results[3]!]))).not.toMatch(/sub-action-detail">(typed|filled)/);
   });
 });

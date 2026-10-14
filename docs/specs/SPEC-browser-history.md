@@ -227,7 +227,8 @@ only that the entry navigates.
   fields; `page.reload()` with this spec's arrival rule (`domcontentloaded`,
   30 s, then the ordinary settle — it is in `MUTATING_ACTIONS`); prompt rule
   16b beside 16a; `page.reload()` in code-behind via the same conditional
-  rule 7b; `refresh` and the other near-miss spellings aliased. The form-post
+  rule (7b then, 7c since 7b went to the upload rule it collided with);
+  `refresh` and the other near-miss spellings aliased. The form-post
   decision is the browser's: a reload after a POST re-sends or not as the
   browser does, which is the application's behaviour under test. There is no
   "did it move?" failure — a current page can always be reloaded; one that

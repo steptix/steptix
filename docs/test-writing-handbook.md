@@ -304,7 +304,8 @@ to an action.
 | Reload | `Reload the page` / `Refresh` | `page.reload()` on the active tab — the browser button, not F5 (a key goes to the page). Waits for the page as a navigation does. |
 | Click | `Click the Sign in button` | Located by visible label, then the most stable selector on that element. |
 | Click, scoped | `Click Edit in the row for order {{order_id}}` | Scoping by row, dialog, section or form is how repeated labels are disambiguated. |
-| Enter text | `Type "{{email}}" into the Email field` | Clears the field, then fills. It does not append. |
+| Enter text | `Type "{{email}}" into the Email field` | Clears the field, then fills: the value goes in whole, with no key pressed for its characters. It does not append. |
+| Type key by key | `Type "lamp" into the Search field one character at a time` | Clears the field, then presses each character's key, for a page that reacts as you type (below). A date, time, colour or range input is filled even so. |
 | Several fields | `Enter the username {{username}} and the password {{password}}` | One field per turn, then the step ends. Fine as one line. |
 | Native select | `Select Australia from the Country dropdown` | Acts on the `<select>` by visible option text. |
 | Custom dropdown | `Open the Country dropdown and choose Australia` | Two clicks. |
@@ -336,6 +337,20 @@ to an action.
 Nothing in this table needs a CSS selector, and you should not write one
 unless you have verified it in the real page. Test ids are honoured when
 present, but the label is what the model matches first.
+
+**A page that reacts as you type may need "one character at a time".** A
+plain `Type` fills the field: the page gets the value and an `input` event,
+but no key for its characters. Most pages react to that. Some react only to keys: a live filter,
+a search that suggests as you type, an autocomplete that opens its list on a
+keystroke. A plain `Type` into one of those leaves the list as it was, and the
+step after it finds nothing filtered. Say so in the step, with "one character
+at a time", "key by key" or the like:
+`Type "lamp" into the Search field one character at a time`. Steptix then
+clears the field and presses each character's key, as a person typing does.
+The step's words decide, never the page, and a field gets exactly the
+characters the step names: nothing presses End, Tab or Enter after typing
+unless the step says to, because such a key can change what a field holds.
+End, for example, sets a date segment to its latest value.
 
 ### 3.1 Waits
 

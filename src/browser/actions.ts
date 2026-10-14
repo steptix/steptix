@@ -832,6 +832,9 @@ export interface ActionExecutionResult {
    *  type="file">`, or by answering the picker a control opened. Recorded so a
    *  compiled code-behind entry writes the shape that actually worked. */
   upload?: { via: UploadRoute };
+  /** How a `type` that asked for its text key by key (`sequential`) put it
+   *  in. Absent on a plain type, which fills. */
+  typed?: TypedRoute;
   /**
    * What the region holds, on a `readTable` that failed for a SHAPE reason
    * (§7.10) — nothing with data rows under it, two things with them, no
@@ -848,6 +851,14 @@ export interface ActionExecutionResult {
 
 /** Which of the two upload routes ran. */
 export type UploadRoute = 'input' | 'chooser';
+
+/**
+ * How a key-by-key `type` put its text in (SPEC-web-survey-fixes.md §2.3):
+ * `keys`, each character with its own key events; or `fill`, the value set
+ * whole, because the field is a date, time, colour or range input, which
+ * takes no typing key by key. `inputType` names that input.
+ */
+export type TypedRoute = { by: 'keys' } | { by: 'fill'; inputType: string };
 
 /**
  * Execute a single AI action via Playwright.
@@ -979,6 +990,8 @@ export async function executeAction(
   let remainingMs: number | undefined;
   /** Which route an `upload` took, for the transcript a compile reads. */
   let uploadRoute: UploadRoute | undefined;
+  /** How a key-by-key `type` typed, for the report and the transcript. */
+  let typed: TypedRoute | undefined;
   /** The HTTP status a `navigate` landed on (§2.35). */
   let httpStatus: number | undefined;
 
@@ -1092,7 +1105,7 @@ export async function executeAction(
       }
 
       case 'type':
-        await executeType(page, root, eff, remainingMs);
+        typed = await executeType(page, root, eff, remainingMs);
         break;
 
       case 'dialog': {
@@ -1312,6 +1325,7 @@ export async function executeAction(
       success: true,
       ...(targeting !== undefined && { targeting }),
       ...(uploadRoute !== undefined && { upload: { via: uploadRoute } }),
+      ...(typed !== undefined && { typed }),
       ...(httpStatus !== undefined && { httpStatus }),
     };
   } catch (err) {
@@ -1830,17 +1844,38 @@ export async function explainEnclosedToggle(selector: string, matches: Locator, 
  */
 const MALFORMED_WHEN_EMPTY = /Malformed value/i;
 
-/** Text-like elements, where pressing End moves the caret and nothing else. */
-const END_KEY_SAFE_TYPES = new Set(['text', 'search', 'email', 'password', 'url', 'tel', 'textarea', 'contenteditable']);
+/**
+ * The fields a key-by-key `type` presses each character into: the ones that
+ * take typed text. A date or time input takes typed digits segment by
+ * segment, in the order the browser's locale shows them, and a colour or
+ * range input takes no typed characters at all, so a `sequential` type fills
+ * those, as a plain one does, and says so (SPEC-web-survey-fixes.md §2.3).
+ */
+const KEY_BY_KEY_KINDS = new Set(['text', 'search', 'email', 'password', 'url', 'tel', 'number', 'textarea', 'contenteditable']);
 
+/**
+ * Type the action's value into its field, and return how, when the action
+ * asked for its text key by key (`sequential`).
+ *
+ * A plain type fills: `fill` sets the value and fires `input` with no key
+ * event. Only a `sequential` type, which the model sends when the step asks
+ * for its text one character at a time, presses the characters' keys, for a
+ * page that reacts to them, such as a filter or an autocomplete that listens
+ * for `keyup`. The step's words decide that, never the framework by the page,
+ * and no key follows the text: End once did, and set a spinbutton date
+ * segment to its maximum (SPEC-web-survey-fixes.md §2.3). Two keys are still
+ * pressed without being asked, and §2.3 leaves both open: the Delete of the
+ * clear below (Playwright's `clear()` is `fill('')`), and §2.27's Ctrl+A.
+ */
 async function executeType(
   page: Page,
   root: Page | FrameLocator,
   action: AIAction,
   clearTimeoutMs?: number,
-): Promise<void> {
+): Promise<TypedRoute | undefined> {
   const selector = requireSelector(action);
   let value = action.value ?? '';
+  const keyByKey = action.sequential === true;
   const locator = root.locator(selector).locator('visible=true').first();
   await uncoverForTyping(locator);
   // A custom element whose field lives in a CLOSED shadow root, a canvas
@@ -1861,28 +1896,26 @@ async function executeType(
     }
     await page.keyboard.press('ControlOrMeta+A');
     await page.keyboard.type(value);
-    return;
+    return keyByKey ? { by: 'keys' } : undefined;
   }
-  // Clear existing content first, then type. A colour, date or range input
-  // cannot be empty, so its clear throws; `fill` replaces its value anyway.
-  let clearable = true;
+  // Clear existing content first, then type. A colour or range input cannot
+  // be empty, so its clear throws; `fill` replaces its value anyway.
   try {
     await locator.clear({ timeout: clearTimeoutMs ?? TYPE_CLEAR_TIMEOUT_MS });
   } catch (err) {
     if (!MALFORMED_WHEN_EMPTY.test(err instanceof Error ? err.message : String(err))) throw err;
-    clearable = false;
   }
   const kind = await inputKindOf(locator);
   if (kind === 'color') value = normaliseColour(value);
   if (kind === 'range') value = await clampToRange(locator, value);
-  await locator.fill(value, { timeout: TYPE_FILL_TIMEOUT_MS });
-  // `fill` fires `input` and nothing else. A filter or autocomplete that
-  // listens for `keyup` never sees the change, which is how two of the
-  // survey's sites kept every row after "Type test into the filter" (§2.3).
-  // End fires keydown and keyup and leaves the text as it is.
-  if (clearable && kind !== undefined && END_KEY_SAFE_TYPES.has(kind)) {
-    await locator.press('End', { timeout: MEASUREMENT_TIMEOUT_MS }).catch(() => {});
+  // A kind that cannot be read is typed as the step asked.
+  if (keyByKey && (kind === undefined || KEY_BY_KEY_KINDS.has(kind))) {
+    await locator.pressSequentially(value, { timeout: TYPE_FILL_TIMEOUT_MS });
+    return { by: 'keys' };
   }
+  await locator.fill(value, { timeout: TYPE_FILL_TIMEOUT_MS });
+  // A `sequential` type gets here only for a field that takes its value whole.
+  return keyByKey && kind !== undefined ? { by: 'fill', inputType: kind } : undefined;
 }
 
 /**
@@ -2009,16 +2042,19 @@ async function focusRefusingText(root: Page | FrameLocator): Promise<string | nu
   }
 }
 
-/** The element's input type in lower case, `textarea`, `contenteditable`,
- *  another tag name, or `undefined` when it cannot be read. */
+/** The kind of field the element is, or of the control it labels: its input
+ *  type in lower case, `textarea`, `contenteditable`, another tag name, or
+ *  `undefined` when it cannot be read. A `<label>` stands for its control
+ *  because that is where `fill` and `pressSequentially` put the text. */
 async function inputKindOf(locator: Locator): Promise<string | undefined> {
   try {
     return await locator.evaluate(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (el: any) => {
-        if (el.tagName === 'INPUT') return String(el.type || 'text').toLowerCase();
-        if (el.isContentEditable) return 'contenteditable';
-        return String(el.tagName).toLowerCase();
+        const field = el.tagName === 'LABEL' && el.control ? el.control : el;
+        if (field.tagName === 'INPUT') return String(field.type || 'text').toLowerCase();
+        if (field.isContentEditable) return 'contenteditable';
+        return String(field.tagName).toLowerCase();
       },
       undefined,
       { timeout: MEASUREMENT_TIMEOUT_MS },

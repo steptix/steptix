@@ -170,6 +170,14 @@ export interface AIAction {
   text?: string;
   /** Text to type, option value to select, or condition to wait for */
   value?: string;
+  /**
+   * `type` only: type the value key by key, each character with its own key
+   * events. Set only when the step asks for its text that way ("one character
+   * at a time"), for a page that reacts to keys rather than to the value
+   * (SPEC-web-survey-fixes.md §2.3). Omitted means a fill, which sets the
+   * value and presses no key.
+   */
+  sequential?: boolean;
   /** URL to navigate to */
   url?: string;
   /** File path for upload actions, relative to the test file's folder unless

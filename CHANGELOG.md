@@ -9,6 +9,38 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — typing presses no key the step did not ask for
+
+A `type` pressed End after every fill, so that a filter listening for keyup
+would see the text (SPEC-web-survey-fixes.md §2.3). End is also the key that
+sets a spinbutton to its maximum. On a date entered in three spinbutton
+segments, a date of birth typed as 01, 01 and 1982 went in as 31/12/9999, and
+every step passed (#90).
+
+- **A plain `Type X into Y` fills again**, as it did before End was added:
+  the value goes in whole and no key follows it.
+- **Typing key by key happens when the step asks for it.** Write "one
+  character at a time", "key by key" or the like, and the model marks the
+  `type` with `"sequential": true`. Steptix clears the field and presses each
+  character's key, which a page that reacts as you type sees. The step's
+  words decide, not how live the page looks. A date, time, colour or range
+  input is filled even then. The report says which way such a field was
+  typed.
+- **A step that typed into a live filter may need those words now.** A
+  filter or autocomplete that listens only for keys does not react to
+  `Type "lamp" into the Search field`. Add "one character at a time". The two
+  survey tests that relied on End, c53 and c58, say so now.
+- **Code-behind types the same way.** A compiled `type` is `.fill(…)`, or
+  `clear()` then `pressSequentially(…)` where the step asked for key by key.
+  Generation and repair are told never to add a key press the step or the
+  recording does not have.
+- **A `type` aimed at a field's `<label>` is judged by the field.** A colour
+  typed through its label is normalised and a range value clamped, as when
+  the input itself is the target.
+- Two keys are still pressed without being asked, each left for its own
+  decision: Playwright's `clear()` before the fill presses Delete, and the
+  §2.27 fallback for an element `fill` cannot reach presses Ctrl+A.
+
 ### Changed — Compile This Step takes body steps from two sections, and one repeat of a step
 
 Compile This Step refused two selections inside `### Section` bodies: steps

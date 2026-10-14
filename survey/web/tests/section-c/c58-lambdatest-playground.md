@@ -12,6 +12,9 @@ menu, so locating the right element starts with ignoring the page around it.
 a select, an AJAX form submit, a download progress bar, a searchable table,
 sliders set to exact values, drag and drop.
 
+The table's search reacts to keys, not to a value set in the field, so the
+step that searches asks for one character at a time.
+
 ## Config
 - baseUrl: https://www.lambdatest.com/selenium-playground/
 
@@ -34,7 +37,7 @@ sliders set to exact values, drag and drop.
 16. Start the download and wait until it completes
 17. Verify the page says the download is complete
 18. Navigate to table-search-filter-demo
-19. Search the tasks table for "Testing"
+19. Search the tasks table for "Testing", typing it one character at a time
 20. Verify the tasks table shows exactly one row, and it mentions Testing
 21. Navigate to drag-drop-range-sliders-demo
 22. Set the first slider to 95
