@@ -187,7 +187,7 @@ which are about compiled code-behind, had nothing to act on in either run.
 |---|------|--------|-------|
 | 39 | The Internet | removed | Test removed 2026-10-13. Chromium's HTTP/2 connection to this host stalls from this network, while curl and Firefox load it; cause not found, and nothing in Steptix to fix. Turning HTTP/2 off made it pass but was not a fix. The rows above are kept as the record |
 | 40 | Expand Testing | pass | |
-| 41 | DemoQA | pass | Needs a Book Store account as `DEMOQA_USERNAME` and `DEMOQA_PASSWORD` in `survey/web/.env` (register at demoqa.com/register; its reCAPTCHA is the invisible v3 kind, with nothing to solve). Without one the run asks for the value and ends (steptix/steptix#46) |
+| 41 | DemoQA | pass | Needs a Book Store account as `DEMOQA_USERNAME` and `DEMOQA_PASSWORD` in `survey/web/.env` (register at demoqa.com/register; its reCAPTCHA is the invisible v3 kind, with nothing to solve). Without one, an unattended run fails before the browser starts, naming both missing values (exit 1, since steptix/steptix#74; before that it exited 0 without running, steptix/steptix#46) |
 | 42 | UI Testing Playground | pass | Timing-sensitive: under a ten-test load the bar once stopped at 97% |
 | 43–45 | | pass | |
 | 46 | Selenium web form | pass | Its date picker reads typed text on keyup only. With End gone, a plain type lost the date and the test still passed, so step 10 asks for one character at a time and a new step 12 checks the date (steptix/steptix#90, see Reruns) |
