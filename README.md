@@ -657,7 +657,7 @@ Inside your test project's `tools/` directory:
   "devDependencies": {
     "steptix": "^1.0.0-beta.1",
     "playwright": "^1.59.1",
-    "typescript": "^5.5.0"
+    "typescript": "^7.0.2"
   }
 }
 ```

@@ -9,6 +9,23 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Changed — Built with TypeScript 7
+
+All five packages now compile with TypeScript 7.0.2, the native compiler.
+The root was on 6.0.3 and `runner-core`, `flick-vscode`, `steptix-vscode`
+and `fixtures/tools` on 5.9.3. The root typecheck takes about 0.6 s, down
+from about 6 s. The root's emitted JavaScript is byte-for-byte the same.
+
+- **`types` is listed where a package needs Node's globals.** TypeScript 7
+  no longer loads every `@types` package by default, so the root,
+  `flick-vscode` and `steptix-vscode` tsconfigs now say `"types": ["node"]`.
+- **The compiler API comes from `@typescript/typescript6`.** TypeScript 7
+  ships no JavaScript API, and `tests/docs-handbook-examples.test.ts` parses
+  handbook excerpts with it, so that test imports the 6.0 compatibility
+  package instead.
+- **The `tools/package.json` example in the README** recommends
+  `typescript@^7.0.2`.
+
 ### Fixed — a compile writes code that knows the test's `## Context`
 
 A test's `## Context` (the notes for the AI on every step, such as "the grid

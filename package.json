@@ -88,12 +88,13 @@
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@typescript/typescript6": "^6.0.2",
     "@vitest/coverage-v8": "^4.1.11",
     "ajv": "^8.17.1",
     "concurrently": "^9.2.1",
     "electron-builder": "^26.8.1",
     "ts-json-schema-generator": "^2.4.0",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   },
   "engines": {
