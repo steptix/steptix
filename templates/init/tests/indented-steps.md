@@ -12,5 +12,5 @@
   3. Enter the username {{username}}
   4. Enter the password password123
   5. Click the Sign in button
-6. Click "Transaction History"
+6. Click the "Transactions" link in the sidebar
 7. Click "Sign out"
