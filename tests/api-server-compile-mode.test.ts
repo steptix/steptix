@@ -231,7 +231,8 @@ vi.mock('../src/context/loader.js', () => ({
  * own client — a compile-built one would never have seen `syncAuth`.
  */
 const aiPrompts: string[] = [];
-const aiCalls: { model: string; prompt: string }[] = [];
+/** `system` is the call's system prompt, where a session's context goes. */
+const aiCalls: { model: string; prompt: string; system: string }[] = [];
 
 vi.mock('../src/ai/client.js', () => ({
   AiClient: class {
@@ -244,11 +245,17 @@ vi.mock('../src/ai/client.js', () => ({
     });
     complete = vi.fn(async function (
       this: { model: string },
-      messages: { role: string; content: string }[],
+      messages: { role: string; content: string | { type: string; text?: string }[] }[],
     ) {
-      const last = messages[messages.length - 1]?.content ?? '';
+      const text = (c: string | { type: string; text?: string }[] | undefined): string =>
+        typeof c === 'string' ? c : (c ?? []).map((b) => b.text ?? '').join('\n');
+      const last = text(messages[messages.length - 1]?.content);
       aiPrompts.push(last);
-      aiCalls.push({ model: this.model, prompt: last });
+      aiCalls.push({
+        model: this.model,
+        prompt: last,
+        system: text(messages.find((m) => m.role === 'system')?.content),
+      });
       // The review pass gets the file back unchanged, which it reports as
       // "no changes" and leaves the generated file standing.
       if (/Review a generated Playwright code-behind file/.test(last)) {
@@ -1225,6 +1232,68 @@ describe('recompiling a step whose entry broke', () => {
       const result = fresh.find((f) => f.type === 'compile:result')!;
       expect(result.summary.totalSteps).toBe(1);
       expect(result.summary.compiled).toBe(1);
+    });
+  });
+
+  describe("the test's ## Context (SPEC-web-survey-fixes.md §2.46, issue #36)", () => {
+    // What the extension sends with every block of a Run & Compile, a Compile
+    // This Step and the blocks after a pause (run-controller.ts reads it off
+    // the editor buffer). Generation has to see it as the recorded run did:
+    // code written from a run that was told "the grid is in the iframe #host"
+    // is wrong without it. Invented names, as in any prompt example.
+    const TEST_CONTEXT = 'The grid is inside the iframe `#host`. Rows are `#grid_row_N`.';
+    const generationSystems = (): string[] =>
+      aiCalls.filter((c) => !/Review a generated/.test(c.prompt)).map((c) => c.system);
+
+    it('reaches every generation prompt of a compile:"run"', async () => {
+      await runSteps(requestBody({ compile: 'run', testContext: TEST_CONTEXT }));
+      expect(generationSystems()).toHaveLength(2);
+      for (const system of generationSystems()) {
+        expect(system).toContain(TEST_CONTEXT);
+        expect(system.indexOf('PROJECT CONTEXT')).toBeGreaterThanOrEqual(0);
+        expect(system.indexOf('PROJECT CONTEXT')).toBeLessThan(system.indexOf(TEST_CONTEXT));
+      }
+    });
+
+    it('reaches the generation prompt of a compile:"steps"', async () => {
+      await runSteps(
+        requestBody({ steps: [STEPS[1]!], sourceLines: [5], compile: 'steps', testContext: TEST_CONTEXT }),
+      );
+      expect(generationSystems()).toHaveLength(1);
+      expect(generationSystems()[0]).toContain(TEST_CONTEXT);
+    });
+
+    it('reaches both blocks of a run continued after a pause', async () => {
+      const session = nextSession();
+      const block = async (body: Record<string, unknown>): Promise<void> => {
+        const res = await fetch(`${baseUrl}/sessions/${session}/steps?stream=1`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, Accept: 'text/event-stream' },
+          body: JSON.stringify(body),
+        });
+        expect(res.status).toBe(200);
+        await readSse(res);
+      };
+      await block({ steps: [STEPS[0]!], sourceLines: [4], testFilePath, compile: 'run', testContext: TEST_CONTEXT });
+      await block({
+        steps: [STEPS[1]!],
+        sourceLines: [5],
+        testFilePath,
+        compile: 'run',
+        compileContinues: true,
+        testContext: TEST_CONTEXT,
+      });
+      expect(generationSystems()).toHaveLength(2);
+      for (const system of generationSystems()) expect(system).toContain(TEST_CONTEXT);
+    });
+
+    it('leaves the prompt as it was for a test without one', async () => {
+      await runSteps(requestBody({ compile: 'run' }));
+      expect(generationSystems().length).toBeGreaterThan(0);
+      for (const system of generationSystems()) {
+        expect(system).toContain('PROJECT CONTEXT');
+        expect(system).not.toContain('### Context: this test');
+      }
     });
   });
 

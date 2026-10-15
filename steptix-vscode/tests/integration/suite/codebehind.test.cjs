@@ -417,6 +417,84 @@ describe('Steptix code-behind compile', function () {
   });
 
   /**
+   * A test's `## Context` (docs/specs/SPEC-web-survey-fixes.md §2.46, issue
+   * #36) rides every compile request, as it rides a Run: the server puts it
+   * in front of the recorded steps AND of the code generated from them, and
+   * it has no other way to learn it on this route. Invented names.
+   *
+   * Lines 11 and 12 are the steps.
+   */
+  const CONTEXT_MD = `---
+tags: [codebehind]
+---
+
+# Compile With Context
+
+## Context
+- The grid is inside the iframe \`#host\`. Rows are \`#grid_row_N\`.
+
+## Steps
+1. Navigate to https://example.com
+2. Click the "Get started" button
+`;
+  const CONTEXT = '- The grid is inside the iframe `#host`. Rows are `#grid_row_N`.';
+
+  describe("the test's ## Context", () => {
+    let contextMd;
+    beforeEach(async () => {
+      contextMd = path.resolve(FIXTURES_DIR, 'compile-context.md');
+      fs.writeFileSync(contextMd, CONTEXT_MD, 'utf-8');
+      await openFixture(contextMd);
+    });
+    afterEach(() => {
+      vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
+      fs.rmSync(contextMd, { force: true });
+      fs.rmSync(contextMd.replace(/\.md$/, '.steps.ts'), { force: true });
+    });
+
+    it('rides a Run & Compile', async () => {
+      void vscode.commands.executeCommand('steptix.runAndCompile');
+      await waitFor('run requested', () => fake.requests.length > 0);
+      assert.equal(fake.requests[0].compile, 'run');
+      assert.equal(fake.requests[0].testContext, CONTEXT);
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('rides a Compile This Step', async () => {
+      void vscode.commands.executeCommand('steptix.compileStepCodeBehind', { lineNumber: 12 });
+      await waitFor('run requested', () => fake.requests.length > 0);
+      assert.equal(fake.requests[0].compile, 'steps');
+      assert.deepEqual(fake.requests[0].sourceLines, [12]);
+      assert.equal(fake.requests[0].testContext, CONTEXT);
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('rides the continuation after a breakpoint', async () => {
+      vscode.debug.addBreakpoints([
+        new vscode.SourceBreakpoint(
+          new vscode.Location(vscode.Uri.file(contextMd), new vscode.Position(11, 0)),
+        ),
+      ]);
+      void vscode.commands.executeCommand('steptix.runAndCompile');
+      await waitFor('first block requested', () => fake.requests.length > 0);
+      assert.deepEqual(fake.requests[0].sourceLines, [11]);
+      assert.equal(fake.requests[0].testContext, CONTEXT);
+      fake.end();
+      await waitFor('paused', () => hooks.tracker.snapshot().breakpointStop !== null, 10_000);
+
+      void vscode.commands.executeCommand('steptix.continueRun');
+      await waitFor('continuation requested', () => fake.requests.length > 1, 10_000);
+      assert.equal(fake.requests[1].compile, 'run');
+      assert.equal(fake.requests[1].compileContinues, true);
+      assert.equal(fake.requests[1].testContext, CONTEXT);
+      fake.end();
+      await waitFor('idle', () => !hooks.isRunning(), 10_000);
+    });
+  });
+
+  /**
    * A data-driven Run & Compile (stories/data-driven-rows.md, decision 11).
    *
    * Every row runs; only the first row's batches carry `compile`. An entry is
