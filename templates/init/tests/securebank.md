@@ -19,7 +19,7 @@ tags: [smoke]
 3. Enter the username {{username}}
 4. Enter the password {{password}}
 5. Click the Sign in button
-6. Click "Transaction History"
+6. Click the "Transactions" link in the sidebar
 7. Get a list of the transaction descriptions [as: transactions]
 8. [tool: print_all items="{{transactions}}"]
 9. Click "Sign out"
