@@ -14,6 +14,7 @@ import {
   type ControlRecord,
 } from '../runner/control-flow.js';
 import { buildCodeBehindRegistry, type CodeBehindBinding } from './loader.js';
+import { withTestContext } from '../context/test-context.js';
 import {
   aiEntryFor,
   anyActionCarriesPlaceholder,
@@ -303,6 +304,11 @@ export interface CompileOptions {
   /** The parsed test, already skill/section-expanded. */
   test: ParsedTest;
   config: Config;
+  /**
+   * The project's context files, combined — NOT the test's own `## Context`.
+   * `compileTest` adds that from `test.context` for its prompts, as `runTest`
+   * does for a run, and a custom `runner` sends it with each run itself.
+   */
   contextContent: string;
   aiClient: AiClient;
   /** Reads the compile's own prompt tokens; the runs report theirs. */
@@ -340,11 +346,22 @@ export interface CompileOptions {
 
 const DEFAULT_MAX_ROUNDS = 3;
 
-export async function compileTest(options: CompileOptions): Promise<CompileResult> {
+export async function compileTest(callerOptions: CompileOptions): Promise<CompileResult> {
+  // Built from the caller's options, before the context below is added: the
+  // default runner hands `contextContent` to `runTest`, which adds the test's
+  // `## Context` itself, and a second copy would reach every recorded step.
+  const runner = callerOptions.runner ?? createTestFileRunner(callerOptions);
+  // The generation and repair prompts see what the recorded run's step
+  // prompts saw: the project's context, then the test's own `## Context`
+  // (SPEC-web-survey-fixes.md §2.46). Without it the selectors and frame ids
+  // the author wrote there reach the run but not the code written from it.
+  const options: CompileOptions = {
+    ...callerOptions,
+    contextContent: withTestContext(callerOptions.contextContent, callerOptions.test.context),
+  };
   const emit = options.onEvent ?? ((): void => {});
   const test = options.test;
   const maxRounds = Math.max(1, options.maxRounds ?? DEFAULT_MAX_ROUNDS);
-  const runner = options.runner ?? createTestFileRunner(options);
   const candidate = new Candidate();
   let runTokens = 0;
   let rounds = 0;

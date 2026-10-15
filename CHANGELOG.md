@@ -9,6 +9,25 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — a compile writes code that knows the test's `## Context`
+
+A test's `## Context` (the notes for the AI on every step, such as "the grid
+is inside the iframe `#host`") reached every run, but compiling through
+`POST /codebehind/compile` or `steptix compile` left it out in places (#36):
+
+- **`POST /codebehind/compile`** recorded the steps without it, so the
+  recording could go to the wrong frame or row, and the code written from that
+  recording kept the mistake. It also generated the code without it. The
+  recording run now sends the test's context from the file it compiles, as a
+  Run sends it, and code generation sees it after the project's context.
+- **`steptix compile`** recorded with it already, but generated the code
+  without it. Generation and repair prompts now see it too.
+
+Compiling from VS Code (Run & Compile, Compile This Step, and Continue after a
+breakpoint) already sent it on every request. New tests now pin that. A test
+without `## Context` compiles as before. Steptix 0.5.202 adds only these
+tests, with no change to the extension's behaviour.
+
 ### Fixed — Record Steps keeps a parameter's value while a step still uses it
 
 Record Steps drafts the steps with the AI in several calls as you work, and
