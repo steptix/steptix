@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { AIGateway } from '@pkent/aigateway';
+import { AIGateway } from '@steptix/aigateway';
 import { DEFAULT_CONFIG } from './defaults.js';
 import type { AiConfig, Config, UserConfig } from './types.js';
 import { parseBoolEnv } from '../env/loader.js';

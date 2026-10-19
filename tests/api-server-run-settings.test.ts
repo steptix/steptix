@@ -215,7 +215,7 @@ vi.mock('../src/browser/screenshot.js', () => ({
  * ever constructs a gateway, and no other model id in this file starts with a
  * self-authenticating prefix.
  */
-vi.mock('@pkent/aigateway', () => {
+vi.mock('@steptix/aigateway', () => {
   class FakeAIGateway {
     static providers() {
       return [

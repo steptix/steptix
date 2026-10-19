@@ -17,7 +17,7 @@ const gateway = vi.hoisted(() => ({
   stream: undefined as undefined | (() => unknown),
 }));
 
-vi.mock('@pkent/aigateway', () => {
+vi.mock('@steptix/aigateway', () => {
   class FakeAIGateway {
     chat() {
       return gateway.chat!();

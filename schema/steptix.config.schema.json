@@ -36,7 +36,7 @@
           "$ref": "#/definitions/DeepPartial%3CLoggingConfig%3E"
         },
         "tables": {
-          "$ref": "#/definitions/DeepPartial%3Cdef-interface-src_config_types.ts-21119-22237-src_config_types.ts-0-30438226896703235751837%3E"
+          "$ref": "#/definitions/DeepPartial%3Cdef-interface-src_config_types.ts-21121-22239-src_config_types.ts-0-30440226896703235751837%3E"
         },
         "mcp": {
           "$ref": "#/definitions/McpConfig",
@@ -104,10 +104,10 @@
           "description": "Show browser window (false = headless)"
         },
         "viewport": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6054-6088-src_config_types.ts-5996-6089-src_config_types.ts-5895-14367-src_config_types.ts-0-30438449752545%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6056-6090-src_config_types.ts-5998-6091-src_config_types.ts-5897-14369-src_config_types.ts-0-30440449752545%3E"
         },
         "windowSize": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6145-6179-src_config_types.ts-6089-6180-src_config_types.ts-5895-14367-src_config_types.ts-0-304381327565221%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6147-6181-src_config_types.ts-6091-6182-src_config_types.ts-5897-14369-src_config_types.ts-0-304401327565221%3E"
         },
         "fixedViewport": {
           "type": "object",
@@ -217,7 +217,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-6054-6088-src_config_types.ts-5996-6089-src_config_types.ts-5895-14367-src_config_types.ts-0-30438449752545>": {
+    "DeepPartial<structure-src_config_types.ts-6056-6090-src_config_types.ts-5998-6091-src_config_types.ts-5897-14369-src_config_types.ts-0-30440449752545>": {
       "type": "object",
       "properties": {
         "width": {
@@ -230,7 +230,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-6145-6179-src_config_types.ts-6089-6180-src_config_types.ts-5895-14367-src_config_types.ts-0-304381327565221>": {
+    "DeepPartial<structure-src_config_types.ts-6147-6181-src_config_types.ts-6091-6182-src_config_types.ts-5897-14369-src_config_types.ts-0-304401327565221>": {
       "type": "object",
       "properties": {
         "width": {
@@ -513,7 +513,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<def-interface-src_config_types.ts-21119-22237-src_config_types.ts-0-30438226896703235751837>": {
+    "DeepPartial<def-interface-src_config_types.ts-21121-22239-src_config_types.ts-0-30440226896703235751837>": {
       "type": "object",
       "properties": {
         "structure": {

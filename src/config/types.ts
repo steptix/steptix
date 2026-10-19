@@ -1,4 +1,4 @@
-import type { Effort } from '@pkent/aigateway';
+import type { Effort } from '@steptix/aigateway';
 
 export interface AiConfig {
   /** Base URL of the OpenAI-compatible gateway that `aibroker/` and `gateway/` models route to. No default: those models refuse to run until one is set. */

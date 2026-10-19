@@ -452,7 +452,7 @@ describe('ensureServerReady — waiting for the server', () => {
     // deliberately not quotable — see the "does not quote an earlier server's
     // log" test below.
     h.deps.spawn.mockImplementation(() => {
-      appendFileSync(logPath, 'Error: Cannot find module @pkent/aigateway\n');
+      appendFileSync(logPath, 'Error: Cannot find module @steptix/aigateway\n');
       return { on: () => undefined, unref: () => undefined };
     });
 

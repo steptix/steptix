@@ -1,5 +1,5 @@
 /**
- * Minimal ambient declaration for `@pkent/aigateway` (a plain-JS package that
+ * Minimal ambient declaration for `@steptix/aigateway` (a plain-JS package that
  * ships no `.d.ts`). Declares only the surface {@link AiClient} consumes:
  * the `AIGateway` class plus the v2 response/stream shapes.
  *
@@ -8,7 +8,7 @@
  * the library validates/normalizes them itself. Mirrors the runtime shapes in
  * `../aigateway/src/{AIGateway,lib/v2,stream/ChatStream}.js`.
  */
-declare module '@pkent/aigateway' {
+declare module '@steptix/aigateway' {
   /** Usage block on the v2 envelope (absent on the stream estimate-fallback path). */
   export interface V2Usage {
     input_tokens: number;
