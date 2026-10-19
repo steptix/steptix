@@ -70,9 +70,16 @@ describe('buildRetryContext — RetryDiagnostics', () => {
     actionType: 'click',
   };
 
-  it('returns empty string when diagnostics has no failures', () => {
-    const diagnostics: RetryDiagnostics = { failures: [], attemptNumber: 2 };
-    expect(buildRetryContext(diagnostics)).toBe('');
+  it('still says it is a retry when diagnostics has no failures', () => {
+    // Every earlier failure may have been answered since — a check a re-check
+    // passed (src/ai/check-retry.ts `standingFailures`) — while the attempt
+    // before still failed, without recording why: a turn limit, a reply that
+    // did not parse. The retry still gets its header and instructions.
+    const diagnostics: RetryDiagnostics = { failures: [], attemptNumber: 3 };
+    const result = buildRetryContext(diagnostics);
+    expect(result).toContain('## Retry Attempt 3');
+    expect(result).toContain('Do NOT blindly repeat the same actions');
+    expect(result).not.toContain('What happened in the previous attempt');
   });
 
   it('uses the provided attempt number', () => {

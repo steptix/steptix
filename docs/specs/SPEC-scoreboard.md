@@ -156,7 +156,7 @@ attempt produces a second line with `"attempt": 2`.
 | `matchCount` | Elements the selector matched, when known | `0` |
 | `ms` | Time the action took | `10012` |
 | `site` | Host of the page the action ran on, masked like a URL in the report; absent when the page has no host (`about:blank`, the computer surface) | `"secure.super.test"` |
-| `model` | Model that chose the action | `"openai/gpt-6-luna"` |
+| `model` | Model that chose the action. A retried check sent again unchanged (src/ai/check-retry.ts) carries the model of the turn that chose it | `"openai/gpt-6-luna"` |
 | `prompt` | Rules fingerprint (§5.5); `null` on imported lines, absent on the lines listed there | `"p-3f9a1c"` |
 | `fw` | Framework version and commit, when known | `"1.0.0+02d968b"` |
 | `card` | `false` when the report writes no card for the step, so there is no anchor to link to (§8.3); absent, never `true`, otherwise | `false` |
@@ -185,7 +185,7 @@ neither do its actions.
 | `tolerated` | `true` for a failure the run carried on past (`otherwise continue`); absent otherwise |
 | `interrupted` | `true` for the step a Stop cut short. Its `status` is `failed`, and neither the run line's `failed` nor `steptix stats` counts it; absent otherwise |
 | `attempts` | Attempts made |
-| `turns` | Model turns across all attempts |
+| `turns` | Turns across all attempts. A turn that re-checks a failed check (src/ai/check-retry.ts) asks a model only for the check's code, and counts too |
 | `firstTry` | `true` when the step passed on attempt 1 with no failed action |
 | `ms` | Step duration |
 | `calls` | Model calls the step made, all purposes and attempts together |
@@ -418,7 +418,10 @@ already carries every field in §5.1 except the run identity:
 - turns, with `attemptNumber` and `turnNumber`
 - each turn's actions (`subActions[].action`, with type and selector), error,
   `targeting.matchCount`, `pageUrl` and `durationMs`
-- each turn's model, on `aiInteractions`
+- each turn's model, on `aiInteractions` — except a turn that re-checks a
+  failed check (src/ai/check-retry.ts), which asks no model for its plan and
+  has none: the recorder carries forward the model of the last turn that did,
+  whose check the re-check sends again
 
 So there is one recorder, called once at the end of `executeStep`. It turns
 the `StepResult` into step and action lines.

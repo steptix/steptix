@@ -292,11 +292,17 @@ lives in that test's `.md` file.
 - **Generic web standards are fine.** HTML element names, input types and ARIA
   roles and attributes (`select`, `input[type=file]`, `[role="dialog"]`,
   `aria-live`) describe every page, not one.
+- **Leave what a person sees to the AI.** Never add framework code that
+  decides which element is visible or selected. Tell the AI in plain words
+  what not to count, and give it the page to judge. Where something must be
+  recorded with no AI there, ask the browser's own question
+  (`checkVisibility()`) and add no rule of your own.
 
 When reviewing a diff, `/code-review` included, report as a blocking finding
 any selector, id, class name, URL or page text under `src/`, `runner-core/` or
-the extensions that appears on a site or app the tests drive. A name that
-appears only in a comment saying where a problem was found is not a finding.
+the extensions that appears on a site or app the tests drive, and any code
+that decides which element is visible or selected. A name that appears only in
+a comment saying where a problem was found is not a finding.
 
 ## Fix comment problems, however minor
 
@@ -313,6 +319,38 @@ problem in a code comment, fix it, even when it is only a nit.
 - **Report it when reviewing.** When reviewing a diff, `/code-review`
   included, report every comment problem as a finding, however small, instead
   of leaving it out as not worth mentioning.
+
+## Claims about what a model does need a real run
+
+What Steptix does depends on what a model sends, and a reply written into a
+test by hand is not evidence of what a model sends. Base every claim about
+model behaviour — in a review, a doc, an issue, a commit message or an answer
+to the user — on real runs, and work from live AI when reviewing.
+
+- **Look at real runs first.** The scoreboard's action log
+  (`<user root>/stats/actions-YYYY-MM.jsonl`, one line per action with its
+  step text, attempt and outcome; see
+  [SPEC-scoreboard.md](docs/specs/SPEC-scoreboard.md)) and run reports show
+  what models sent. When they cannot settle a question, run the live file
+  that exercises it: `npm run test:live -- --files=<name>.test.cjs` in
+  `steptix-vscode/`.
+- **Say which kind of evidence you have.** A scripted reply in a unit test
+  shows how Steptix reacts to that reply, not that a model sends it. Call
+  such a case constructed; call a case seen in a run observed, and say which
+  run.
+- **Write a made-up example as one.** An invented scenario in a doc, comment
+  or commit message reads as an example ("say", "for example"), never as
+  something that happened.
+- **Measure before building against a model behaviour.** Add code to prevent
+  something a model does only once a run shows a model doing it, or when the
+  code is wrong whatever the model sends.
+- **Brief agents the same way.** A prompt that sends an agent to review or
+  fix code tells it to tag model-behaviour findings as observed or
+  constructed and to look at real runs first.
+
+When reviewing a diff, `/code-review` included, tag each finding that depends
+on what a model would send as observed, citing the run, or constructed. Rate
+a constructed one LOW unless the code is wrong whatever the model sends.
 
 ## Seed gitignored files into a new worktree
 

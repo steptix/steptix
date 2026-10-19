@@ -36,7 +36,7 @@ export interface Scan {
 /** Tokens after which a `/` starts a regex literal rather than a division. */
 const REGEX_PRECEDING_KEYWORDS = new Set([
   'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void',
-  'case', 'do', 'else', 'yield', 'await',
+  'case', 'do', 'else', 'yield', 'await', 'throw',
 ]);
 const REGEX_PRECEDING_PUNCT = new Set([
   '', '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-',

@@ -4,10 +4,10 @@
  * Before this suite the live tier had almost no verification coverage. Two
  * steps existed — the since-removed step-cache suite's "Verify the page URL is
  * exactly about:blank" and `sections-live.md`'s DOM-free "Confirm the browser
- * is showing a page" — and neither suite asserted anything about the
- * verification itself: the cache suite asserted replay, sections asserts
- * section expansion. Nothing read a real value off a real page, and
- * nothing proved a verify could go red.
+ * is showing a page" (now "Verify the page URL is "about:blank"") — and
+ * neither suite asserted anything about the verification itself: the cache
+ * suite asserted replay, sections asserts section expansion. Nothing read a
+ * real value off a real page, and nothing proved a verify could go red.
  *
  * Why the red case is the load-bearing half
  * -----------------------------------------
@@ -34,16 +34,28 @@
  * catches, so with the default execution.retries: 1 each must-fail step is
  * attempted twice before settling red. That is expected and does not weaken
  * the test — the page value genuinely differs, so both attempts fail. Two
- * framework behaviours keep the retry from being a "try until green" loop,
- * and this suite is what would notice if either regressed:
+ * framework behaviours keep the retry from being a "try until green" loop:
  *
- *   - evaluateAssertion regenerates assertion code only when the code THROWS,
- *     never on a structured `pass: false` (src/runner/step-executor.ts — the
- *     `break; // success — got a structured result (pass or fail)`).
- *   - assertion failures never reach `collectedFailures`, which is what feeds
- *     the retry prompt's prior-failure context. The second attempt is not
- *     told what the assertion expected or what it got, so it cannot aim at
- *     the expectation.
+ *   - evaluateAssertion regenerates assertion code only when the code cannot
+ *     be used — it does not parse, it throws, it returns something other
+ *     than `{ pass, actual }`, or (when re-checking) it would change the
+ *     page — never on a structured `pass: false`
+ *     (src/runner/step-executor.ts — the
+ *     `break; // success — got a structured result (pass or fail)`). This
+ *     suite would notice that one regressing.
+ *   - the second attempt runs the same check again (src/ai/check-retry.ts,
+ *     steptix/steptix#97): the same question, expected value and code. The
+ *     code is written anew only when it found no element, breaks, or was
+ *     written for a value read again since, told
+ *     what the old code read but not where the expected text is
+ *     (SPEC-web-survey-fixes.md §2.25). The step AI is not
+ *     asked for a new check, so it cannot ask an easier question or act to
+ *     make this one pass. This suite would notice only half of that
+ *     regressing: an easier question could turn one of its must-fail steps
+ *     green, but no action could, since the values they read are static.
+ *     typing.test.cjs is the live suite that would notice a retry acting on
+ *     the page, and verify-letter-case.test.cjs one changing the text a check
+ *     expects.
  *
  * Prereq: Sessions API server running on $LIVE_STEPTIX_SERVER_URL (default :3100),
  * and fixtures/test-app on :8787 (runLiveTest.cjs boots it).

@@ -1468,8 +1468,9 @@ function renderAssertion(assertion: AssertionResult): string {
   const aiHtml = assertion.aiInteraction
     ? renderAiInteraction(assertion.aiInteraction)
     : '';
-  // Code replies replaced before this one — an unreadable reply, or code that
-  // threw — each with what the model said (§2.49).
+  // Code replies replaced before this one — an unreadable reply, code that
+  // threw or returned the wrong shape, or a re-check's code that would have
+  // changed the page — each with what the model said (§2.49).
   const replaced = assertion.supersededAiInteractions ?? [];
   const replacedHtml = replaced.length > 0
     ? `<details class="discarded-calls">

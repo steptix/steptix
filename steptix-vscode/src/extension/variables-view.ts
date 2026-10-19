@@ -107,9 +107,26 @@ const SKILL_INTERNAL_PREFIX = /^__skill\d+_/;
  */
 export async function copyVariable(kind: VariableCopyKind, target: VariableCopyTarget): Promise<boolean> {
   const result = variableCopy(kind, target);
-  if (result.ok) await vscode.env.clipboard.writeText(result.text);
+  if (result.ok) await writeClipboard(result.text);
   vscode.window.setStatusBarMessage(result.status, 3000);
   return result.ok;
+}
+
+/** Where a copy goes: the system clipboard, or what a test put in its place. */
+type ClipboardWriter = (text: string) => Thenable<void>;
+
+const systemClipboard: ClipboardWriter = (text) => vscode.env.clipboard.writeText(text);
+
+let writeClipboard: ClipboardWriter = systemClipboard;
+
+/**
+ * Test-only: take what Copy puts on the clipboard. `null` restores the system
+ * clipboard. The tests that copy run unattended, and while the Windows session
+ * is locked the system clipboard cannot be opened: VS Code drops the write
+ * without an error, and what is read back is "".
+ */
+export function setVariablesClipboardForTests(writer: ClipboardWriter | null): void {
+  writeClipboard = writer ?? systemClipboard;
 }
 
 /** How long a copied row shows its tick — the panel's is the same. */

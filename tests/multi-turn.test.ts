@@ -1053,11 +1053,15 @@ describe('executeStep — a switched-to tab is brought to the front (§4)', () =
   });
 });
 
-// SPEC-web-survey-fixes.md §2.25: a failed check is recorded for the retry,
-// with where the expected text really is, and the call that writes the next
-// check's code is told.
+// SPEC-web-survey-fixes.md §2.25: a failed check says where the expected text
+// really is, and is recorded for the retry, which runs the same check again.
 describe('executeStep — a failed check is passed on to the retry', () => {
-  it('tells the retry and its code generator what the check read and where the text is', async () => {
+  // The retry runs the same check again, its code and all, so no AI is asked:
+  // not the step AI, and not the code generator, which is told nothing of
+  // where the expected text is when it does write new code — the part to
+  // read is the one the condition names (src/ai/check-retry.ts,
+  // steptix/steptix#97; tests/check-retry.test.ts covers what it is told).
+  it('says in the failure where the text is, and runs the same check code again on the retry', async () => {
     const page = makeMockPage();
     (page as unknown as { title: unknown }).title = vi.fn().mockResolvedValue('Results');
     (page.evaluate as ReturnType<typeof vi.fn>).mockImplementation((fn: unknown, arg: unknown) => {
@@ -1075,10 +1079,13 @@ describe('executeStep — a failed check is passed on to the retry', () => {
       reasoning: 'Check the comment.',
     });
     const codeReply = JSON.stringify({ code: "(() => { /* READ_THE_FORM */ return { pass: false, actual: 'Comments...' }; })()" });
-    let call = 0;
+    // Answered by what is asked: the code generator's prompt says what it wants.
     const aiClient = {
-      complete: vi.fn().mockImplementation(() =>
-        Promise.resolve({ text: call++ % 2 === 0 ? stepReply : codeReply, model: 'test-model' })),
+      complete: vi.fn().mockImplementation((messages: unknown) =>
+        Promise.resolve({
+          text: JSON.stringify(messages).includes('Write a self-executing JavaScript function') ? codeReply : stepReply,
+          model: 'test-model',
+        })),
     } as unknown as AiClient;
     const config = makeConfig();
     config.execution.retries = 1;
@@ -1097,11 +1104,12 @@ describe('executeStep — a failed check is passed on to the retry', () => {
     expect(result.error).toContain('the page does show "Steptix survey" at li#_valuecomments');
     const sent = (aiClient.complete as ReturnType<typeof vi.fn>).mock.calls
       .map((c) => JSON.stringify(c[0]));
-    // The second attempt's step call (index 2) hears about the failed check…
-    expect(sent[2]).toContain('Action \\"assert\\" failed');
-    expect(sent[2]).toContain('li#_valuecomments');
-    // …and so does the call that writes its code (index 3); the first did not.
-    expect(sent[3]).toContain('An earlier attempt at this check failed');
+    // The step AI once, then the code once: the retry asked the same question
+    // with the same code.
+    expect(sent).toHaveLength(2);
     expect(sent[1]).not.toContain('An earlier attempt at this check failed');
+    const ran = (page.evaluate as ReturnType<typeof vi.fn>).mock.calls
+      .filter((c) => typeof c[0] === 'string' && c[0].includes('READ_THE_FORM'));
+    expect(ran).toHaveLength(2);
   });
 });

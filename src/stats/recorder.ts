@@ -254,10 +254,16 @@ export function stepToLines(result: StepResult, ctx: StatsContext, meta: StepLin
 
   const lines: StatsLine[] = [];
   const actions: StatsActionLine[] = [];
+  /** The model of the step's last turn that asked one for its plan. */
+  let planModel: string | undefined;
   for (const turn of result.turns) {
     // The action plan is a turn's first call; a clarification or a readTable
-    // structure question after it goes to the same client.
-    const model = turn.aiInteractions.find((interaction) => interaction.model !== undefined)?.model;
+    // structure question after it goes to the same client. A turn that
+    // re-checks a failed check asks no model for its plan: it sends again
+    // what an earlier turn's model chose (src/ai/check-retry.ts), so its
+    // actions are that model's.
+    const model = turn.aiInteractions.find((interaction) => interaction.model !== undefined)?.model ?? planModel;
+    planModel = model;
     for (const sub of turn.subActions) {
       const raw = actionSelector(sub.action);
       const selector = raw === undefined ? null : redact(raw, masks);

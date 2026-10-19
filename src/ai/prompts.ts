@@ -230,7 +230,7 @@ Plan your next action based on the observed result — do not batch multiple act
 5. Only include an "assert" action when the step instruction's *intent* is verification — i.e. the user wants to check that a specific value or state matches an expectation. Action verbs that overlap with verification words ("Confirm by clicking the Submit button", "Check the box", "Ensure the toggle is on") are NOT verifications — they are clicks, and you should emit only the click action. Do NOT add an assert to self-verify that a click or other action succeeded — you will see the result in the next screenshot. A failed assert immediately fails the step, so be deliberate${dismissalRule}
 7. If you cannot determine what to do, return a single "prompt" action with a "question" field. A step that leaves a choice OPEN is not unclear: "pick a size", "tick two options", "choose any item" means any valid option will do, so choose one yourself and name it in "description". Ask only when the step names something the page does not have, or contradicts the page
 8. For "assert" actions, ALWAYS set "description" (short report label) and "condition" (natural-language statement of what is being checked). The "against" field discriminates four shapes — pick the one that matches the resolved instruction text:
-   - against: "dom" (default): the instruction asks you to verify something visible on the page. Set "condition" to what to read (e.g. "visible modal title text") and "expected" to the concrete literal it should equal (e.g. "Done"). Example: { "action": "assert", "against": "dom", "condition": "visible modal title text", "expected": "Done", "description": "Modal title equals Done" }. When the instruction checks that something IS EMPTY or IS BLANK, the expected literal is the empty string — send "expected": "" rather than omitting the field, dropping the assertion, or inventing a word like "empty": { "action": "assert", "against": "dom", "condition": "text of the Reference cell in row 2 of the Scheduled payments table", "expected": "", "description": "Reference cell in row 2 is empty" }.
+   - against: "dom" (default): the instruction asks you to verify something visible on the page. Set "condition" to what to read (e.g. "visible modal title text") and "expected" to the concrete literal it should equal (e.g. "Done"). When the instruction names a part of the page and what it says, name that part in "condition", in the instruction's words: "the page" when it says the page. Never narrow it to an element you found holding the expected text in the DOM snapshot: the snapshot also holds text a person does not see, such as a dropdown's other options or a hidden element, and the check would then ask whether that element says it, not whether the part the instruction names does. Example: { "action": "assert", "against": "dom", "condition": "visible modal title text", "expected": "Done", "description": "Modal title equals Done" }. When the instruction checks that something IS EMPTY or IS BLANK, the expected literal is the empty string — send "expected": "" rather than omitting the field, dropping the assertion, or inventing a word like "empty": { "action": "assert", "against": "dom", "condition": "text of the Memo cell in row 2 of the Shipments table", "expected": "", "description": "Memo cell in row 2 is empty" }. Keep in "condition" any words the instruction uses for how to compare — "exactly", "only", "ignoring letter case" — and add none it does not use: an instruction that says a part "says" or "shows" a value asks whether the part holds it, not whether that is all it holds. For 'Verify the banner says "Order 12 was placed."', "condition" is "the banner says", not "the banner says exactly". Copy a value the instruction quotes into "expected" letter for letter, letter case included: unless the instruction says to ignore it, letter case counts.
    - against: "api": the instruction is purely about a prior API response. Set "condition" to a path/description into that response and "expected" to the literal value at that path. Example: { "action": "assert", "against": "api", "condition": "step_3.response.body.id", "expected": "DEL-1234", "description": "Created delegate id is DEL-1234" }.
    - against: "both": the instruction can reference either DOM or prior API responses. Same field requirements as "dom"/"api".
    - against: "predicate": the instruction is a self-contained predicate — everything either side of the comparison is in the step text itself, whether written as a literal or as a placeholder listed under "## Values". Use this whenever NOTHING in the DOM or prior API responses needs to be fetched. Set "condition" to the predicate AS WRITTEN, placeholders included — the framework substitutes them before the check is generated, so do not resolve them yourself. DO NOT include "expected" — predicate mode rejects it strictly. Triggers: instructions like "Assert that {{order_count}} is at least 5", "Assert that 8 is at least 5", "Assert that 2 equals 2", or 'Assert that ["O-1003","O-1007"] contains "O-1003"' (nothing to read from the page or from an API). Example: { "action": "assert", "against": "predicate", "condition": "{{order_count}} is at least 5", "description": "order_count >= 5" }. A substituted value that was EMPTY leaves the step reading literally 'Verify that "" is empty' — copy those two quote marks into "condition" as the left operand, exactly as the step shows them; a condition of just "is empty" has no left operand and the evaluator refuses it: { "action": "assert", "against": "predicate", "condition": "\\"\\" is empty", "description": "The captured reference is empty" }.
@@ -580,6 +580,24 @@ Respond with ONLY this JSON:
   const expectedLine =
     assertExpected === undefined ? '(not provided)' : assertExpected === '' ? '""' : assertExpected;
 
+  // What a check reads of the page: the part its condition names, as a person
+  // sees it (docs/specs/SPEC-verify-checks.md, section 7). An API check reads no
+  // page, and its note above says not to touch `document`.
+  const pageReading = against === 'api' ? '' : `
+- Read the part of the page the condition names — a row, a cell, a field, a heading, a message, a section — and nothing beyond it: not another row, not another section. Only a condition about the whole page ("the page says …") reads all of it, \`document.documentElement\`. Wherever else on the page the expected text appears, what that part shows decides the check
+- Read only what a person sees there. Not script code or hidden text: an element's \`textContent\` holds both, and an element that is itself hidden (\`display: none\`) still hands back its text from \`innerText\`. Not a dropdown's options other than the chosen one: a dropdown's \`innerText\`, and each option's own \`text\` and \`label\`, hold every option, chosen or not. When the condition asks for something other than the text shown, such as a link's address (\`href\`) or a field's placeholder, read that`;
+
+  // The rest of what only a page check needs: case shown by CSS, the
+  // sentence search, selectors, notifications, frames and shadow roots.
+  const textTransformLine = against === 'api' ? '' : `
+- Where letter case counts and CSS \`text-transform\` shows text in another case than its markup has, the text matches in the case shown and in its markup's case, and in no other: when the text shown (\`innerText\`) holds the expected text exactly, or when the text shown holds it ignoring case and its markup holds it exactly as written. Compare the markup with letter case kept: never lower- or upper-case it. For the markup, join the \`textContent\` of its text nodes that are not inside a \`textarea\`, \`canvas\`, \`video\`, \`audio\`, \`iframe\`, \`object\`, \`progress\` or \`meter\` and whose parent element passes \`checkVisibility({ visibilityProperty: true })\`, rather than remove hidden parts from a copy`;
+  const sentenceSearch = against === 'api' ? '' : ` When no element you picked holds it all, take the smallest element that shows it all, inside the part the condition names and nowhere else: for a condition about the whole page, that part is \`document.documentElement\`.`;
+  const pageTail = against === 'api' ? '' : `
+- Use ONLY native CSS selectors with \`document.querySelector\` / \`document.querySelectorAll\`. Playwright pseudos (\`:has-text(...)\`, \`:text-is(...)\`, \`:visible\`, \`:text(...)\`) are NOT valid CSS and will throw \`SyntaxError\`. To match elements by text, query a broader set then filter in JS — e.g. \`Array.from(document.querySelectorAll('tr')).find((row) => row.cells[0] && row.cells[0].innerText.trim() === 'Ada')\`.
+- A notification that closes by itself may be gone by the time this runs. \`window.__steptixNotices\` lists the recent ones the page marked as live regions (\`role="alert"\`, \`role="status"\`, \`aria-live\`, \`<output>\`) as \`{ text, at }\`, closed or not — the DOM above names closed ones in a comment. For a check about such a message, accept it from there too: \`(window.__steptixNotices || []).some((n) => n.text.includes('Saved'))\`.
+- Markup inside an \`<iframe>\` in the DOM above is that frame's own document, which \`document.querySelector\` on the page does not search. For a same-origin frame go through it: \`document.querySelector('#frame').contentDocument.querySelector('#item')\`.
+- Markup between \`<!-- shadow-root (open) -->\` and \`<!-- /shadow-root -->\` is inside the enclosing element's shadow root, which \`document.querySelector\` does not search. Find the host, then query its \`shadowRoot\` — e.g. \`document.querySelector('#host').shadowRoot.querySelector('#field')\`.`;
+
   const textContent = `${testInfoBlock}Write a self-executing JavaScript function that evaluates the following assertion.
 
 ${contextNote}
@@ -592,16 +610,14 @@ ${domSection}${apiSection}
 
 Requirements for the code:
 - Must be a self-executing function: \`(() => { ... })()\`
-- Must return \`{ pass: boolean, actual: string }\`
+- Must return \`{ pass: boolean, actual: string }\`, \`actual\` being what the code read, as it read it
 - If an element is not found, return \`{ pass: false, actual: "element not found: <selector>" }\` — do NOT throw
+- Only read: never click, type, focus, scroll, submit, dispatch events or change the DOM. A check reports what the page shows; it never makes the page show it${pageReading}
+- Letter case counts: compare text in the case it is written, unless the condition says to ignore case ("ignoring letter case", "ignoring case", "case-insensitive", "in any letter case"). When it says so, compare both sides in lower case and both in upper case: the texts match if either comparison does${textTransformLine}
 - For numeric comparisons, strip currency symbols and commas before parsing
 - For cross-element assertions, query each element separately and compare
-- Text the page "says", "shows", "displays" or "contains" passes when the element's text, whitespace collapsed, CONTAINS the expected text; compare for exact equality only when the condition says "equals", "exactly" or "only". Read an element that holds ALL of the expected text: a value inside a sentence (\`12\` in \`Order 12 was placed.\`) is too small to hold it. When no element you picked holds it all, take the innermost one that does — e.g. \`const norm = (t) => t.replace(/\\s+/g, ' ').trim(); Array.from(document.querySelectorAll('body *')).filter((el) => norm(el.textContent).includes(norm(expected))).pop()\`.
-- A mark around a label is not part of its text: a required-field \`*\`, a trailing \`:\`, a bullet or a bar. A field labelled \`Hull colour *\` is labelled "Hull colour", so strip those marks from the ends of the text you read before comparing it. The exception is a check about a mark or what it means — that a field is required or optional, or that its \`*\` is shown, gone or no longer there: the mark is the point, so compare the text as it is, marks included. Nothing overrides your verdict, so a check that the text is NOT shown must fail whenever the text is there, marks or not.
-- Use ONLY native CSS selectors with \`document.querySelector\` / \`document.querySelectorAll\`. Playwright pseudos (\`:has-text(...)\`, \`:text-is(...)\`, \`:visible\`, \`:text(...)\`) are NOT valid CSS and will throw \`SyntaxError\`. To match elements by text, query a broader set then filter in JS — e.g. \`Array.from(document.querySelectorAll('tr')).find(el => el.textContent.includes('Alice'))\`.
-- A notification that closes by itself may be gone by the time this runs. \`window.__steptixNotices\` lists the recent ones the page marked as live regions (\`role="alert"\`, \`role="status"\`, \`aria-live\`, \`<output>\`) as \`{ text, at }\`, closed or not — the DOM above names closed ones in a comment. For a check about such a message, accept it from there too: \`(window.__steptixNotices || []).some((n) => n.text.includes('Saved'))\`.
-- Markup inside an \`<iframe>\` in the DOM above is that frame's own document, which \`document.querySelector\` on the page does not search. For a same-origin frame go through it: \`document.querySelector('#frame').contentDocument.querySelector('#item')\`.
-- Markup between \`<!-- shadow-root (open) -->\` and \`<!-- /shadow-root -->\` is inside the enclosing element's shadow root, which \`document.querySelector\` does not search. Find the host, then query its \`shadowRoot\` — e.g. \`document.querySelector('#host').shadowRoot.querySelector('#field')\`.
+- Text the page "says", "shows", "displays" or "contains" passes when the element's text, whitespace collapsed, CONTAINS the expected text; compare for exact equality only when the condition says "equals", "exactly" or "only". Read an element that holds ALL of the expected text: a value inside a sentence (\`12\` in \`Order 12 was placed.\`) is too small to hold it.${sentenceSearch}
+- A mark around a label is not part of its text: a required-field \`*\`, a trailing \`:\`, a bullet or a bar. A field labelled \`Hull colour *\` is labelled "Hull colour", so strip those marks from the ends of the text you read before comparing it. The exception is a check about a mark or what it means — that a field is required or optional, or that its \`*\` is shown, gone or no longer there: the mark is the point, so compare the text as it is, marks included. Nothing overrides your verdict, so a check that the text is NOT shown must fail whenever the text is there, marks or not.${pageTail}
 
 Respond with ONLY this JSON:
 {
@@ -644,6 +660,70 @@ export interface PriorFailureContext {
    * be right), and the "Failed selectors" instruction leaves it out.
    */
   typeRefused?: true;
+  /**
+   * Set when a check ran and came back false, and again when a re-check of it
+   * came to no verdict: the check itself. On most steps the retry then asks
+   * the same question again rather than letting the step AI write a new,
+   * possibly weaker one (src/ai/check-retry.ts, steptix/steptix#97). Not on
+   * an `If …, then return / stop / fail` line, where it is set too: that line
+   * is planned again by its step AI, as only that can tell whether the check
+   * was the condition or something verified after acting. A first check whose
+   * code failed — it threw, returned the wrong shape or never parsed — has no
+   * verdict and records no failure of its own: it is retried as before.
+   */
+  check?: FailedCheck;
+}
+
+/**
+ * A check that ran and came back false, kept for the retry (`check-retry.ts`)
+ * — and kept again, unchanged but for `attempt` and `noVerdict`, when a
+ * re-check of it came to no verdict.
+ */
+export interface FailedCheck {
+  /** The `assert` as the model sent it — placeholders unresolved, so the
+   *  retry resolves them again as any turn does. */
+  action: AIAction;
+  /** What its code read: the assertion's `actual`. */
+  read: string;
+  /** How it failed, as the step's error says it but without where the
+   *  expected text is (SPEC-web-survey-fixes.md §2.25): what a re-check's code
+   *  is told. The part of the page a check reads is the one its condition
+   *  names; told where the expected text shows, a re-check could read another
+   *  row that holds it and pass. */
+  failure: string;
+  /** The code that read it, when there was any. */
+  code?: string | undefined;
+  /** The condition and expected value that code was written for, placeholders
+   *  resolved: the code holds them as they were then. A re-check that resolves
+   *  them to something else needs new code. */
+  resolved: { condition: string; expected: string | undefined };
+  /** The step had more to do after this check: an action after it in the same
+   *  answer, or `needs_reeval`. Once the re-check passes, the step goes on.
+   *  A bare answer the step would have looked at once more had the check
+   *  passed (step-executor.ts `reevalInferred`) does not count. */
+  hadMore: boolean;
+  /** The attempt the check failed in, or whose re-check of it came to no
+   *  verdict. Only the attempt right after it asks it again: a later one
+   *  follows that attempt's own failure. */
+  attempt: number;
+  /** What the step had done before the check, in that attempt — and, along
+   *  a chain of re-checks, in the attempts before it — its actions and the
+   *  checks that passed, for the turn that goes on once the re-check passes,
+   *  so it does not do them again. */
+  done: Array<{ action: string; description: string; selector?: string }>;
+  /** The reads that stored a value since an action last changed the page
+   *  before the check, as they ran (a `readTable` with the mapping it ran
+   *  with). The re-check reads them again first: a value read before the
+   *  page had loaded would otherwise be checked stale. A page that changes by
+   *  itself is not noticed. */
+  rereads: AIAction[];
+  /** On the copy a re-check that came to no verdict carried forward: why it
+   *  came to none — the first line of the error that ended that attempt
+   *  before the check had a result: its code failed or was refused, a value
+   *  it read again could not be read, a reference in it was refused, the page
+   *  went. The next re-check's code is told, as part of how the check went
+   *  before. */
+  noVerdict?: string;
 }
 
 /** Full diagnostics passed to buildRetryContext on retry attempts */
@@ -692,14 +772,20 @@ function unknownTypeGuidance(type: string): string {
  * rather than blindly trying different selectors.
  *
  * Accepts either a plain PriorFailureContext[] (backward-compatible) or
- * a full RetryDiagnostics object with page state diagnosis.
+ * a full RetryDiagnostics object with page state diagnosis. A plain list with
+ * no failures says nothing. Diagnostics with none still say it is a retry,
+ * with the page state and the instructions: the earlier failures may all have
+ * been answered since (a check a re-check passed, src/ai/check-retry.ts
+ * `standingFailures`) while the attempt just before failed without recording
+ * one — a turn limit, a stall, a reply that did not parse, a check whose code
+ * failed.
  */
 export function buildRetryContext(input: PriorFailureContext[] | RetryDiagnostics): string {
   const diagnostics: RetryDiagnostics = Array.isArray(input)
     ? { failures: input, attemptNumber: 2 }
     : input;
 
-  if (diagnostics.failures.length === 0) return '';
+  if (Array.isArray(input) && diagnostics.failures.length === 0) return '';
 
   const sections: string[] = [];
 
@@ -859,12 +945,24 @@ export function buildContinuationMessage(
    * asks about the lists alone, not for the step's next action.
    */
   reviewOnly?: boolean,
+  /**
+   * How many of `completedActions`, from the start, were done before this
+   * attempt: what the attempt that failed on a check had done before it (and,
+   * along a chain of re-checks, the attempts before that), when this
+   * attempt's re-check of that check passed (src/ai/check-retry.ts). They are
+   * listed apart, as this attempt's turns did not do them.
+   */
+  earlierAttemptActions = 0,
 ): ChatMessage {
   const instructionText = authoredInstruction ?? originalInstruction;
 
-  const actionLines = completedActions.length > 0
-    ? completedActions.map((a) => `  - ${a.description}`).join('\n')
+  const lines = (actions: typeof completedActions): string => actions.length > 0
+    ? actions.map((a) => `  - ${a.description}`).join('\n')
     : '  (none)';
+  const thisAttempt = `Actions completed so far (turns 1–${turnNumber - 1}):\n${lines(completedActions.slice(earlierAttemptActions))}`;
+  const actionsSection = earlierAttemptActions > 0
+    ? `Actions completed before this attempt:\n${lines(completedActions.slice(0, earlierAttemptActions))}\n\n${thisAttempt}`
+    : thisAttempt;
 
   const legacyVariableLines = Object.entries(capturedVariables).length > 0
     ? Object.entries(capturedVariables).map(([k, v]) => `  ${k} = "${v}"`).join('\n')
@@ -897,8 +995,7 @@ export function buildContinuationMessage(
 
 Original instruction: "${instructionText}"
 
-Actions completed so far (turns 1–${turnNumber - 1}):
-${actionLines}
+${actionsSection}
 
 ${valuesSection}
 

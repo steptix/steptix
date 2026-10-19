@@ -191,7 +191,8 @@ describe('Steptix live — typing presses only what the step asks for', function
     assert.equal(
       statuses[verifyLine], 'fail',
       `line ${verifyLine} checks a filter that reacts only to keys after a plain type, and MUST fail; ` +
-        `got '${statuses[verifyLine]}'. A pass means a key reached the filter that the step never asked for.`,
+        `got '${statuses[verifyLine]}'. A pass means a key reached the filter that the step never asked for, ` +
+        'or a retry checked something easier than "no other payee" (steptix/steptix#97).',
     );
   });
 });

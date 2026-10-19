@@ -64,8 +64,21 @@ A failed action is retried once, and the retry prompt says which selector
 failed, how many elements it matched, and why. A `Verify` or `Assert` step is
 turned into a JavaScript check that runs in the page (or a pure value
 comparison when no page is involved), and the step fails when it returns
-false. The check is generated afresh on every run unless the step has been
-compiled to code-behind (§10).
+false. A check that returned false is retried by running the same check
+again: the same question, the same expected value and the same code, so
+neither the question nor the way the page is read can change. The code is
+written anew only when it found nothing (a wrong selector), breaks when it
+runs again, or was written for a stored value that has since been read again
+as something else. Every value the step stored since its last action that could
+change the page (a click, typing, a wait) is read again first, whether or not
+the check uses it. If the check passes, the step goes on with whatever else it
+asks for; if it fails again, the step fails. (An `If …, then return`, `stop`
+or `fail the test` line is planned again, as a failed action is.) A check's
+code is asked to only read the page, and when a check runs again, code that
+would click, type or change the page — as far as a scan of the code can tell
+— is written anew rather than run. The code is still written by an AI, which
+is told all this and could still get it wrong. The check is generated afresh
+on every run unless the step has been compiled to code-behind (§10).
 
 Six consequences for how you write:
 
@@ -385,6 +398,33 @@ File `tests/save-profile.md`:
 Do not encode state in a selector ("wait for `.spinner:hidden`"); say the
 state in words and the framework applies it.
 
+**Wait before you verify after something slow.** A `Verify` step checks the
+page as it is when the step runs. For now Steptix does not wait for a page
+that is still loading — a spinner up, a request not yet answered
+([steptix/steptix#98](https://github.com/steptix/steptix/issues/98)) — so
+waiting is yours to write. After an action that loads something (placing an
+order, a search, a save), wait for what the finished page shows before you
+check it. A check that something is *not* shown needs this most: run while
+the page is still loading, `Verify the page shows no error message` passes
+before the error has arrived, and a check that passes is never retried. Wait
+for the end state rather than for a spinner to go: `Wait until the spinner
+disappears` returns at once when the spinner has not appeared yet.
+
+File `tests/place-order.md`:
+
+```markdown
+# Place order
+
+## Config
+- baseUrl: https://shop.example.test
+
+## Steps
+1. Navigate to /checkout
+2. Click Place order and wait up to 30 seconds for the "Order placed" message
+3. Verify the page shows no error message
+4. Verify the order total says "$42.00"
+```
+
 ### 3.2 Capturing values
 
 A capture writes a variable that later steps read as `{{name}}`. Three
@@ -500,6 +540,49 @@ result fails the step. The check is generated on every run, so each assertion
 costs a code-generation call until the test is compiled (§10); a compiled
 assertion carries its check as code and asks nothing.
 
+Write a check with `Verify` or `Assert that`. `Confirm by clicking Submit`,
+`Check the Remember me box` and `Ensure the toggle is on` read as actions,
+and so can `Make sure …`: the framework does them rather than checking them.
+And a successful click is not evidence that the feature worked; add the
+`Verify` line that would fail if it had not.
+
+Letter case counts: `Verify the status says "Payment Received"` fails on a
+page that shows "Payment received". To accept any case, say so —
+`Verify the status says "payment received", ignoring letter case`. Text the
+page shows in another case than its markup has, through CSS `text-transform`,
+counts in either: a button whose markup says "Submit" and that is shown as
+"SUBMIT" passes both `Verify the button says "SUBMIT"` and `Verify the button
+says "Submit"`, and fails `Verify the button says "SuBmit"`. That is what the
+AI that writes a check's code is told to do; it is still an AI, and could get
+it wrong.
+
+Say where to look ([SPEC-verify-checks.md](specs/SPEC-verify-checks.md)
+has the rules and examples). `Verify the page heading contains "Sign in"`
+names one element; `Verify the page title contains "Sign in"` could mean the
+heading or the browser tab's title, and the two can differ in letter case on
+the same page. A check reads only the part the step names, and only what a
+person sees there. Another row that says the same thing does not count, and
+nor does text in the page's script code or in a part of the page that is
+hidden: `Verify the status of order 12 says "Shipped"` fails while order 12
+is "Pending", even when order 13 says "Shipped", and
+`Verify the page says "Draft saved"` fails while that message is hidden. A
+text box is read by the text in it, and a dropdown by the option chosen, not
+by its other options. The AI that writes a check's code is told to read only
+what a person sees, and works out how itself; it is still an AI, and could
+read the wrong part, or text a person cannot see. The more exactly the step
+names where to look, the less it has to work out.
+A failed check's retry checks the same thing again, with the same code, so a
+check that read the page wrongly the first time reads it the same way again:
+reword the step rather than count on the retry. A check reads the page as it
+is when its step runs, and does not wait for a page that is still loading:
+after something slow, put a wait step before it (§3.1). New code for a retry is told
+to read the part the step names, and is not pointed at other places the
+expected text appears.
+An `If …, then return / stop / fail` line is the exception: its retry plans
+the line again, and both the AI that plans it and the one that writes its
+check's code are told where the page shows the expected text, when the check
+read a part that does not.
+
 Shapes that are known to pass and, with a wrong expectation, known to fail:
 
 File `tests/portfolio-checks.md`:
@@ -531,10 +614,6 @@ File `tests/portfolio-checks.md`:
 Steps 14 and 15 compare values only. They need no page, so they run as a
 predicate over the `## Values` block, which is the right way to check a
 captured value against another variable or a literal.
-
-Two things that are not assertions: `Confirm by clicking Submit` and `Check
-the Remember me box` are clicks. And a successful click is not evidence that
-the feature worked; add the `Verify` line that would fail if it had not.
 
 For an eventually-consistent value, split the trigger and the check into two
 steps, as steps 17 and 18 of the shipped `verify-assertions.md` do. A second
@@ -2450,6 +2529,7 @@ report's skipped steps and warnings, not just the summary.
 | `Log in and go to the orders page and check the total` | Three steps | The model stops at one instruction; one line of three intents runs the first. |
 | `Click Save` when two Save buttons exist | `Click Save in the Shipping address dialog` | Positional picks are forbidden; scope decides. |
 | `Click Submit` then `Verify it worked` | `Click Submit and wait for the Order placed message`, then verify a value | "Worked" is not checkable; a named message or value is. |
+| `Click Place order` then `Verify the page shows no error message` | `Click Place order and wait for the "Order placed" message`, then verify | A check does not wait for a page that is still loading ([#98](https://github.com/steptix/steptix/issues/98)); one that something is not shown passes before the error has arrived. |
 | `Note the order number` | `Read the order number [store as: order_id]` | Nothing is stored without a name. |
 | `Read the order number [as: order_id]` | `[store as: order_id]` | `[as:]` has no parser and is renamed wrongly inside skills. |
 | `Set {{total}} to "{{a}} + {{b}}"` | A `defineTool` with number parameters | `Set` is text only. |

@@ -38,7 +38,7 @@ in the test files, not here.
 | 2.22 | A drag pressed through an ad | 40 | A drag presses at the source's coordinates without checking what is there. The circles page has side-rail Google ad frames that reposition after a scroll, and about one drag in five pressed on one: no `mousedown` reached the page, the drag "succeeded", and the red circle stayed put | Move the pointer onto the source first and check the source received the `mousemove`. If not, hide the page's ads (as §2.5 does for a click) and try once more; if something else covers it, fall back to `dragTo`, whose actionability check reports what intercepts the pointer **Superseded by §2.47:** the ad hiding is removed. |
 | 2.23 | `browser.blockAds` ignored on the server | every survey run | On the server path, `browser.*` comes from the server's own config except for a listed few keys, and `blockAds` was not one of them. The survey project set it, and no session ever blocked an ad. A Google vignette covered test 40's last steps | Read `blockAds` off the session's project config at launch, as `launchArgs` already is |
 | 2.24 | No press-and-hold | 44 | There was no way to hold a button down. LetCode's "Click and Hold" button only reacts to a press of about two seconds, and `click` releases at once | `holdMs` on `click` (Playwright's `delay` between press and release), with `longPress`, `pressAndHold`, `clickAndHold` and similar names mapped onto it at 2 s |
-| 2.25 | A failed check does not say where the expected text is | 45 | An assertion that reads the wrong element fails with "expected X, got Y", and the retry is shown only that, so it reads the same element again. The form results page repeats the empty form above the results; both attempts read the empty textarea ("Comments...") | On a failed DOM assertion, find the smallest visible elements whose text contains the expected value (or a part of it) and add their CSS paths to the failure |
+| 2.25 | A failed check does not say where the expected text is | 45 | An assertion that reads the wrong element fails with "expected X, got Y", and the retry is shown only that, so it reads the same element again. The form results page repeats the empty form above the results; both attempts read the empty textarea ("Comments...") | On a failed assertion that may read the page (`dom` or `both`), find the smallest visible elements whose text contains the expected value (or a part of it) and add their CSS paths to the failure. Since #97: not for an `api` check; only when what the check read does not hold the expected text even in another letter case; the search keeps letter case; a re-check of the same check is not told |
 | 2.26 | Shadow DOM missing from the snapshot | 44 | The snapshot walks `childNodes` only, so an open shadow root's content never appeared. LetCode's first-name field sat in `div#open-shadow`'s root, the snapshot showed the div empty, and the model guessed a selector that matched nothing | Walk each open shadow root before the element's light children, between `<!-- shadow-root (open) -->` markers; tell both prompts how to reach it |
 | 2.27 | No way to type where `fill` cannot | 44 | `type` uses `fill`, which only takes inputs, textareas and contenteditables, and `keyboard` only presses keys. A field inside a CLOSED shadow root cannot be queried by anyone, Playwright included, so there was no way to type into it | When the target is not fillable, `type` clicks it and types on the keyboard, unless the click left the focus somewhere that takes no text: then it types nothing and fails. `keyboard` takes `text` to type into whatever has focus |
 | 2.28 | `find` does not say a match is hidden | 45 | A sidebar entry two collapsed levels deep shows in the snapshot only as `<ul><!-- hidden --></ul>`. The model could not tell which section held "Dynamic Buttons 01", wandered for 15 turns, then clicked the hidden link until it timed out | Each `find` match that is not rendered says so and names the collapsed sections around it, outermost first; rule 19 says to `find` an unseen menu entry and open those sections first |
@@ -51,12 +51,12 @@ in the test files, not here.
 | 2.35 | A navigation to a 404 passed | 62 | "Navigate to input.xhtml" was sent to `/pages/input.xhtml`, which answered 404 Not Found; the navigate succeeded because a page loaded, and the next step had no field to type into and asked for clarification | A navigate reports the document's HTTP status; a 4xx or 5xx fails it (retryably) unless the step mentions an error or a status code |
 | 2.36 | A drag cannot say which side to drop on | 72 | "Drag Item 1 below Item 3" let go on Item 3's centre. A jQuery UI sortable decides before or after by which half the pointer is in, so Item 1 landed before Item 3 | `position` on `drag` (`above`, `below`, `left`, `right`) lets go at 20% or 80% of the target's height or width |
 | 2.37 | A navigation timeout does not say whether the site is up | 39 | "page.goto: Timeout 30000ms exceeded" and nothing else. the-internet.herokuapp.com answered curl and Firefox in under a second, while Chromium and Edge hung on it every time, and the bare timeout read as "the site is down" | On a navigation timeout, ask the URL once from outside the browser and add which it is: the site answers (with its status and time) or it does not answer at all. The message names the symptom only, not a browser flag |
-| 2.38 | "The page says X" is checked by equality on the wrong element | 45 | The check generated for "Verify the page says the confirm returned true" read the value span (`true`) and compared it for equality with the whole sentence, so it failed; §2.25's hint rescued it on the second attempt in every run | The assertion prompt says "says/shows/displays/contains" passes by containment, exact equality only for "equals/exactly/only", and that the element read must hold all of the expected text, with an innermost-element example |
+| 2.38 | "The page says X" is checked by equality on the wrong element | 45 | The check generated for "Verify the page says the confirm returned true" read the value span (`true`) and compared it for equality with the whole sentence, so it failed; in every run the second attempt, with §2.25's hint, passed | The assertion prompt says "says/shows/displays/contains" passes by containment, exact equality only for "equals/exactly/only", and that the element read must hold all of the expected text; since #97 that search looks only inside the part the condition names, at what a person sees there, said in words rather than shown as code |
 | 2.39 | A step that leaves the choice open made the model ask | 56 | "Pick an experience level and tick two skills" returned a `prompt` action asking which level and which skills, and the step failed waiting for an answer | Rule 7 says a step that leaves a choice open is not unclear: choose any valid option and name it in the description; ask only when the step names something the page does not have |
 | 2.40 | A value from an unset environment variable is typed into the page | 41 | `bookstore_user: $DEMOQA_USERNAME` with no such variable stays the literal `$DEMOQA_USERNAME`, with a warning in the run result. The model typed it into the Book Store login, and in one run a check then "found" `$DEMOQA_USERNAME` on the page and passed the section: a false pass | A turn that names a placeholder still holding a bare `$NAME`, or types that literal, is refused before anything runs, naming the variable to set |
 | 2.41 | No way to clear a field | 44 | The model sent `clear`, which is not an action, and the turn was refused; the retry selected the text and pressed Backspace | `clear`, `clearField`, `clearInput` and `clearText` map to `type` with an empty value |
 | 2.42 | §2.34's rewrite broke on an apostrophe | 70 | The glyph-tolerant name for `role=combobox[name="I'm the only traveler"]` put a bare `'` in the regex. It parsed on its own, so the rewrite was kept, but Playwright's `>>` splitter read the `'` as an open string and the click's own `>> visible=true >> nth=0` made the selector unparsable; the retry recovered | Write `'` and `"` in the rewritten pattern as `'` and `"` |
-| 2.43 | A required-field asterisk fails a label check | 70 | "Verify a return date field is shown" expected "Return date" and read "Return date *"; the asterisk is the form's required marker. It failed on attempt 1 and §2.25's hint rescued it | The assertion-code prompt says `*`, `:`, bullets and bars around a label are not part of it, so the check code strips them before comparing, unless the check is about a mark or what it means (required or optional, the `*` shown or gone). The check code's verdict is final: an earlier rule that passed failed checks once the marks were stripped also passed real failures (issue 35) |
+| 2.43 | A required-field asterisk fails a label check | 70 | "Verify a return date field is shown" expected "Return date" and read "Return date *"; the asterisk is the form's required marker. It failed on attempt 1, and attempt 2, with §2.25's hint, passed | The assertion-code prompt says `*`, `:`, bullets and bars around a label are not part of it, so the check code strips them before comparing, unless the check is about a mark or what it means (required or optional, the `*` shown or gone). The check code's verdict is final: an earlier rule that passed failed checks once the marks were stripped also passed real failures (issue 35) |
 | 2.44 | Prompt examples copied from tested sites | 44, 45, 50, 56, 62, and the fixture app | Ten examples added with these fixes used ids and text from the sites under test (`#open-shadow`/`#fname`, `#copy`, `'Checked'`, "tick two skills", "confirm returned true", Red and Green in `#colors`), and four older ones used the fixture app and a Telerik grid (`demo@securebank.com`, "Transaction Dispute", `#RadGrid1_ctl00__7`). On those pages the model was shown the answer | Every example uses invented names (`#host`/`#field`, `#item`, `#grid_row_7`, "Ada", "Order 12 was placed."). CLAUDE.md now forbids site-specific selectors and text anywhere in the framework |
 | 2.45 | A project's context files never reached the model on the server | every survey run | Context was loaded once per session from the server's own `tests.contextDir`, so the survey's `context/public-sites.md` (close ads and overlays) was replaced by the repo's sample API docs | Load context on every batch from the test's project |
 | 2.46 | No way for a test to tell the AI what it needs | 40, 44, 59 and any test | Only the project's context files reached the AI, and the description under the title is not sent | A `## Context` section, sent word for word with every step after the project's context; selectors and frame ids welcome |
@@ -406,6 +406,14 @@ a function. When none has it, the next attempt sends the unusable reply back
 as the assistant's turn with one line saying what was wrong and the exact shape
 to send, instead of the first prompt again.
 
+Since #97 code that fails is answered the same way. When the code throws, or
+returns something other than `{ pass, actual }`, the next attempt sends that
+reply back with the first line of the error (`assertionCodeFailed`): asked
+again with no word of why, the model tended to send the same code, which
+failed the same way. A result is kept only once it has that shape: before,
+one left over from a rejected attempt was returned as the verdict when the
+last attempt failed too, and `pass: "false"` passed.
+
 ### 2.15 Range values
 
 **Fix.** `executeType` reads a range input's `min` and `max` (HTML's defaults
@@ -512,27 +520,112 @@ the time the step names, else 2000.
 
 ### 2.25 A failed check says where the expected text is
 
-**Fix.** When a non-predicate assertion fails, the step loop calls
-`describeWhereExpectedIs` (src/browser/locate-text.ts). It splits the expected
-value into at most four fragments: the whole value, then the parts of a list
-split on `;`, newlines, `, ` and ` and `, then the value of each
-`label: value` part. Booleans and fragments under three characters are dropped.
-For each fragment it finds the smallest visible elements whose `innerText`
-contains it (no child holds the whole fragment) and builds a CSS path to up to
-three of them, anchored at the nearest unique `id`. Those paths are appended
-to the failure: `— the page does show "Steptix survey" at li#_valuecomments. If
-that is what the step means, read it from there`. The retry sees the
-sentence in its prior failures; a person reading the report sees it too.
+[SPEC-verify-checks.md](SPEC-verify-checks.md) sets out in plain words what a
+check reads and what its retry may change, with the evidence; this section
+keeps the history.
+
+**Fix.** When an assertion that may read the page fails (`against: "dom"`
+or `"both"`), the step loop calls `describeWhereExpectedIs`
+(src/browser/locate-text.ts) — never for a predicate nor, since #97, for an
+`api` check, as neither reads the page; and since #97 only when what the
+check read does not contain the expected text, even in another letter case,
+and matching letter case itself (see the end of this section).
+It splits the expected value into at most four fragments: the whole value,
+then the parts of a list split on `;`, newlines, `, ` and ` and `, then the
+value of each `label: value` part. Boolean-like words (`true`, `false`,
+`yes`, `no`, `null`, `undefined`) and fragments under three characters are
+dropped. For each fragment it finds the smallest visible elements (no child
+holds the whole fragment, leaving out a child hidden by `display: none`)
+whose `innerText`, whitespace collapsed, contains it — or, since #97, whose
+shown text holds it in its markup's letter case, so that text CSS shows in
+another case is found in either case. Text hidden by
+`display: none` or `visibility: hidden` never counts. Nor, for the markup's
+case, does text inside a `textarea`, `canvas`, `video`, `audio`, `iframe`,
+`object`, `progress` or `meter`: a textarea's default value, the text between
+an iframe's tags and the others' fallback content, which the page does not
+show as text. An `object` that embeds nothing does show its fallback
+content, and its `innerText` holds it in Chromium, Firefox and WebKit, so
+that text is found in the case it is shown in, but not in its markup's case.
+It builds a CSS path to up to three of those elements, anchored at the
+nearest unique `id`. Text whose smallest holder has no box of its own is not
+pointed at: a closed select's options — nor the select, as its options still
+count as holding their text — and text directly inside a `display: contents`
+element; no hint rather than a wrong one. Those paths are appended to the
+failure: `— the page does show "Steptix survey" at li#_valuecomments. If
+that is what the step means, read it from there`. A retry that plans the
+step again sees the sentence in its prior failures — since #97 a re-check
+does not (below) — and a person reading the report sees it too.
 
 Two gaps had kept even the bare failure from the retry. A failed assertion was
 never added to the attempt's failure list, so the retry prompt had nothing to
 say about it; it is now recorded like a failed action (`Action "assert"
-failed: …`). And the second model call, the one that writes the check's code
-and so picks the element, saw no prior failures at all; on a retry it now gets
-the earlier attempts' check failures as a separate message, with the instruction
-not to read the same element again unless it is what the step means. When
-the text is nowhere on the page, nothing is added. The hint never passes a
-check; the retried assertion still has to read the value and compare.
+failed: …`). Since #97 the step model sees that line only on a retry of an
+`If …, then return / stop / fail` line: the attempt right after a check came
+back false does not ask it for a new check (below), and once the check
+passes on a re-check its failure is no longer mentioned. And the second model
+call, the one that writes the check's code and so picks the element, saw no
+prior failures at all; on a retry it now gets the earlier attempts' check
+failures as a separate message, with the instruction not to read the same
+element again unless it is what the step means. Since #97 the code call of a
+re-check gets another message instead: the old check's failure without the
+hint, the old code and what it read, and the instruction to read the part of
+the page the condition names, not wherever the expected text appears — the
+same part, when the old code read it, compared again as the requirements
+say, and nowhere else — for the same question. A re-check of an API check is
+told instead to take the value its condition names from the API responses;
+one of a check that may read either (`both`), to read the part of the page
+or take the value from the API responses that its condition names; and a
+predicate's, to evaluate its condition as written, reading nothing. When
+the text is nowhere on the page, the hint is left off. The hint never passes
+a check; the retried assertion still has to read the value and compare.
+
+Told what the check lacked, a retry that planned the step afresh wrote a new
+check, and two kinds of new check passed one its fixture requires to fail
+(steptix/steptix#97): one changed the page first (a filter that reacts only
+to keys was typed into again, key by key), and one asked an easier question
+(the Northside Dental option's text, for "Northside Dental and no other
+payee") after this hint named it: in #97's live run of 2026-10-16
+(`typing.test.cjs`), the hint named
+`fieldset#payee-list > label:nth-of-type(2)`, and the retry checked that
+single label instead of "no other payee", and passed. So the retry of a
+check that came back false runs the same check again
+(src/ai/check-retry.ts): the step AI is not asked, and the check's condition
+and expected value are reused. It runs whatever check failed; the step
+prompt tells the AI to write a check only when the step asks for one (rule
+5). Values the step stored since an action last changed the page are read
+again first, so a stale one is not checked twice; a page that changes by
+itself is not noticed. The check's code runs again too, as it was: new code,
+written after the old code had read the page and answered, could read the
+page another way and pass (SPEC-verify-checks.md, section 5). It is written
+anew, told what the old code read, only when the old code found no element,
+breaks when it runs again, or was written for a value read again since, so a
+wrong selector can still be fixed; code that would change the page
+(`checkCodeMutation`) is written anew rather than run. This
+hint is added to the failure of a check that may read the page only when
+what the check read does not contain the expected text, even in another
+letter case (the two compared in lower case and in upper case, as "ß"
+upper-cases to "SS") — it read the wrong place — and it matches letter case
+itself. The re-check is not told it at all: the part to read is the one the
+condition names, and told where else the expected text shows — in another
+row, say — it could read there and pass, as the payee retry above did. Only
+the check that failed in the attempt just before is asked again. If the step
+had more to do once it passes — an action after the check in the same
+answer, or a request for another turn — the step AI is told what that
+attempt already did, and does the rest. A bare answer the step would have
+looked at once more had the check passed does not count: in the scoreboard's
+action log for Sept–Oct 2026, no turn whose check ran holds any other
+action. The turn that re-checks asks the step AI nothing, so it does not
+count against `execution.maxTurns`. With `execution.retries` above 1, an
+attempt whose re-check fails again, or comes to no verdict, is followed by
+another re-check of the same check — told, for one with no verdict, why it
+came to none. A first check whose code failed (it threw, returned the wrong
+shape or never parsed) has no verdict and is retried as before, with the step
+planned again; so are `If …, then return / stop / fail` lines, whose check
+may be the condition or a check after an action, and every failure that is
+not a check. Those retries are told only the failures recorded that still
+stand: a check a re-check has since passed is no longer mentioned, and a
+check whose code failed recorded none. The check code's note lists each
+error once.
 
 ### 2.26 Open shadow roots in the snapshot
 
@@ -672,6 +765,18 @@ else, with their age. A notification still on screen is in the snapshot itself.
 The assertion code prompt shows reading `window.__steptixNotices` for a
 message that may have closed. Nothing on the page changes.
 
+Since #97 a region is recorded only while a person can see it
+(`checkVisibility`), with the text it shows (`innerText`). Before, a live
+region hidden from the start was recorded too, and `captureDomSnapshot` then
+listed it as a notification that had closed: on the SecureBank sign-in page,
+the hidden "Invalid email or password" banner, on every snapshot
+([SPEC-verify-checks.md](SPEC-verify-checks.md), section 7, and section 11,
+case J). A region the page shows later, by a change to a class, a style or
+`hidden`, is recorded then; one whose style keeps changing while it stays
+shown is recorded once. Until the page has loaded, the stylesheet that hides
+a region may not have arrived, so the recorder looks at the page's regions
+once it has.
+
 ### 2.34 Role names match what a person sees
 
 The accessible name `name=` matches includes text a person does not see as
@@ -810,8 +915,23 @@ whitespace collapsed, contains the expected text, and exact equality is for
 conditions that say "equals", "exactly" or "only". The element read must hold
 all of the expected text — a value span inside the sentence is too small —
 and when none picked does, take the innermost element whose text contains it.
-The prompt gives that search as code, and a test runs the example against the
-eviltester markup to show it picks the `<p>`, not the `<span>`.
+The prompt first gave that search as code, and a test ran the example against
+the eviltester markup to show it picks the `<p>`, not the `<span>`.
+
+Since #97 the search looks only inside the part of the page the condition
+names, at what a person sees there, and the prompt gives it in words, not as
+code: how to tell what is shown is the AI's to work out. As first written, it
+searched every element on the page by its `textContent`, which holds script
+code and hidden text, and a check in survey test 45 passed on the page's
+JavaScript source that way ([SPEC-verify-checks.md](SPEC-verify-checks.md),
+section 7, and section 11, case D). The tests now check the prompt's words:
+the smallest element that shows the text, inside the part, and no search of
+every element by `textContent`. A re-check runs the old code again, so it
+reads the same part the same way; when it writes new code — the old code
+found nothing, broke, was written for a value read again since, or would
+change the page — that code is told to read the part the condition names and
+search nowhere else on the page (§2.25, src/ai/check-retry.ts
+`recheckNote`).
 
 ### 2.39 An open choice is not a question
 
@@ -897,8 +1017,12 @@ off the list ("has changed from Pending") still turned a real failure into a
 pass. Only the code that made the comparison knows what it was for, so the
 rule went and the instruction moved to where the comparison is written. What
 that costs is a first attempt on a label check whose code still compares
-exactly: it fails, and §2.25's hint gets the retry, which is how run 70 passed
-before the rule existed.
+exactly: it fails, and the retry has to compare again. Run 70 passed that way
+before the rule existed, on an attempt 2 that had §2.25's hint. Since #97 the retry
+re-checks the same check, which is not told that hint — nor would this one
+be: what the check read, `Return date *`, holds the expected text. Its new
+code is shown the old code and what it read, and told to compare that part
+again as the requirements say, which is where the mark rule is.
 
 ### 2.44 Prompt examples name nothing real
 
@@ -1034,7 +1158,12 @@ and steptix/steptix#24 collects ways for a test author to handle such pages.
 Tests: a message appended to an existing `aria-live` container is recorded;
 `role="status"`, `role="log"` and `<output>` are recorded and
 `aria-live="off"` is not; elements classed toast, snackbar, notification and
-flash-message with no live-region marking are not recorded.
+flash-message with no live-region marking are not recorded. Since #97 (§2.33):
+a region hidden from the start, text changed while a region is hidden, and
+text only in a hidden child are not recorded; a region added hidden and then
+shown by a class change is recorded once shown; a shown region whose style
+keeps changing is recorded once; and a snapshot never lists a message that
+was never shown as one that closed.
 
 ### 2.51 The project lists the domains to block
 
@@ -1101,6 +1230,12 @@ These are fixed in the test files.
 - **Test 42, "click Stop as soon as the bar reaches 75%".** A model turn takes
   seconds. §2.13 makes a `wait` then `click` sequence in one turn possible,
   and that is the fix within reach. Acting faster than one turn is not.
-- **Test 45's wrong-element checks** are no longer out of scope: §2.25 tells
-  the retry where the expected text is, and §2.38 tells the first attempt to
-  read an element that holds all of it.
+- **Test 45's wrong-element checks** are unmeasured since #97. In run D,
+  step 5's check read the empty form's comment box at the top of the results
+  page on attempt 1; §2.25's hint named where "Steptix survey" was, and
+  attempt 2 passed (survey/web/results/section-c-runs.md). Since #97 a
+  re-check is not told where: it reads the part the condition names. Step 5
+  says "the results page shows … the comment", and the results page shows
+  the empty form's comment box too, so the step does not say which comment;
+  one that names where it is (the submitted values) is read there. §2.38
+  still tells the first attempt to read an element that holds all of it.

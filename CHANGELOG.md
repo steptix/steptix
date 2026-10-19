@@ -9,6 +9,214 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — a retried check asks the same question
+
+The whole design, with examples and the evidence behind it, is in
+[docs/specs/SPEC-verify-checks.md](docs/specs/SPEC-verify-checks.md).
+
+When a Verify step's check came back false, its retry asked the AI to plan the
+step again, and the AI wrote a new check (#97). In the live suite that new
+check made a check that must fail pass in two ways: by changing the page
+(typing a filter's text again, key by key, until the list filtered), and by
+asking an easier question ("the Northside Dental option's text" for "Northside
+Dental and no other payee"). The general risk: `Verify the total is $42.00`
+fails on $40.00, and the retry checks something that does say $42.00.
+
+- **The retry runs the same check again.** The step AI is not asked for a new
+  check: the failed check's question (its condition) and expected value are
+  reused, so the retry cannot change what is checked, nor plan an action to
+  make the check pass. That also stops a retry changing the value it looks
+  for (#66). Values the step stored since an action last changed the page
+  are read again first, so a check against a value read before the page had
+  finished updating does not fail on the stale value twice. The retry runs
+  whatever check failed; the step prompt tells the AI to write a check only
+  when the step asks for one.
+- **The retry runs the same code again, too.** Writing new code for the
+  retry, told what the old code read, let a check that must fail pass. On
+  `verify-scope-courier.md`, `Verify the page says "Collect in branch"` names
+  an option of a dropdown that has another option chosen. Its first check
+  failed in 9 of 9 runs; in 3 of them the retry's new code read the whole
+  page's `innerText`, which in Chrome holds every option of a dropdown, and
+  passed. Now the failed check's code runs again as it is, on the page as it
+  is then, and no AI is asked. New code is written only when the old code
+  found nothing (a wrong selector), breaks when it runs again, was written
+  for a value that has since been read again as something else, or would
+  change the page. That code is told what the old code read and why it
+  failed, to check everything the condition says, letter case included, and
+  to read the part of the page the condition names. A re-check of an API
+  check is told instead to take the value its condition names from the API
+  responses; one of a check that may read either, to read the part of the
+  page or take the value from the API responses that its condition names;
+  and a predicate's, to evaluate its condition as written, reading nothing.
+  The cost: a first check whose code read the right part but compared it
+  wrongly fails again, where new code once fixed it. `Verify the payee list
+  shows Northside Dental and no other payee`, which must pass, was rescued so
+  in 2 of its 16 runs on this branch (in one, its first code compared the
+  payee's name exactly with a space in front of it), so `typing.test.cjs` can
+  be expected to go red about one run in eight.
+- **A failed predicate says its condition was false.** Its failure read
+  `expected "undefined"`, as a predicate has no expected value; it now says
+  `predicate "…" was false: …`, as the report does.
+- **Check code that fails is written again, told why.** When a check's code
+  throws, or returns something other than `{ pass, actual }`, the request for
+  new code quotes that code and the first line of its error. Before, the same
+  request was sent again, and the same code tended to come back and fail the
+  same way. This holds for every check, first ones included. A result in the
+  wrong shape is no longer kept either: before, `{ pass: "false" }` from one
+  code attempt was returned as the verdict when the next code failed too, and
+  passed the check.
+- **A re-check's code may only read the page.** Code that would click,
+  type, focus, scroll, dispatch events or change the DOM, as far as a scan of
+  it can tell, is not run but written anew: new code for a re-check, and the
+  failed check's own code before it runs again (a first check's code is not
+  scanned). The prompt that writes any check's code now asks for code that
+  only reads. The same scan checks the
+  page functions of compiled `If …` conditions, and in both it now also
+  catches `scroll()`, a method called through `call`, `apply` or `bind`
+  (`HTMLElement.prototype.click.call(el)`), and one named in brackets
+  (`el['click']()`). It does not catch every form: among others, it misses
+  `Object.assign` onto an element, which it cannot tell from merging plain
+  objects, an optional call (`el.click?.()`), and a method called through
+  `Reflect.apply`.
+- **A re-check is not told where the expected text is (§2.25).** The part of
+  the page it reads is the one the condition names, and a retry told where
+  else the text shows can read there instead. In #97's live run of
+  2026-10-16 (`typing.test.cjs`, step
+  `Verify the payee list shows Northside Dental and no other payee`), after
+  the hint named `fieldset#payee-list > label:nth-of-type(2)`, the retry
+  checked that single label instead of "no other payee", and passed. Say a
+  re-check of "order 12 is Shipped" were told that "Shipped" shows in another
+  order's row: it could read that row and pass the same way. The step's
+  failure still says where the text is, for the person reading it and a
+  retry that plans the step again — but only for a check that may read the
+  page (not an API check, nor a predicate), and only when the check read the
+  wrong place: when what it read does not contain the expected text, even in
+  another letter case (compared in lower case and in upper case, so
+  "HAUPTSTRASSE 5" holds "Hauptstraße 5"). A read that differs only in case
+  most likely read the right place, and pointing elsewhere could invite an
+  easier check. The search itself now matches letter case (#67), in the case
+  the text is shown in or in its markup's case, and never points at text
+  hidden by `display: none` or `visibility: hidden`, nor at a closed select's
+  options.
+  For the markup of what an element shows, it leaves out the text inside a
+  `textarea`, `canvas`, `video`, `audio`, `iframe`, `object`, `progress` or
+  `meter` — a textarea's default value, the text between an iframe's tags and
+  the others' fallback content, which the page does not show as text. An
+  `object` that embeds nothing does show its fallback content: the search
+  finds that text in the case it is shown in, but not in its markup's case.
+  It compares the text shown with whitespace collapsed, as a check does, so
+  `Total:&nbsp;$42.00` and `Out for<br>delivery` are found as "Total: $42.00"
+  and "Out for delivery". The check-code prompt now asks for a check's
+  `actual` to be what its code read, as it read it.
+- **After the check passes, the step goes on** when the AI's answer had more
+  to do after the check — an action after it, or a request for another turn
+  ("Verify the total, then click Pay") — and the AI does the rest, told what
+  the failed attempt already did. The turn that re-checks asks the AI for
+  nothing, so it does not count against `execution.maxTurns`: with
+  `maxTurns: 1`, the AI still has its one turn for the rest. When the check
+  fails again, the step fails with its result; with `execution.retries` above
+  1, each further attempt checks the same question again — as it does when
+  the re-check came to no verdict (its code failed or was refused on both
+  tries, a value it read again could not be read, or the attempt failed
+  before the check had a result).
+- **Letter case counts, unless the step says otherwise.** Both prompts now
+  tell the AI that a check compares text in the case it is written, unless
+  the step says to ignore it ("ignoring letter case", "case-insensitive", "in
+  any letter case"); before, it was left to the code the AI wrote. The
+  check-code prompt adds that ignoring case means comparing both sides in
+  lower case and in upper case, either matching ("ß" upper-cases to "SS"),
+  and that text CSS shows in another case than its markup has
+  (`text-transform`) matches in either of those two cases and in no other.
+  That is what the AI is told; it could still get it wrong. In live run
+  r-20261016-120220-a606 (`verify-letter-case.md` step 5, "EXPRESS
+  COURIER"), the check's code lower-cased the markup as well as the text
+  shown, so it would have passed "Express Courier" too on markup written
+  "Express courier". The prompt's `text-transform` clause now says to
+  compare the markup with letter case kept. The new live test
+  `verify-letter-case.test.cjs` checks on a fixture page that text passes in
+  the case it is shown, in another case when the step says "ignoring letter
+  case" or "in any letter case", and in either case when CSS changes it; and
+  that a wrong capital fails when the step says nothing about case, as does a
+  third case of text CSS shows in capitals.
+- **A check adds no way of comparing the step does not use.** The step AI
+  turned `Verify the page says "$25.00 to Northside Dental on 14/03/2027"`
+  into a check that "the page says exactly" that text, and its code compared
+  the whole page's text with it for equality: a check that must pass failed
+  on both attempts in live runs r-20261016-234632-a571,
+  r-20261017-002140-b2b7 and, after the first fix, r-20261017-022629-b7c0.
+  The step prompt now says to add no such word the step does not use, that
+  a part that "says" or "shows" a value holds it rather than holds only it,
+  and shows the condition for an invented step without "exactly".
+- **A check reads only the part of the page its step names, and only what a
+  person sees there.** For a value inside a sentence, the check-code prompt
+  said to take the innermost element that holds all of the expected text, and
+  gave as its example a search of every element on the page by
+  `textContent`, which holds script code and hidden text. In survey run
+  r-20261008-001709-c04b, `Verify the page says the button was clicked`
+  passed on the page's JavaScript source that way. The prompt now says to
+  read the part the condition names and nothing beyond it (the whole document
+  only when the condition is about the whole page), and to count only what a
+  person sees there: not script code or hidden text, which an element's
+  `textContent` holds, as does the `innerText` of an element that is itself
+  hidden (`display: none`); and not a dropdown's options other than the
+  chosen one, which a dropdown's `innerText` and each option's own `text` and
+  `label` hold. Each of these reads has passed a check that must fail in a
+  real run. It says what to leave out, not how: the AI works out how to
+  read each page. The sentence search is now given in words, inside the
+  named part only. The prompt's examples use an invented name where one used
+  a name from the test site, and compare a table cell exactly.
+
+  Steptix has no code of its own that decides what a person sees. A function
+  that did, `window.__steptixShownText`, put in every page and used by check
+  code and the log of pop-up messages, was built over eight versions on this
+  branch and removed: each fix for one kind of page broke another, and pages
+  combine elements in more ways than such code can follow
+  (SPEC-verify-checks.md, section 12). So was a refusal of retry code that
+  read text another way than with it.
+- **A check keeps to the part its step names.** In one live run, the step AI
+  turned `Verify the page says "Collect in branch"` into a check of the one
+  dropdown option holding those words, which nobody had chosen. The check
+  read the option and correctly failed; its retry read the option's own
+  label, which is there whether the option is chosen or not, and passed. Now
+  the step AI is told that when a step names a part of the page and what it
+  says, it names that part in the step's words, never an element it found
+  the expected text in. The new live test `verify-scope.test.cjs` runs on a
+  fixture page of card orders. A check there must fail when the expected text
+  is only in another row, only in a script, only in a hidden element or only
+  in a dropdown option nobody chose. It must pass on a row, a sentence, a
+  typed text box, a dropdown, SVG text and the chosen option on the page.
+- **Steptix's log of pop-up messages keeps only messages that were shown.** A
+  check about a message that closes by itself may read
+  `window.__steptixNotices`. The page snapshot sent to the AI with most
+  requests lists the messages that have closed. The log recorded the text of
+  any message the page marks for screen readers to announce (a live region),
+  hidden or not. On the SecureBank sign-in page, whose error message is
+  hidden until a sign-in fails, the snapshot told the AI that
+  "Invalid email or password. Please try again." had appeared and closed
+  while it was hidden. That happened in 122 of the 498 requests of one
+  live-suite run, across 31 of its 68 reports. A check could also have passed
+  on such a message. The log now records a message only while the browser
+  says it is shown (`checkVisibility`), with the text it shows (`innerText`):
+  when it is added, when its text changes, or when a change to a class, a
+  style, `hidden` or `open` shows it. A message whose styles keep changing
+  while it stays on screen is recorded once. While a page is loading, the
+  stylesheet that hides a message may not have arrived, so the log looks at
+  the page's messages once the page has loaded.
+- **The report shows everything a check's code AI was sent:** the note on
+  how the check failed before, and the reminders after a reply that could not
+  be used, as well as the prompt (#70).
+- **Unchanged:** a first check whose code failed — it threw, returned the
+  wrong shape or never parsed — has no verdict and is retried as before, as
+  is every failure that is not a check. So are `If …, then return /
+  stop / fail` lines, whose check may be the condition or something the line
+  verifies after acting. On those retries the AI plans the step again, told
+  the failures recorded before, and the code of each check it writes is told
+  how the step's checks failed (§2.25), as it was — except that a check a
+  re-check has since passed is no longer mentioned. (A check whose code
+  failed records no failure, so a retry after one is told nothing of it, as
+  before.) Checks in `[use computer]` mode, which the model judges itself
+  without code, are retried as before too.
+
 ### Changed — Built with TypeScript 7
 
 All five packages now compile with TypeScript 7.0.2, the native compiler.
@@ -1493,7 +1701,14 @@ a "try until green" loop, and this suite is what would notice if either
 regressed — `evaluateAssertion` regenerates assertion code only when the code
 *throws*, never on a structured `pass: false`; and assertion failures never
 reach `collectedFailures`, so the retry prompt carries no hint about what the
-assertion expected or what it got.
+assertion expected or what it got. (Superseded: since #27, SPEC-web-survey-fixes.md
+§2.25, the retry is told both; since #97 the retry runs the same check again,
+with only its code written anew. Of the ways a retry could pass a check that
+should fail, this suite would catch an easier question, which could turn a
+must-fail step green, but not a retry acting on the page: the values its
+checks read are static, so no action changes them. `typing.test.cjs` is the
+live suite that would notice that, and `verify-letter-case.test.cjs` a retry
+changing the text a check expects.)
 
 `fixtures/test-app/assertions.html` grew the targets those shapes needed and
 previously had nowhere to read: a Transfer panel (a field holding `50.20`, a

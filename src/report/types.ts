@@ -181,12 +181,13 @@ export interface AssertionResult extends AssertionEvaluation {
   aiInteraction?: AiInteraction | undefined;
   /**
    * The code generations before the one in {@link aiInteraction}, oldest
-   * first: code that did not parse or threw was regenerated, and those calls
-   * were made and paid for too. Not rendered — the report shows the code that
-   * decided the assertion — but counted wherever a step's model calls are
-   * (`getAllAiInteractions`: the model summary, the scoreboard's `calls` and
-   * tokens, docs/specs/SPEC-scoreboard.md §7.1). Absent when the first code
-   * generation was the only one.
+   * first: code that did not parse, threw, returned the wrong shape, or (on a
+   * re-check) would have changed the page was regenerated, and those calls
+   * were made and paid for too. Shown in the report folded away, under
+   * "Earlier code replies, replaced" (generator.ts), and counted wherever a
+   * step's model calls are (`getAllAiInteractions`: the model summary, the
+   * scoreboard's `calls` and tokens, docs/specs/SPEC-scoreboard.md §7.1).
+   * Absent when the first code generation was the only one.
    */
   supersededAiInteractions?: AiInteraction[] | undefined;
 }
