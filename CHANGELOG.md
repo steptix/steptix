@@ -9,6 +9,38 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — a drag that dropped nothing no longer passes
+
+On the web survey's c58, `Drag "Draggable 1" onto the drop zone` reported
+success and moved nothing, and only the next Verify failed
+(steptix/steptix#92). The page moves its content 1280px to the right, off
+screen, when a chat widget arrives, and under a drag that happened while
+the drag ran. Depending on when, the drop zone was gone from where the
+pointer went, the drag never started, or the press landed beside the item.
+In every case the drop zone got no `dragover`, so the browser had nowhere
+to drop, and the `drag` action could not tell
+(SPEC-web-survey-fixes.md §2.52).
+
+- **The drag is watched in the page**: the press, `dragstart`, and the
+  target's `dragover`. The release waits for that `dragover` (1 s
+  ceiling), and moves to where the target is now if it has moved.
+- **An HTML5 drag that could not drop fails**, saying which of the three
+  happened and where the pointer and the target were. Pointer-event drags,
+  pages that run their own drag, and frame targets pass as before.
+- **When the page moved the source or target during the drag**, and nothing
+  in the page took the drag, nothing was dropped or done, so it drags once
+  more from where they are now before failing.
+- **The run log and the report's drag row name the route**: `(via stepped
+  mouse moves)` or `(via dragTo)`.
+- A drag whose two ends do not fit on one screen falls back to `dragTo`,
+  which scrolls after the press, and Chromium then starts no drag. That used
+  to pass with nothing moved; it now fails saying so.
+
+Measured 2026-10-19 with a script that drives `executeAction` on the c58
+page the way the CLI runner does, 30 drags each: before, 1 of 30 dropped
+headless and 0 of 30 headed (plain `dragTo`: 3 and 1). After, 30 of 30 both ways, 29 of them
+on the second drag.
+
 ### Fixed — a check's code is written from the part of the page it checks
 
 A Verify check is planned by one AI request and its code written by a second

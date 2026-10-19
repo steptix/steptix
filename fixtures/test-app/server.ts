@@ -1516,6 +1516,9 @@ async function handleRequest(
       // Fields that react to keys: a keyup-only filter and a date in three
       // spinbutton segments, where End sets the maximum (steptix/steptix#90).
       '/schedule-transfer': 'schedule-transfer.html',
+      // An HTML5 drag and drop, and a page that moves its content mid-drag
+      // (docs/specs/SPEC-web-survey-fixes.md §2.52).
+      '/file-receipts': 'file-receipts.html',
       // The one NON-html static asset (docs/specs/SPEC-use-computer.md §7).
       // It is in this map rather than reached by the `.html` fallback below
       // because that fallback is what keeps the static path from serving

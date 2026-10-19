@@ -832,6 +832,9 @@ export interface ActionExecutionResult {
    *  type="file">`, or by answering the picker a control opened. Recorded so a
    *  compiled code-behind entry writes the shape that actually worked. */
   upload?: { via: UploadRoute };
+  /** Which way a `drag` was driven, for the report's drag row and the run
+   *  log (SPEC-web-survey-fixes.md §2.52). */
+  drag?: { via: DragRoute };
   /** How a `type` that asked for its text key by key (`sequential`) put it
    *  in. Absent on a plain type, which fills. */
   typed?: TypedRoute;
@@ -851,6 +854,14 @@ export interface ActionExecutionResult {
 
 /** Which of the two upload routes ran. */
 export type UploadRoute = 'input' | 'chooser';
+
+/**
+ * Which of the two drag routes ran (SPEC-web-survey-fixes.md §2.9, §2.52):
+ * `stepped`, the mouse pressed on the source and moved to the target in
+ * steps; or `dragTo`, Playwright's `dragTo`, taken when an end has no box
+ * or is out of view, or the pointer does not reach the source.
+ */
+export type DragRoute = 'stepped' | 'dragTo';
 
 /**
  * How a key-by-key `type` put its text in (SPEC-web-survey-fixes.md §2.3):
@@ -990,6 +1001,8 @@ export async function executeAction(
   let remainingMs: number | undefined;
   /** Which route an `upload` took, for the transcript a compile reads. */
   let uploadRoute: UploadRoute | undefined;
+  /** Which route a `drag` took, for the report. */
+  let dragRoute: DragRoute | undefined;
   /** How a key-by-key `type` typed, for the report and the transcript. */
   let typed: TypedRoute | undefined;
   /** The HTTP status a `navigate` landed on (§2.35). */
@@ -1141,7 +1154,7 @@ export async function executeAction(
         break;
 
       case 'drag':
-        await executeDrag(page, root, eff, remainingMs);
+        dragRoute = await executeDrag(page, root, eff, remainingMs);
         break;
 
       case 'upload':
@@ -1325,6 +1338,7 @@ export async function executeAction(
       success: true,
       ...(targeting !== undefined && { targeting }),
       ...(uploadRoute !== undefined && { upload: { via: uploadRoute } }),
+      ...(dragRoute !== undefined && { drag: { via: dragRoute } }),
       ...(typed !== undefined && { typed }),
       ...(httpStatus !== undefined && { httpStatus }),
     };
@@ -2328,7 +2342,15 @@ async function executeReload(page: Page): Promise<void> {
  * HTML5 drag-and-drop (Chromium dispatches the drag events for it).
  *
  * A drag the application ignored still "succeeds" here, exactly as a click on a
- * dead button does: the next `Verify` is what says whether it worked.
+ * dead button does: the next `Verify` is what says whether it worked. The
+ * exception is an HTML5 drag that could not have dropped anywhere, which
+ * fails (SPEC-web-survey-fixes.md §2.52): the page started a drag but the
+ * target never received a `dragover`, or the source is `draggable="true"`
+ * and no drag started at all. Either way the browser had no drop to make,
+ * and only this action can see that. Whether the page then accepted the drop
+ * is still for the `Verify` to say. When the page moved the source or the
+ * target while such a drag ran, nothing was dropped, so it drags once more
+ * from where they are now before failing.
  *
  * The pointer moves in STEPS (SPEC-web-survey-fixes.md §2.9). `dragTo` jumps
  * from source to target, and jQuery UI's draggable and sortable both ignore
@@ -2338,13 +2360,16 @@ async function executeReload(page: Page): Promise<void> {
  * the HTML5 drag events for real mouse movement, so a native drag-and-drop
  * keeps working. When either end has no box in the viewport (off-screen or
  * detached), `dragTo` takes over, because it scrolls and this cannot.
+ *
+ * Returns the route that ran, which the run log names at debug level and the
+ * report's drag row shows.
  */
 async function executeDrag(
   page: Page,
   root: Page | FrameLocator,
   action: AIAction,
   timeoutMs?: number,
-): Promise<void> {
+): Promise<DragRoute> {
   const selector = requireSelector(action);
   const target = action.target !== undefined ? sanitizeCssSelector(action.target) : '';
   if (!target) {
@@ -2353,6 +2378,47 @@ async function executeDrag(
   const timeout = timeoutMs ?? DRAG_TIMEOUT_MS;
   const source = root.locator(selector).locator('visible=true').first();
   const destination = root.locator(target).locator('visible=true').first();
+  const ends: DragEnds = { selector, target, source, destination };
+  const deadline = Date.now() + timeout;
+  const first = await dragOnce(page, root, action, ends, timeout, true);
+  if (typeof first === 'string') return first;
+  // §2.52: nothing was dropped, so a second drag cannot drop twice. It starts
+  // over from where the page has put the two now, scrolling them in if the
+  // move took them off screen.
+  logger.debug(`drag: the page moved ${first.moved} while the drag ran and nothing was dropped; dragging again from where they are now`);
+  // Within the action's one budget, not a second one of its own.
+  const left = Math.max(MIN_ACTION_TIMEOUT_MS, deadline - Date.now());
+  return await dragOnce(page, root, action, ends, left, false) as DragRoute;
+}
+
+/** The two ends of a drag, as the action named them and as located. */
+interface DragEnds {
+  selector: string;
+  target: string;
+  source: Locator;
+  destination: Locator;
+}
+
+/**
+ * One drag, start to finish: scroll the pair into view, pick the route, drive
+ * it, and judge what the page saw (§2.52). Returns the route that ran.
+ *
+ * With `mayRetry`, a stepped drag that could not drop, during which the page
+ * moved the source or the target, returns what moved instead of throwing, so
+ * the caller can drag once more. A page that moves its content as the pointer
+ * first touches it — a widget loading on first interaction, say — moves it
+ * once; a target that stayed put and still got no `dragover` would get none
+ * the second time either, so that one fails at once.
+ */
+async function dragOnce(
+  page: Page,
+  root: Page | FrameLocator,
+  action: AIAction,
+  ends: DragEnds,
+  timeout: number,
+  mayRetry: boolean,
+): Promise<DragRoute | { moved: string }> {
+  const { selector, target, source, destination } = ends;
   await source.scrollIntoViewIfNeeded({ timeout }).catch(() => {});
   // A headed launch has `viewport: null`, and so does every CDP page, so
   // `viewportSize()` is null exactly where drags run most. The window's own
@@ -2375,9 +2441,10 @@ async function executeDrag(
   if (from !== null && to !== null && viewport !== null && (!inView(from) || !inView(to))) {
     // Scrolling the source in leaves it at the viewport's edge, often with the
     // target still below (SPEC-web-survey-fixes.md §2.19). `dragTo` would then
-    // scroll mid-drag, and Chromium abandons an HTML5 drag that scrolls: the
-    // drag "succeeds" and nothing is dropped. Centre the pair instead, when
-    // they fit on one screen together.
+    // scroll after the press, which takes the source out from under it, and
+    // Chromium starts no HTML5 drag: nothing is dropped, and since §2.52 the
+    // drag fails saying so. Centre the pair instead, when they fit on one
+    // screen together.
     const scroll = scrollToFitBoth(from, to, viewport);
     if (scroll !== null) {
       // `instant` overrides a page's `scroll-behavior: smooth`, so the boxes
@@ -2392,8 +2459,14 @@ async function executeDrag(
     }
   }
   if (from === null || to === null || !inView(from) || !inView(to)) {
-    await source.dragTo(destination, { timeout });
-    return;
+    logger.debug(`drag via dragTo: ${from === null || to === null ? 'an end has no box' : 'an end is out of view'}`);
+    const probe = await watchDrag(source, destination);
+    await source.dragTo(destination, { timeout }).catch(async (err: unknown) => {
+      await forgetDragWatch(root);
+      throw err;
+    });
+    await refuseUndroppedDrag(root, probe, selector, target, 'dragTo', null);
+    return 'dragTo';
   }
   // A click refuses to press through something laid over its target; a drag
   // by mouse coordinates does not, so anything that slid over the source — an
@@ -2405,22 +2478,381 @@ async function executeDrag(
   const startY = from.y + from.height / 2;
   const reached = await pointerReaches(page, source, startX, startY);
   if (!reached) {
-    await source.dragTo(destination, { timeout });
-    return;
+    logger.debug('drag via dragTo: the pointer did not reach the source');
+    const probe = await watchDrag(source, destination);
+    await source.dragTo(destination, { timeout }).catch(async (err: unknown) => {
+      await forgetDragWatch(root);
+      throw err;
+    });
+    await refuseUndroppedDrag(root, probe, selector, target, 'dragTo', null);
+    return 'dragTo';
   }
-  await page.mouse.down();
-  // Past the 1–5 px threshold libraries wait for before they call it a drag.
-  await page.mouse.move(startX + 6, startY + 6, { steps: 3 });
-  // The target can move once the drag starts (a sortable opens a gap), so its
-  // box is read again rather than trusted from before the press.
-  const landing = (await destination.boundingBox().catch(() => null)) ?? to;
+  logger.debug('drag via stepped mouse moves');
+  const probe = await watchDrag(source, destination);
   // A sortable puts the item before or after the target by which half the
   // pointer is in, so "below Item 3" lets go in the lower part, not on the
   // midpoint (SPEC-web-survey-fixes.md §2.36).
   const fx = action.position === 'left' ? 0.2 : action.position === 'right' ? 0.8 : 0.5;
   const fy = action.position === 'above' ? 0.2 : action.position === 'below' ? 0.8 : 0.5;
-  await page.mouse.move(landing.x + landing.width * fx, landing.y + landing.height * fy, { steps: 15 });
+  let release = { x: startX, y: startY };
+  await page.mouse.down();
+  try {
+    // Past the 1–5 px threshold libraries wait for before they call it a drag.
+    await page.mouse.move(startX + 6, startY + 6, { steps: 3 });
+    // An HTML5 drag is under way only once the page has had its `dragstart`;
+    // gliding before then can end the moves before the drag began.
+    if (probe?.draggable === true) await awaitDrag(root, 'started', DRAG_EVENT_WAIT_MS);
+    // The target can move once the drag starts (a sortable opens a gap), so its
+    // box is read again rather than trusted from before the press.
+    const landing = (await destination.boundingBox().catch(() => null)) ?? to;
+    release = { x: landing.x + landing.width * fx, y: landing.y + landing.height * fy };
+    await page.mouse.move(release.x, release.y, { steps: 15 });
+    // §2.52: a drop happens only where the target has had a `dragover`, and
+    // the browser delivers it after the move that caused it. Let go once it
+    // has arrived. If it has not, the target may have moved since its box was
+    // read: go to where it is now, when that is on screen, and wait again.
+    if (probe?.seesTarget === true && await awaitDrag(root, 'over', DRAG_EVENT_WAIT_MS) === false) {
+      const now = await destination.boundingBox({ timeout: MEASUREMENT_TIMEOUT_MS }).catch(() => null);
+      if (now !== null && inView(now)) {
+        release = { x: now.x + now.width * fx, y: now.y + now.height * fy };
+        await page.mouse.move(release.x, release.y, { steps: 3 });
+        await awaitDrag(root, 'over', DRAG_EVENT_WAIT_MS);
+      }
+    }
+  } catch (err) {
+    await page.mouse.up().catch(() => {});
+    await forgetDragWatch(root);
+    throw err;
+  }
   await page.mouse.up();
+  try {
+    await refuseUndroppedDrag(root, probe, selector, target, 'stepped', { release, destination, inView });
+  } catch (err) {
+    if (!mayRetry || !(err instanceof UndroppedDragError) || !err.repeatable) throw err;
+    const moved = await movedSince(source, destination, from, to);
+    if (moved === null) throw err;
+    return { moved };
+  }
+  return 'stepped';
+}
+
+/**
+ * Which ends of a drag the page moved since their boxes were read before the
+ * press: "the source", "the target" or "the source and the target". Null
+ * when neither moved, or when either is gone, since a drag again needs both.
+ */
+async function movedSince(source: Locator, destination: Locator, from: Box, to: Box): Promise<string | null> {
+  const fromNow = await source.boundingBox({ timeout: MEASUREMENT_TIMEOUT_MS }).catch(() => null);
+  const toNow = await destination.boundingBox({ timeout: MEASUREMENT_TIMEOUT_MS }).catch(() => null);
+  if (fromNow === null || toNow === null) return null;
+  const shifted = (a: Box, b: Box): boolean => Math.abs(a.x - b.x) > 2 || Math.abs(a.y - b.y) > 2;
+  const names = [shifted(from, fromNow) && 'the source', shifted(to, toNow) && 'the target'].filter(Boolean);
+  return names.length === 0 ? null : names.join(' and ');
+}
+
+/** A drag that could not have dropped anywhere (§2.52). `repeatable` when
+ *  nothing in the page took the drag at all, so dragging again cannot repeat
+ *  something the page already did. */
+class UndroppedDragError extends Error {
+  constructor(message: string, readonly repeatable: boolean) {
+    super(message);
+  }
+}
+
+/** How long a drag waits for the page's `dragstart`, and then for the
+ *  target's `dragover`, before going on without it. Each normally arrives
+ *  within milliseconds of the move that causes it; this is the ceiling. */
+const DRAG_EVENT_WAIT_MS = 1_000;
+
+/** What {@link watchDrag} found out before the drag began. */
+interface DragWatch {
+  /** The source, or an ancestor, has `draggable="true"`: the page asked for
+   *  an HTML5 drag. */
+  draggable: boolean;
+  /** Whether a `dragover` on the target can be seen from the source's
+   *  window. Not when the target is a frame, whose own document gets it. */
+  seesTarget: boolean;
+}
+
+/** What the drag watch saw, read back once the drag is over. */
+interface DragSeen {
+  /** A `pointerdown` or `mousedown` reached the source. */
+  pressed: boolean;
+  /** The `mousedown` on the source was not cancelled by the page. */
+  pressKept: boolean;
+  /** What the first press that did NOT reach the source landed on, as
+   *  `tag#id`; null when every press reached it, or there was none. */
+  pressedOther: string | null;
+  /** The source was no longer in the document when it was pressed: the page
+   *  had replaced it, so whether "it" was pressed cannot be told. */
+  sourceReplaced: boolean;
+  started: boolean;
+  startKept: boolean;
+  over: boolean;
+  /** Something in the window cancelled a `dragover`: it offered to take
+   *  the drop, and the page may have acted on the drag already, as a
+   *  sortable that reorders while the pointer passes does. */
+  accepted: boolean;
+  /** A `drop` fired somewhere in the window: the browser dropped, on the
+   *  target or on something the page put over it. */
+  dropped: boolean;
+  /** The target is no longer in the document: the page replaced it, so a
+   *  `dragover` on the new one cannot be told from none. */
+  targetReplaced: boolean;
+}
+
+/**
+ * Watch the drag about to happen, in the source's window: whether the press
+ * reached the source and the page let it stand, whether a drag started
+ * (`dragstart`) and the page let it stand, whether the target, or anything
+ * inside it, received a `dragover`, whether anything at all took a
+ * `dragover` (cancelled it), and whether a `drop` fired anywhere
+ * (SPEC-web-survey-fixes.md §2.52).
+ *
+ * Null when the watch cannot be installed, and then nothing is judged: the
+ * drag runs as it did before the watch existed.
+ */
+async function watchDrag(source: Locator, destination: Locator): Promise<DragWatch | null> {
+  let target: Awaited<ReturnType<Locator['elementHandle']>> = null;
+  try {
+    target = await destination.elementHandle({ timeout: MEASUREMENT_TIMEOUT_MS });
+    return await source.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (src: any, dst: any) => {
+        // Every function in here is a property assignment or an inline
+        // callback: esbuild's `keepNames` wraps a `const f = () => …` in
+        // `__name`, which the page does not have (see READ_TABLE_SCRIPT).
+        const w = globalThis as any;
+        w.__steptixDragWatch?.remove();
+        const seen: any = {
+          pressed: false, pressKept: false, pressSettled: false, mousePressed: false,
+          pressedOther: null, sourceReplaced: false,
+          started: false, startKept: false, startSettled: false,
+          over: false, accepted: false, dropped: false,
+          wake: new Set<() => void>(),
+        };
+        seen.wakeAll = () => { for (const f of [...seen.wake]) f(); };
+        seen.onPress = (e: any) => {
+          if (!src.isConnected) seen.sourceReplaced = true;
+          if (e.composedPath().includes(src)) {
+            seen.pressed = true;
+            // `defaultPrevented` is final only once the event has been
+            // through every listener, so it is read on the next task.
+            if (e.type === 'mousedown') {
+              seen.mousePressed = true;
+              setTimeout(() => { seen.pressKept = !e.defaultPrevented; seen.pressSettled = true; seen.wakeAll(); }, 0);
+            } else {
+              // A cancelled `pointerdown` sends no `mousedown`, and the
+              // browser starts no native drag: the press is settled, not kept.
+              // Its task runs after a `mousedown` dispatched with it.
+              setTimeout(() => {
+                if (seen.mousePressed || !e.defaultPrevented) return;
+                seen.pressKept = false;
+                seen.pressSettled = true;
+                seen.wakeAll();
+              }, 0);
+            }
+          } else if (seen.pressedOther === null && e.target) {
+            const el = e.target;
+            seen.pressedOther = String(el.tagName || el.nodeName).toLowerCase() + (el.id ? `#${el.id}` : '');
+            seen.wakeAll();
+          }
+        };
+        seen.onStart = (e: any) => {
+          seen.started = true;
+          setTimeout(() => { seen.startKept = !e.defaultPrevented; seen.startSettled = true; seen.wakeAll(); }, 0);
+        };
+        seen.onOver = (e: any) => {
+          if (e.composedPath().includes(dst)) { seen.over = true; seen.wakeAll(); }
+          if (!seen.accepted) setTimeout(() => { if (e.defaultPrevented) seen.accepted = true; }, 0);
+        };
+        seen.onDrop = () => { seen.dropped = true; };
+        seen.read = () => ({
+          pressed: seen.pressed, pressKept: seen.pressKept, pressedOther: seen.pressedOther,
+          sourceReplaced: seen.sourceReplaced,
+          started: seen.started, startKept: seen.startKept,
+          over: seen.over, accepted: seen.accepted, dropped: seen.dropped, targetReplaced: !dst.isConnected,
+        });
+        w.addEventListener('pointerdown', seen.onPress, true);
+        w.addEventListener('mousedown', seen.onPress, true);
+        w.addEventListener('dragstart', seen.onStart, true);
+        w.addEventListener('dragover', seen.onOver, true);
+        w.addEventListener('drop', seen.onDrop, true);
+        seen.remove = () => {
+          w.removeEventListener('pointerdown', seen.onPress, true);
+          w.removeEventListener('mousedown', seen.onPress, true);
+          w.removeEventListener('dragstart', seen.onStart, true);
+          w.removeEventListener('dragover', seen.onOver, true);
+          w.removeEventListener('drop', seen.onDrop, true);
+          delete w.__steptixDragWatch;
+        };
+        w.__steptixDragWatch = seen;
+        const frameTags = ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'];
+        return {
+          draggable: src.closest('[draggable="true"]') !== null,
+          seesTarget: !frameTags.includes(String(dst.tagName).toUpperCase()),
+        };
+      },
+      target,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    return null;
+  } finally {
+    await target?.dispose().catch(() => {});
+  }
+}
+
+/**
+ * Wait until the drag watch has seen `what` — a `dragstart`, or a
+ * `dragover` on the target — or `ms` have passed. True when it was seen,
+ * false when not. Null, at once, when there is nothing to wait for: for
+ * `started`, the press missed the source or the page cancelled it, so no
+ * drag can start; for `over`, no drag started or the page cancelled it, as a
+ * pointer-event drag does. Null too when the watch is gone. The wait is on
+ * the events themselves; `ms` is only the ceiling.
+ *
+ * Read through `:root`, not the source, because a drop may have removed the
+ * source from the page.
+ */
+async function awaitDrag(root: Page | FrameLocator, what: 'started' | 'over', ms: number): Promise<boolean | null> {
+  try {
+    return await root.locator(':root').evaluate(
+      (_el: unknown, arg: { what: 'started' | 'over'; ms: number }) => new Promise<boolean | null>((resolve) => {
+        const seen = (globalThis as any).__steptixDragWatch;
+        if (!seen) { resolve(null); return; }
+        // Property assignments, not `const` functions, for watchDrag's reason.
+        const wait: any = {};
+        // true: seen; null: nothing to wait for; undefined: not yet.
+        wait.state = (): boolean | null | undefined => {
+          if (arg.what === 'started') {
+            if (seen.startSettled) return true;
+            if (!seen.pressed && seen.pressedOther !== null) return null;
+            return seen.pressSettled && !seen.pressKept ? null : undefined;
+          }
+          if (seen.over) return true;
+          if (!seen.started || (seen.startSettled && !seen.startKept)) return null;
+          return undefined;
+        };
+        const now = wait.state();
+        if (now !== undefined) { resolve(now); return; }
+        wait.check = () => {
+          const then = wait.state();
+          if (then === undefined) return;
+          clearTimeout(wait.timer);
+          seen.wake.delete(wait.check);
+          resolve(then);
+        };
+        wait.timer = setTimeout(() => { seen.wake.delete(wait.check); resolve(wait.state() ?? false); }, arg.ms);
+        seen.wake.add(wait.check);
+      }),
+      { what, ms },
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Take the drag watch down without judging, for a drag that threw. */
+async function forgetDragWatch(root: Page | FrameLocator): Promise<void> {
+  await root.locator(':root').evaluate(
+    () => { (globalThis as any).__steptixDragWatch?.remove(); },
+    undefined,
+    { timeout: MEASUREMENT_TIMEOUT_MS },
+  ).catch(() => {});
+}
+
+/**
+ * After the release: take the drag watch down, and throw when the drag was
+ * an HTML5 drag that could not have dropped anywhere (SPEC-web-survey-fixes.md
+ * §2.52). Three shapes:
+ *
+ * - the page started a drag and let it stand, the target never received a
+ *   `dragover`, and no `drop` fired anywhere. A drop happens only where a
+ *   `dragover` was cancelled, so nothing moved.
+ * - the source is `draggable="true"`, the press reached it and the page let
+ *   it stand, and no drag started.
+ * - the source is `draggable="true"`, and the press landed on something
+ *   else: the page moved it, or put something over it, after the pointer
+ *   reached it, so no drag started.
+ *
+ * Anything else passes, as before: a pointer-event drag, a page that cancels
+ * the native drag to run its own, a target that is a frame, an end the page
+ * replaced with a new element, a watch that could not be read.
+ */
+async function refuseUndroppedDrag(
+  root: Page | FrameLocator,
+  watch: DragWatch | null,
+  selector: string,
+  target: string,
+  via: DragRoute,
+  stepped: { release: { x: number; y: number }; destination: Locator; inView: (box: Box | null) => boolean } | null,
+): Promise<void> {
+  if (watch === null) return;
+  let seen: DragSeen | null;
+  try {
+    // Read on a task of its own, so the `setTimeout`s the watch queued to
+    // settle `defaultPrevented` have run first.
+    seen = await root.locator(':root').evaluate(
+      () => new Promise<DragSeen | null>((resolve) => setTimeout(() => {
+        const w = (globalThis as any).__steptixDragWatch;
+        if (!w) { resolve(null); return; }
+        w.remove();
+        resolve(w.read());
+      }, 0)),
+      undefined,
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch {
+    seen = null;
+  }
+  if (seen === null) return;
+  logger.debug(
+    `drag events (via ${via}): press ${seen.pressed ? 'on the source' : seen.pressedOther !== null ? `on ${seen.pressedOther}` : 'not seen'}, `
+    + `dragstart ${seen.started ? (seen.startKept ? 'yes' : 'cancelled by the page') : 'no'}, `
+    + `dragover on the target ${seen.over ? 'yes' : 'no'}, taken by the page ${seen.accepted ? 'yes' : 'no'}, `
+    + `drop ${seen.dropped ? 'yes' : 'no'}`,
+  );
+  if (seen.started && seen.startKept && !seen.over && !seen.dropped && watch.seesTarget && !seen.targetReplaced) {
+    let where = '';
+    if (stepped !== null) {
+      const box = await stepped.destination.boundingBox({ timeout: MEASUREMENT_TIMEOUT_MS }).catch(() => null);
+      const at = `(${Math.round(stepped.release.x)}, ${Math.round(stepped.release.y)})`;
+      where = box === null
+        ? ` The pointer let go at ${at}; "${target}" no longer has a box on the page.`
+        : ` The pointer let go at ${at}; "${target}" is now at (${Math.round(box.x)}, ${Math.round(box.y)}), `
+          + `${Math.round(box.width)}×${Math.round(box.height)}, ${stepped.inView(box) ? 'on screen' : 'off screen'}.`;
+    }
+    throw new UndroppedDragError(
+      `The drag did not reach "${target}": the page started a drag, but "${target}" never received a dragover, `
+      + `so the browser had nowhere to drop it and nothing was dropped (via ${via}).${where} `
+      + 'If the page moved while the drag ran, drag again.',
+      !seen.accepted,
+    );
+  }
+  if (seen.started || !watch.draggable || seen.sourceReplaced) return;
+  if (seen.pressed && seen.pressKept) {
+    // Chromium starts a drag only while the pressed element is still under the
+    // point where it was pressed.
+    const why = via === 'dragTo'
+      ? '`dragTo` scrolls the page to reach the target after the press, which can take the element out from '
+        + 'under the pointer: the two may be too far apart to show on one screen together.'
+      : 'That happens when the page moves the element out from under the pointer as it is pressed. Drag again.';
+    throw new UndroppedDragError(
+      `The drag never started: "${selector}" is draggable (draggable="true"), but the browser started no drag `
+      + `after the press, so nothing was dropped (via ${via}). ${why}`,
+      true,
+    );
+  }
+  if (!seen.pressed && seen.pressedOther !== null) {
+    throw new UndroppedDragError(
+      `The drag never started: the press meant for "${selector}" landed on ${seen.pressedOther} instead, so nothing `
+      + `was dragged (via ${via}). The page moved "${selector}", or put something over it, after the pointer `
+      + 'reached it. Drag again.',
+      true,
+    );
+  }
 }
 
 type Box = { x: number; y: number; width: number; height: number };
