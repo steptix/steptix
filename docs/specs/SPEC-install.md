@@ -526,8 +526,6 @@ which is the expected result: the user still has Steptix installed.
   today, so the first release picks a number for all three. The CLAUDE.md
   rule that bumps the extension's patch version on every change needs
   replacing to fit (§11).
-- **Changed:** `@pkent/aigateway` moves to the `steptix` organisation, as
-  `@steptix/aigateway`, before the first public release.
 - **Retired:** the Windows installer (`packaging/runtime/`,
   `scripts/build-runtime.mjs`, `scripts/verify-runtime.mjs`) and the
   CLAUDE.md section about it, once this ships. Its beta has no installs that
@@ -563,8 +561,9 @@ copy of the npm registry:
 
 ## 11. Still to settle
 
-1. **The server package's name.** The maintainer is settling it, along with
-   the `steptix` organisation on npm that `@steptix/aigateway` also needs.
+1. **The server package's name.** The maintainer is settling it. The
+   `steptix` organisation on npm exists (`@steptix/aigateway` is published
+   there), so `@steptix/server` is available as a name.
 2. **How builds between releases are numbered.** With one version number per
    release (§4.2), the extension's patch number can no longer go up on every
    change. That rule exists so the Extensions panel shows a new number after
