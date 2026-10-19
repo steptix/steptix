@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SecureBank — File receipts</title>
+  <!--
+    An HTML5 drag and drop (docs/specs/SPEC-web-survey-fixes.md §2.52):
+    draggable receipts, a Tax folder that takes them, and a list of what was
+    filed. A receipt dropped on the folder leaves Receipts and is listed under
+    Filed receipts.
+
+    `?move=` makes the page move its content another 3000px to the right, off
+    screen, the way a late layout change does (a widget that widens the page
+    and re-centres it):
+      - `on-drag`: once, during the first drag, as soon as it is under way
+        (its first dragover anywhere on the page). The folder is gone from
+        where the pointer is headed and gets no dragover that time. Not in
+        the dragstart handler itself: a dragstart that moves its own element
+        away makes Chromium give up the drag, and Playwright's mouse move then
+        waits for it forever;
+      - `every-drag`: the same during every drag, so no drag ever reaches the
+        folder;
+      - `every-press`: whenever a receipt is pressed, so the receipt is never
+        under the pointer by the time it moves, and the browser starts no
+        drag.
+    tests/drag-dragover.test.ts drives it.
+  -->
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; background: #f5f7fa; color: #1a1a2e; margin: 0; }
+    .card { max-width: 760px; margin: 40px auto; background: white; border-radius: 8px; border: 1px solid #e2e8f0; padding: 32px; }
+    h1 { font-size: 1.25rem; margin: 0 0 16px; }
+    h2 { font-size: 1rem; margin: 0 0 8px; }
+    .board { display: flex; gap: 24px; }
+    .board > section { flex: 1; }
+    #receipts span { display: block; padding: 8px 12px; margin-bottom: 8px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f8fafc; cursor: grab; }
+    #tax-folder { min-height: 120px; border: 2px dashed #94a3b8; border-radius: 6px; }
+    #tax-folder.over { background: #e2e8f0; }
+    #filed-list { margin: 0; padding-left: 20px; min-height: 24px; }
+  </style>
+</head>
+<body>
+  <main class="card" id="filing">
+    <h1>File receipts</h1>
+    <div class="board">
+      <section>
+        <h2>Receipts</h2>
+        <div id="receipts">
+          <span draggable="true">Receipt 1043</span>
+          <span draggable="true">Receipt 1044</span>
+        </div>
+      </section>
+      <section>
+        <h2>Tax folder</h2>
+        <div id="tax-folder"></div>
+      </section>
+      <section>
+        <h2>Filed receipts</h2>
+        <ul id="filed-list"></ul>
+      </section>
+    </div>
+  </main>
+  <script>
+    const move = new URLSearchParams(location.search).get('move');
+    const filing = document.getElementById('filing');
+    const folder = document.getElementById('tax-folder');
+    const filed = document.getElementById('filed-list');
+    let dragged = null;
+    let drags = 0;
+    let movePending = false;
+    let moved = 0;
+    const moveAway = () => { moved += 3000; filing.style.marginLeft = moved + 'px'; };
+    for (const receipt of document.querySelectorAll('#receipts span')) {
+      receipt.addEventListener('mousedown', () => {
+        if (move === 'every-press') moveAway();
+      });
+      receipt.addEventListener('dragstart', (e) => {
+        dragged = receipt;
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', receipt.textContent);
+        drags += 1;
+        movePending = move === 'every-drag' || (move === 'on-drag' && drags === 1);
+      });
+    }
+    document.addEventListener('dragover', () => {
+      if (!movePending) return;
+      movePending = false;
+      moveAway();
+    });
+    folder.addEventListener('dragenter', (e) => { e.preventDefault(); folder.classList.add('over'); });
+    folder.addEventListener('dragleave', () => folder.classList.remove('over'));
+    folder.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+    folder.addEventListener('drop', (e) => {
+      e.preventDefault();
+      folder.classList.remove('over');
+      const item = document.createElement('li');
+      item.textContent = e.dataTransfer.getData('text/plain');
+      filed.appendChild(item);
+      if (dragged) dragged.remove();
+      dragged = null;
+    });
+  </script>
+</body>
+</html>

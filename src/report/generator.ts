@@ -1261,11 +1261,13 @@ function renderSubAction(
   const mappingHtml = describeTableMapping(sub.action.mapping);
   // A drag names two elements, and the row's description is the model's own
   // sentence: say which selector was dragged onto which, as an upload row
-  // says which files it sent.
+  // says which files it sent, and which way the drag was driven
+  // (SPEC-web-survey-fixes.md §2.52). A failed drag has no route here; its
+  // error names it.
   const dragHtml =
     sub.action.action === 'drag'
       ? `<div class="sub-action-detail">dragged: ${escapeHtml(sub.action.selector ?? '?')} → onto: `
-        + `${escapeHtml(sub.action.target ?? '?')}</div>`
+        + `${escapeHtml(sub.action.target ?? '?')}${describeDragRoute(sub.drag)}</div>`
       : '';
   // A type the step asked to make key by key, and whether it went in that way
   // (SPEC-web-survey-fixes.md §2.3). A plain type fills and has no line.
@@ -1334,6 +1336,13 @@ function renderSubAction(
   </div>
   ${hasBody ? `<div class="sub-action-body">${uploadHtml}${dragHtml}${typedHtml}${mappingHtml}${listReviewHtml}${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
 </div>`;
+}
+
+/** The end of a drag row: which way the drag was driven. Empty when the
+ *  route is not known (a failed drag, or a run from before §2.52). */
+function describeDragRoute(drag: SubActionResult['drag']): string {
+  if (drag === undefined) return '';
+  return drag.via === 'stepped' ? ' (via stepped mouse moves)' : ' (via dragTo)';
 }
 
 /** A key-by-key type's line: typed key by key, or why the value was set

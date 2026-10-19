@@ -4269,6 +4269,8 @@ async function executeStepAttempt(
         // `targeting` exists, so an upload carrying only a route would read as
         // measured and take the wrong selector rules.
         ...(result.upload !== undefined && { upload: result.upload }),
+        // Which drag route ran, for the report's drag row (§2.52).
+        ...(result.drag !== undefined && { drag: result.drag }),
         // How a key-by-key `type` typed, for the report and for generation.
         ...(result.typed !== undefined && { typed: result.typed }),
         // The first-party requests the action started, observed on a compile

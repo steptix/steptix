@@ -65,6 +65,7 @@ in the test files, not here.
 | 2.49 | An unusable model reply left no trace | 40 | 'Assertion code response missing code field' failed c40's 'Verify that 3 equals 3' on two of three runs; the replies were counted but not shown, so the cause was a guess | The report shows unused and replaced replies in full; the failure message quotes the start of the last one |
 | 2.50 | Notifications recognised by class-name guesses | 62 | §2.33 recorded an element as a notification if its class contained toast, growl, snackbar or notification. Those are library vocabulary, one of them PrimeFaces' own, so the list suited the sites it came from and missed any other name (`flash-message`) | Only WAI-ARIA live regions count: `role` alert, status or log, an `aria-live` other than off, or `<output>`. Leafground's notification is marked that way and is still recorded |
 | 2.51 | A built-in list of ad domains | 40, 44, 59 | `browser.blockAds: true` blocked 13 ad-network domains chosen by the framework: a list that is never complete, goes stale, and decides for every project what counts as an ad | `blockAds` is the project's own list of domains (`["doubleclick.net", …]`); the framework has none. `true` and anything that is not a bare host name are refused at load |
+| 2.52 | A drag that dropped nothing passed | 58 | The page moved its demo off screen while the drag ran. The drop zone got no `dragover`, nothing was dropped, and the drag reported success; only the next Verify failed (steptix/steptix#92) | Watch the drag in the page. Let go once the target has had its `dragover`. When an HTML5 drag could not have dropped anywhere, fail saying why, after one more drag if the page moved the pair. Name the route in the run log and the report |
 
 ## 2. Fixes
 
@@ -262,11 +263,12 @@ behaviour.
 
 **Fix.** `executeDrag` takes the bounding boxes of both elements (page
 coordinates, which hold for elements inside frames too). It moves the mouse to
-the centre of the source, presses, moves 5 px to pass the drag threshold,
+the centre of the source, presses, moves 6 px to pass the drag threshold,
 glides to the centre of the target in 15 steps, and releases. If either box is
 missing (the element is off-screen or detached) it falls back to `dragTo`.
 HTML5 drag-and-drop still works, because Chromium dispatches the drag events
-for real mouse movement.
+for real mouse movement. Since §2.52 the release waits for the target's
+`dragover`, and an HTML5 drag that could not drop fails.
 
 ### 2.10 Styled checkboxes and radios
 
@@ -1197,6 +1199,114 @@ Tests: a list loads as written; no key blocks nothing; `true`, URLs, wildcards,
 a rule-injecting entry and a number are refused with each named; the schema
 takes a list of strings; host matching covers subdomains, case, look-alikes and
 query strings; the resolver rule holds only the listed hosts.
+
+### 2.52 An HTML5 drag that could not drop fails
+
+**Problem.** c58's `Drag "Draggable 1" onto the drop zone` reported success
+and moved nothing, in 2 of 3 runs on 2026-10-14 and in both section C runs on
+2026-10-19 (steptix/steptix#92). The next step, a Verify of the dropped-items
+list, was the first to notice.
+
+The cause is the page, but the silent pass was Steptix's. Measured with a
+script that drives `executeAction` the way the CLI runner does (its own
+browser launch, the test's navigation order): a chat widget arrives,
+`<body>` widens to 4000px, and the page's centred content moves 1280px to
+the right, off a 1440px-wide window. With no interaction it happened once,
+about 10 s after load. In all 60 drags made 5 s after load (30 headless, 30
+headed) it happened during the drag: the drop zone was at x=276 (260 headed)
+just before and at x=1556 just after. The pointer probably sets it off, as a
+page does that loads a widget on first interaction; that is likely, not
+shown. One drag dropped before the move. In the other 59 the move left one of
+three things behind, and in every one the drop zone received no `dragover`:
+
+- the drag started, and the glide went to where the zone used to be or to
+  where it now was, off screen;
+- the press reached the source, the source then moved before the drag
+  threshold, and Chromium started no drag, since it starts one only while
+  the pressed element is still under the press;
+- the source moved after the pointer was checked on it (§2.22), and the
+  press landed on the page behind it.
+
+`executeDrag` judged none of this: "a drag the application ignored still
+succeeds".
+
+**Fix.** The drag is watched in the source's window (`watchDrag`): which
+element the press reached and whether the page cancelled it, whether a
+`dragstart` fired and whether the page cancelled it, and whether the
+target or anything inside it received a `dragover`. Waits are on those
+events, each with a 1 s ceiling (`DRAG_EVENT_WAIT_MS`), never a fixed sleep:
+
+- after the threshold move, a draggable source waits for its `dragstart`
+  before gliding;
+- after the glide, the release waits for the target's `dragover`. If none
+  comes, the target may have moved since its box was read: the pointer goes
+  to where it is now, when that is on screen, and waits once more.
+
+After the release, a drag fails (`UndroppedDragError`) when it was an
+HTML5 drag that could not have dropped anywhere:
+
+- a `dragstart` the page let stand, no `dragover` on the target, and no
+  `drop` anywhere: "The drag did not reach …", with where the pointer let
+  go and where the target is now, on screen or off. A `drop` elsewhere means
+  the page took it on something of its own, such as a layer over the target;
+- a `draggable="true"` source the press reached, a `mousedown` the page
+  let stand, and no `dragstart`: "The drag never started: … is draggable";
+- a `draggable="true"` source the press missed: "the press meant for …
+  landed on <element> instead". The page moved the source, or put something
+  over it, after the pointer was checked on it.
+
+Nothing was dropped in any of these, so a second drag cannot drop twice.
+When the page moved the source or the target during a stepped drag (either
+box is more than 2px from where it was read before the press), and nothing in
+the page took the drag (no element cancelled a `dragover`), the drag runs
+once more from where they are now, scrolling them in as §2.19 does. The
+second condition is for a sortable that reorders while the pointer passes:
+it may have acted on the first drag without any drop, and a second would
+act again. A target
+that stayed put and still got no `dragover` would get none the second time
+either, so that one fails at once. So does a `dragTo` drag, whose own
+scrolling moves both boxes.
+
+Everything else passes as before: a pointer-event drag (no `dragstart`, no
+`draggable`), a page that cancels the native drag to run its own, a
+target that is a frame (its own document gets the `dragover`), an end the
+page replaced with a new element, a watch that could not be installed. A
+`pointerdown` the page cancels counts as a cancelled press. The retry runs
+within the action's one time budget, and a drag that throws takes the watch
+down with it.
+Whether the page accepted the drop is still for the next Verify to say.
+
+This makes one old silent pass a failure. When source and target do not fit
+on one screen together, the drag falls back to `dragTo`, which scrolls the
+target into view after the press. That takes the source out from under the
+press, and Chromium starts no drag. It used to pass with nothing moved; it
+now fails saying `dragTo` scrolled.
+
+**Route.** `executeDrag` returns the route it took, `stepped` or
+`dragTo`. The run log says which at debug level, with the reason for a
+`dragTo` and what the watch saw (`drag events (via stepped): press on the
+source, dragstart yes, dragover on the target yes, taken by the page yes,
+drop yes`). The report's drag row
+ends `(via stepped mouse moves)` or `(via dragTo)`. A failed drag has no
+route on its row; its error names it.
+
+**Not fixed here.** A page whose own `dragstart` handler moves the dragged
+element away makes Chromium give up the drag, and Playwright's mouse move
+then waits for an intercepted drag that never comes, with no timeout. Seen
+only with a fixture written to do it, not on a survey site.
+
+Tests (`tests/drag-dragover.test.ts`, on the SecureBank File receipts page,
+`fixtures/test-app/file-receipts.html`): a drop lands by the stepped route
+and the log names it; a page that moves its content once during the first
+drag is dragged again and drops; a page that moves it during every drag
+fails "did not reach", with the target off screen; a page that moves it on
+every press fails "never started"; a page that moves the receipt before
+every press fails "landed on", and before the first press only drops; the
+`dragTo` fallback that must scroll fails saying so; a drop the page takes on
+a layer over the folder passes; a drag something else in the page took is
+not repeated; a drag that throws leaves no watch behind; a
+pointer-event drag with no `draggable` passes; the report's row names each
+route.
 
 ## 3. Failures caused by the test files or the sites
 

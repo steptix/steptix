@@ -91,6 +91,10 @@ export interface SubActionResult {
    *  action was not measured", so a route stored in there would misclassify
    *  every upload (stories/upload-action.md, decision 14). */
   upload?: { via: 'input' | 'chooser' };
+  /** Which way a `drag` was driven: the stepped mouse drag, or Playwright's
+   *  `dragTo` (SPEC-web-survey-fixes.md §2.52). Report-only; a sibling of
+   *  `targeting` for `upload`'s reason. */
+  drag?: { via: 'stepped' | 'dragTo' };
   /**
    * How a `type` that asked for its text key by key (`sequential`) put it in:
    * each character with its own key events, or the value set whole into a
