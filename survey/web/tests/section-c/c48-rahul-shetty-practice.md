@@ -24,8 +24,8 @@ whole other site.
 4. Verify the suggestion field contains "India"
 5. Select "Option3" in the dropdown
 6. Tick checkbox Option1 and Option3
-7. Type "Steptix" into the name field under "Switch To Alert Example" and click Alert
-8. Verify the alert text contains "Steptix", then accept it
+7. Type "Steptix" into the name field under "Switch To Alert Example", then click Alert and accept the alert
+8. Verify the alert said "Steptix"
 9. Click Confirm and dismiss the dialog
 10. Click Hide, then verify the text box under "Element Displayed Example" is hidden
 11. Click Show, then verify it is visible again

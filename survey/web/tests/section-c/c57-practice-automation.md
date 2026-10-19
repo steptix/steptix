@@ -31,11 +31,13 @@ whose submit shows an alert, a hover reveal.
 13. Read the price of Oranges from the simple table [as: orange_price]
 14. Verify that "{{orange_price}}" contains "$"
 15. Navigate to /hover/
-16. Hover over the "Mouse over me" text
-17. Verify the text changes to say you hovered
-18. Navigate to /form-fields/
-19. In the practice form (not the comment form at the bottom), enter name "Survey Tester" and password "secret"
-20. Tick "Water" and "Coffee" under favourite drink, and choose "Blue" as favourite colour
-21. Select "Yes" for whether you like automation
-22. Enter email "survey.tester@example.com" and message "Written by Steptix"
-23. Submit the practice form and accept the alert that appears
+16. Hover over the "Hover" page title
+17. Verify the grey heading below the introduction says "Mouse over me"
+18. Hover over the "Mouse over me" heading
+19. Verify that heading now says "You did it!"
+20. Navigate to /form-fields/
+21. In the practice form (not the comment form at the bottom), enter name "Survey Tester" and password "secret"
+22. Tick "Water" and "Coffee" under favourite drink, and choose "Blue" as favourite colour
+23. Select "Yes" for whether you like automation
+24. Enter email "survey.tester@example.com" and message "Written by Steptix"
+25. Submit the practice form and accept the alert that appears

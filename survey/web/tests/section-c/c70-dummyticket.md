@@ -29,5 +29,5 @@ jQuery date pickers, select2-style dropdowns, knowing when to stop.
 10. Enter "London" as the origin city and "Paris" as the destination city
 11. Pick a departure date about one month from today and a return date one week after it
 12. Choose "Visa application" as the purpose
-13. Verify the order summary shows a total price
+13. Verify the order summary shows a total price starting with "AUD"
 14. Stop here without placing the order or entering any payment details

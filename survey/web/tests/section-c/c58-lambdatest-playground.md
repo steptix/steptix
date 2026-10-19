@@ -35,7 +35,7 @@ step that searches asks for one character at a time.
 14. Verify the page shows the form was submitted
 15. Navigate to jquery-download-progress-bar-demo
 16. Start the download and wait until it completes
-17. Verify the page says the download is complete
+17. Verify the File Download dialog says "Complete!"
 18. Navigate to table-search-filter-demo
 19. Search the tasks table for "Testing", typing it one character at a time
 20. Verify the tasks table shows exactly one row, and it mentions Testing

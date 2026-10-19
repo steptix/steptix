@@ -20,7 +20,7 @@ JS popup, predictive search, a table read, hidden elements.
 2. Expand the second accordion section
 3. Verify the second section's text is visible
 4. Navigate to calculator.html
-5. Press 1, 2, +, 3, 0, = on the calculator
+5. Press 1, then 2, then +, then 3, then 0, then = on the calculator
 6. Verify the display shows 42
 7. Navigate to loader.html
 8. Wait for the loader to disappear, then click the button it was covering

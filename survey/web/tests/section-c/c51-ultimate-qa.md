@@ -19,7 +19,7 @@ look-alike labels, simple elements located by their visible text.
 ## Steps
 1. Navigate to /filling-out-forms/
 2. In the left-hand form, enter name "Survey Tester" and message "Left form", then submit it
-3. Verify the left-hand form says thanks for contacting
+3. Verify the left-hand form shows a message starting with "Thanks for contacting"
 4. In the right-hand form, enter name "Survey Tester" and message "Right form"
 5. Solve the arithmetic question shown in the right-hand form and enter the answer
 6. Submit the right-hand form

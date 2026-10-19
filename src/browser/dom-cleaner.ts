@@ -388,8 +388,9 @@ export interface CaptureDomOptions {
   /** Maximum nesting depth for recursive iframe content capture.
    *  Default 5 in DEFAULT_CONFIG. */
   maxIframeDepth?: number | undefined;
-  /** Hard character cap on the rendered DOM snapshot.
-   *  Default 100000 in DEFAULT_CONFIG. */
+  /** Hard character cap on the rendered DOM snapshot. Default 300000 in
+   *  DEFAULT_CONFIG (`browser.domSnapshotCharLimit`); a caller that passes
+   *  none gets DEFAULT_DOM_SNAPSHOT_CHAR_LIMIT. */
   domSnapshotCharLimit?: number | undefined;
   /** Restrict emitted attributes to the curated ALLOWED_DOM_ATTRIBUTES list
    *  (plus all aria-*). When false, every attribute is emitted (legacy).
@@ -408,6 +409,10 @@ export interface CaptureDomOptions {
    *  reader marked only once its snapshot has been delivered — the step
    *  loop's model (`markDialogsShown`). */
   onDialogNote?: ((listed: readonly DialogRecord[]) => void) | undefined;
+  /** Called when the snapshot was clipped at `domSnapshotCharLimit`. The
+   *  truncation marker is not always the snapshot's last line — the dialog and
+   *  notice notes come after it — so a caller that must know asks here. */
+  onClipped?: (() => void) | undefined;
 }
 
 /** Resolved, all-fields-present option set used internally. */
@@ -474,6 +479,7 @@ export async function captureDomSnapshot(page: Page, opts: CaptureDomOptions = {
   if (snapshot.length > resolved.domSnapshotCharLimit) {
     snapshot = snapshot.substring(0, resolved.domSnapshotCharLimit)
       + DOM_SNAPSHOT_TRUNCATION_MARKER;
+    opts.onClipped?.();
   }
 
   return snapshot + dialogNote(page, opts.dialogReader, opts.onDialogNote) + (await noticeNote(page));

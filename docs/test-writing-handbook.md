@@ -1500,9 +1500,12 @@ test is reading.
   visual-regression comparison as built-in vocabulary **in browser mode**. A
   native dialog is reachable by switching surface (§3.10); the rest want a
   tool.
-- JavaScript `alert`/`confirm` dialogs are answered automatically by the
-  framework (dismissed, and `beforeunload` accepted); you cannot script a
-  choice.
+- A JavaScript `alert`, `confirm` or `prompt` is answered the moment it
+  opens: dismissed unless the step said otherwise (`beforeunload` is
+  accepted). To accept one, or type into a prompt, say so in the step that
+  opens it — `Click Delete and accept the confirmation` — because a later
+  step is too late to change the answer. What a dialog said is kept, so a
+  later step can check it: `Verify the alert said "Saved"`.
 - `Press Enter in the Search field` does not focus the field. Type into it in
   the same step first.
 - No keyboard route to the BROWSER **in browser mode**. A key press is

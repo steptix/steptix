@@ -47,7 +47,7 @@ import {
 } from '../ai/action-parser.js';
 import { describeWhereExpectedIs } from '../browser/locate-text.js';
 import { resolveFrame } from '../browser/actions.js';
-import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
+import { captureDomSnapshot, domCaptureFailure, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
 import { disarmDialog, markDialogsShown, type DialogRecord } from '../browser/dialogs.js';
@@ -3522,6 +3522,8 @@ async function executeStepAttempt(
           dismissalGuidance: opts.dismissalGuidance ?? false,
           fullPageScreenshots: config.browser.fullPageScreenshots,
           sendScreenshots: config.ai.sendScreenshots,
+          maxIframeDepth: config.browser.maxIframeDepth,
+          domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
           ...(opts.signal && { signal: opts.signal }),
           onCodeGenerated: (interaction) => assertionCallsInFlight.push(interaction),
         });
@@ -4842,6 +4844,10 @@ interface EvaluateAssertionParams {
   dismissalGuidance: boolean;
   fullPageScreenshots: boolean;
   sendScreenshots: boolean;
+  /** `browser.maxIframeDepth` and `browser.domSnapshotCharLimit`, for the
+   *  code AI's snapshot (`captureCheckCodeDom`). */
+  maxIframeDepth: number | undefined;
+  domSnapshotCharLimit: number | undefined;
   /** Run abort signal — forwarded to the assertion code-gen AI call. See issues/020. */
   signal?: AbortSignal;
   /**
@@ -4855,6 +4861,55 @@ interface EvaluateAssertionParams {
 const DEFAULT_POLL_TIMEOUT_MS = 5000;
 const DEFAULT_POLL_INTERVAL_MS = 250;
 const MAX_ASSERTION_CODE_ATTEMPTS = 2;
+
+/** The check code AI's snapshot: the markup as it is, every attribute and
+ *  every element, hidden ones included, so its code can name what is there. */
+const CHECK_CODE_DOM = {
+  collapseRepetitiveDom: false,
+  compactSvg: false,
+  hideHiddenInputs: false,
+  hideDisplayNoneElements: false,
+  hideAriaHiddenElements: false,
+  useDomAttributeAllowlist: false,
+  dropUnstableIds: false,
+} as const;
+
+/**
+ * The snapshot the check code AI writes its code from.
+ *
+ * The whole markup, hidden elements included, when it fits in
+ * `domSnapshotCharLimit`. When it does not, the same snapshot with hidden
+ * elements left out, as the step AI's snapshot leaves them out by default
+ * (`hiddenLeftOut`): clipping the whole markup cuts it off wherever the limit
+ * falls, and a page whose hidden menus come first loses everything shown
+ * after them. Measured on a survey page (c45): the whole markup was 295,691
+ * characters, and the form and its results began after character 283,000.
+ * Given the first 100,000, the code AI guessed where the results were.
+ */
+async function captureCheckCodeDom(
+  page: Page,
+  maxIframeDepth: number | undefined,
+  domSnapshotCharLimit: number | undefined,
+): Promise<{ dom: string; hiddenLeftOut: boolean }> {
+  const limits = { maxIframeDepth, domSnapshotCharLimit };
+  let clipped = false;
+  const whole = await captureDomSnapshot(page, {
+    ...CHECK_CODE_DOM,
+    ...limits,
+    onClipped: () => { clipped = true; },
+  });
+  if (!clipped) return { dom: whole, hiddenLeftOut: false };
+  const shown = await captureDomSnapshot(page, {
+    ...CHECK_CODE_DOM,
+    ...limits,
+    hideHiddenInputs: true,
+    hideDisplayNoneElements: true,
+    hideAriaHiddenElements: true,
+  });
+  // A capture that failed is no better than the clipped one it would replace.
+  if (domCaptureFailure(shown, 'snapshot') !== null) return { dom: whole, hiddenLeftOut: false };
+  return { dom: shown, hiddenLeftOut: true };
+}
 
 /**
  * Evaluate a single `assert` action inline against the current page state.
@@ -4925,17 +4980,9 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
       // DOM capture, screenshot, and API history entirely. Saves tokens
       // and removes irrelevant context from the AI's prompt.
       const skipDomAndScreenshot = p.against === 'api' || p.against === 'predicate';
-      const fullDom = skipDomAndScreenshot
-        ? null
-        : await captureDomSnapshot(p.page, {
-            collapseRepetitiveDom: false,
-            compactSvg: false,
-            hideHiddenInputs: false,
-            hideDisplayNoneElements: false,
-            hideAriaHiddenElements: false,
-            useDomAttributeAllowlist: false,
-            dropUnstableIds: false,
-          });
+      const { dom: fullDom, hiddenLeftOut } = skipDomAndScreenshot
+        ? { dom: null, hiddenLeftOut: false }
+        : await captureCheckCodeDom(p.page, p.maxIframeDepth, p.domSnapshotCharLimit);
       const finalShot = p.sendScreenshots && !skipDomAndScreenshot
         ? await captureScreenshot(p.page, p.fullPageScreenshots)
         : null;
@@ -4954,6 +5001,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
         p.against,
         formatTestInfo(p.testName, p.baseUrl),
         target === p.page ? undefined : p.frame,
+        hiddenLeftOut,
       );
 
       const apiContext: ApiPromptContext | undefined = p.contextContent.includes('Type:')
