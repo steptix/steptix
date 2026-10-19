@@ -9,6 +9,28 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Changed — `@pkent/aigateway` is now `@steptix/aigateway`
+
+The AI client library moved with the rest of the project: its repository is
+`steptix/aigateway` and it publishes as `@steptix/aigateway`. npm cannot
+rename a package, so none of the old versions exist under the new name and
+moving the specifier is necessarily also a version move — `1.4.0-beta.7` to
+`1.5.0-beta.1`. The old name is deprecated and frozen at `1.4.0-beta.7`:
+installing it warns, and it will get no further release.
+
+Nothing changes about what Steptix sends to a model. The step between those
+two versions is purely additive — an optional `serviceTier` call option, and
+a `service_tier` field that appears on a response only when the provider
+reports one. Steptix sets neither, and the library writes the key only when
+the option is present, so a request body is byte-for-byte what it was
+before. No call site adapted, and the hand-maintained declaration in
+`src/types/aigateway.d.ts` stays as narrow as it was: it declares only the
+surface the AI client consumes, which is neither of the new fields.
+
+It is an internal dependency, so there is nothing to rename in a project's
+configuration, `.env` or test files. In your own checkout, `npm install`
+picks the new tree up from the committed lockfile.
+
 ### Fixed — a drag that dropped nothing no longer passes
 
 On the web survey's c58, `Drag "Draggable 1" onto the drop zone` reported
