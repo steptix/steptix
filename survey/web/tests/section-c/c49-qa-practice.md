@@ -35,8 +35,8 @@ picker, file upload, a loader.
 16. Read the heading inside the iframe [as: iframe_heading]
 17. Verify that "{{iframe_heading}}" is not empty
 18. Navigate to /pagination.html
-19. Go to the last page of results
-20. Verify the last page is shown as the current page
+19. Click page 3 in the pagination
+20. Verify the message below the pagination says "You clicked page no. 3"
 21. Navigate to /calendar.html
 22. Pick 15 January 2026 in the date picker
 23. Verify the date field shows 15 January 2026 in its own format

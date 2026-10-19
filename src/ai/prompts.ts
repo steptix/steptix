@@ -523,6 +523,9 @@ export function buildAssertionCodePrompt(
   against: 'dom' | 'api' | 'both' | 'predicate' = 'dom',
   testInfoSection?: string,
   frameSelector?: string,
+  /** The snapshot leaves hidden elements out, because the whole markup was
+   *  over the size limit (step-executor.ts `captureCheckCodeDom`). */
+  hiddenLeftOut = false,
 ): ChatMessage {
   const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
 
@@ -561,7 +564,9 @@ Respond with ONLY this JSON:
     : '';
 
   const domSection = (against !== 'api' && domSnapshot)
-    ? `\n\n## Current Page DOM (full, uncompacted)\n\`\`\`html\n${domSnapshot}\n\`\`\``
+    ? hiddenLeftOut
+      ? `\n\n## Current Page DOM (uncompacted, hidden elements left out)\nThe whole page is too large to send, so hidden elements (\`display: none\`, \`aria-hidden="true"\`, \`<input type="hidden">\`) are left out below. Each shows as a \`<!-- hidden: … -->\` comment in its place.\n\`\`\`html\n${domSnapshot}\n\`\`\``
+      : `\n\n## Current Page DOM (full, uncompacted)\n\`\`\`html\n${domSnapshot}\n\`\`\``
     : '';
 
   const contextNote = against === 'api'

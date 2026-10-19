@@ -9,6 +9,34 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — a check's code is written from the part of the page it checks
+
+A Verify check is planned by one AI request and its code written by a second
+(SPEC-verify-checks.md §2). The second is sent the page's whole markup, hidden
+elements included, so its code can name what is there. That markup was cut
+off at a fixed 100,000 characters, whatever `browser.domSnapshotCharLimit`
+said (default 300,000). On a page whose hidden menus come first, the cut fell
+inside the menu, and the code AI never saw the part of the page the check was
+about. It guessed, and the check passed or failed on the guess. On the web
+survey's c45, the markup was 295,691 characters and the results the check
+read began after character 283,000. `Verify the results page shows … the
+comment "Steptix survey"` read the empty form's comment box instead, and
+failed at both attempts.
+
+- **The cut is `browser.domSnapshotCharLimit`**, as for every other snapshot.
+- **A page over that limit is sent with hidden elements left out**, as the
+  step AI's snapshot leaves them out, and the code AI is told so. Hidden
+  elements are sent whenever the page fits, so a check such as
+  `Verify "Draft saved" is not shown` can still find the element.
+
+Measured on c45, 2026-10-19 (UTC), with the step as first written: at the
+default limit the page fits, and step 5 passed at the first check in 3 of 3
+runs. With the limit set to 150,000, every check's code was written from the
+snapshot with hidden elements left out, and step 5 passed at the first check
+in 3 of 3 runs. A page between 100,000 characters and the limit now sends
+more to the code AI: c45's whole run used about 1.7 M tokens, against about
+1.5 M with hidden elements left out.
+
 ### Fixed — a retried check asks the same question
 
 The whole design, with examples and the evidence behind it, is in

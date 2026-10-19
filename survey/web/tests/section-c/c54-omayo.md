@@ -25,7 +25,7 @@ box, a table read, a popup window, a dropdown that opens after a delay.
 6. Click the "ClickToGetAlert" button and accept the alert
 7. Click the GetPrompt button, type "Steptix" and accept the prompt
 8. Click the "Check this" button and wait until the checkbox next to it is enabled
-9. Tick the checkbox next to "Check this"
+9. Tick the "Mr Option" checkbox
 10. Click the "Try it" button under "TimerEnableButton" and wait until "My Button" is disabled
 11. Verify "My Button" is disabled
 12. Double-click the "Double click Here" button and accept the alert
