@@ -21,5 +21,5 @@ path without needing a real site to be up.
 
 ### Check the page
 
-1. Confirm the browser is showing a page
+1. Verify the page URL is "about:blank"
 2. Confirm the page has finished loading

@@ -316,6 +316,23 @@ describe('stepToLines', () => {
     expect(stepOf(lines)).toMatchObject({ source: 'code', calls: 0 });
   });
 
+  it('credits a re-check turn\'s actions to the model that chose them on the attempt before', () => {
+    // A retried check sends the failed check again without asking a model for
+    // the plan (src/ai/check-retry.ts), so its turn has no plan call.
+    const check = { action: 'assert', condition: 'the order total', expected: '$42.00' };
+    const result = stepResult({
+      retried: true,
+      turns: [
+        turn([subAction(check, { error: 'Assertion failed: Total — expected "$42.00", got "$40.00"' })]),
+        turn([subAction(check)], { attemptNumber: 2, aiInteractions: [] }),
+      ],
+    });
+    const lines = stepToLines(result, CTX, META);
+    const [first, recheck] = actions(lines);
+    expect(first).toMatchObject({ attempt: 1, model: 'openai/gpt-6-luna' });
+    expect(recheck).toMatchObject({ attempt: 2, model: 'openai/gpt-6-luna' });
+  });
+
   it('masks a secret in the selector, the step text and the site; the placeholder stays', () => {
     const result = stepResult({
       turns: [

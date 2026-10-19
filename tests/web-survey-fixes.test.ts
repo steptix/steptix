@@ -1179,6 +1179,164 @@ describe('§2.25 a failed check says where the expected text is', () => {
       await page.close();
     }
   });
+
+  it('matches letter case: "Sign In" is not at a heading that says "Sign in" (steptix/steptix#67)', async () => {
+    const page = await pageWith('<h1>Sign in</h1><button id="go">Sign In</button>');
+    try {
+      const where = await describeWhereExpectedIs(page, 'Sign In');
+      expect(where).toContain('"Sign In" at button#go');
+      expect(where).not.toContain('h1');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('finds text in the case its markup has and in the case CSS shows it', async () => {
+    const page = await pageWith('<h1>Parcel</h1><p id="state" style="text-transform: uppercase">Out for delivery</p>');
+    try {
+      expect(await describeWhereExpectedIs(page, 'OUT FOR DELIVERY')).toContain('"OUT FOR DELIVERY" at p#state');
+      expect(await describeWhereExpectedIs(page, 'Out for delivery')).toContain('"Out for delivery" at p#state');
+      // A third case is in neither.
+      expect(await describeWhereExpectedIs(page, 'Out For Delivery')).toBe('');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('never points at hidden text, in any case or as part of shown text', async () => {
+    const page = await pageWith(`
+      <form><span id="error" style="visibility: hidden">Email is required</span></form>
+      <p id="status">Saved <span style="display: none">draft</span></p>
+      <p id="note" style="text-transform: uppercase">Ready <span style="display: none">to ship</span></p>`);
+    try {
+      // A message not shown yet is not somewhere a check should read.
+      expect(await describeWhereExpectedIs(page, 'Email is required')).toBe('');
+      // Nor is shown text with a hidden part beside it.
+      expect(await describeWhereExpectedIs(page, 'Saved draft')).toBe('');
+      expect(await describeWhereExpectedIs(page, 'Ready to ship')).toBe('');
+      // The markup's case still counts for the text that is shown.
+      expect(await describeWhereExpectedIs(page, 'Ready')).toContain('"Ready" at p#note');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('takes the markup\'s case only from text that is shown', async () => {
+    // Shown in capitals; the markup's "Ready" is in a hidden span beside it.
+    const page = await pageWith('<p id="tag" style="text-transform: uppercase">ready <span style="visibility: hidden">Ready</span></p>');
+    try {
+      expect(await describeWhereExpectedIs(page, 'Ready')).toBe('');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('is not put off shown text by a hidden copy of it inside', async () => {
+    const page = await pageWith(
+      '<p id="msg">Order <b>12</b> was placed.<span style="display: none">Order 12 was placed.</span></p>',
+    );
+    try {
+      expect(await describeWhereExpectedIs(page, 'Order 12 was placed.')).toContain('"Order 12 was placed." at p#msg');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('never takes a closed select for an option it does not show', async () => {
+    const page = await pageWith('<select id="payee"><option>Acme Plumbing</option><option>Harbour Glazing</option></select>');
+    try {
+      expect(await describeWhereExpectedIs(page, 'Harbour Glazing')).toBe('');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('does not point at text whose smallest holder has no box of its own (a known gap)', async () => {
+    // A closed select's current option, and text directly inside a
+    // `display: contents` element: no hint rather than a wrong one.
+    const page = await pageWith(
+      '<select id="payee"><option selected>Harbour Glazing</option><option>Acme Plumbing</option></select>' +
+        '<div id="msg"><span style="display: contents">Order 12 was placed.</span></div>',
+    );
+    try {
+      expect(await describeWhereExpectedIs(page, 'Harbour Glazing')).toBe('');
+      expect(await describeWhereExpectedIs(page, 'Order 12 was placed.')).toBe('');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('points past a box-less wrapper to the element inside it', async () => {
+    const page = await pageWith(
+      '<main><header>Site</header><section style="display: contents"><h2 id="total">Total: $42.00</h2></section></main>',
+    );
+    try {
+      const where = await describeWhereExpectedIs(page, 'Total: $42.00');
+      expect(where).toContain('"Total: $42.00" at h2#total');
+      expect(where).not.toContain('at main');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('finds text whose capitals are longer than its markup ("ß" is shown "SS")', async () => {
+    const page = await pageWith('<p id="street" style="text-transform: uppercase">Hauptstraße 5</p>');
+    try {
+      expect(await describeWhereExpectedIs(page, 'Hauptstraße 5')).toContain('"Hauptstraße 5" at p#street');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('never takes text the page does not show as text for the markup of what it shows', async () => {
+    // Each element has a box, so the text inside passes `checkVisibility`,
+    // yet none of it is shown as text: a textarea's default value, the text
+    // between an iframe's tags, and fallback content. Beside each, the same
+    // words shown in capitals, so the markup around them is all that would
+    // match in the case asked for.
+    const page = await pageWith(`
+      <section id="notes"><h2>DELIVERY NOTES</h2><textarea>Delivery notes</textarea></section>
+      <figure id="chart"><figcaption>SALES BY MONTH</figcaption><canvas>Sales by month</canvas></figure>
+      <div id="clip"><p>OPENING SCENE</p><video>Opening scene</video><audio controls>Opening scene</audio></div>
+      <div id="map"><p>HARBOUR MAP</p><iframe>Harbour map</iframe></div>
+      <div id="usage"><p>DISK USAGE</p><progress value="3" max="10">Disk usage</progress><meter value="0.3">Disk usage</meter></div>`);
+    try {
+      for (const text of ['Delivery notes', 'Sales by month', 'Opening scene', 'Harbour map', 'Disk usage']) {
+        expect(await describeWhereExpectedIs(page, text), text).toBe('');
+      }
+      // The words shown are still found, where they are shown.
+      expect(await describeWhereExpectedIs(page, 'DELIVERY NOTES')).toContain('"DELIVERY NOTES" at section#notes > h2');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('finds an object\'s fallback text in the case it is shown in, but not in its markup\'s case', async () => {
+    // An `<object>` that embeds nothing shows its fallback content, and its
+    // `innerText` holds it, so that text is found as shown. Its markup is
+    // left out all the same, so text CSS shows in another case is not found
+    // in the case the markup writes it.
+    const page = await pageWith(`
+      <p><object id="report">Annual report</object></p>
+      <p><object id="summary" style="text-transform: uppercase">Annual summary</object></p>`);
+    try {
+      expect(await describeWhereExpectedIs(page, 'Annual report')).toContain('"Annual report" at object#report');
+      expect(await describeWhereExpectedIs(page, 'ANNUAL SUMMARY')).toContain('"ANNUAL SUMMARY" at object#summary');
+      expect(await describeWhereExpectedIs(page, 'Annual summary')).toBe('');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('compares the text shown with its whitespace collapsed, as a check does', async () => {
+    const page = await pageWith('<p id="total">Total:&nbsp;$42.00</p><p id="state">Out for<br>delivery</p>');
+    try {
+      expect(await describeWhereExpectedIs(page, 'Total: $42.00')).toContain('"Total: $42.00" at p#total');
+      expect(await describeWhereExpectedIs(page, 'Out for delivery')).toContain('"Out for delivery" at p#state');
+    } finally {
+      await page.close();
+    }
+  });
 });
 
 describe('§2.26 open shadow roots are in the snapshot', () => {
@@ -1487,6 +1645,22 @@ describe('§2.33 notifications that close are remembered', () => {
       await own.close();
     }
   });
+
+  it('never names a message that was never shown as one that closed', async () => {
+    const own = await browser.newContext();
+    await installNoticeRecorder(own);
+    const page = await own.newPage();
+    try {
+      await page.setContent(`<!doctype html><html><body>
+        <p role="status" style="display: none">Draft saved</p>
+        <p>Nothing else</p></body></html>`);
+      const snap = await captureDomSnapshot(page);
+      expect(snap).not.toContain('Notifications that appeared and have since closed');
+      expect(snap).not.toContain('Draft saved');
+    } finally {
+      await own.close();
+    }
+  });
 });
 
 describe('§2.50 notifications are what the page marks as live regions', () => {
@@ -1523,6 +1697,90 @@ describe('§2.50 notifications are what the page marks as live regions', () => {
       requestAnimationFrame(() => { document.body.dataset.done = '1'; });`);
     expect(texts).toEqual(expect.arrayContaining(['Uploaded', 'Ada joined', 'Total 12']));
     expect(texts).not.toContain('Ticking clock');
+  });
+
+  it('records nothing a person never saw: a hidden region, text changed while hidden, a hidden child', async () => {
+    const texts = await noticesAfter(`
+      <p role="status" style="display: none">Hidden from the start</p>
+      <div id="quiet" role="alert" style="visibility: hidden"></div>
+      <div role="status"><span style="display: none">Only in a hidden child</span></div>`, `
+      document.getElementById('quiet').textContent = 'Changed while hidden';
+      requestAnimationFrame(() => { document.body.dataset.done = '1'; });`);
+    expect(texts).toEqual([]);
+  });
+
+  it('records a region when it is shown, not before: added hidden, then shown by a class change', async () => {
+    const own = await browser.newContext();
+    await installNoticeRecorder(own);
+    const page = await own.newPage();
+    try {
+      await page.setContent('<!doctype html><html><head><style>.off { display: none }</style></head><body></body></html>');
+      // A frame later, the recorder's observer has seen every change before it.
+      const textsAfterAFrame = () => page.evaluate(() => new Promise<string[]>((resolve) => requestAnimationFrame(() => resolve(
+        (window as unknown as { __steptixNotices: Array<{ text: string }> }).__steptixNotices.map((n) => n.text)))));
+      await page.evaluate(() => {
+        const t = document.createElement('div');
+        t.id = 'note'; t.setAttribute('role', 'alert'); t.className = 'off'; t.textContent = 'Saved at last';
+        document.body.appendChild(t);
+      });
+      expect(await textsAfterAFrame()).toEqual([]);
+      await page.evaluate(() => { document.getElementById('note')!.className = ''; });
+      expect(await textsAfterAFrame()).toEqual(['Saved at last']);
+    } finally {
+      await own.close();
+    }
+  });
+
+  it('waits for the page to load: a region its late stylesheet hides is not recorded', async () => {
+    const http = await import('node:http');
+    let releaseCss!: () => void;
+    const cssArrives = new Promise<void>((resolve) => { releaseCss = resolve; });
+    const server = http.createServer((req, res) => {
+      if (req.url === '/late.css') {
+        void cssArrives.then(() => {
+          res.writeHead(200, { 'content-type': 'text/css' });
+          res.end('.later { display: none }');
+        });
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<!doctype html><html><head><link rel="stylesheet" href="/late.css"></head>'
+        + '<body><div role="alert" class="later">Hidden by a late stylesheet</div></body></html>');
+    });
+    const port = await listenFetchable(server, '127.0.0.1');
+    const own = await browser.newContext();
+    await installNoticeRecorder(own);
+    const page = await own.newPage();
+    try {
+      await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'commit' });
+      // The parser has added the region while its stylesheet is still on the
+      // way, so it looks shown for now. (Polled by interval: no frame is drawn
+      // until the stylesheet arrives.)
+      await page.waitForFunction(() => document.querySelector('[role="alert"]') !== null, undefined, { polling: 50 });
+      releaseCss();
+      await page.waitForLoadState('load');
+      expect(await page.evaluate(() => (window as unknown as { __steptixNotices: Array<{ text: string }> })
+        .__steptixNotices.map((n) => n.text))).toEqual([]);
+    } finally {
+      releaseCss();
+      await own.close();
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('records a shown region once, however long its style keeps changing', async () => {
+    const texts = await noticesAfter('<div id="bar" role="status">Uploading</div>', `
+      // Each change lands 4 s after the one before, past the 3 s in which the
+      // same text is not recorded twice: only being shown again records it again.
+      const start = Date.now(); let n = 0; Date.now = () => start + n * 4000;
+      const bar = document.getElementById('bar');
+      const tick = () => {
+        n++; bar.style.opacity = String(0.5 + (n % 2) / 2);
+        if (n < 10) requestAnimationFrame(tick); else requestAnimationFrame(() => { document.body.dataset.done = '1'; });
+      };
+      requestAnimationFrame(tick);`);
+    expect(texts).toEqual(['Uploading']);
   });
 
   it('does not guess from class names: a message with no live-region marking is not recorded', async () => {
@@ -1957,30 +2215,29 @@ describe('§2.37 a navigation that never gets a page says whether the site is up
 });
 
 describe('§2.38 "the page says" checks read by containment', () => {
-  it('tells the check writer to contain, and to read the element holding the whole text', async () => {
+  async function promptText(): Promise<string> {
     const { buildAssertionCodePrompt } = await import('../src/ai/prompts.js');
     const msg = buildAssertionCodePrompt('Confirm result', 'confirm explanation text', 'You clicked OK, confirm returned true.', '<p></p>', null);
-    const text = typeof msg.content === 'string' ? msg.content : '';
+    return typeof msg.content === 'string' ? msg.content : '';
+  }
+
+  it('tells the check writer to contain, and to read the element holding the whole text', async () => {
+    const text = await promptText();
     expect(text).toMatch(/CONTAINS the expected text/);
     expect(text).toMatch(/exact equality only when the condition says "equals"/);
-    expect(text).toMatch(/innermost one that does/);
-    // The example has to survive the template literal as runnable code.
-    expect(text).toContain(String.raw`t.replace(/\s+/g, ' ')`);
+    expect(text).toMatch(/take the smallest element that shows it all, inside the part the condition names and nowhere else/);
+    // It no longer searches every element on the page by `textContent`, which
+    // holds script code and hidden text (SPEC-verify-checks.md, section 7).
+    expect(text).not.toContain("querySelectorAll('body *')");
+    expect(text).not.toContain('norm(el.textContent)');
   });
 
-  it('the innermost-element example finds the sentence around a value span', async () => {
-    const page = await pageWith('<p id="confirmexplanation">You clicked OK, confirm returned <span id="confirmreturn">true</span>.</p>');
-    try {
-      const id = await page.evaluate((expected) => {
-        const norm = (t: string) => t.replace(/\s+/g, ' ').trim();
-        const doc = (globalThis as any).document;
-        const all = Array.from(doc.querySelectorAll('body *')) as any[];
-        return all.filter((el) => norm(el.textContent ?? '').includes(norm(expected))).pop()?.id;
-      }, 'You clicked OK, confirm returned true.');
-      expect(id).toBe('confirmexplanation');
-    } finally {
-      await page.close();
-    }
+  it('tells the check writer to read only what a person sees, naming the reads that hold more', async () => {
+    const text = await promptText();
+    expect(text).toMatch(/Read only what a person sees there/);
+    expect(text).toMatch(/`textContent` holds both/);
+    expect(text).toMatch(/still hands back its text from `innerText`/);
+    expect(text).toMatch(/hold every option, chosen or not/);
   });
 });
 

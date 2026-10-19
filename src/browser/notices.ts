@@ -29,6 +29,13 @@ export const NOTICE_MEMORY_MS = 60_000;
  * Installs `window.__steptixNotices`: up to 20 `{ text, at }` records, newest
  * last, each holding a WeakRef to its element so a reader can tell whether it
  * is still on screen.
+ *
+ * Only what a person could see is recorded (docs/specs/SPEC-verify-checks.md,
+ * section 7): a region is recorded while it is shown, with the text it shows.
+ * A region hidden from the start was never a notification, and listing it as
+ * one that closed told the model something that never happened — the
+ * SecureBank sign-in page's error banner, hidden until a sign-in fails, was
+ * listed on every snapshot of that page.
  */
 export const NOTICE_RECORDER_SCRIPT = `(() => {
   if (window.__steptixNotices) return;
@@ -38,8 +45,25 @@ export const NOTICE_RECORDER_SCRIPT = `(() => {
   // aria-live, and <output> (implicit role status). No class names.
   var SEL = '[role~="alert"],[role~="status"],[role~="log"],'
     + '[aria-live]:not([aria-live="off" i]),output';
-  function record(el) {
-    var text = String(el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+  // Whether a person can see the region, as the browser answers it.
+  // innerText alone cannot say: an element that is itself display: none
+  // hands back all of its text.
+  function shown(el) {
+    return typeof el.checkVisibility !== 'function' || el.checkVisibility({ visibilityProperty: true });
+  }
+  // Whether each region was shown when last looked at, so that a change to a
+  // class or style records a region only on its way from hidden to shown,
+  // not on every frame of an animation while it stays on screen.
+  var wasShown = new WeakMap();
+  function record(el, onlyIfNewlyShown) {
+    // Until the page has loaded, the stylesheet that hides a region may not
+    // have arrived: the regions are looked at once it has.
+    if (document.readyState !== 'complete') return;
+    var now = shown(el);
+    var before = wasShown.get(el);
+    wasShown.set(el, now);
+    if (!now || (onlyIfNewlyShown && before === true)) return;
+    var text = String(typeof el.innerText === 'string' ? el.innerText : el.textContent || '').replace(/\\s+/g, ' ').trim();
     if (!text || text.length > 300) return;
     for (var i = list.length - 1; i >= 0 && i >= list.length - 5; i--) {
       if (list[i].text === text && Date.now() - list[i].at < 3000) return;
@@ -47,20 +71,31 @@ export const NOTICE_RECORDER_SCRIPT = `(() => {
     list.push({ text: text, at: Date.now(), ref: typeof WeakRef === 'function' ? new WeakRef(el) : null });
     if (list.length > 20) list.shift();
   }
-  function scan(node) {
+  function scan(node, onlyIfNewlyShown) {
     if (!node || node.nodeType !== 1) return;
-    if (node.matches && node.matches(SEL)) record(node);
-    if (node.querySelectorAll) node.querySelectorAll(SEL).forEach(record);
+    if (node.matches && node.matches(SEL)) record(node, onlyIfNewlyShown);
+    if (node.querySelectorAll) node.querySelectorAll(SEL).forEach(function (el) { record(el, onlyIfNewlyShown); });
   }
   new MutationObserver(function (muts) {
     for (var m = 0; m < muts.length; m++) {
       var mut = muts[m];
-      for (var a = 0; a < mut.addedNodes.length; a++) scan(mut.addedNodes[a]);
+      // A class, style or hidden attribute can show a region, or the part of
+      // the page around it, without changing its text; a role or aria-live
+      // can make an element a region.
+      var byAttribute = mut.type === 'attributes';
+      for (var a = 0; a < mut.addedNodes.length; a++) scan(mut.addedNodes[a], false);
+      if (byAttribute) scan(mut.target, true);
       var t = mut.target && mut.target.nodeType === 1 ? mut.target : mut.target && mut.target.parentElement;
       var host = t && t.closest ? t.closest(SEL) : null;
-      if (host) record(host);
+      if (host) record(host, byAttribute);
     }
-  }).observe(document, { childList: true, subtree: true, characterData: true });
+  }).observe(document, {
+    childList: true, subtree: true, characterData: true,
+    attributes: true, attributeFilter: ['class', 'style', 'hidden', 'open', 'role', 'aria-live'],
+  });
+  if (document.readyState !== 'complete') {
+    window.addEventListener('load', function () { scan(document.documentElement, false); }, { once: true });
+  }
 })();`;
 
 /** Record notifications in every page of `context`, current and future. */
@@ -95,7 +130,8 @@ export async function closedNotices(page: Page): Promise<Array<{ text: string; a
           const shown = typeof el.checkVisibility === 'function' ? el.checkVisibility() : el.offsetParent !== null;
           if (!shown) return true;
           // Still shown, but saying something else now: the old text closed.
-          return !String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').includes(n.text);
+          const text = typeof el.innerText === 'string' ? el.innerText : el.textContent || '';
+          return !String(text).replace(/\s+/g, ' ').includes(n.text);
         })
         .map((n) => ({ text: String(n.text), ageSeconds: Math.round((now - n.at) / 1000) }));
     }, NOTICE_MEMORY_MS);

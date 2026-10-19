@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SecureBank — Order confirmation</title>
+  <!--
+    Text whose letter case is the point: the status "Payment received", with a
+    small r, and the reference "AB-1042" in capitals, both shown as written.
+    The delivery method is written "Express courier" and shown in capitals by
+    CSS text-transform, so the case a reader sees is not the case in the
+    markup. None of the three appears anywhere else in any other case.
+    templates/init/tests/verify-letter-case.md, verify-letter-case-strict.md and
+    verify-letter-case-transform-strict.md drive it, through
+    steptix-vscode/tests/integration/live/verify-letter-case.test.cjs.
+  -->
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; background: #f5f7fa; color: #1a1a2e; margin: 0; }
+    .card { max-width: 540px; margin: 40px auto; background: white; border-radius: 8px; border: 1px solid #e2e8f0; padding: 32px; }
+    h1 { font-size: 1.25rem; margin: 0 0 16px; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; margin: 0; }
+    dt { font-weight: 600; }
+    dd { margin: 0; }
+    .shown-in-capitals { text-transform: uppercase; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Order confirmation</h1>
+    <dl>
+      <dt>Status</dt>
+      <dd id="order-status">Payment received</dd>
+      <dt>Reference</dt>
+      <dd id="order-reference">AB-1042</dd>
+      <dt>Delivery</dt>
+      <dd id="order-delivery" class="shown-in-capitals">Express courier</dd>
+    </dl>
+  </main>
+</body>
+</html>

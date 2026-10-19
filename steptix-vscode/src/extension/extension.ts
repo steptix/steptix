@@ -59,6 +59,7 @@ import {
   VariablesTreeProvider,
   copyVariable,
   exportVariables,
+  setVariablesClipboardForTests,
   setVariablesExportPickerForTests,
   type VariableNode,
 } from './variables-view.js';
@@ -2204,6 +2205,10 @@ export interface SteptixTestHooks {
   setVariablesExportPicker: (
     pick: ((suggested: vscode.Uri | undefined) => Thenable<vscode.Uri | undefined>) | null,
   ) => void;
+  /** Take what the variables' Copy commands and the panel's copy put on the
+   *  clipboard, in place of the system clipboard (`null` restores it) — which
+   *  cannot be used while the Windows session is locked. */
+  setVariablesClipboard: (write: ((text: string) => Thenable<void>) | null) => void;
   /** Select a Variables row by name, as a click does — through
    *  `TreeView.reveal`, which needs no keyboard focus. */
   selectVariable: (name: string) => Promise<void>;
@@ -2847,6 +2852,7 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
         });
       },
       setVariablesExportPicker: (pick) => setVariablesExportPickerForTests(pick),
+      setVariablesClipboard: (write) => setVariablesClipboardForTests(write),
       selectVariable: (name) => variablesProvider.selectForTests(name),
       lastReportPath: () => registry.active()?.lastReportPath ?? null,
       lastRunTokens: () => registry.active()?.lastRunTokens ?? null,

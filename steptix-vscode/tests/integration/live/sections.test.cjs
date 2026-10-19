@@ -54,7 +54,7 @@ async function waitFor(label, predicate, timeoutMs = 60_000) {
 
 // Line numbers in templates/init/tests/sections-live.md.
 const CALL_LINE = 18; // `1. Check the page` — the FIRST main-flow step
-const BODY_FIRST = 24; // `1. Confirm the browser is showing a page`
+const BODY_FIRST = 24; // `1. Verify the page URL is "about:blank"`
 const BODY_LAST = 25; // `2. Confirm the page has finished loading`
 
 describe('Steptix live — inline sections expand server-side', function () {
@@ -127,8 +127,8 @@ describe('Steptix live — inline sections expand server-side', function () {
     // the call, so the first step the server executes is a body line —
     // whether it passes or fails is the AI's business, and gating on `pass`
     // would make this test fail for reasons that have nothing to do with
-    // sections. (Confirmed against the server log: "Step 1/5: Confirm the
-    // browser is showing a page" — 5 steps from 3 sent, body line first.)
+    // sections. (Confirmed against the server log: "Step 1/5: Verify the
+    // page URL is "about:blank"" — 5 steps from 3 sent, body line first.)
     await waitFor(
       `body line ${BODY_FIRST} has a status (server expanded the section)`,
       () => {

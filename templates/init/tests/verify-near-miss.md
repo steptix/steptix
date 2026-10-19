@@ -18,9 +18,10 @@ Worth knowing when reading a run of this: a failed assertion throws
 `StepFailureError`, which the step-level `withRetry` catches, so with the
 default `execution.retries: 1` the step is attempted twice before it settles
 red. Both attempts fail — the page value genuinely differs — but the run log
-shows two. The retry is not coached toward passing: assertion failures never
-reach `collectedFailures`, so the second attempt's prompt carries no "your
-assertion failed, expected X got Y" hint (src/runner/step-executor.ts).
+shows two. The retry runs the same check again — the same question, expected
+value and code (src/ai/check-retry.ts, steptix/steptix#97). The value is one
+cent off on the element that holds it, so the code reads it again and fails
+again.
 
 ## Config
 - baseUrl: http://localhost:8787/assertions

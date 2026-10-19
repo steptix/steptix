@@ -846,7 +846,11 @@ describe('a Stop mid-call (finding 2, contract E)', () => {
 });
 
 describe('every call a failing step made is on its line (finding 3)', () => {
-  it('an assertion that fails on both attempts: four calls, and all their tokens', async () => {
+  // Two calls, not four: the retry runs the same check again, its code and
+  // all, without asking the step AI for a new check or the code AI for new
+  // code (src/ai/check-retry.ts, steptix/steptix#97), so attempt 2 makes no
+  // call. The test that throws below counts a retry's calls.
+  it('an assertion that fails on both attempts: two calls, and all their tokens', async () => {
     const { root, reports } = project();
     gw.respond = (text) => {
       if (text.includes(ASSERTION_PROMPT)) {
@@ -866,7 +870,7 @@ describe('every call a failing step made is on its line (finding 3)', () => {
 
     const all = await lines();
     const [step] = stepLines(all);
-    expect(step).toMatchObject({ status: 'failed', attempts: 2, calls: 4, tokensIn: 2 * 2000 + 2 * 8000, tokensOut: 2 * 40 + 2 * 150 });
+    expect(step).toMatchObject({ status: 'failed', attempts: 2, calls: 2, tokensIn: 2000 + 8000, tokensOut: 40 + 150 });
     // Each attempt's verdict, as the structure it is (contract C).
     expect(actionLines(all).map((a) => [a.attempt, a.action, a.outcome])).toEqual([
       [1, 'assert', 'assert-failed'],

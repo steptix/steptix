@@ -84,7 +84,7 @@ const STEPS = [
       '7. [use ai] Greet {{nobody_set_this}} and store it in greeting otherwise ' +
       'continue with warning "no greeting"',
   },
-  { n: 8, text: '8. Verify the page title contains "Sign In"' },
+  { n: 8, text: '8. Verify the page heading contains "Sign in"' },
 ];
 
 /** The line a 1-based step number sits on. Set by `pinFixture`, in `before`. */

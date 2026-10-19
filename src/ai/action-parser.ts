@@ -698,6 +698,23 @@ export const ASSERTION_CODE_REMINDER =
   + '{ "code": "(() => { ... return { pass, actual }; })()" }';
 
 /**
+ * What to tell the model when the assertion code it wrote failed — it threw,
+ * or returned something other than `{ pass, actual }` — so the second attempt
+ * can fix the code rather than be the first one asked again, which tends to
+ * get the same code back. Only the error's first line: a stack says nothing
+ * about the code the model wrote. Not every error is the code's (the page
+ * can navigate while it runs), so it is asked to fix whatever in the code
+ * made it fail — which may be nothing.
+ */
+export function assertionCodeFailed(error: string): string {
+  const first = error.split('\n')[0]!.trim().replace(/\.$/, '');
+  return (
+    `That code failed: ${first.length > 300 ? `${first.slice(0, 300)}…` : first}. `
+    + 'Write it again for the same check, fixing whatever in the code made it fail, and return { pass, actual }.'
+  );
+}
+
+/**
  * Parse the AI response for a branched (conditional) step.
  * Extracts the `matched` field in addition to standard actions.
  */

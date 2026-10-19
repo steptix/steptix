@@ -3128,15 +3128,39 @@ function isPlaywrightReceiver(chain: string, names: ReadonlySet<string>): boolea
  *  before a name: the global it names, whatever the page function declared. */
 const GLOBAL_OWNER = String.raw`\b(?:window|document|self|globalThis|top|parent)\s*\.\s*`;
 
+/** The DOM methods whose call changes the page: what it shows, where it is
+ *  scrolled to, or what has focus. */
+const MUTATING_METHODS =
+  'click|submit|requestSubmit|dispatchEvent|focus|blur|select|reset|remove|removeChild|append|appendChild|' +
+  'prepend|before|after|replaceWith|replaceChildren|insertAdjacentHTML|insertAdjacentElement|' +
+  'insertAdjacentText|insertBefore|setAttribute|removeAttribute|toggleAttribute|setSelectionRange|setRangeText|' +
+  'showModal|showPicker|execCommand|scroll|scrollIntoView|scrollTo|scrollBy|setProperty|removeProperty';
+
+/** A call of the method just named: directly, or through `call`, `apply` or
+ *  `bind` — `HTMLElement.prototype.click.call(el)`. */
+const CALLED = String.raw`\s*(?:\.\s*(?:call|apply|bind)\s*)?\(`;
+
 /**
  * Inside a function the PAGE runs — `page.evaluate(…)`, `locator.evaluate(…)`,
  * `evaluateAll`, `evaluateHandle`, `$eval` / `$$eval` — every DOM object is
  * the live page, so these calls change it. Checked over the page function
  * whether it is written as a function, as a string of code, or as the name of
  * a function the entry defines.
+ *
+ * Not caught, among others: `Object.assign(el, { value: … })`, which writes
+ * to an element as a property assignment would — its target cannot be told
+ * from a plain object being merged (`Object.assign(row, { total })` over a
+ * callback's `row` is either) without refusing the merges too; an optional
+ * call (`el.click?.()`); a method {@link MUTATING_METHODS} does not name
+ * (`scrollIntoViewIfNeeded()`, `showPopover()`, a dialog's `show()` or
+ * `close()`); one called through `Reflect.apply`; and one held in a variable
+ * first (`const { focus } = el; focus.call(el)`). A scan of the text cannot
+ * follow every way code can reach a method.
  */
 const EVALUATE_MUTATING_CALLS: ReadonlyArray<RegExp> = [
-  /\.\s*(?:click|submit|requestSubmit|dispatchEvent|focus|blur|select|reset|remove|removeChild|append|appendChild|prepend|before|after|replaceWith|replaceChildren|insertAdjacentHTML|insertAdjacentElement|insertAdjacentText|insertBefore|setAttribute|removeAttribute|toggleAttribute|setSelectionRange|setRangeText|showModal|showPicker|execCommand|scrollIntoView|scrollTo|scrollBy|setProperty|removeProperty)\s*\(/,
+  new RegExp(String.raw`\.\s*(?:${MUTATING_METHODS})${CALLED}`),
+  // The same methods named in brackets: `el['click']()`, `el["focus"].call(el)`.
+  new RegExp(String.raw`\[\s*(['"\x60])(?:${MUTATING_METHODS})\1\s*\]${CALLED}`),
   /\bclassList\s*\.\s*(?:add|remove|toggle|replace)\s*\(/,
   /\bhistory\s*\.\s*(?:back|forward|go|pushState|replaceState)\s*\(/,
   // The location's own moves, on the global reached by name — a bare
@@ -3262,6 +3286,24 @@ function pageFunctionMutation(body: string): string | undefined {
     }
   }
   return locationMutation(body);
+}
+
+/**
+ * What a check's code does that would change the page, named, or undefined —
+ * {@link pageFunctionMutation} on the code with its comments blanked, as an
+ * entry's page functions are. Asked of a re-check's code (step-executor.ts
+ * `evaluateAssertion`), not of the code of a check the step AI planned again,
+ * as on an `If …, then return / stop / fail` line's retry: a check only reads
+ * the page (steptix/steptix#97). Like the entry scan it errs towards
+ * refusing: a comment inside a template literal's `${…}` is read as template
+ * text, and a page call named in a string literal is seen as made — either
+ * gets the code written again, never run unchecked.
+ */
+export function checkCodeMutation(code: string): string | undefined {
+  const scanned = scan(code);
+  let body = '';
+  for (let k = 0; k < code.length; k++) body += scanned.mask[k] === COMMENT ? ' ' : code[k];
+  return pageFunctionMutation(body);
 }
 
 const EVALUATE_CALL = /\.\s*(evaluate|evaluateAll|evaluateHandle|\$eval|\$\$eval)\s*\(/g;
@@ -3507,13 +3549,14 @@ export function entryDefinesCondition(code: string): boolean {
  *    through: this is a backstop for what a model writes, not a type checker;
  *  - inside a page function (`evaluate`, `evaluateAll`, `evaluateHandle`,
  *    `$eval`, `$$eval` — a function, a string of code, or the NAME of a
- *    function the entry defines): a click, submit, dispatch, focus, DOM
- *    insertion or removal, attribute or style write, history or location move,
- *    storage write, or an assignment to a DOM property that holds page state
- *    (`el.checked = true`, `el.value = …`, `el.style.display = …`,
- *    `location.href = …`). An assignment to the page function's own locals —
- *    `acc[k] = …`, `r.count = …`, `const [next] = …` — changes nothing and is
- *    allowed.
+ *    function the entry defines): a click, submit, dispatch, focus, scroll,
+ *    DOM insertion or removal, attribute or style write — an element method
+ *    called directly, through `call`, `apply` or `bind`, or named in brackets
+ *    — a history or location move, a storage write, or an assignment to a
+ *    DOM property that holds page state (`el.checked = true`, `el.value = …`,
+ *    `el.style.display = …`, `location.href = …`). An assignment to the page
+ *    function's own locals — `acc[k] = …`, `r.count = …`, `const [next] = …`
+ *    — changes nothing and is allowed.
  *
  * Since `generateConditionEntry` refuses an entry that still breaks one of
  * these after its re-ask, a false positive here costs a compiled condition —

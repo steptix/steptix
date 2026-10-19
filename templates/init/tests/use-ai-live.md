@@ -39,4 +39,4 @@ step does not say, so the step has to say what today is.
      continue" tail must turn that failure amber so the run goes on to step 8. -->
 
 7. [use ai] Greet {{nobody_set_this}} and store it in greeting otherwise continue with warning "no greeting"
-8. Verify the page title contains "Sign In"
+8. Verify the page heading contains "Sign in"

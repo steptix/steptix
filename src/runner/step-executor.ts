@@ -1,9 +1,21 @@
 import type { Frame, Browser, BrowserContext, Page } from 'playwright';
 import type { Config } from '../config/types.js';
 import { effectiveViewport } from '../config/viewport.js';
-import type { AIAction, BranchedAIResponse, TableReadMapping } from '../ai/types.js';
+import type { AIAction, AIResponse, BranchedAIResponse, TableReadMapping } from '../ai/types.js';
 import type { StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
+import {
+  checkCodeReadsOnly,
+  codeToRunAgain,
+  earlierCheckErrors,
+  earlierFailuresNote,
+  readHoldsExpected,
+  recheckNote,
+  recheckResponse,
+  sameCheck,
+  standingFailures,
+  type PriorCheck,
+} from '../ai/check-retry.js';
 import type { CompleteResult } from '../ai/client.js';
 import {
   buildSystemPrompt,
@@ -27,6 +39,7 @@ import {
   parseAIResponse,
   parseAssertionCode,
   ASSERTION_CODE_REMINDER,
+  assertionCodeFailed,
   parseBranchedResponse,
   extractJson,
   isKnownActionType,
@@ -83,6 +96,7 @@ import { envDataRefsIn, resolveEnvDataRef } from '../parser/interpolate-env-data
 import { parseOutputPrefixes, buildEnrichedInstruction } from '../server/run-helpers.js';
 import { redact, runSecrets } from '../utils/secrets.js';
 import { warnBindingOnce, type CodeBehindBinding } from '../codebehind/loader.js';
+import { checkCodeMutation } from '../codebehind/generate.js';
 import {
   entrySourceText,
   isConditionCode,
@@ -509,9 +523,11 @@ class StepFailureError extends Error {
   assertions: AssertionResult[] = [];
   /**
    * Model calls this attempt made that nothing else on the error holds: the
-   * code generations of an assertion whose evaluation threw (code that never
-   * parsed, or threw every time it ran), which therefore produced no
-   * `AssertionResult` to carry them.
+   * code generations of an assertion whose evaluation threw — its code failed
+   * on every attempt, each time in its own way (it never parsed, threw or
+   * returned the wrong shape when it ran, or, when re-checking, would have
+   * changed the page), or a later code request, or the page capture before
+   * it, failed — which therefore produced no `AssertionResult` to carry them.
    */
   discardedCalls: AiInteraction[] = [];
   constructor(
@@ -816,6 +832,17 @@ export async function executeStep(
     });
   }
   return result;
+}
+
+/** `items` without the ones whose key an earlier one already had. */
+function uniqueBy<T>(items: readonly T[], key: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const k = key(item);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 }
 
 /** {@link executeStep} without the scoreboard line: every exit of a step. */
@@ -2531,6 +2558,21 @@ async function executeStepAttempt(
 ): Promise<StepResult> {
   const { config, aiClient, contextContent, testName, baseUrl, conversationHistory, apiResponseStore, csrfTokens, pageTracker } = opts;
 
+  /**
+   * The check the attempt just before this one saw come back false — or
+   * re-checked and came to no verdict on, which leaves it still unanswered.
+   * Set, this attempt's first turn runs that same check again rather than
+   * asking the step AI for a new one, which could ask an easier question
+   * (src/ai/check-retry.ts, steptix/steptix#97). Only the attempt right
+   * before: when a re-check passed and something else then failed, this
+   * attempt follows that failure as any retry does. Never on an `If …, then
+   * return / stop / fail` line, whose check may be its condition or something
+   * it verifies after acting — only the step AI planning it again can tell.
+   */
+  const failedCheck = attemptNumber > 1 && opts.flowControlClaim === undefined
+    ? [...priorFailures].reverse().find((f) => f.check?.attempt === attemptNumber - 1)
+    : undefined;
+
   // The step as WRITTEN, tokens intact — what the model reads, beside the
   // `## Values` block. The `[output:]` enrichment runs on it as well as on the
   // substituted text, or the model is shown a raw `[output: x]` prefix and no
@@ -2571,10 +2613,30 @@ async function executeStepAttempt(
     // A page without a context (a test double) has no dialogs to disarm.
   }
   const maxTurns = config.execution.maxTurns;
+  /**
+   * The last turn this attempt may take. The turn that re-checks a failed
+   * check asks the step AI for nothing — it sends the check again
+   * (check-retry.ts) — so it comes on top of `execution.maxTurns`, which caps
+   * the turns the step AI plans: with `maxTurns: 1`, a check that failed
+   * before the rest of its answer ran is re-checked, and the step AI still
+   * has its one turn to do the rest, as a retry that planned the step afresh
+   * would have had.
+   */
+  const turnCap = maxTurns + (failedCheck?.check !== undefined ? 1 : 0);
 
   // Accumulated across all turns
   const allTurns: TurnResult[] = [];
   const allCompletedActions: Array<{ action: string; description: string; selector?: string }> = [];
+  // What the failed attempt did before its check, so the turn that goes on
+  // once the re-check passes does not do it again (check-retry.ts).
+  if (failedCheck?.check !== undefined) allCompletedActions.push(...failedCheck.check.done);
+  /**
+   * The reads that stored a value since an action last changed the page, the
+   * latest per name, in the order they ran — what a re-check of a check that
+   * fails now reads again before it (`FailedCheck.rereads`, check-retry.ts).
+   * Kept by `notePageChanges`, which sees every sub-action a turn records.
+   */
+  const readsSinceChange = new Map<string, AIAction>();
   /** This turn's passed assertions, moved into `allCompletedActions` at its end. */
   const passedChecks: Array<{ action: string; description: string }> = [];
   const collectedFailures: PriorFailureContext[] = [];
@@ -2594,10 +2656,23 @@ async function executeStepAttempt(
   trackerFor(page); // attach to initial page
   let prevPageFingerprint: string | undefined;
   let lastActionWasWait = false;
-  // At most one inferred re-evaluation per step (9a below): a model that
+  // At most one inferred re-evaluation per attempt (9a below): a model that
   // answers bare once tends to answer bare again, and re-evaluating every
   // time would repeat a "Click Next" until the turn cap.
   let inferredReevalUsed = false;
+  /**
+   * Is this answer given one more turn though it never asked for one (9a
+   * below)? Yes for a bare answer that said nothing about `needs_reeval`
+   * (AIResponse.reevalUnstated), with an action in it after which the step
+   * may be unfinished — once per attempt, while a turn is left. Asked at the
+   * end of a turn; not of the answer a check failed in (`FailedCheck.hadMore`).
+   */
+  const reevalInferred = (response: AIResponse, turn: number): boolean =>
+    response.needs_reeval !== true
+    && response.reevalUnstated === true
+    && !inferredReevalUsed
+    && response.actions.some((a) => REEVAL_WHEN_UNSTATED.has(a.action))
+    && turn < turnCap;
   // A list read that came back empty or mixed is shown to the model before
   // the step can end on it (src/runner/list-read-review.ts, issue #48).
   /** The latest read under review, per stored name, so a later read of the name replaces it. */
@@ -2681,7 +2756,7 @@ async function executeStepAttempt(
   let deliberateFailure: { why: string } | undefined;
 
   try {
-  for (let currentTurn = 1; currentTurn <= maxTurns; currentTurn++) {
+  for (let currentTurn = 1; currentTurn <= turnCap; currentTurn++) {
     completedTurns = currentTurn;
     /**
      * This turn was added only to show the model its list reads, after it had
@@ -2871,9 +2946,16 @@ async function executeStepAttempt(
     const domForAi = redact(domSnapshot, secretsNow());
 
     if (currentTurn === 1) {
+      // Given when an earlier attempt recorded a failure, as before — without
+      // a check a re-check since passed (check-retry.ts `standingFailures`),
+      // but still a retry when that leaves none: the attempt before failed.
+      // Not given when none was recorded (a turn limit, a reply that did not
+      // parse, a first check whose code failed): there the step is planned
+      // afresh, as it was. A turn that re-checks asks the step AI nothing, so
+      // this reaches it only on a retry that plans the step again.
       const retryInput: RetryDiagnostics | undefined = priorFailures.length > 0
         ? {
-            failures: priorFailures,
+            failures: standingFailures(priorFailures, attemptNumber, opts.flowControlClaim === undefined),
             ...(pageDiagnosis ? { pageState: pageDiagnosis } : {}),
             attemptNumber,
             dismissalGuidance: opts.dismissalGuidance ?? false,
@@ -2913,6 +2995,9 @@ async function executeStepAttempt(
         promptAuthored,
         listReadLines.map((line) => redact(line, secretsNow())),
         reviewOnly,
+        // The failed attempt's, at the start of the list: done before the
+        // re-check, not in this attempt's turns.
+        failedCheck?.check?.done.length ?? 0,
       );
     }
     listReadLines = [];
@@ -2925,43 +3010,57 @@ async function executeStepAttempt(
       userMessage,
     ];
 
-    // 6. Get the AI action plan
-    let completion: Awaited<ReturnType<typeof aiClient.complete>>;
+    // 6. Get the AI action plan — or, on a retry of a check that came back
+    // false (or whose re-check came to no verdict), the check itself, after
+    // the values to read again. The step AI is not asked for a new check on the
+    // turn that re-checks: it wrote easier questions, or changed the page until
+    // the old one passed (src/ai/check-retry.ts, steptix/steptix#97). Its code
+    // runs again, and is written anew only when it found no element or was
+    // written for a value read again since (`codeToRunAgain`), or would
+    // change the page or breaks when it runs again (`evaluateAssertion`).
+    const recheckTurn = currentTurn === 1 && !reviewOnly && failedCheck?.check !== undefined;
     let aiResponse: ReturnType<typeof parseAIResponse>;
-    try {
-      completion = await traceOp(`ai.complete (turn ${currentTurn})`, () => aiClient.complete(messages, opts.signal));
-      aiResponse = parseAIResponse(completion.text);
-    } catch (err) {
-      // A call that failed, or a reply that did not parse, fails a turn of the
-      // step. It ends a review turn instead, with the reads unanswered — a
-      // Stop still stops.
-      const aborted = opts.signal?.aborted === true
-        || (err instanceof Error && err.name === 'AbortError');
-      if (!reviewOnly || aborted) throw err;
-      logger.warn(
-        `Step ${stepIndex}: the turn showing the model its list reads failed (${err instanceof Error ? err.message : String(err)}) — the step ends where it stood`,
-      );
-      if (inFlightTurn && (inFlightTurn.aiInteractions.length > 0 || inFlightTurn.subActions.length > 0)) {
-        allTurns.push(inFlightTurn);
+    let rawResponse = '';
+    if (recheckTurn) {
+      aiResponse = recheckResponse(failedCheck!.check!);
+      logger.info(`Step ${stepIndex}: checking again, unchanged — ${failedCheck!.check!.action.description}`);
+    } else {
+      let completion: Awaited<ReturnType<typeof aiClient.complete>>;
+      try {
+        completion = await traceOp(`ai.complete (turn ${currentTurn})`, () => aiClient.complete(messages, opts.signal));
+        aiResponse = parseAIResponse(completion.text);
+      } catch (err) {
+        // A call that failed, or a reply that did not parse, fails a turn of the
+        // step. It ends a review turn instead, with the reads unanswered — a
+        // Stop still stops.
+        const aborted = opts.signal?.aborted === true
+          || (err instanceof Error && err.name === 'AbortError');
+        if (!reviewOnly || aborted) throw err;
+        logger.warn(
+          `Step ${stepIndex}: the turn showing the model its list reads failed (${err instanceof Error ? err.message : String(err)}) — the step ends where it stood`,
+        );
+        if (inFlightTurn && (inFlightTurn.aiInteractions.length > 0 || inFlightTurn.subActions.length > 0)) {
+          allTurns.push(inFlightTurn);
+        }
+        inFlightTurn = undefined;
+        break;
       }
-      inFlightTurn = undefined;
-      break;
-    }
-    // The model has read this turn's snapshot, so its dialog note is used up.
-    markDialogsShown(dialogsForModel, 'model');
-    const rawResponse = completion.text;
+      // The model has read this turn's snapshot, so its dialog note is used up.
+      markDialogsShown(dialogsForModel, 'model');
+      rawResponse = completion.text;
 
-    turnAiInteractions.push({
-      purpose: 'action-plan',
-      attemptNumber,
-      requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
-      response: rawResponse,
-      model: completion.model,
-      ...(completion.usage !== undefined && { usage: completion.usage }),
-      ...(screenshotBase64 !== undefined && { screenshotBase64 }),
-      pageUrl: currentUrl,
-      timestamp: turnTimestamp,
-    });
+      turnAiInteractions.push({
+        purpose: 'action-plan',
+        attemptNumber,
+        requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+        response: rawResponse,
+        model: completion.model,
+        ...(completion.usage !== undefined && { usage: completion.usage }),
+        ...(screenshotBase64 !== undefined && { screenshotBase64 }),
+        pageUrl: currentUrl,
+        timestamp: turnTimestamp,
+      });
+    }
 
     // The step's explanation is its own reasoning, not a review turn's: that
     // turn is about the lists, and its answer may never have run.
@@ -3179,6 +3278,9 @@ async function executeStepAttempt(
      * and browser moves, an assertion, an API call) — at the top of each
      * action and once after the last. An action that failed changed nothing,
      * and fails the turn.
+     *
+     * The same pass keeps `readsSinceChange`: a read that stored a value joins
+     * it, and an action that may have changed the page empties it.
      */
     let pageChangesSeen = 0;
     /** An action this turn may have changed the page (`leavesPageAsRead`). */
@@ -3186,7 +3288,15 @@ async function executeStepAttempt(
     const notePageChanges = (): void => {
       for (; pageChangesSeen < turnSubActions.length; pageChangesSeen++) {
         const done = turnSubActions[pageChangesSeen]!;
-        if (done.error !== undefined || leavesPageAsRead(done.action)) continue;
+        if (done.error !== undefined) continue;
+        const stored = storedName(done.action);
+        if (stored !== undefined) {
+          // Moved to the end: a read again of a name runs where the later read did.
+          readsSinceChange.delete(stored);
+          readsSinceChange.set(stored, done.action);
+        }
+        if (leavesPageAsRead(done.action)) continue;
+        readsSinceChange.clear();
         pageChangedThisTurn = true;
         for (const [name, { concern, sub }] of turnListConcerns) {
           sub.listReview!.outcome = 'unseen';
@@ -3365,6 +3475,7 @@ async function executeStepAttempt(
         const description = action.description;
 
         assertionCallsInFlight = [];
+        const rerunCode = recheckTurn ? codeToRunAgain(failedCheck!.check!, { condition, expected }) : undefined;
         const assertResult = await evaluateAssertion({
           page,
           stepIndex,
@@ -3382,7 +3493,31 @@ async function executeStepAttempt(
           aiClient,
           apiResponseStore,
           attemptNumber,
-          priorCheckFailures: priorFailures.filter((f) => f.actionType === 'assert').map((f) => f.error),
+          // Only the turn that re-checks a failed check runs its code again,
+          // and tells the code AI what the old code read and why it failed
+          // when new code is written (check-retry.ts): a check the step AI
+          // writes on a later turn asks something else.
+          // A retry that does not re-check — a flow-control line, or one after
+          // a first check whose code failed or after a failure that was not a
+          // check and did not end a re-check — tells every check's code AI how
+          // checks failed before, as §2.25 did, but only the failures that
+          // still stand (`earlierCheckErrors`): in practice a flow-control
+          // line's, as on a step that re-checks every recorded check has
+          // passed by then.
+          ...(recheckTurn
+            ? {
+                priorChecks: uniqueBy(
+                  priorFailures.flatMap((f): PriorCheck[] =>
+                    f.check && sameCheck(f.check.action, failedCheck!.check!.action)
+                      ? [{ error: f.check.failure, read: f.check.read, code: f.check.code, noVerdict: f.check.noVerdict }]
+                      : []),
+                  (c) => JSON.stringify([c.error, c.read, c.code, c.noVerdict]),
+                ),
+                ...(rerunCode !== undefined && { rerunCode }),
+              }
+            : failedCheck === undefined && attemptNumber > 1
+              ? { earlierCheckFailures: earlierCheckErrors(priorFailures, attemptNumber, opts.flowControlClaim === undefined) }
+              : {}),
           ...(action.frame !== undefined && { frame: action.frame }),
           dismissalGuidance: opts.dismissalGuidance ?? false,
           fullPageScreenshots: config.browser.fullPageScreenshots,
@@ -3406,20 +3541,69 @@ async function executeStepAttempt(
         });
 
         if (!assertResult.pass) {
-          turnFailed = true;
-          // Where the expected text really is, when it is on the page at all:
-          // the retry is shown only this sentence, and without it read the
-          // same wrong element again (SPEC-web-survey-fixes.md §2.25).
-          const where = against === 'predicate'
+          // A predicate has no expected value to quote: it says, as the
+          // report does, that its condition was false.
+          const failure = against === 'predicate'
+            ? `Assertion failed: ${assertResult.description} — predicate "${assertResult.condition}" was false: ${assertResult.actual}`
+            : `Assertion failed: ${assertResult.description} — expected "${assertResult.expected}", got "${assertResult.actual}"`;
+          // Where the expected text really is, when it is on the page at all,
+          // for the person reading the failure and a retry that plans the step
+          // again (SPEC-web-survey-fixes.md §2.25) — only for a check that may
+          // read the page (`dom`, `both`): never for a predicate or an `api`
+          // check, which read nothing there. And only when what the check read
+          // does not hold it even in another letter case: when it does, the
+          // check most likely read the right place and failed on something
+          // else there, and pointing elsewhere invited a weaker check
+          // (check-retry.ts `readHoldsExpected`). A re-check of this check is
+          // told `failure`, without it: the part it reads is the one the
+          // condition names, and pointed at where the expected text shows it
+          // could read another row that holds it and pass (steptix/steptix#97).
+          const where = against === 'predicate' || against === 'api'
+            || readHoldsExpected(assertResult.actual, assertResult.expected)
             ? ''
             : await describeWhereExpectedIs(page, assertResult.expected);
-          turnError = `Assertion failed: ${assertResult.description} — expected "${assertResult.expected}", got "${assertResult.actual}"${where}`;
+          const checkError = `${failure}${where}`;
+          turnFailed = true;
+          turnError = checkError;
           // Recorded like a failed action, so the retry is told what the
-          // check read — it was told nothing, and read the same element again.
+          // check read — it was told nothing, and read the same element again —
+          // and with the check itself, which a retry that re-checks asks again
+          // unchanged.
           collectedFailures.push({
             selector: '',
             error: turnError,
             actionType: 'assert',
+            check: {
+              action: emitted,
+              read: assertResult.actual,
+              failure,
+              code: assertResult.assertionCode,
+              resolved: { condition, expected },
+              // An action after it in the same answer, or `needs_reeval`. Not
+              // a bare answer 9a would have looked at once more had the check
+              // passed (`reevalInferred`): in the scoreboard's action log for
+              // Sept–Oct 2026, no turn whose check ran holds any other action,
+              // and counting one let the attempt that re-checks look once
+              // more again after its next bare answer, as `inferredReevalUsed`
+              // starts afresh in each attempt.
+              hadMore: emittedIndex < aiResponse.actions.length - 1 || aiResponse.needs_reeval === true,
+              attempt: attemptNumber,
+              // `notePageChanges` ran at the top of this check's iteration, so
+              // this holds every read before it since an action last changed
+              // the page.
+              rereads: [...readsSinceChange.values()],
+              // Earlier turns' actions and checks, then this turn's before it —
+              // they all ran, or the turn would have ended before this check.
+              // A re-check's own reads again are in `done` already, as the
+              // reads they repeat.
+              done: [
+                ...allCompletedActions,
+                ...(recheckTurn ? [] : aiResponse.actions.slice(0, emittedIndex))
+                  .filter((a) => a.action !== 'assert' && a.action !== 'prompt')
+                  .map((a) => ({ action: a.action, description: a.description, ...(a.selector ? { selector: a.selector } : {}) })),
+                ...passedChecks,
+              ],
+            },
             startUrl: attemptStartUrl,
             failureUrl: page.url(),
             navigated: page.url() !== attemptStartUrl,
@@ -4238,9 +4422,11 @@ async function executeStepAttempt(
     // The turn's last action may have changed the page too (`notePageChanges`).
     notePageChanges();
 
-    // Track non-assert/prompt actions for the continuation prompt on the next turn
+    // Track non-assert/prompt actions for the continuation prompt on the next
+    // turn — but not a re-check's reads again: `done` already lists the reads
+    // they repeat.
     allCompletedActions.push(
-      ...aiResponse.actions
+      ...(recheckTurn ? [] : aiResponse.actions)
         .filter((a) => a.action !== 'assert' && a.action !== 'prompt')
         .map((a) => ({
           action: a.action,
@@ -4342,17 +4528,12 @@ async function executeStepAttempt(
     // needs_reeval has not said the step is done (AIResponse.reevalUnstated):
     // "Upload the file, then click Upload" answered with a bare upload once
     // passed without the click. Look once more; a finished step answers that
-    // turn with a noop. Only once per step (inferredReevalUsed). Bare
+    // turn with a noop. Only once per attempt (inferredReevalUsed). Bare
     // noop/assert/return/fail/prompt/count and wait stay terminal
     // (REEVAL_WHEN_UNSTATED), and the last turn ends as it always did rather
-    // than failing a step on a re-evaluation the model never asked for.
-    const inferredReeval =
-      !reviewOnly &&
-      !aiResponse.needs_reeval &&
-      aiResponse.reevalUnstated === true &&
-      !inferredReevalUsed &&
-      aiResponse.actions.some((a) => REEVAL_WHEN_UNSTATED.has(a.action)) &&
-      currentTurn < maxTurns;
+    // than failing a step on a re-evaluation the model never asked for
+    // (`reevalInferred`).
+    const inferredReeval = !reviewOnly && reevalInferred(aiResponse, currentTurn);
     if (inferredReeval) {
       inferredReevalUsed = true;
       logger.info(
@@ -4371,7 +4552,7 @@ async function executeStepAttempt(
       const concerns = [...turnListConcerns.values()];
       // A review turn's own `needs_reeval` asks for nothing: the step is done.
       const nextTurnAnyway = !reviewOnly && (aiResponse.needs_reeval === true || inferredReeval);
-      if (currentTurn < maxTurns) {
+      if (currentTurn < turnCap) {
         if (!nextTurnAnyway) {
           nextTurnReviewOnly = true;
           const n = concerns.length + unanswered.length;
@@ -4401,9 +4582,10 @@ async function executeStepAttempt(
     }
 
     // needs_reeval is true — enforce the turn cap
-    if (currentTurn === maxTurns) {
+    if (currentTurn === turnCap) {
+      const recheckTurnToo = turnCap > maxTurns ? ', after the turn that checked again' : '';
       throw new StepFailureError(
-        `Step failed: multi-turn limit reached (${maxTurns} turns).\nLast URL: ${page.url()}`,
+        `Step failed: multi-turn limit reached (${maxTurns} turns${recheckTurnToo}).\nLast URL: ${page.url()}`,
         [],
         allTurns,
       );
@@ -4418,10 +4600,14 @@ async function executeStepAttempt(
   } catch (err) {
     // The turn a throw cut short still happened: push what it did — a model
     // call answered, the actions run before the throw — unless it did nothing
-    // at all, which is a throw before the model was asked.
+    // at all, which is a throw before the model was asked. A re-check's turn
+    // asks no model for its plan, and a check whose code failed records no
+    // action, so it is pushed even empty: the report then still shows the
+    // attempt, beside the code replies it set aside.
     if (
       inFlightTurn !== undefined
-      && (inFlightTurn.aiInteractions.length > 0 || inFlightTurn.subActions.length > 0)
+      && (inFlightTurn.aiInteractions.length > 0 || inFlightTurn.subActions.length > 0
+        || (failedCheck?.check !== undefined && inFlightTurn.turnNumber === 1))
     ) {
       allTurns.push(inFlightTurn);
     }
@@ -4434,6 +4620,27 @@ async function executeStepAttempt(
     // code, and the code of an assertion that threw — for the step to count.
     failure.assertions = [...assertionResults];
     failure.discardedCalls = [...assertionCallsInFlight];
+    // A re-check that came to no verdict — neither of its code's two tries
+    // gave a result, each one failing or refused for changing the page; a
+    // value it read again could not be read; or the attempt failed before the
+    // check had a result — leaves the same check
+    // failed and still unanswered. The next attempt asks it again, rather than
+    // the step AI, which would be free to write an easier check (check-retry.ts).
+    // A Stop is not such an end. No test can see that guard: after a Stop
+    // `withRetry` starts no next attempt, and `executeStep` reports the step
+    // stopped without reading `failures`; it keeps the record true all the same.
+    if (
+      failedCheck?.check !== undefined
+      && !opts.signal?.aborted
+      && !assertionResults.some((r) => r.turnNumber === 1)
+      && !failure.failures.some((f) => f.check !== undefined)
+    ) {
+      failure.failures.push({
+        ...failedCheck,
+        // The first line: a code error's stack says nothing to the next code.
+        check: { ...failedCheck.check, attempt: attemptNumber, noVerdict: failure.message.split('\n')[0]!.trim() },
+      });
+    }
     throw failure;
   } finally {
     for (const t of activityTrackers.values()) t.dispose();
@@ -4598,12 +4805,34 @@ interface EvaluateAssertionParams {
   apiResponseStore: ApiResponseStore | undefined;
   attemptNumber: number;
   /**
-   * How this step's checks failed on earlier attempts, each with where the
-   * expected text really is when it was found (SPEC-web-survey-fixes.md
-   * §2.25). The code generator is the call that picks the element, so it is
-   * the one that has to hear it.
+   * Set on the turn that re-checks a failed check (src/ai/check-retry.ts): how
+   * it failed on earlier attempts — the error, but not where the expected
+   * text is (SPEC-web-survey-fixes.md §2.25, `FailedCheck.failure`) — and
+   * what its code read, and the code. Told to the code generator when the
+   * re-check writes new code (when there is no `rerunCode`, or it would change
+   * the page or breaks): it is the call that picks the element, so it is the
+   * one that has to hear it.
+   * New code that would change the page is not run. The re-check after one
+   * that came to no verdict is told why it came to none.
    */
-  priorCheckFailures?: string[];
+  priorChecks?: readonly PriorCheck[];
+  /**
+   * Set on the turn that re-checks a failed check whose code read the page and
+   * answered (`codeToRunAgain`): that code, run again before any is written —
+   * unless it would change the page, when new code is written instead.
+   */
+  rerunCode?: string;
+  /**
+   * Set on a retry that does not re-check (a flow-control line, a first
+   * check whose code failed, or a failure that was not a check and did not
+   * end a re-check): how this step's checks failed on earlier attempts, for
+   * the code generator of a check the step AI wrote anew —
+   * SPEC-web-survey-fixes.md §2.25's note, as before, less a check a re-check
+   * since passed and repeats (`earlierCheckErrors`). In practice only a
+   * flow-control line's retries have any. Its code is not scanned for page
+   * changes.
+   */
+  earlierCheckFailures?: string[];
   /**
    * The assert's `frame`: the check reads an iframe's content, so its code runs
    * in that frame (SPEC-web-survey-fixes.md §2.31). `document.querySelector`
@@ -4630,11 +4859,18 @@ const MAX_ASSERTION_CODE_ATTEMPTS = 2;
 /**
  * Evaluate a single `assert` action inline against the current page state.
  *
- * Asks the AI for evaluation code and runs it with `page.evaluate(code)`.
+ * Asks the AI for evaluation code and runs it with `page.evaluate(code)` — or,
+ * re-checking a failed check, runs that check's code again (`rerunCode`)
+ * without asking, unless it would change the page.
  *
- * If `poll` is set, the JS code is re-run in a loop until `pass: true` or the
- * timeout. If the JS throws or returns the wrong shape, the code is
- * regenerated — up to 2 attempts.
+ * If `poll` is set, the JS code is run again while it returns an object whose
+ * `pass` is falsy, until the timeout (see runAssertionCode). If the reply does
+ * not parse, the JS throws or returns the wrong shape, or — when re-checking a
+ * failed check — new JS would change the page (`checkCodeMutation`), the code
+ * is regenerated — up to 2 attempts, the code run again counting as the
+ * first — and the model is told which. When no attempt gives a verdict it
+ * throws, saying the code "was refused" when the last code would have changed
+ * the page, and "failed" otherwise.
  */
 async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionResult> {
   let assertionCode: string | null = null;
@@ -4652,6 +4888,34 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
   let lastErr: string | undefined;
   /** The previous reply, when it held no usable code. */
   let unreadableReply: string | undefined;
+  /** A re-check's code that would have changed the page, and what in it did;
+   *  `ranBefore` when it is the failed check's own code, not run again. */
+  let mutatingReply: { text: string; call: string; ranBefore?: true } | undefined;
+  /** Whether the last code was refused rather than run. */
+  let lastRefused = false;
+  /** The reply whose code then failed — threw, or returned something other
+   *  than `{ pass, actual }` — and what it failed with. */
+  let failedReply: { text: string; error: string } | undefined;
+  /** The reply the code in hand came from. */
+  let lastReply = '';
+
+  // A re-check runs the failed check's code again as it is: new code, written
+  // after the old code had read the page and answered, could read the page
+  // another way and pass (check-retry.ts `codeToRunAgain`). Not code that would
+  // change the page — a first check's code is not scanned, a re-check's is — so
+  // that code is written anew, told what in it would have.
+  if (p.rerunCode !== undefined) {
+    const rerunReply = JSON.stringify({ code: p.rerunCode });
+    const mutation = checkCodeMutation(p.rerunCode);
+    if (mutation === undefined) {
+      assertionCode = p.rerunCode;
+      lastReply = rerunReply;
+      logger.info('Re-check: running the failed check\'s code again');
+    } else {
+      logger.warn(`Re-check: the failed check's code would change the page (\`${mutation}\`); writing it anew`);
+      mutatingReply = { text: rerunReply, call: mutation, ranBefore: true };
+    }
+  }
 
   for (let attempt = 1; attempt <= MAX_ASSERTION_CODE_ATTEMPTS; attempt++) {
     // 1. Generate code (or regenerate it after a failure)
@@ -4699,11 +4963,14 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
       const assertSystemPrompt = buildSystemPrompt(p.contextContent, apiContext, {
         dismissalGuidance: p.dismissalGuidance,
       });
-      const priorNote = p.priorCheckFailures !== undefined && p.priorCheckFailures.length > 0
-        ? `An earlier attempt at this check failed:\n${p.priorCheckFailures.map((e) => `- ${e}`).join('\n')}\n`
-          + 'Do not read the same element again unless it really is what the step means.'
-        : undefined;
-      const codeCompletion = await p.aiClient.complete([
+      const priorNote = p.priorChecks !== undefined && p.priorChecks.length > 0
+        ? recheckNote(p.priorChecks, p.against)
+        : p.earlierCheckFailures !== undefined && p.earlierCheckFailures.length > 0
+          ? earlierFailuresNote(p.earlierCheckFailures)
+          : undefined;
+      // Built once, so the report records exactly what was sent — the note
+      // and the reminders included (steptix/steptix#70).
+      const codeMessages: ChatMessage[] = [
         { role: 'system', content: assertSystemPrompt },
         codeMsg,
         ...(priorNote !== undefined ? [{ role: 'user' as const, content: priorNote }] : []),
@@ -4715,17 +4982,33 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
               { role: 'user' as const, content: ASSERTION_CODE_REMINDER },
             ]
           : []),
-      ], p.signal, { profile: 'authoring' });
+        ...(mutatingReply !== undefined
+          ? [
+              { role: 'assistant' as const, content: mutatingReply.text },
+              { role: 'user' as const, content: checkCodeReadsOnly(mutatingReply.call, mutatingReply.ranBefore === true) },
+            ]
+          : []),
+        // Code that failed, asked for again with no word of why, came back the
+        // same and failed the same way. Say what it failed with.
+        ...(failedReply !== undefined
+          ? [
+              { role: 'assistant' as const, content: failedReply.text },
+              { role: 'user' as const, content: assertionCodeFailed(failedReply.error) },
+            ]
+          : []),
+      ];
+      const codeCompletion = await p.aiClient.complete(codeMessages, p.signal, { profile: 'authoring' });
       unreadableReply = undefined;
+      mutatingReply = undefined;
+      failedReply = undefined;
+      lastRefused = false;
+      lastReply = codeCompletion.text;
 
       if (aiInteraction !== undefined) superseded.push(aiInteraction);
       aiInteraction = {
         purpose: `assertion[${p.assertIndex}]`,
         attemptNumber: p.attemptNumber,
-        requestMessages: [
-          { role: 'system', content: extractTextFromMessage({ role: 'system', content: assertSystemPrompt }) },
-          { role: 'user', content: extractTextFromMessage(codeMsg) },
-        ],
+        requestMessages: codeMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
         response: codeCompletion.text,
         model: codeCompletion.model,
         ...(codeCompletion.usage !== undefined && { usage: codeCompletion.usage }),
@@ -4744,24 +5027,47 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
         unreadableReply = codeCompletion.text;
         continue;
       }
+      // A re-check's code writer is shown the failed check (`recheckNote`): the
+      // same nudge to fix the page that made a retry change it (check-retry.ts).
+      // So code that would change the page is not run but written again, told
+      // what in it would have. Only when re-checking: a retry that plans the
+      // step again is retried as it was, and its step AI may act on the page
+      // anyway.
+      const mutation = p.priorChecks !== undefined ? checkCodeMutation(assertionCode) : undefined;
+      if (mutation !== undefined) {
+        lastErr = `Assertion code would change the page (\`${mutation}\`); a check only reads it`;
+        logger.warn(`Assertion code refused (attempt ${attempt}/${MAX_ASSERTION_CODE_ATTEMPTS}): ${lastErr}`);
+        mutatingReply = { text: codeCompletion.text, call: mutation };
+        lastRefused = true;
+        assertionCode = null;
+        continue;
+      }
     }
 
     // 2. Run the JS — with optional polling
     try {
-      evalResult = await runAssertionCode(target, assertionCode, p.poll);
-      if (!evalResult || typeof evalResult.pass !== 'boolean' || typeof evalResult.actual !== 'string') {
-        throw new Error(`Assertion code returned unexpected shape: ${JSON.stringify(evalResult)}`);
+      const ran = await runAssertionCode(target, assertionCode, p.poll);
+      // Kept only once it has the shape: a result in the wrong shape left in
+      // `evalResult` outlived the attempt that rejected it, and when the last
+      // attempt then failed too, it was returned as the verdict — a
+      // `pass: "false"` counted as a pass.
+      if (!isCheckResult(ran)) {
+        throw new Error(`Assertion code returned unexpected shape: ${JSON.stringify(ran)}`);
       }
+      evalResult = ran;
       break; // success — got a structured result (pass or fail)
     } catch (codeErr) {
       lastErr = String(codeErr);
       logger.warn(`Assertion code failed (attempt ${attempt}/${MAX_ASSERTION_CODE_ATTEMPTS}): ${lastErr}`);
+      failedReply = { text: lastReply, error: lastErr };
       assertionCode = null; // force regeneration on next loop iteration
     }
   }
 
   if (!evalResult) {
-    throw new Error(`Assertion code failed after ${MAX_ASSERTION_CODE_ATTEMPTS} attempts: ${lastErr ?? 'unknown error'}`);
+    throw new Error(
+      `Assertion code ${lastRefused ? 'was refused' : 'failed'} after ${MAX_ASSERTION_CODE_ATTEMPTS} attempts: ${lastErr ?? 'unknown error'}`,
+    );
   }
 
   // The check code's verdict is final. A required-field asterisk around a
@@ -4794,7 +5100,6 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
   };
 }
 
-/** Run assertion JS code, optionally polling until pass or timeout. */
 /** How much of an unusable reply a failure message quotes (§2.49). */
 const REPLY_QUOTE_CHARS = 300;
 
@@ -4807,23 +5112,46 @@ export function quoteReply(text: string): string {
     : `"${flat}"`;
 }
 
+/** Is what a check's code returned the `{ pass, actual }` it must return? */
+function isCheckResult(value: unknown): value is { pass: boolean; actual: string } {
+  if (value === null || typeof value !== 'object') return false;
+  const r = value as { pass?: unknown; actual?: unknown };
+  return typeof r.pass === 'boolean' && typeof r.actual === 'string';
+}
+
+/**
+ * Run assertion JS code, polling it when `poll` is set. What the code
+ * returned comes back as it is, for the caller to check the shape of. A poll
+ * runs the code again while it returns an object whose `pass` is falsy — as
+ * code reading an element not there yet can return `{ pass: false, actual:
+ * undefined }` — until the timeout. It stops at anything else: a truthy
+ * `pass` (the caller still checks it is `true`), or a result that is not an
+ * object — `null`, `undefined`, a string, a number, a boolean — rather than
+ * read `.pass` off it: off `null` or `undefined` that threw, blaming the code
+ * for an error of the poll's, and off any other such result it polled on to
+ * the timeout for nothing. An array is an object, with no `pass`: it is still
+ * polled on to the timeout, then refused for its shape.
+ */
 async function runAssertionCode(
   page: Page | Frame,
   code: string,
   poll: { timeoutMs?: number; intervalMs?: number } | undefined,
-): Promise<{ pass: boolean; actual: string }> {
+): Promise<unknown> {
   if (!poll) {
-    return await page.evaluate(code) as { pass: boolean; actual: string };
+    return await page.evaluate(code);
   }
 
   const timeoutMs = poll.timeoutMs ?? DEFAULT_POLL_TIMEOUT_MS;
   const intervalMs = poll.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const deadline = Date.now() + timeoutMs;
 
-  let lastResult = await page.evaluate(code) as { pass: boolean; actual: string };
-  while (!lastResult.pass && Date.now() < deadline) {
+  let lastResult: unknown = await page.evaluate(code);
+  while (
+    lastResult !== null && typeof lastResult === 'object'
+    && !(lastResult as { pass?: unknown }).pass && Date.now() < deadline
+  ) {
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    lastResult = await page.evaluate(code) as { pass: boolean; actual: string };
+    lastResult = await page.evaluate(code);
   }
   return lastResult;
 }

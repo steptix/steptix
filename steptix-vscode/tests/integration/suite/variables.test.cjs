@@ -610,11 +610,13 @@ describe('Steptix Variables panel (Phase 4)', function () {
   });
 
   describe('copying a variable', () => {
-    // The copy commands write the real system clipboard. Put back whatever
-    // the person running the suite had on it.
-    let savedClipboard;
-    before(async () => { savedClipboard = await vscode.env.clipboard.readText(); });
-    after(async () => { await vscode.env.clipboard.writeText(savedClipboard); });
+    // The copies land on a test clipboard, not the system one: the suite
+    // usually runs unattended, and while the Windows session is locked the
+    // system clipboard cannot be opened — VS Code drops the write without an
+    // error and reads back "". Everything up to the clipboard is real.
+    let clipboardText = '';
+    before(() => { hooks.setVariablesClipboard(async (text) => { clipboardText = text; }); });
+    after(() => { hooks.setVariablesClipboard(null); });
 
     it("a row's menu commands copy its value, unmasked value, name and placeholder", async () => {
       void vscode.commands.executeCommand('steptix.runSelected');
@@ -637,7 +639,7 @@ describe('Steptix Variables panel (Phase 4)', function () {
 
       const copied = async (command, node) => {
         await vscode.commands.executeCommand(command, node);
-        return vscode.env.clipboard.readText();
+        return clipboardText;
       };
       assert.equal(await copied('steptix.copyVariableValue', byName.username.node), 'alice');
       // A tree row cannot animate: the copied row's icon turns into a tick for
@@ -669,18 +671,18 @@ describe('Steptix Variables panel (Phase 4)', function () {
         value: 'variables-copy-test-password',
         masked: true,
       });
-      assert.equal(await vscode.env.clipboard.readText(), 'variables-copy-test-password');
+      assert.equal(clipboardText, 'variables-copy-test-password');
 
       await hooks.dispatchWebviewMessage({ type: 'copyVariable', kind: 'placeholder', name: 'order.id' });
-      assert.equal(await vscode.env.clipboard.readText(), '{{order.id}}');
+      assert.equal(clipboardText, '{{order.id}}');
 
       // Nothing to copy leaves the clipboard alone: a row with no value yet,
       // and a name no placeholder can reference.
-      await vscode.env.clipboard.writeText('untouched');
+      clipboardText = 'untouched';
       const mark = hooks.hostMessageCount();
       await hooks.dispatchWebviewMessage({ type: 'copyVariable', kind: 'value', name: 'orderId' });
       await hooks.dispatchWebviewMessage({ type: 'copyVariable', kind: 'placeholder', name: 'order.Order ID' });
-      assert.equal(await vscode.env.clipboard.readText(), 'untouched');
+      assert.equal(clipboardText, 'untouched');
       await hooks.dispatchWebviewMessage({ type: 'copyVariable', kind: 'name', name: 'orderId' });
 
       // The panel shows its "copied" tick from this answer — so a refused copy
@@ -691,6 +693,28 @@ describe('Steptix Variables panel (Phase 4)', function () {
         { type: 'variableCopied', name: 'order.Order ID', kind: 'placeholder', ok: false },
         { type: 'variableCopied', name: 'orderId', kind: 'name', ok: true },
       ]);
+    });
+
+    it('copies to the system clipboard once the test clipboard is taken away', async function () {
+      // The one copy that reaches `vscode.env.clipboard`, so a broken default,
+      // or a hook that does not give the system clipboard back, is caught. It
+      // runs only where a probe written to the clipboard reads back: not while
+      // the Windows session is locked (see above).
+      const saved = await vscode.env.clipboard.readText();
+      const probe = 'steptix-variables-clipboard-probe';
+      await vscode.env.clipboard.writeText(probe);
+      if ((await vscode.env.clipboard.readText()) !== probe) {
+        await vscode.env.clipboard.writeText(saved);
+        this.skip();
+      }
+      hooks.setVariablesClipboard(null);
+      try {
+        await hooks.dispatchWebviewMessage({ type: 'copyVariable', kind: 'placeholder', name: 'order.id' });
+        assert.equal(await vscode.env.clipboard.readText(), '{{order.id}}');
+      } finally {
+        hooks.setVariablesClipboard(async (text) => { clipboardText = text; });
+        await vscode.env.clipboard.writeText(saved);
+      }
     });
 
     it('Ctrl+C copies the row selected in the Variables view', async () => {
@@ -708,14 +732,14 @@ describe('Steptix Variables panel (Phase 4)', function () {
       });
       await waitFor('scope arrived', () => hooks.runningScope().beta === 'second-row-value');
 
-      await vscode.env.clipboard.writeText('untouched');
+      clipboardText = 'untouched';
       await vscode.commands.executeCommand('steptix.variables.focus');
       await hooks.selectVariable('beta');
       // The selection reaches the extension host as an event; wait on the
       // clipboard rather than on time.
       await waitFor('the selected row reaches the clipboard', async () => {
         await vscode.commands.executeCommand('steptix.copyVariableValue');
-        return (await vscode.env.clipboard.readText()) === 'second-row-value';
+        return clipboardText === 'second-row-value';
       });
 
       fake.end();
@@ -747,9 +771,9 @@ describe('Steptix Variables panel (Phase 4)', function () {
       const byName = Object.fromEntries(hooks.variablesViewItems().map((i) => [i.name, i]));
       assert.equal(hooks.variablesDescription(), 'test');
       await vscode.commands.executeCommand('steptix.copyVariableValue', byName.orderId.node);
-      assert.equal(await vscode.env.clipboard.readText(), 'ORD-1042');
+      assert.equal(clipboardText, 'ORD-1042');
       await vscode.commands.executeCommand('steptix.copyVariableUnmaskedValue', byName.token.node);
-      assert.equal(await vscode.env.clipboard.readText(), 'variables-pause-test-token');
+      assert.equal(clipboardText, 'variables-pause-test-token');
 
       await vscode.commands.executeCommand('steptix.restartSession');
       await waitFor('Close Session clears the pause', () => hooks.tracker.snapshot().breakpointStop === null);

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SecureBank — Card orders</title>
+  <!--
+    Text a check must read only where its step says, and only as a person sees
+    it (docs/specs/SPEC-verify-checks.md, section 7).
+
+    - The orders table: order 5126 is "Pending", while orders 5127 and 5128
+      are "Shipped". A check of order 5126's status must read that row, not
+      find "Shipped" in another one. The cells carry no ids, so a check finds
+      the row by its order number.
+    - "Label printed" is only in a script inside the delivery form: it would
+      show after a click on Print label, which no test makes. The form has no
+      empty element waiting for it, so a check of the page, or of the form,
+      reads a part that holds the script.
+    - "Draft saved" is only in an element styled display: none, the draft
+      status under the delivery instructions.
+    - The delivery notice holds its order number in a <strong>, so the whole
+      sentence is in the paragraph, not in any one element inside it.
+    - The delivery instructions box starts empty: what a test types is in its
+      value, never in its markup.
+    - The courier dropdown's options have values that differ from their text.
+      "Priority courier" is chosen; "Collect in branch" is an option nobody
+      chose, so the page does not show it.
+    - The chart's title is SVG text, which has no innerText.
+
+    "Shipped", "Label printed", "Draft saved", "left the depot", "Priority
+    courier", "Collect in branch" and "Cards sent this week" appear on no other
+    page of the test app, in any case.
+    templates/init/tests/verify-scope.md, verify-scope-order-status.md,
+    verify-scope-print-label.md, verify-scope-draft-message.md and
+    verify-scope-courier.md drive it, through
+    steptix-vscode/tests/integration/live/verify-scope.test.cjs.
+  -->
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; background: #f5f7fa; color: #1a1a2e; margin: 0; }
+    .card { max-width: 640px; margin: 40px auto; background: white; border-radius: 8px; border: 1px solid #e2e8f0; padding: 32px; }
+    h1 { font-size: 1.25rem; margin: 0 0 16px; }
+    h2 { font-size: 1rem; margin: 24px 0 8px; }
+    table { border-collapse: collapse; width: 100%; }
+    caption { text-align: left; font-weight: 600; padding-bottom: 8px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e2e8f0; }
+    label { display: block; font-weight: 600; margin: 16px 0 4px; }
+    textarea, select { font: inherit; width: 100%; padding: 6px; }
+    button { font: inherit; padding: 6px 12px; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Card orders</h1>
+
+    <table>
+      <caption>Replacement cards</caption>
+      <thead>
+        <tr><th scope="col">Order</th><th scope="col">Card</th><th scope="col">Status</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>5126</td><td>Everyday debit</td><td>Pending</td></tr>
+        <tr><td>5127</td><td>Platinum credit</td><td>Shipped</td></tr>
+        <tr><td>5128</td><td>Travel card</td><td>Shipped</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Latest delivery</h2>
+    <p id="delivery-notice">Card order <strong>5127</strong> left the depot on 14 May.</p>
+
+    <form id="delivery-form" onsubmit="return false">
+      <label for="delivery-instructions">Delivery instructions</label>
+      <textarea id="delivery-instructions" rows="2"></textarea>
+      <p id="draft-status" style="display: none">Draft saved</p>
+
+      <label for="courier">Courier</label>
+      <select id="courier">
+        <option value="post">Standard post</option>
+        <option value="priority" selected>Priority courier</option>
+        <option value="branch">Collect in branch</option>
+      </select>
+
+      <button type="button" id="print-label">Print label</button>
+      <script>
+        document.getElementById('print-label').addEventListener('click', function () {
+          var status = document.createElement('p');
+          status.textContent = 'Label printed';
+          document.getElementById('delivery-form').appendChild(status);
+        });
+      </script>
+    </form>
+
+    <svg width="260" height="120" viewBox="0 0 260 120" style="margin-top: 24px">
+      <text x="0" y="16" font-size="14" fill="#1a1a2e">Cards sent this week</text>
+      <rect x="0" y="40" width="40" height="70" fill="#3b82f6"></rect>
+      <rect x="60" y="60" width="40" height="50" fill="#3b82f6"></rect>
+      <rect x="120" y="30" width="40" height="80" fill="#3b82f6"></rect>
+    </svg>
+  </main>
+</body>
+</html>

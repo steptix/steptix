@@ -27,6 +27,11 @@
  * breakpoint ends the run's request, and the view only read a RUNNING
  * controller.
  *
+ * The copies land on a test clipboard (`setVariablesClipboard`), not the
+ * system one: a live run is usually unattended, and while the Windows session
+ * is locked the system clipboard cannot be opened — VS Code drops the write
+ * without an error and reads back "". Everything up to the clipboard is real.
+ *
  * Prereq: the API server on $LIVE_STEPTIX_SERVER_URL (the parallel runner starts
  * one per shard) and the fixture app on :8787 (runLiveTest.cjs boots it).
  *
@@ -104,7 +109,8 @@ describe('Steptix live — copy and export the variables a real run captured', f
   /** The fixture's `password` parameter — SecureBank's demo login — read from
    *  its `## Parameters` so this file holds no credential of its own. */
   let fixturePassword;
-  let savedClipboard;
+  /** What the Copy commands last put on the test clipboard. */
+  let clipboardText = '';
   let exportDir;
 
   before(async () => {
@@ -122,7 +128,7 @@ describe('Steptix live — copy and export the variables a real run captured', f
           `Original error: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    savedClipboard = await vscode.env.clipboard.readText();
+    hooks.setVariablesClipboard(async (text) => { clipboardText = text; });
     exportDir = fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-live-vars-'));
 
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -141,7 +147,7 @@ describe('Steptix live — copy and export the variables a real run captured', f
 
   after(async () => {
     hooks?.setVariablesExportPicker(null);
-    if (savedClipboard !== undefined) await vscode.env.clipboard.writeText(savedClipboard);
+    hooks?.setVariablesClipboard(null);
     if (exportDir) fs.rmSync(exportDir, { recursive: true, force: true, maxRetries: 5 });
     if (vscode.debug.breakpoints.length > 0) vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
     try { await vscode.commands.executeCommand('steptix.restartSession'); } catch { /* best effort */ }
@@ -192,9 +198,9 @@ describe('Steptix live — copy and export the variables a real run captured', f
     assert.notEqual(byName.password.description, fixturePassword);
 
     const copied = async (command, node) => {
-      await vscode.env.clipboard.writeText('untouched');
+      clipboardText = 'untouched';
       await vscode.commands.executeCommand(command, node);
-      return vscode.env.clipboard.readText();
+      return clipboardText;
     };
     const tableText = await copied('steptix.copyVariableValue', byName.payments.node);
     assert.equal(tableText, panel.payments, 'the whole table, not the one line the view shows');
@@ -214,8 +220,9 @@ describe('Steptix live — copy and export the variables a real run captured', f
     assert.ok(!csv.includes(fixturePassword), 'the password never reaches the file');
 
     // --- The panel's copy path, with the value the panel holds ------------
+    clipboardText = 'untouched';
     await hooks.dispatchWebviewMessage({ type: 'copyVariable', kind: 'value', name: 'payments', value: panel.payments });
-    assert.equal(await vscode.env.clipboard.readText(), panel.payments);
+    assert.equal(clipboardText, panel.payments);
 
     // --- Continue to the end; the panel keeps the values ------------------
     void vscode.commands.executeCommand('steptix.continueRun');
@@ -226,9 +233,9 @@ describe('Steptix live — copy and export the variables a real run captured', f
 
     const afterRun = hooks.webviewRuntimeVariables();
     assert.equal(afterRun.payments, panel.payments, 'the panel still holds the table after the run');
-    await vscode.env.clipboard.writeText('untouched');
+    clipboardText = 'untouched';
     await hooks.dispatchWebviewMessage({ type: 'copyVariable', kind: 'value', name: 'first_payee', value: afterRun.first_payee });
-    assert.equal(await vscode.env.clipboard.readText(), panel.first_payee);
+    assert.equal(clipboardText, panel.first_payee);
     // The view follows the debugger's rule: a finished run has nothing to
     // inspect. The panel is where a finished run's values stay.
     assert.deepEqual(hooks.variablesViewItems().map((i) => i.name), [], 'the Variables view clears when the run ends');
