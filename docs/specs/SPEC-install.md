@@ -33,7 +33,7 @@ did the user have to do anything they would not have guessed?
 | Word | Meaning |
 | --- | --- |
 | **Server** | The part of Steptix that runs tests. The extension and the `steptix` command both use it. It is the large part: it drives the browser, talks to the AI and writes the reports. |
-| **Launcher** | The small program behind the `steptix` command. It finds the right server on this machine and runs it. It contains no server code itself. |
+| **Launcher** | The first thing the `steptix` command does. It picks which server version on this machine to use and hands the command to it. It is part of the same package as the server (§3.1). |
 | **Steptix folder** | One folder per user where Steptix keeps its files: `%LOCALAPPDATA%\steptix` on Windows, `~/.steptix` on macOS and Linux (or `$XDG_CONFIG_HOME/steptix` when that is set). It already holds the machine key today. |
 | **Node.js** | The program that runs JavaScript outside a browser. The server needs version 22.21 or later. |
 | **npm** | The tool that comes with Node.js for downloading and installing JavaScript packages. |
@@ -46,12 +46,12 @@ did the user have to do anything they would not have guessed?
 
 | What | Where | Notes |
 | --- | --- | --- |
-| `steptix` | npm | The launcher. Depends on the server package, so installing it downloads both. Small. |
-| Server package | npm | The server. Large. Its name is being settled by the maintainer (§11). This spec calls it `@steptix/server`. |
+| `steptix` | npm | One package: the server, the `steptix` command with its launcher, and the `steptix/tools` and `steptix/codebehind` modules that test projects import (§3.4). |
 | Extension `steptix.steptix-vscode` | VS Code Marketplace, and as a `.vsix` file on GitHub Releases | Published by the `steptix` publisher. |
 | Offline files `steptix-<version>-<platform>.tgz` | GitHub Releases | One per supported platform (§5.6). |
 
 All of them are released together and carry the same version number (§4.2).
+The first release is 1.0.0 for all of them (§10).
 
 Not published: the Electron desktop app, and the Flick extension
 (`flick-vscode`), which is being retired.
@@ -64,24 +64,56 @@ Not published: the Electron desktop app, and the Flick extension
 
 A platform is supported once its packages pass the release test (§10.1) on
 that platform. Until then, the extension on an unsupported platform says so
-plainly instead of trying an install that cannot work.
+plainly instead of trying an install that cannot work (§8.4).
+
+**This is a deliberate exception to CLAUDE.md's rule** that what works on one
+platform needs a counterpart on the others. The exception covers releasing
+and release testing only, not the code:
+
+- Everything this spec adds is written for all three operating systems from
+  the start: folders, PATH, the launcher, the extension's install. Nothing
+  Windows-only goes in on the grounds that Windows ships first.
+- The four unit suites keep passing on Windows, macOS and Linux, as CLAUDE.md
+  requires, including the tests for this spec's code.
+- What waits is publishing a platform's packages and running the release test
+  there. When a platform's turn comes, that is the only work left.
 
 ### 3.3 Inside the Steptix folder
 
 ```
 <Steptix folder>/
   runtimes/
-    1.3.0/          one folder per server version (§4.3 says which are kept)
-    1.4.0/
+    1.3.0/          one folder per version, each holding the whole steptix
+    1.4.0/          package (§4.3 says which versions are kept)
   node/
     22.21.0/        Steptix's own copy of Node.js, only if it had to download one (§4.6)
   bin/
-    steptix         the launcher the extension sets up (§5.5), only if needed
+    steptix         a small script the extension sets up (§5.5), only if needed:
+                    it starts the launcher in the newest runtimes/ folder
   .env              the machine key and server address, as today
 ```
 
 `runtimes/` is the folder the extension already looks in today, so it keeps
 its name.
+
+### 3.4 One package, because test projects import it by name
+
+Test projects import from Steptix by the package name `steptix`:
+
+- A user's own tools start with `import { defineTool } from 'steptix/tools'`.
+- Every code-behind file Steptix generates starts with `import { defineSteps }
+  from 'steptix/codebehind'` (`src/codebehind/writer.ts`).
+
+A project with no copy of Steptix of its own needs none: the server answers
+those imports with itself (`src/tools/reload.ts`). A project that installs
+`steptix` locally, for example so the editor can check its tools' types, gets
+the same package everything else uses.
+
+Splitting the server into a package with another name would break both: the
+server would no longer answer to `steptix`, and a local `npm i steptix` would
+bring the launcher without the modules. So Steptix stays one package, and the
+launcher is just the first thing its `steptix` command does. Nothing in this
+spec changes how these imports resolve.
 
 ## 4. Rules every scenario follows
 
@@ -96,7 +128,7 @@ complete, so a half-finished copy is never picked up.
 
 ### 4.2 Released together; the newest one runs
 
-The extension, the launcher and the server are released together with one
+The extension and the `steptix` package are released together with one
 version number. Extension 1.4.0 was tested with server 1.4.0, and that is the
 server it installs.
 
@@ -107,7 +139,7 @@ Which server runs:
   versions.
 - **Never one older than the extension or launcher asking.** Extension 1.4.0
   does not run server 1.3.0; it installs 1.4.0 (§6.2).
-- **Unless the user chose one** with `steptix server use <version>` (§6.4).
+- **Unless the user chose one** with `steptix server use <version>` (§6.5).
 
 VS Code and npm update at different times, so the server can be newer than
 the extension or launcher talking to it. A server therefore keeps working with
@@ -123,7 +155,7 @@ start uses the new one.
 Steptix keeps three kinds of version and removes the rest:
 
 - the newest,
-- the one before it, so going back needs no download (§6.4),
+- the one before it, so going back needs no download (§6.5),
 - one the user chose with `steptix server use`, if any.
 
 A version is removed only when nothing is running from it. If something is,
@@ -198,6 +230,25 @@ Downloads of the server go through npm, even when the extension starts them.
 npm reads the user's own settings file (`~/.npmrc`), so a company's own
 package registry and proxy are used without any Steptix setting.
 
+### 4.12 Developer settings keep working
+
+Two existing User settings let someone working on Steptix itself run a server
+from their own checkout. They keep their meaning, and they switch this spec's
+behaviour off rather than fighting it:
+
+- **`steptix.serverAutoStart.command` is set:** the extension starts that
+  command when no server is running, exactly as today. It never offers to
+  install or update a server, and it does not apply the version checks in
+  §4.2 and §6.4 to whatever server answers. The person who set the command
+  chose that server.
+- **`steptix.serverAutoStart.useInstalledRuntime` is off:** the extension
+  never installs, updates or starts a server from `runtimes/`, and never asks
+  about one. With no server running, it says so, as today.
+
+The live test runner and an Extension Development Host start their own
+servers from the checkout. A checkout's server and extension carry the same
+version (§4.2), so the version checks pass without either setting.
+
 ## 5. Installing
 
 ### 5.1 Scenario 1: from a terminal only
@@ -205,14 +256,14 @@ package registry and proxy are used without any Steptix setting.
 **Before:** the user has Node.js 22.21 or later and npm. They are using npm,
 so they have it.
 
-1. **They run `npm i -g steptix`.** npm downloads the launcher and the server
-   together, with its normal progress display. `steptix` now works in every
-   new terminal, because npm's folder is already on PATH.
+1. **They run `npm i -g steptix`.** npm downloads the whole package, with its
+   normal progress display. `steptix` now works in every new terminal,
+   because npm's folder is already on PATH.
 2. **They run their first `steptix` command,** any command. The launcher sees
-   that its server version is not in `runtimes/` yet. It prints one line,
-   *"Setting up Steptix 1.4.0 (first run only)…"*, copies the server from
-   npm's folder into `runtimes/1.4.0/`, and then runs the command they typed.
-   This takes a few seconds and needs no network.
+   that its own version is not in `runtimes/` yet. It prints one line,
+   *"Setting up Steptix 1.4.0 (first run only)…"*, copies its package from
+   npm's folder into `runtimes/1.4.0/`, and then runs the command they typed
+   from there. This takes a few seconds and needs no network.
 3. **First-run setup** (§7) checks for a browser and an AI key.
 
 **If their Node.js is too old:** npm warns during the install, and the
@@ -238,8 +289,8 @@ Steptix folder, so it is theirs. Nothing later needs `sudo`.
    Output panel:
    1. If no suitable Node.js is available (§4.6), it downloads its own copy
       into `<Steptix folder>/node/`.
-   2. It uses that Node.js's npm to install the server, the same version as
-      the extension, into `runtimes/<version>/`.
+   2. With that Node.js's npm, it installs the `steptix` package, the same
+      version as the extension, into `runtimes/<version>/`.
 5. **The server starts** as it does today, and the Run carries on.
 6. **The `steptix` command** is set up as in §5.5.
 
@@ -254,9 +305,9 @@ was never copied into `runtimes/`, because that happens on the first command.
 
 1. **They install the extension.**
 2. **The extension looks in `runtimes/`.** It is empty.
-3. **It looks for `steptix` on PATH** and finds the launcher npm installed.
+3. **It looks for `steptix` on PATH** and finds the one npm installed.
    It runs `steptix server install`, which does exactly what the first
-   terminal command would have done: copy the server from npm's folder into
+   terminal command would have done: copy the package from npm's folder into
    `runtimes/<version>/`. It reports the folder and version back.
 4. **If that version is at least the extension's**, the extension uses it
    without asking anything, and says *"Using Steptix 1.4.0 installed with
@@ -295,9 +346,9 @@ The extension installed the server (§5.2). The user also wants `steptix` in a
 terminal.
 
 - **In VS Code's own terminals**, it already works. When the extension
-  installs the server, it puts a launcher in `<Steptix folder>/bin/` and adds
-  that folder to the PATH of VS Code's terminals only. Nothing outside VS Code
-  changes.
+  installs the server, it puts a small `steptix` script in
+  `<Steptix folder>/bin/` and adds that folder to the PATH of VS Code's
+  terminals only. Nothing outside VS Code changes.
 - **For other terminals**, the extension asks once, after the first
   successful install: *"Use the steptix command in other terminals too? [Add
   it] [No thanks]"*.
@@ -308,13 +359,14 @@ terminal.
     `~/.bashrc`), and says which.
   - Terminals that are already open need to be reopened, and the message says
     so.
-  - The launcher in `bin/` uses the Node.js the server uses (§4.6), so it
-    works even for someone who never installed Node.js.
+  - The script in `bin/` starts the launcher in the newest `runtimes/` folder
+    with the Node.js the server uses (§4.6), so it works even for someone who
+    never installed Node.js.
 - **If `steptix` is already on PATH** (scenarios 3 and 4), the extension
   skips all of this.
-- **If they later run `npm i -g steptix` anyway**, there are two launchers on
-  PATH. Both run the newest server in `runtimes/`, so it makes no difference
-  which one the terminal finds first.
+- **If they later run `npm i -g steptix` anyway**, there are two `steptix`
+  commands on PATH. Both run the newest server in `runtimes/`, so it makes no
+  difference which one the terminal finds first.
 
 ### 5.6 Scenario 6: a machine with no internet access
 
@@ -339,7 +391,7 @@ download it without a network.
 2. **On the machine, they run `npm i -g ./steptix-1.4.0-win32-x64.tgz`.**
    Everything is inside the file, so npm fetches nothing. `steptix` is on PATH
    as in scenario 1.
-3. **The first `steptix` command** copies the server into `runtimes/1.4.0/`,
+3. **The first `steptix` command** copies the package into `runtimes/1.4.0/`,
    as in §5.1 step 2.
 4. **In VS Code, they install the `.vsix`** with *Extensions: Install from
    VSIX…*. The extension finds `steptix` on PATH and continues as in §5.3 or
@@ -357,8 +409,7 @@ is refused at install with a message naming the right one.
 
 ### 6.1 Updating from a terminal
 
-1. `npm i -g steptix@latest` downloads the new launcher and server into npm's
-   folder. Nothing in `runtimes/` changes, so a running server is not affected.
+1. `npm i -g steptix@latest` downloads the new version into npm's folder. Nothing in `runtimes/` changes, so a running server is not affected.
 2. The next `steptix` command, or the extension's next Run, whichever comes
    first, copies the new version into its own folder (§4.1).
 3. The previous version stays, and anything older is removed once nothing is
@@ -377,12 +428,53 @@ is refused at install with a message naming the right one.
 
 ### 6.3 Updating while a server is running
 
-The extension's server keeps running for up to 60 minutes after its last use.
-An update never touches it (§4.3). It finishes what it is doing, stops when
-idle, and the next start runs the new version. No one is asked to stop
-anything.
+Updating never changes a running server's files (§4.3), so it keeps working
+and nothing it is doing is cut short.
 
-### 6.4 Going back to an older version
+What happens to it next depends on who needs it:
+
+- **After an update from npm**, the extension may still be the same version
+  as the running server. Then nothing happens: the server stops when it has
+  been idle long enough, and the next start runs the newest version.
+- **After the extension updates**, the running server is older than the
+  extension, which never runs an older server (§4.2). §6.4 says what the
+  extension does about it.
+
+### 6.4 An older server is still running
+
+The extension's server keeps running for up to 60 minutes after its last use,
+and a user may have started one by hand with `steptix serve`. So right after
+the extension updates, the server already running is often older than the
+extension.
+
+Before each Run, the extension asks the running server about itself. The
+server already reports its version, its process number and whether a test is
+running in it. It also reports **who started it**: VS Code, automatically, or
+a person, by hand. That last one is new.
+
+- **It is the extension's version or newer:** the extension uses it.
+- **It is older, and VS Code started it:**
+  - If no test is running in it, the extension stops it and starts the right
+    version, showing *"Updating the Steptix server to 1.4.0…"* while it does.
+    The Run carries on once the new server is ready.
+  - If a test is running in it (another VS Code window still on the old
+    extension, for example), the extension waits for that test to finish,
+    showing *"Waiting for a test in another window to finish before updating
+    the Steptix server"*, then does the same.
+- **It is older, and a person started it:** the extension never stops it on
+  its own. It says: *"A Steptix server you started (1.3.0, at
+  http://127.0.0.1:3100) is older than this extension (1.4.0). Stop it and
+  press Run again, or start the new version yourself with `steptix serve`.
+  [Stop it] [Cancel]"*. **Stop it** stops that server, and only because the
+  user asked.
+- **It is a version the user chose with `steptix server use`** (§6.5): as
+  above, the extension does not run it if it is older than the extension, and
+  says why.
+
+The launcher follows the same rules for a terminal command that needs the
+running server.
+
+### 6.5 Going back to an older version
 
 The previous version is still installed (§4.3), so going back needs no
 download.
@@ -401,7 +493,7 @@ A chosen version is not affected by updates: a newer version can still be
 installed beside it, but the chosen one keeps running until the choice is
 undone.
 
-### 6.5 Switching Node.js versions
+### 6.6 Switching Node.js versions
 
 Tools such as nvm keep a separate npm folder for each Node.js version.
 
@@ -412,7 +504,7 @@ Tools such as nvm keep a separate npm folder for each Node.js version.
   If it is older, it uses Steptix's own copy if there is one, and otherwise
   offers to download one (§4.6).
 
-### 6.6 Two VS Code windows at once
+### 6.7 Two VS Code windows at once
 
 Both may notice there is no server. One installs, the other shows *"Waiting
 for Steptix to finish installing in another window"* and continues when it is
@@ -484,22 +576,24 @@ first. It removes:
 
 - every server in `runtimes/`,
 - Steptix's own Node.js, if it downloaded one,
-- the launcher in `bin/`, and the PATH entry or startup-file line it added.
+- the `steptix` script in `bin/`, and the PATH entry or startup-file line it
+  added.
 
 ### 9.3 Installed both ways
 
-Either uninstall removes the servers. If the npm launcher is still installed
-afterwards, its next command copies its own server back in (§5.1 step 2),
+Either uninstall removes the servers. If npm's `steptix` is still installed
+afterwards, its next command copies its package back in (§5.1 step 2),
 which is the expected result: the user still has Steptix installed.
 
 ## 10. What changes in the repo
 
-- **New:** the `steptix` npm package becomes the launcher, and the server
-  moves to its own package. The server package leaves out what only the
-  Electron desktop app needs (Electron, Vite, React, CodeMirror), as the
-  runtime build already does (`scripts/build-runtime.mjs`). The desktop app is
-  not shipped at all.
-- **New:** the server package ships its exact tested dependency versions
+- **Changed:** `steptix` stays one npm package (§3.4). Its `steptix` command
+  gains the launcher step: pick the version to run (§4.2), copy its own
+  package into `runtimes/` on first use (§5.1), and hand the command to that
+  folder. The package leaves out what only the Electron desktop app needs
+  (Electron, Vite, React, CodeMirror), as the runtime build already does
+  (`scripts/build-runtime.mjs`). The desktop app is not shipped at all.
+- **New:** the package ships its exact tested dependency versions
   (`npm-shrinkwrap.json`). npm ignores a package's lock file when someone
   installs it, so without this each user would get whatever versions are
   newest that day, not the ones that were tested.
@@ -513,7 +607,11 @@ which is the expected result: the user still has Steptix installed.
   `server remove`, `uninstall`, and the version details in `--version`.
 - **Changed:** the extension's server lookup
   (`steptix-vscode/src/extension/server-manager.ts`). Today it gives up when
-  no runtime is installed. It will find, install and update servers as above.
+  no runtime is installed. It will find, install and update servers as above,
+  and replace an older running server as §6.4 says.
+- **Changed:** the server's `/health` answer also says who started it: VS Code
+  automatically, or a person by hand (§6.4). It already reports the version,
+  the process number and whether a test is running.
 - **Changed:** the extension is published to the Marketplace by a new
   `steptix` publisher, so its ID becomes `steptix.steptix-vscode` instead of
   `pkent.steptix-vscode`. VS Code treats that as a different extension: an
@@ -521,11 +619,13 @@ which is the expected result: the user still has Steptix installed.
   and the docs and CLAUDE.md that name the old ID change with it. Publishing
   also needs a PNG icon (the Marketplace does not accept SVG for it) and a
   Marketplace description.
-- **Changed:** one version number for the extension, the launcher and the
-  server (§4.2). The extension is at 0.5.x and the server at 1.0.0-beta.1
-  today, so the first release picks a number for all three. The CLAUDE.md
-  rule that bumps the extension's patch version on every change needs
-  replacing to fit (§11).
+- **Changed:** one version number for the extension and the `steptix`
+  package (§4.2), starting at **1.0.0** for both. Today the extension is at
+  0.5.x and the package at 1.0.0-beta.1; 1.0.0 is newer than both, so every
+  existing install sees it as an update. The CLAUDE.md rule that bumps the
+  extension's patch version on every change needs replacing to fit (§11).
+- **Changed:** CLAUDE.md's platform rule gains a note pointing at the
+  Windows-first exception in §3.2, so it is not mistaken for a gap to fix.
 - **Retired:** the Windows installer (`packaging/runtime/`,
   `scripts/build-runtime.mjs`, `scripts/verify-runtime.mjs`) and the
   CLAUDE.md section about it, once this ships. Its beta has no installs that
@@ -544,7 +644,8 @@ copy of the npm registry:
 
 | Check | Scenario |
 | --- | --- |
-| `npm i -g`, first command copies the server, a test runs | §5.1 |
+| `npm i -g`, first command copies the package, a test runs | §5.1 |
+| A test project's own tool (`steptix/tools`) and a generated code-behind file (`steptix/codebehind`) both load against the installed server, with and without a local `steptix` in the project | §3.4 |
 | Extension with Node.js 22.21+ on PATH downloads only the server and runs on the user's Node.js | §5.2, §4.6 |
 | Extension with no Node.js, or an older one, on PATH downloads Node.js and the server, a test runs | §5.2, §4.6 |
 | npm install never run, then the extension: no download, uses npm's copy | §5.3 |
@@ -552,19 +653,20 @@ copy of the npm registry:
 | Offline file and `.vsix` installed with the network switched off, a test runs | §5.6 |
 | Update from npm while a server runs: the server keeps serving, the next start is the new version | §6.1, §6.3 |
 | Extension needs a newer server: it installs it, and the terminal runs it too | §6.2 |
+| Older server started by VS Code, idle: the extension replaces it and the Run passes | §6.4 |
+| Older server started by VS Code, test running: the extension waits, then replaces it | §6.4 |
+| Older server started by hand: the extension asks and does not stop it on its own | §6.4 |
+| `serverAutoStart.command` set: no install offer, the configured server runs; `useInstalledRuntime` off: no install offer, no start | §4.12 |
 | The previous release's extension runs a test against this release's server | §4.2 |
-| `server use` the previous version, both sides run it; `server use newest` undoes it | §6.4 |
+| `server use` the previous version, both sides run it; `server use newest` undoes it | §6.5 |
 | Only the newest, the previous and a chosen version are kept | §4.3 |
-| Two windows install at once: one download, both work | §6.6 |
+| Two windows install at once: one download, both work | §6.7 |
 | Install interrupted, then retried | §8.3 |
 | Each uninstall removes what §9 says, and nothing else | §9 |
 
 ## 11. Still to settle
 
-1. **The server package's name.** The maintainer is settling it. The
-   `steptix` organisation on npm exists (`@steptix/aigateway` is published
-   there), so `@steptix/server` is available as a name.
-2. **How builds between releases are numbered.** With one version number per
+1. **How builds between releases are numbered.** With one version number per
    release (§4.2), the extension's patch number can no longer go up on every
    change. That rule exists so the Extensions panel shows a new number after
    each install of a work-in-progress build. A suffix such as `1.4.0-dev.17`
