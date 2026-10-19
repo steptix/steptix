@@ -9,6 +9,24 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Fixed — a drag the browser gives up no longer hangs the run
+
+When a page's own `dragstart` handler moves, hides or removes the element
+being dragged, Chromium gives the drag up at once. Playwright's drag
+interception then waits for a drag that never comes, with no timeout, so
+the `drag` action never returned and the run stopped there
+(microsoft/playwright#43256, closed upstream without a fix). Found with a
+fixture page written to do it, not on a site.
+
+- **Every move with the button down is raced** against the page hearing
+  the browser give up (a `dragend` in the same task as the `dragstart`)
+  and against the action's remaining budget. On either, the drag lets go
+  of the button.
+- **It fails saying so**: "The drag never got going: the browser started a
+  drag from … and gave it up at once". Nothing was dropped, so it drags once
+  more from where the page put the element first, as for a drag that
+  reached nothing (SPEC-web-survey-fixes.md §2.52).
+
 ### Changed — `@pkent/aigateway` is now `@steptix/aigateway`
 
 The AI client library moved with the rest of the project: its repository is
