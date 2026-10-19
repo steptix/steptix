@@ -455,7 +455,7 @@ function summary(
     'Copilot premium requests; running a compiled test spends none, and runSettings ' +
     'ai: "off" makes any run keyless by policy. ' +
     // The one failure this command cannot detect: `gateway/` is resolved by
-    // @pkent/aigateway inside the server process, which this extension neither
+    // @steptix/aigateway inside the server process, which this extension neither
     // imports nor can interrogate. A server predating the gateway provider
     // refuses the model it was just handed, and the error names neither Copilot
     // nor the bridge — so the remedy is said here, once. Now that the framework

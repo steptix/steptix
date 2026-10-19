@@ -213,7 +213,7 @@ export const IMAGE_INPUT_UNSUPPORTED = 'image_input_unsupported';
  * Did this AI request fail because the model rejects images?
  *
  * The error reaches the runner as the OpenAI SDK's `BadRequestError` —
- * `@pkent/aigateway` passes provider errors through unwrapped — whose `message`
+ * `@steptix/aigateway` passes provider errors through unwrapped — whose `message`
  * is `"400 <the bridge's message>"` and does NOT contain the code: the code is
  * on `.code` and on `.error.code` (the body's `error` object). So all three are
  * read, plus a `cause` chain, plus the message as a last resort for a layer

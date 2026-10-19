@@ -26,7 +26,7 @@ const streamMock = vi.fn();
 /** Records every `new AIGateway(...)`, so a rebuild between calls is visible. */
 const constructorMock = vi.fn();
 
-vi.mock('@pkent/aigateway', () => {
+vi.mock('@steptix/aigateway', () => {
   class FakeAIGateway {
     chat: typeof chatMock;
     stream: typeof streamMock;

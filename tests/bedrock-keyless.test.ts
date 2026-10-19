@@ -39,7 +39,7 @@ vi.mock('../src/utils/logger.js', () => ({
 const constructorMock = vi.fn();
 const chatMock = vi.fn();
 
-vi.mock('@pkent/aigateway', () => {
+vi.mock('@steptix/aigateway', () => {
   class FakeAIGateway {
     chat: typeof chatMock;
     stream = vi.fn();

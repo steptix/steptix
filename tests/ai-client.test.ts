@@ -36,7 +36,7 @@ let streamImpl: (...args: any[]) => any = () => makeStream([], { content: [], mo
 /** Records every `new AIGateway(model, key, options)` so tests can assert construction args + rebuild count. */
 const constructorMock = vi.fn();
 
-vi.mock('@pkent/aigateway', () => {
+vi.mock('@steptix/aigateway', () => {
   class FakeAIGateway {
     chat: typeof chatMock;
     stream: typeof streamMock;
@@ -87,7 +87,7 @@ function withoutGatewayUrl(config: AiConfig): AiConfig {
   return rest;
 }
 
-describe('AiClient — @pkent/aigateway integration', () => {
+describe('AiClient — @steptix/aigateway integration', () => {
   const tokenTracker = {
     addUsage: vi.fn(),
     checkStepBudget: vi.fn(),

@@ -51,7 +51,7 @@ import {
 /** A text-only message: exactly one text part, as the translation coalesces it. */
 const msg = (role, text) => ({ role, parts: [{ kind: 'text', text }] });
 
-/** A request in the shape `@pkent/aigateway` actually builds. */
+/** A request in the shape `@steptix/aigateway` actually builds. */
 const request = (over = {}) => ({
   model: 'copilot/gpt-4.1',
   messages: [{ role: 'user', content: 'hello' }],

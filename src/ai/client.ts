@@ -1,5 +1,5 @@
-import { AIGateway } from '@pkent/aigateway';
-import type { CallOptions, Effort, V2ContentBlock } from '@pkent/aigateway';
+import { AIGateway } from '@steptix/aigateway';
+import type { CallOptions, Effort, V2ContentBlock } from '@steptix/aigateway';
 import type { AiConfig } from '../config/types.js';
 import { aiConfigured } from '../config/loader.js';
 import type { ChatMessage, MessageContentBlock } from './types.js';
@@ -234,7 +234,7 @@ export interface CompleteResult {
   text: string;
   /**
    * The model id reported by the gateway's v2 response envelope, or the
-   * configured model if the envelope omitted it. `@pkent/aigateway` echoes the
+   * configured model if the envelope omitted it. `@steptix/aigateway` echoes the
    * BOUND `<provider>/<model>` id (it discards the upstream's returned model),
    * so this is effectively the configured `AI_MODEL`.
    */
@@ -304,7 +304,7 @@ export class AiClient {
   }
 
   /**
-   * Build the `@pkent/aigateway` client bound to the current `model` + `apiKey`.
+   * Build the `@steptix/aigateway` client bound to the current `model` + `apiKey`.
    * The model-string prefix drives routing: `baseURL` (the gateway `/v1`
    * surface) is supplied ONLY for gateway-routed models — for direct models
    * (`openai/…`, `anthropic/…`, …) passing it would point the provider's own SDK
@@ -430,7 +430,7 @@ export class AiClient {
    * every other field (maxInputTokens, streaming) is server-level and left
    * untouched.
    *
-   * `@pkent/aigateway` binds the model at construction AND the `baseURL` choice
+   * `@steptix/aigateway` binds the model at construction AND the `baseURL` choice
    * depends on the model prefix, so a model change OR a key change invalidates
    * the cached gateway — it's rebuilt on the next {@link getGateway} call. The
    * gateway URL is baked into that same `baseURL`, which is why it belongs
@@ -550,7 +550,7 @@ export class AiClient {
 
     let v2;
     try {
-      // Messages pass through unchanged — `@pkent/aigateway` accepts the
+      // Messages pass through unchanged — `@steptix/aigateway` accepts the
       // consumer's `ChatMessage` shape and handles `cache` hints itself.
       v2 = await gateway.chat(messages, {
         ...this.resolveProfile(options?.profile),

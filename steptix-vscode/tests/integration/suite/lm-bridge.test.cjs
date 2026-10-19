@@ -78,7 +78,7 @@ describe('Steptix Copilot LM bridge', function () {
 
   const json = (result) => JSON.parse(result.text);
 
-  /** The request shape @pkent/aigateway actually builds for this framework. */
+  /** The request shape @steptix/aigateway actually builds for this framework. */
   const completionRequest = (over = {}) => ({
     model: 'copilot/gpt-4.1',
     messages: [

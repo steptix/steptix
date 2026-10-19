@@ -1026,7 +1026,7 @@ bridge below it works headless and in CI.
 npm install @anthropic-ai/bedrock-sdk
 ```
 
-It is an optional peer dependency of `@pkent/aigateway` rather than something
+It is an optional peer dependency of `@steptix/aigateway` rather than something
 this framework depends on, deliberately: it pulls the AWS SDK, roughly 50
 packages and 38 MB of credential providers and IMDS clients, and depending on it
 here would charge every user of this framework for a provider most of them never
@@ -1166,9 +1166,10 @@ bridge speaks text only, so an image block is replaced with a short note (the
 diagnosis pass still works, text-only). The bridge is loopback — a **remote**
 Sessions API server would resolve `127.0.0.1` to itself, so this only works with
 a server on the same machine; the setup command warns when `STEPTIX_SERVER_URL` is not
-local. And the `gateway/` prefix is resolved by `@pkent/aigateway` inside the server
+local. And the `gateway/` prefix is resolved by `@steptix/aigateway` inside the server
 process, so the server has to be running a build whose dependency ships it —
-`1.4.0-beta.5` or later. If it answers `Unsupported model "gateway/…"` and lists
+any `@steptix/aigateway`, or `@pkent/aigateway` `1.4.0-beta.5` or later from
+before the rename. If it answers `Unsupported model "gateway/…"` and lists
 the providers it does know, that server predates the prefix: rebuild and restart
 it from a checkout on this version.
 

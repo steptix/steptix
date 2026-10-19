@@ -11,7 +11,7 @@
  * its own.
  *
  * The one shape assumption worth stating: the caller on the other end is
- * always this framework's `AiClient` via `@pkent/aigateway`, which is the
+ * always this framework's `AiClient` via `@steptix/aigateway`, which is the
  * OpenAI SDK. So the request is OpenAI-canonical, and the response has to
  * satisfy that SDK's parser — not a hand-rolled reader that would forgive a
  * missing `finish_reason` or a bare `[DONE]`.
@@ -433,7 +433,7 @@ export function translateRequest(raw: unknown, options: TranslateOptions = {}): 
   const responseFormat = raw['response_format'];
   const wantsJson = isRecord(responseFormat) && responseFormat['type'] === 'json_object';
 
-  // `max_completion_tokens` is the ONLY spelling that arrives: @pkent/aigateway
+  // `max_completion_tokens` is the ONLY spelling that arrives: @steptix/aigateway
   // writes the consumer's `maxTokens` under that name, and never sends
   // `max_tokens`. Passed under modelOptions, which providers read at their own
   // discretion — a provider that ignores the key just uses its own default,
@@ -622,7 +622,7 @@ const sse = (payload: unknown): string => `data: ${JSON.stringify(payload)}\n\n`
  * reporting a number derived from the response's string length.
  *
  * It rides on a chunk that still carries a `choices` entry, which works because
- * the client reads usage off ANY chunk that has it (@pkent/aigateway's
+ * the client reads usage off ANY chunk that has it (@steptix/aigateway's
  * `openaiCompatible` provider). OpenAI's own `include_usage` convention is a
  * separate trailing chunk with `choices: []`, so a stricter client than the one
  * this bridge is built for would drop these numbers on the floor. Worth knowing

@@ -34,7 +34,7 @@ const gw = vi.hoisted(() => ({
   requests: 0,
 }));
 
-vi.mock('@pkent/aigateway', () => {
+vi.mock('@steptix/aigateway', () => {
   const textOf = (messages: Array<{ content: unknown }>): string =>
     messages
       .map((m) =>

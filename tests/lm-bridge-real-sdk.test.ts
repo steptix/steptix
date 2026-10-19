@@ -6,24 +6,24 @@
  * steptix-vscode's own unit tests assert the shapes it builds, and its
  * integration suite drives them over a real socket — but both sides of those
  * are ours, so a shape both agree on can still be one the OpenAI SDK rejects.
- * Here the request comes from `@pkent/aigateway` (which is the OpenAI SDK) and
+ * Here the request comes from `@steptix/aigateway` (which is the OpenAI SDK) and
  * the response is parsed by it, so the assertions are about the contract rather
  * than about our reading of it.
  *
  * This file lives in the framework's suite, not the extension's, because that is
- * where `@pkent/aigateway` is a declared dependency. It imports the extension's
+ * where `@steptix/aigateway` is a declared dependency. It imports the extension's
  * response shapers across the package line; they import nothing at all
  * (lm-bridge-core.ts is deliberately free of `vscode` and `node:http`), so
  * there is no extension host in play.
  *
- * The model is spelled `openai/…` rather than `gateway/…`: the pinned
- * @pkent/aigateway has no `gateway` provider yet (that is rollout step 1 of the
- * story), and `openai/` with a `baseURL` is the same OpenAI-compatible client
- * the `gateway` provider will build — which is what this test is about.
+ * The model is spelled `openai/…` rather than `gateway/…`: `openai/` with a
+ * `baseURL` builds the same OpenAI-compatible client the `gateway` provider
+ * builds, so the assertions are about that client's contract rather than about
+ * prefix routing.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as http from 'node:http';
-import { AIGateway } from '@pkent/aigateway';
+import { AIGateway } from '@steptix/aigateway';
 import {
   chatCompletionBody,
   streamFrames,
