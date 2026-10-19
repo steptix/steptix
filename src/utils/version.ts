@@ -9,6 +9,15 @@ const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
  *  (`npm run dev` through tsx, or vitest). */
 const RUNNING_FROM_DIST = basename(join(dirname(fileURLToPath(import.meta.url)), '..')) === 'dist';
 
+/**
+ * The folder this build of Steptix runs from — the one holding its
+ * `package.json`. With the version, it is what tells two installs or
+ * checkouts apart when both claim the same release.
+ */
+export function getPackageRoot(): string {
+  return PACKAGE_ROOT;
+}
+
 let cached: string | undefined;
 
 /**

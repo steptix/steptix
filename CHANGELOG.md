@@ -9,6 +9,21 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Added — the server says which build started, and from where
+
+`steptix serve` now opens its console output with the version and the folder
+it runs from, before it binds the port:
+
+```text
+[INFO]  Steptix 1.0.0-beta.1 (fcda88c) starting from C:\Projects\steptix
+[INFO]  Sessions API server listening on http://127.0.0.1:3111
+```
+
+The version reads as `steptix --version` does — with the commit, and
+`, modified` when the build held uncommitted changes. With several
+checkouts or an installed runtime on one machine, this is how to tell which
+one a console belongs to. A start that dies on a taken port prints it too.
+
 ### Fixed — a drag the browser gives up no longer hangs the run
 
 When a page's own `dragstart` handler moves, hides or removes the element

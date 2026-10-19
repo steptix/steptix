@@ -65,7 +65,7 @@ import { HEALTH_SERVICE_ID, type HealthResponse } from './health.js';
 // same function, moved.
 import { validateDetachedBody, validateSectionEntry } from './section-entry.js';
 import { logger } from '../utils/logger.js';
-import { getBuildInfo, getPackageVersion } from '../utils/version.js';
+import { describeVersion, getBuildInfo, getPackageRoot, getPackageVersion } from '../utils/version.js';
 
 /**
  * Default cap on characters returned by `GET /sessions/:id/content`.
@@ -2661,6 +2661,12 @@ export function installCrashGuards(target: CrashGuardTarget = process): void {
  * and `listen.source` is what a taken port is reported against.
  */
 export async function startServer(config: Config, listen: ServePort): Promise<void> {
+  // First, before anything can fail: a start that dies on a taken port still
+  // says which build and which folder it was.
+  logger.info(
+    `Steptix ${describeVersion({ version: getPackageVersion(), ...getBuildInfo() })} ` +
+      `starting from ${getPackageRoot()}`,
+  );
   let shuttingDown = false;
 
   // `shutdown` is a hoisted function declaration, not a `const` arrow, so the
