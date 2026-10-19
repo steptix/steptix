@@ -9,6 +9,13 @@ suffix; a beta extension is a pre-release build instead.
 
 ## Unreleased
 
+### Changed — `@pkent/aigateway` 1.5.0-beta.1
+
+The AI client library moves from 1.4.0-beta.7 to 1.5.0-beta.1. The release adds
+one option, `serviceTier` (OpenAI's Fast mode and Flex, Anthropic's fast
+mode), and leaves a request without it byte-for-byte as before. Steptix does
+not set it, so what is sent to a model is unchanged.
+
 ### Fixed — a check's code is written from the part of the page it checks
 
 A Verify check is planned by one AI request and its code written by a second
