@@ -14,15 +14,17 @@
     and re-centres it):
       - `on-drag`: once, during the first drag, as soon as it is under way
         (its first dragover anywhere on the page). The folder is gone from
-        where the pointer is headed and gets no dragover that time. Not in
-        the dragstart handler itself: a dragstart that moves its own element
-        away makes Chromium give up the drag, and Playwright's mouse move then
-        waits for it forever;
+        where the pointer is headed and gets no dragover that time;
       - `every-drag`: the same during every drag, so no drag ever reaches the
         folder;
       - `every-press`: whenever a receipt is pressed, so the receipt is never
         under the pointer by the time it moves, and the browser starts no
-        drag.
+        drag;
+      - `in-dragstart`: in every dragstart handler. The receipt leaves the
+        pointer as its drag begins, so Chromium gives the drag up at once (a
+        dragend straight after the dragstart), and Playwright's mouse move
+        waits for that drag forever;
+      - `in-first-dragstart`: the same, in the first dragstart only.
     tests/drag-dragover.test.ts drives it.
   -->
   <style>
@@ -80,6 +82,7 @@
         e.dataTransfer.setData('text/plain', receipt.textContent);
         drags += 1;
         movePending = move === 'every-drag' || (move === 'on-drag' && drags === 1);
+        if (move === 'in-dragstart' || (move === 'in-first-dragstart' && drags === 1)) moveAway();
       });
     }
     document.addEventListener('dragover', () => {

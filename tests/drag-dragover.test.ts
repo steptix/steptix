@@ -8,15 +8,17 @@
  * The SecureBank File receipts page (`fixtures/test-app/file-receipts.html`)
  * does the same on request: `?move=on-drag` moves its content off screen
  * once, as the first drag gets under way; `?move=every-drag` during every
- * drag; `?move=every-press` whenever a receipt is pressed.
+ * drag; `?move=every-press` whenever a receipt is pressed; `?move=in-dragstart`
+ * in every dragstart handler, which makes Chromium give the drag up as it
+ * begins; `?move=in-first-dragstart` in the first one only.
  *
  * Nothing here waits on time: each drag is awaited, and what the page did is
  * read from the page afterwards.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
-import { executeAction } from '../src/browser/actions.js';
+import { DragStalledError, executeAction, untilDragStalls } from '../src/browser/actions.js';
 import { renderReport } from '../src/report/generator.js';
 import { addLogCallback } from '../src/utils/logger.js';
 import type { AIAction } from '../src/ai/types.js';
@@ -281,6 +283,118 @@ describe('an HTML5 drag that could not drop', () => {
     expect(result.success).toBe(true);
     expect(await filed()).toEqual([]);
   }, 30_000);
+});
+
+describe('a drag the browser gives up as it begins', () => {
+  // The page moves (or removes) the receipt in its own dragstart handler.
+  // Chromium then gives the drag up at once (a dragend straight after the
+  // dragstart), and Playwright's mouse move waits for the drag forever:
+  // before this fix, the action never returned. Each test here ends when the drag does;
+  // nothing waits on time.
+
+  /** Count the mouse releases that reach the page from now on. */
+  const countReleases = () => page.evaluate(() => {
+    (globalThis as any).releases = 0;
+    addEventListener('mouseup', () => { (globalThis as any).releases += 1; }, true);
+  });
+  const releases = () => page.evaluate(() => (globalThis as any).releases as number);
+
+  it('fails saying the browser gave the drag up, and lets go of the button', async () => {
+    await page.goto(`${server!.baseUrl}/file-receipts?move=in-dragstart`);
+    await countReleases();
+    const lines: string[] = [];
+    const stop = addLogCallback((_level, message) => lines.push(message));
+    let result;
+    try {
+      result = await executeAction(page, drag);
+    } finally {
+      stop();
+    }
+    expect(result.success).toBe(false);
+    expect(result.error).toBe(
+      'The drag never got going: the browser started a drag from "#receipts span:text-is("Receipt 1043")" and gave '
+      + 'it up at once, before it reached anything, so nothing was dropped (via stepped). Chromium does that when '
+      + 'the page moves, hides or removes the element as the drag starts.',
+    );
+    // Nothing was dropped, so it dragged once more from where the page put
+    // the receipt, and the page gave that one up too.
+    expect(lines.filter((l) => l === 'drag via stepped mouse moves')).toHaveLength(2);
+    expect(await filed()).toEqual([]);
+    expect(await waiting()).toEqual(['Receipt 1043', 'Receipt 1044']);
+    // Each press was let go, and the watch is down.
+    expect(await releases()).toBe(2);
+    expect(await page.evaluate(() => '__steptixDragWatch' in globalThis)).toBe(false);
+  }, 30_000);
+
+  it('fails the same way when the dragstart handler removes the receipt', async () => {
+    // A removed receipt is the only one to hear its dragend: the window does
+    // not, so the watch listens on the receipt too.
+    await page.goto(`${server!.baseUrl}/file-receipts`);
+    await page.evaluate(() => {
+      for (const receipt of document.querySelectorAll('#receipts span')) {
+        receipt.addEventListener('dragstart', () => receipt.remove());
+      }
+    });
+    const result = await executeAction(page, drag);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/^The drag never got going: .* \(via stepped\)\./);
+  }, 30_000);
+
+  it('drags again when only the first dragstart moved the receipt, and drops', async () => {
+    // The mouse move the first drag left waiting does not get in the way of
+    // the second.
+    await page.goto(`${server!.baseUrl}/file-receipts?move=in-first-dragstart`);
+    const result = await executeAction(page, drag);
+    expect(result.error).toBeUndefined();
+    expect(result.drag).toEqual({ via: 'stepped' });
+    expect(await filed()).toEqual(['Receipt 1043']);
+  }, 30_000);
+
+  it('fails the same way by dragTo, and lets go of the button', async () => {
+    // dragTo takes over when the window looks too small for the pair (§2.19).
+    // Only the drag's own read of the window size is made small, so dragTo
+    // moves without scrolling and the dragstart handler is what stops it.
+    await page.goto(`${server!.baseUrl}/file-receipts?move=in-dragstart`);
+    await countReleases();
+    const evaluate = page.evaluate.bind(page) as (...args: unknown[]) => Promise<unknown>;
+    (page as any).evaluate = (fn: unknown, ...rest: unknown[]) => (
+      String(fn).includes('innerWidth') ? Promise.resolve({ width: 1, height: 1 }) : evaluate(fn, ...rest)
+    );
+    const result = await executeAction(page, drag);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/^The drag never got going: .* \(via dragTo\)\./);
+    expect(await filed()).toEqual([]);
+    expect(await releases()).toBe(1);
+    expect(await page.evaluate(() => '__steptixDragWatch' in globalThis)).toBe(false);
+  }, 30_000);
+});
+
+describe('untilDragStalls', () => {
+  // The ceiling for a drag the watch cannot follow. Fake timers, so the
+  // budget passes without anyone waiting for it.
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('returns what the input returns', async () => {
+    await expect(untilDragStalls(Promise.resolve('moved'), new Promise(() => {}), 5_000)).resolves.toBe('moved');
+  });
+
+  it('fails as given up when the watch hears the browser give the drag up', async () => {
+    const stalled = untilDragStalls(new Promise(() => {}), Promise.resolve(true), 5_000);
+    await expect(stalled).rejects.toBeInstanceOf(DragStalledError);
+    await expect(stalled).rejects.toMatchObject({ gaveUp: true });
+  });
+
+  it('fails as out of time once the budget and a moment more have passed', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    // The watch could not tell (null), so only the budget ends the wait.
+    const stalled = untilDragStalls(new Promise(() => {}), Promise.resolve(null), 5_000);
+    const settled = stalled.then(() => 'returned', (err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const err = await settled;
+    expect(err).toBeInstanceOf(DragStalledError);
+    expect(err).toMatchObject({ gaveUp: false, waitedMs: 6_000 });
+  });
 });
 
 describe('the report', () => {

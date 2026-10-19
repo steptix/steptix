@@ -1290,10 +1290,37 @@ drop yes`). The report's drag row
 ends `(via stepped mouse moves)` or `(via dragTo)`. A failed drag has no
 route on its row; its error names it.
 
-**Not fixed here.** A page whose own `dragstart` handler moves the dragged
-element away makes Chromium give up the drag, and Playwright's mouse move
-then waits for an intercepted drag that never comes, with no timeout. Seen
-only with a fixture written to do it, not on a survey site.
+**A drag the browser gives up as it begins.** A page whose own `dragstart`
+handler moves, hides or removes the dragged element makes Chromium give up
+the drag at once: the dragged element gets a `dragend` straight after the
+`dragstart`, in the same task (measured headless and headed, Chromium 147;
+a removed element gets it, the window does not). Playwright's Chromium drag
+interception has by then seen a `dragstart` the page let stand, and waits
+for the browser to hand it the drag with no timeout, not even `dragTo`'s
+own, so the action never returned. Upstream this is
+microsoft/playwright#43256, closed without a fix (its PR #43261 was
+declined), and the wait is unchanged through 1.65. Seen only with a fixture
+written to do it, not on a survey site.
+
+So every mouse move made with the button down, and `dragTo` as a whole,
+is raced against two things: the drag watch hearing a `dragend` in the
+same task as the `dragstart`, and the action's remaining budget plus a
+second, for a drag the watch cannot follow. On either, the drag lets go of
+the button, takes the watch down and leaves the waiting move behind. A
+release ends a drag tasks later, so a drag that worked, even one dropped
+into a frame the watch cannot see into, is never taken for one the browser
+gave up. A drag the browser gave up dropped nothing, so it is dragged again
+on the terms above, and otherwise fails:
+
+> The drag never got going: the browser started a drag from "…" and gave it
+> up at once, before it reached anything, so nothing was dropped (via
+> stepped). Chromium does that when the page moves, hides or removes the
+> element as the drag starts.
+
+Out of budget, it fails saying the pointer was still moving with the button
+down after so many seconds. No browser flag and no budget of its own: it is
+the one the action already had, plus a second so that `dragTo`'s own
+timeout, which says what it waited for, fires first when it can.
 
 Tests (`tests/drag-dragover.test.ts`, on the SecureBank File receipts page,
 `fixtures/test-app/file-receipts.html`): a drop lands by the stepped route
@@ -1306,7 +1333,12 @@ every press fails "landed on", and before the first press only drops; the
 a layer over the folder passes; a drag something else in the page took is
 not repeated; a drag that throws leaves no watch behind; a
 pointer-event drag with no `draggable` passes; the report's row names each
-route.
+route. A page that moves the receipt in every `dragstart` fails "never got
+going" by the stepped route and by `dragTo`, letting go of the button each
+time, and one that does so in the first `dragstart` only is dragged again
+and drops; one that removes the receipt in `dragstart` fails the same way;
+the race itself ends on the input, on the watch, and, with fake timers, on
+the budget.
 
 ## 3. Failures caused by the test files or the sites
 
