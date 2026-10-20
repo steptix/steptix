@@ -23,7 +23,7 @@ export { chromeFound };
 export const WELCOME_COMMAND = 'steptix.welcome';
 export const CHOOSE_AI_COMMAND = 'steptix.chooseAi';
 
-export type ServerStepState = 'not-installed' | 'installing' | 'ready' | 'yours' | 'unsupported';
+export type ServerStepState = 'not-installed' | 'installing' | 'ready' | 'yours' | 'unsupported' | 'chosen';
 export type CopilotState = 'checking' | 'offers-luna' | 'no-luna' | 'none' | 'unavailable';
 export type SaveFor = 'all' | 'project';
 
@@ -172,13 +172,14 @@ function saveForLine() {
 
 function serverStep() {
   const s = state.server;
-  const label = { 'not-installed': 'Not installed', installing: 'Installing', ready: 'Ready', yours: 'Yours', unsupported: 'Not supported here' }[s.state];
+  const label = { 'not-installed': 'Not installed', installing: 'Installing', ready: 'Ready', yours: 'Yours', unsupported: 'Not supported here', chosen: 'Another version chosen' }[s.state];
   let body = '<div>' + esc(s.detail) + '</div>';
   if (s.state === 'installing') body += '<div class="bar" role="progressbar" aria-label="Installing"></div>' + (s.progress ? '<div class="note">' + esc(s.progress) + '</div>' : '') + '<div class="note">You can carry on with the steps below while this finishes.</div>';
   if (s.state === 'not-installed') {
     body += '<div class="row"><button id="install">Install server</button>' +
       (s.onPath ? '' : '<label><input type="checkbox" id="addpath"' + (form.path ? ' checked' : '') + '> Also add <code>steptix</code> to PATH, for every terminal</label>') + '</div>';
   }
+  if (s.state === 'chosen') body += '<div class="row"><button id="use-newest">Use newest server</button></div>';
   if (s.state === 'ready' && !s.onPath) body += '<div><a id="addpath-link">Add steptix to PATH, for every terminal</a></div>';
   return card('server', '1 · Steptix server', label, s.state === 'ready' || s.state === 'yours', body, s.state !== 'ready');
 }
@@ -241,7 +242,12 @@ function render() {
   if (!state) return;
   const focused = document.activeElement && document.activeElement.id;
   document.getElementById('steps').innerHTML = serverStep() + aiStep() + browserStep() + testStep();
-  if (focused && document.getElementById(focused)) document.getElementById(focused).focus();
+  const again = focused && document.getElementById(focused);
+  if (again) {
+    again.focus();
+    // A rebuilt text box gets its caret back at the end of what was typed.
+    if (typeof again.setSelectionRange === 'function' && typeof again.value === 'string') { try { again.setSelectionRange(again.value.length, again.value.length); } catch {} }
+  }
 }
 
 document.addEventListener('click', (e) => {
@@ -250,6 +256,7 @@ document.addEventListener('click', (e) => {
   if (t.id === 'install') post({ type: 'installServer', addToPath: form.path });
   else if (t.id === 'addpath') { form.path = t.checked; }
   else if (t.id === 'addpath-link') post({ type: 'addToPath' });
+  else if (t.id === 'use-newest') post({ type: 'useNewestServer' });
   else if (t.id === 'change-ai') { form.mode = 'change'; form.open = 'ai'; post({ type: 'checkCopilot' }); render(); }
   else if (t.name === 'aimode') { form.mode = t.value; render(); }
   else if (t.name === 'savefor') { form.saveFor = t.value; }
@@ -277,7 +284,8 @@ document.addEventListener('change', (e) => {
   if (e.target.id === 'copilot-model') form.copilotModel = e.target.value;
 });
 document.addEventListener('input', (e) => {
-  if (e.target.id === 'api-key') { form.key = e.target.value; form.keyOk = false; }
+  // A changed key has to be checked again before it can be saved.
+  if (e.target.id === 'api-key') { form.key = e.target.value; form.keyOk = false; if (form.models) { form.models = null; form.keyMessage = ''; render(); } }
   if (e.target.id === 'typed-model') form.typed = e.target.value;
 });
 

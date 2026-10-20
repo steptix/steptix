@@ -13,13 +13,14 @@ import { Writable } from 'node:stream';
 import type { Command } from 'commander';
 import {
   AI_PROVIDERS,
-  aiModelFor,
   checkProviderKey,
   envValueBlank,
   maskKey,
   modelChoices,
+  projectAiOverrides,
+  providerEnvText,
   providerInfo,
-  setEnvValues,
+  withEnvIgnored,
   type ProviderFetch,
   type ProviderId,
 } from '../../ai/provider-setup.js';
@@ -37,10 +38,21 @@ export interface AiCommandIo {
   machineEnvPath: string;
   /** Where "Only this project" writes: the project's .env. */
   projectDir: string;
-  /** Whether `.env` in `projectDir` is in a git repository and not ignored. */
-  envUntracked(projectDir: string): boolean;
+  /** Where `.env` in `projectDir` stands with git: {@link EnvGitState}. */
+  envGitState(projectDir: string): EnvGitState;
   platform: NodeJS.Platform;
 }
+
+/**
+ * Where a project's `.env` stands with git: `safe` outside a repository or
+ * ignored, `not-ignored` when a commit would pick it up, and `committed` when
+ * git already tracks it, which a .gitignore line no longer changes.
+ */
+export type EnvGitState = 'safe' | 'not-ignored' | 'committed';
+
+/** Where a company proxy is set for this command. Node's fetch reads
+ *  HTTPS_PROXY only with NODE_USE_ENV_PROXY=1. */
+const TERMINAL_PROXY = 'this terminal (HTTPS_PROXY, with NODE_USE_ENV_PROXY=1)';
 
 const ATTEMPTS = 3;
 
@@ -79,9 +91,16 @@ export async function chooseAi(io: AiCommandIo): Promise<number> {
   let key = '';
   let models: string[] | null = null;
   io.out(`Make a key at ${info.keyPage} if you have none.`);
-  for (let i = 0; i < ATTEMPTS && models === null; i++) {
+  for (let tries = 0, blanks = 0; tries < ATTEMPTS && blanks < ATTEMPTS && models === null; ) {
     key = (await io.ask(`${info.label} API key: `, { hidden: true })).trim();
-    const check = await checkProviderKey(provider, key, io.fetch, 'this terminal (HTTPS_PROXY)');
+    if (key === '') {
+      // Not a key the provider refused, so it does not use up a try.
+      blanks++;
+      io.err('Paste the key, then press Enter.');
+      continue;
+    }
+    tries++;
+    const check = await checkProviderKey(provider, key, io.fetch, TERMINAL_PROXY);
     if (check.ok) {
       models = check.models;
       io.out('Key works.');
@@ -113,30 +132,41 @@ export async function chooseAi(io: AiCommandIo): Promise<number> {
   const where = (await io.ask(`Save for 1) all your projects  2) only this project (${io.projectDir}) [1]: `)).trim();
   const forProject = where === '2';
   const target = forProject ? projectEnv : io.machineEnvPath;
-  if (forProject && io.envUntracked(io.projectDir)) {
+  const git = forProject ? io.envGitState(io.projectDir) : 'safe';
+  if (git === 'committed') {
+    io.err(
+      `${projectEnv} is already committed to git, so a key saved there goes into the next commit; .gitignore cannot stop that. ` +
+        'Run git rm --cached .env first, or save for all your projects.',
+    );
+    io.err('Nothing was saved.');
+    return 1;
+  }
+  if (git === 'not-ignored') {
     const add = (await io.ask(`${projectEnv} is not in .gitignore, and it will hold your key. Add it? [Y/n]: `)).trim();
     if (!/^n/i.test(add)) {
       const gitignore = path.join(io.projectDir, '.gitignore');
-      const text = readText(gitignore);
-      fs.writeFileSync(gitignore, `${text}${text === '' || text.endsWith('\n') ? '' : '\n'}.env\n`);
+      fs.writeFileSync(gitignore, withEnvIgnored(readText(gitignore)));
       io.out('Added .env to .gitignore.');
     }
   }
-  if (!forProject && envValueBlank(readText(projectEnv), 'AI_API_KEY')) {
-    io.err(
-      `${projectEnv} has an empty AI_API_KEY= line, which keeps the all-projects key from reaching this project. ` +
-        'Remove that line, or run steptix ai again and save for only this project.',
-    );
+  if (!forProject) {
+    const projectText = readText(projectEnv);
+    const own = projectAiOverrides(projectText);
+    if (envValueBlank(projectText, 'AI_API_KEY')) {
+      io.err(
+        `${projectEnv} has an empty AI_API_KEY= line, which keeps the all-projects key from reaching this project. ` +
+          'Remove that line, or run steptix ai again and save for only this project.',
+      );
+    } else if (own.length > 0) {
+      io.err(
+        `${projectEnv} sets its own ${own.join(' and ')}, which this project uses instead of the all-projects choice. ` +
+          'Remove those lines to use it here, or run steptix ai again and save for only this project.',
+      );
+    }
   }
 
-  const current = readText(target);
-  // A gateway URL left from Copilot points at VS Code's bridge, which a
-  // provider's model does not use; any other gateway is the user's own.
-  const gateway = /^\s*AI_GATEWAY_URL\s*=\s*(\S*)/m.exec(current)?.[1] ?? '';
-  const values: Record<string, string | null> = { AI_MODEL: aiModelFor(provider, modelId), AI_API_KEY: key };
-  if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(gateway)) values['AI_GATEWAY_URL'] = null;
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, setEnvValues(current, values), { mode: PRIVATE_FILE_MODE });
+  fs.writeFileSync(target, providerEnvText(readText(target), provider, modelId, key), { mode: PRIVATE_FILE_MODE });
   if (io.platform !== 'win32') fs.chmodSync(target, PRIVATE_FILE_MODE);
   io.out(
     `${forProject ? 'Saved for this project' : 'Saved for all your projects'}: ${info.label}, ${modelId}, key ending ${maskKey(key)}.`,
@@ -144,19 +174,19 @@ export async function chooseAi(io: AiCommandIo): Promise<number> {
   return 0;
 }
 
-/** Is `.env` in `dir` inside a git work tree and not ignored there? */
-function envUntrackedByGit(dir: string): boolean {
-  try {
-    execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: dir, stdio: 'ignore' });
-  } catch {
-    return false;
-  }
-  try {
-    execFileSync('git', ['check-ignore', '-q', '.env'], { cwd: dir, stdio: 'ignore' });
-    return false;
-  } catch {
-    return true;
-  }
+/** Where `.env` in `dir` stands with git ({@link EnvGitState}). */
+function envGitStateOf(dir: string): EnvGitState {
+  const git = (args: string[]): boolean => {
+    try {
+      execFileSync('git', args, { cwd: dir, stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!git(['rev-parse', '--is-inside-work-tree'])) return 'safe';
+  if (git(['ls-files', '--error-unmatch', '.env'])) return 'committed';
+  return git(['check-ignore', '-q', '.env']) ? 'safe' : 'not-ignored';
 }
 
 /** The project the terminal is in: the nearest folder up with a steptix.config.json, else this one. */
@@ -205,7 +235,7 @@ export function registerAiCommand(program: Command): void {
           fetch: (url, init) => fetch(url, init),
           machineEnvPath: userRootEnvPath(),
           projectDir: projectDirFrom(process.cwd()),
-          envUntracked: envUntrackedByGit,
+          envGitState: envGitStateOf,
           platform: process.platform,
         });
       } finally {

@@ -660,6 +660,7 @@ function projectConfig(
 
   const out: WireConfig = {};
   // A baseUrl beginning ./ or ../ is a page beside the test (resolveBaseUrl).
+  // The parser resolved the file's own; this catches one a tool argument gave.
   if (resolved['baseUrl'] !== undefined) out.baseUrl = resolveBaseUrl(resolved['baseUrl'], filePath);
   if (resolved['timeout'] !== undefined) out.timeout = resolved['timeout'];
   // The raw spec, unvalidated (stories/per-test-viewport.md §7). This whitelist

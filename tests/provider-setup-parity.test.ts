@@ -114,6 +114,31 @@ describe('what a choice writes and how it is shown', () => {
   });
 });
 
+describe('saving a provider choice', () => {
+  it("writes the model and key, and drops a gateway on this machine, which is Copilot's bridge", () => {
+    expect(cli.providerEnvText('AI_GATEWAY_URL=http://127.0.0.1:18790\nAI_MODEL=gateway/copilot/gpt-6-luna\n', 'openai', 'gpt-6-luna', 'provider-test-key')).toBe(
+      'AI_MODEL=openai/gpt-6-luna\nAI_API_KEY=provider-test-key\n',
+    );
+  });
+
+  it("keeps a gateway anywhere else, which is the user's own", () => {
+    expect(cli.providerEnvText('AI_GATEWAY_URL=https://gateway.example.test\n', 'openai', 'gpt-6-luna', 'provider-test-key')).toBe(
+      'AI_GATEWAY_URL=https://gateway.example.test\nAI_MODEL=openai/gpt-6-luna\nAI_API_KEY=provider-test-key\n',
+    );
+  });
+
+  it('adds .env to a .gitignore on a line of its own', () => {
+    expect(cli.withEnvIgnored('')).toBe('.env\n');
+    expect(cli.withEnvIgnored('node_modules')).toBe('node_modules\n.env\n');
+    expect(cli.withEnvIgnored('node_modules\n')).toBe('node_modules\n.env\n');
+  });
+
+  it("names the AI settings a project's .env makes for itself, and not empty ones", () => {
+    expect(cli.projectAiOverrides('AI_MODEL=openai/gpt-6-luna\nexport AI_API_KEY=provider-test-key\n')).toEqual(['AI_MODEL', 'AI_API_KEY']);
+    expect(cli.projectAiOverrides('AI_API_KEY=\n# AI_MODEL=x\nSTEPTIX_SERVER_URL=http://127.0.0.1:3100\n')).toEqual([]);
+  });
+});
+
 describe("runner-core's copy", () => {
   it('lists the same providers and recommended models', () => {
     expect(core.AI_PROVIDERS).toEqual(cli.AI_PROVIDERS);
@@ -139,5 +164,9 @@ describe("runner-core's copy", () => {
     expect(core.setEnvValues(text, { AI_MODEL: 'z', B: '2' })).toBe(cli.setEnvValues(text, { AI_MODEL: 'z', B: '2' }));
     expect(core.envValueBlank('AI_API_KEY=', 'AI_API_KEY')).toBe(cli.envValueBlank('AI_API_KEY=', 'AI_API_KEY'));
     expect(core.maskKey('abc')).toBe(cli.maskKey('abc'));
+    const env = 'AI_GATEWAY_URL=http://localhost:18790\nAI_MODEL=y\n';
+    expect(core.providerEnvText(env, 'anthropic', 'm', 'k')).toBe(cli.providerEnvText(env, 'anthropic', 'm', 'k'));
+    expect(core.withEnvIgnored('a')).toBe(cli.withEnvIgnored('a'));
+    expect(core.projectAiOverrides(env + 'AI_API_KEY=k\n')).toEqual(cli.projectAiOverrides(env + 'AI_API_KEY=k\n'));
   });
 });

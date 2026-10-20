@@ -503,7 +503,7 @@ export async function copilotModels(bridge: LmBridge): Promise<LmModelHandle[] |
  */
 export async function useCopilotFor(
   bridge: LmBridge,
-  args: { modelId: string; envPath: string; privateFile: boolean },
+  args: { modelId: string; envPath: string },
 ): Promise<{ ok: true } | { ok: false; message: string }> {
   const models = await copilotModels(bridge);
   if (models === null) {
@@ -531,7 +531,8 @@ export async function useCopilotFor(
   const tmpPath = `${args.envPath}.tmp-${process.pid}`;
   try {
     await fs.mkdir(path.dirname(args.envPath), { recursive: true });
-    await fs.writeFile(tmpPath, plan.text, { encoding: 'utf8', ...(args.privateFile && { mode: 0o600 }) });
+    // Owner-only, like every file the AI step writes a key or token into.
+    await fs.writeFile(tmpPath, plan.text, { encoding: 'utf8', mode: 0o600 });
     await fs.rename(tmpPath, args.envPath);
   } catch (err) {
     await fs.rm(tmpPath, { force: true }).catch(() => undefined);

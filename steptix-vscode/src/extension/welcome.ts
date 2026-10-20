@@ -11,17 +11,17 @@
 
 import * as vscode from 'vscode';
 import { execFile } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import * as path from 'node:path';
 import {
-  aiModelFor,
   checkProviderKey,
   COPILOT_RECOMMENDED_MODEL,
   modelChoices,
+  providerEnvText,
   providerInfo,
-  setEnvValues,
   userRootEnvPath,
+  withEnvIgnored,
   type ModelChoice,
   type ProviderId,
 } from 'steptix-runner-core';
@@ -52,6 +52,7 @@ type FromPage =
   | { type: 'ready' }
   | { type: 'installServer'; addToPath: boolean }
   | { type: 'addToPath' }
+  | { type: 'useNewestServer' }
   | { type: 'checkCopilot' }
   | { type: 'useCopilot'; modelId: string; saveFor: SaveFor }
   | { type: 'checkKey'; provider: ProviderId; key: string }
@@ -61,13 +62,15 @@ type FromPage =
   | { type: 'createSample' }
   | { type: 'openFolder' };
 
-/** Is `.env` in `dir` inside a git work tree and not ignored there (§7.2)? */
-function envUntrackedByGit(dir: string): Promise<boolean> {
+/** Where `.env` in `dir` stands with git (§7.2), as `steptix ai` asks it:
+ *  `safe` outside a repository or ignored, `not-ignored` when a commit would
+ *  pick it up, `committed` when git tracks it already. */
+async function envGitState(dir: string): Promise<'safe' | 'not-ignored' | 'committed'> {
   const git = (args: string[]) =>
     new Promise<boolean>((resolve) => execFile('git', args, { cwd: dir, windowsHide: true }, (err) => resolve(!err)));
-  return git(['rev-parse', '--is-inside-work-tree']).then(async (inside) =>
-    inside ? !(await git(['check-ignore', '-q', '.env'])) : false,
-  );
+  if (!(await git(['rev-parse', '--is-inside-work-tree']))) return 'safe';
+  if (await git(['ls-files', '--error-unmatch', '.env'])) return 'committed';
+  return (await git(['check-ignore', '-q', '.env'])) ? 'safe' : 'not-ignored';
 }
 
 export class Welcome implements vscode.Disposable {
@@ -201,12 +204,21 @@ export class Welcome implements vscode.Disposable {
     }
   }
 
-  /** The `.env` a choice goes in, or null after the user declined to write a
-   *  key into a file git would commit. */
-  private async envFor(saveFor: SaveFor): Promise<{ path: string; private: boolean } | null> {
-    if (saveFor === 'all' || !this.folder) return { path: userRootEnvPath(), private: true };
+  /** The `.env` a choice goes in, or null when the key would go into a file
+   *  git commits and the user did not go on. */
+  private async envFor(saveFor: SaveFor): Promise<string | null> {
+    if (saveFor === 'all' || !this.folder) return userRootEnvPath();
     const envPath = path.join(this.folder, '.env');
-    if (await envUntrackedByGit(this.folder)) {
+    const git = await envGitState(this.folder);
+    if (git === 'committed') {
+      void vscode.window.showErrorMessage(
+        `${envPath} is already committed to git, so a key saved there goes into the next commit; .gitignore cannot stop that. ` +
+          'Run git rm --cached .env first, or save for all your projects.',
+        { modal: true },
+      );
+      return null;
+    }
+    if (git === 'not-ignored') {
       const add = 'Add .env to .gitignore';
       const choice = await vscode.window.showWarningMessage(
         `${envPath} is not in .gitignore, and it will hold your key. Add it before saving?`,
@@ -217,11 +229,10 @@ export class Welcome implements vscode.Disposable {
       if (choice === undefined) return null;
       if (choice === add) {
         const gitignore = path.join(this.folder, '.gitignore');
-        const text = readText(gitignore);
-        writeFileSync(gitignore, `${text}${text === '' || text.endsWith('\n') ? '' : '\n'}.env\n`);
+        writeFileSync(gitignore, withEnvIgnored(readText(gitignore)));
       }
     }
-    return { path: envPath, private: false };
+    return envPath;
   }
 
   private async onMessage(m: FromPage): Promise<void> {
@@ -232,6 +243,9 @@ export class Welcome implements vscode.Disposable {
       case 'installServer':
         await vscode.commands.executeCommand('steptix.installServer', { addToPath: m.addToPath });
         return this.refresh();
+      case 'useNewestServer':
+        this.setup.useNewestServer();
+        return this.refresh();
       case 'addToPath':
         await vscode.commands.executeCommand('steptix.addToPath');
         return this.refresh();
@@ -239,14 +253,14 @@ export class Welcome implements vscode.Disposable {
         await this.checkCopilot();
         return this.refresh();
       case 'useCopilot': {
-        const env = await this.envFor(m.saveFor);
-        if (!env) return void post({ type: 'failed', message: 'Nothing was saved.' });
-        const result = await useCopilotFor(this.bridge, { modelId: m.modelId, envPath: env.path, privateFile: env.private });
+        const envPath = await this.envFor(m.saveFor);
+        if (!envPath) return void post({ type: 'failed', message: 'Nothing was saved.' });
+        const result = await useCopilotFor(this.bridge, { modelId: m.modelId, envPath });
         await post(result.ok ? { type: 'saved' } : { type: 'failed', message: result.message });
         return this.refresh();
       }
       case 'checkKey': {
-        const check = await checkProviderKey(m.provider, m.key, (url, init) => fetch(url, init), 'VS Code');
+        const check = await this.checkKey(m.provider, m.key);
         return void post(
           check.ok
             ? { type: 'keyChecked', ok: true, models: modelChoices(m.provider, check.models) }
@@ -254,20 +268,23 @@ export class Welcome implements vscode.Disposable {
         );
       }
       case 'saveProvider': {
-        const env = await this.envFor(m.saveFor);
-        if (!env) return void post({ type: 'failed', message: 'Nothing was saved.' });
-        const current = readText(env.path);
-        // A gateway URL left from Copilot points at this window's bridge,
-        // which a provider's model does not use; any other is the user's own.
-        const gateway = /^\s*AI_GATEWAY_URL\s*=\s*(\S*)/m.exec(current)?.[1] ?? '';
-        const values: Record<string, string | null> = { AI_MODEL: aiModelFor(m.provider, m.model), AI_API_KEY: m.key.trim() };
-        if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(gateway)) values['AI_GATEWAY_URL'] = null;
+        // Checked again here, not taken on the page's word: the key in the
+        // form may have changed since its Check key (§7.2).
+        const key = m.key.trim();
+        const check = await this.checkKey(m.provider, key);
+        if (!check.ok) return void post({ type: 'failed', message: check.message });
+        const envPath = await this.envFor(m.saveFor);
+        if (!envPath) return void post({ type: 'failed', message: 'Nothing was saved.' });
+        const tmpPath = `${envPath}.tmp-${process.pid}`;
         try {
-          mkdirSync(path.dirname(env.path), { recursive: true });
-          writeFileSync(env.path, setEnvValues(current, values), env.private ? { mode: 0o600 } : {});
-          if (env.private && process.platform !== 'win32') chmodSync(env.path, 0o600);
+          mkdirSync(path.dirname(envPath), { recursive: true });
+          // Owner-only, project or machine: either way it holds the key.
+          writeFileSync(tmpPath, providerEnvText(readText(envPath), m.provider, m.model, key), { mode: 0o600 });
+          if (process.platform !== 'win32') chmodSync(tmpPath, 0o600);
+          renameSync(tmpPath, envPath);
         } catch (err) {
-          return void post({ type: 'failed', message: `Could not write ${env.path}: ${(err as Error).message}` });
+          rmSync(tmpPath, { force: true });
+          return void post({ type: 'failed', message: `Could not write ${envPath}: ${(err as Error).message}` });
         }
         await post({ type: 'saved' });
         return this.refresh();
@@ -281,6 +298,10 @@ export class Welcome implements vscode.Disposable {
       case 'openFolder':
         return void vscode.commands.executeCommand('workbench.action.files.openFolder');
     }
+  }
+
+  private checkKey(provider: ProviderId, key: string) {
+    return checkProviderKey(provider, key, (url, init) => fetch(url, init), 'VS Code');
   }
 
   /**

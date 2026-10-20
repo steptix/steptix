@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chooseAi, type AiCommandIo } from '../src/cli/commands/ai.js';
+import { chooseAi, type AiCommandIo, type EnvGitState } from '../src/cli/commands/ai.js';
 import { COPILOT_IN_TERMINAL, copilotOutOfReach } from '../src/ai/copilot-terminal.js';
 import { aiChosen, chromePaths, firstRunLines } from '../src/launcher/first-run.js';
 import { chromePaths as extensionChromePaths } from '../steptix-vscode/src/extension/install-core.ts';
@@ -21,7 +21,7 @@ afterEach(() => rmSync(scratch, { recursive: true, force: true, maxRetries: 5 })
 
 /** A terminal that answers each question in turn, and a provider that takes
  *  only `good-key-test`. */
-function terminal(answers: string[], opts: { untracked?: boolean } = {}) {
+function terminal(answers: string[], opts: { git?: EnvGitState } = {}) {
   const asked: Array<{ question: string; hidden: boolean }> = [];
   const out: string[] = [];
   const err: string[] = [];
@@ -40,7 +40,7 @@ function terminal(answers: string[], opts: { untracked?: boolean } = {}) {
     },
     machineEnvPath: path.join(scratch, 'home', 'steptix', '.env'),
     projectDir: project,
-    envUntracked: () => opts.untracked === true,
+    envGitState: () => opts.git ?? 'safe',
     platform: process.platform,
   };
   return { io, asked, out, err, project };
@@ -62,7 +62,7 @@ describe('steptix ai', () => {
   });
 
   it("saves for only this project, offering to keep the key out of git, and drops Copilot's bridge URL", async () => {
-    const t = terminal(['2', 'good-key-test', 'claude-haiku-5', '2', ''], { untracked: true });
+    const t = terminal(['2', 'good-key-test', 'claude-haiku-5', '2', ''], { git: 'not-ignored' });
     writeFileSync(path.join(t.project, '.env'), 'AI_GATEWAY_URL=http://127.0.0.1:18790\nAI_MODEL=gateway/copilot/gpt-6-luna\n');
     expect(await chooseAi(t.io)).toBe(0);
     expect(readFileSync(path.join(t.project, '.env'), 'utf8')).toBe('AI_MODEL=anthropic/claude-haiku-5\nAI_API_KEY=good-key-test\n');
@@ -75,6 +75,28 @@ describe('steptix ai', () => {
     writeFileSync(path.join(t.project, '.env'), 'AI_API_KEY=\n');
     expect(await chooseAi(t.io)).toBe(0);
     expect(t.err.join('\n')).toMatch(/empty AI_API_KEY= line, which keeps the all-projects key from reaching this project/);
+  });
+
+  it("warns when this project's own AI settings would set the all-projects choice aside", async () => {
+    const t = terminal(['2', 'good-key-test', '', '1']);
+    writeFileSync(path.join(t.project, '.env'), 'AI_MODEL=openai/gpt-6-luna\nAI_API_KEY=project-key-test\n');
+    expect(await chooseAi(t.io)).toBe(0);
+    expect(t.err.join('\n')).toMatch(/sets its own AI_MODEL and AI_API_KEY, which this project uses instead/);
+  });
+
+  it('refuses to save a key into a .env git already tracks, which .gitignore cannot stop', async () => {
+    const t = terminal(['2', 'good-key-test', '', '2'], { git: 'committed' });
+    expect(await chooseAi(t.io)).toBe(1);
+    expect(t.err.join('\n')).toMatch(/already committed to git/);
+    expect(existsSync(path.join(t.project, '.env'))).toBe(false);
+    expect(existsSync(path.join(t.project, '.gitignore'))).toBe(false);
+  });
+
+  it('asks again for an empty key without counting it as a try', async () => {
+    const t = terminal(['2', '', 'wrong-key-test', '', 'good-key-test', '', '']);
+    expect(await chooseAi(t.io)).toBe(0);
+    expect(t.err).toContain('Paste the key, then press Enter.');
+    expect(readFileSync(t.io.machineEnvPath, 'utf8')).toContain('AI_API_KEY=good-key-test');
   });
 
   it('saves nothing when the key never works', async () => {

@@ -7,6 +7,10 @@
  * wherever the project was created, with no network. It becomes the file's
  * `file://` URL. Anything else is passed on exactly as written, as before.
  *
+ * The parser applies it to a test file's own baseUrl (src/parser/markdown.ts),
+ * so every consumer gets the resolved one; src/mcp/assemble.ts applies it
+ * again to a baseUrl a tool argument supplies.
+ *
  * runner-core/src/base-url.ts is a deliberate copy for the VS Code
  * extension, which cannot import the framework;
  * tests/base-url-parity.test.ts holds the two together.

@@ -7,6 +7,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { initCommand, SAMPLE_DIR, SAMPLE_TEST, scaffoldConfig, sampleFiles } from '../src/cli/commands/init.js';
 import { parseTestFile } from '../src/parser/markdown.js';
@@ -77,12 +78,13 @@ describe('the sample test', () => {
   it('opens its own page, by a path beside the test, and every step is compiled', async () => {
     const testFile = path.join(SAMPLE_DIR, SAMPLE_TEST);
     const parsed = await parseTestFile(testFile, {});
-    expect(parsed.config.baseUrl).toBe('../pages/sample-page.html');
-    expect(existsSync(path.resolve(path.dirname(testFile), parsed.config.baseUrl!))).toBe(true);
-    const steps = readFileSync(testFile.replace(/\.md$/, '.steps.ts'), 'utf8');
+    expect(readFileSync(testFile, 'utf8')).toContain('- baseUrl: ../pages/sample-page.html');
+    // The parser makes it the page's file URL (src/utils/base-url.ts).
+    expect(existsSync(fileURLToPath(parsed.config.baseUrl!))).toBe(true);
+    const steps = (await import(pathToFileURL(testFile.replace(/\.md$/, '.steps.ts')).href)) as {
+      default: Array<{ source: string }>;
+    };
     expect(parsed.steps).toHaveLength(4);
-    for (const step of parsed.steps) {
-      expect(steps, `a compiled entry for "${step}"`).toContain(`source: ${JSON.stringify(step).replace(/^"|"$/g, "'").replace(/\\"/g, '"')}`);
-    }
+    expect(steps.default.map((entry) => entry.source)).toEqual(parsed.steps);
   });
 });

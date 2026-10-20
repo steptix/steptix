@@ -536,6 +536,14 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
   // The welcome page's server step (§7.1)
   // -------------------------------------------------------------------------
 
+  /** The welcome page's **Use newest server**: undo a `steptix server use`
+   *  choice, as a Run's Use newest does. */
+  useNewestServer(): void {
+    clearServerChoice(this.userRoot);
+    this.log('cleared the steptix server use choice: the newest matching server runs');
+    this.changed.fire();
+  }
+
   async welcomeServerState(): Promise<WelcomeState['server']> {
     const onPath = this.steptixOnPath() !== null || readPathChanges(this.userRoot).length > 0;
     if (!this.managed()) {
@@ -545,6 +553,17 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
       return { state: 'installing', detail: 'Installing the Steptix server.', progress: this.progressText, onPath };
     }
     const pick = currentPick(this.userRoot, this.requires);
+    if (pick.kind === 'chosen-mismatch') {
+      // Installing would not help: the choice still wins over what is installed.
+      return {
+        state: 'chosen',
+        detail:
+          `You chose Steptix server ${pick.chosen} with steptix server use, but this extension is ${this.version}. ` +
+          `Install extension ${pick.chosen} to match, or go back to the newest server.`,
+        progress: null,
+        onPath,
+      };
+    }
     if (pick.kind === 'run') {
       const node = await this.nodeNow();
       const runsOn = node ? `, running on ${node.origin === 'yours' ? 'your' : "Steptix's own"} Node.js ${node.version}` : '';

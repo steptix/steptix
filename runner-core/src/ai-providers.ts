@@ -222,3 +222,32 @@ export function envValueBlank(text: string, key: string): boolean {
     return m?.[1] === key && (m[2] === '' || m[2] === '""' || m[2] === "''");
   });
 }
+
+/**
+ * A `.env`'s text with a provider choice written into it (§7.2): `AI_MODEL`
+ * and `AI_API_KEY`, and an `AI_GATEWAY_URL` on this machine removed. That one
+ * was left by Copilot and points at VS Code's bridge, which a provider's
+ * model does not use; a gateway anywhere else is the user's own and stays.
+ */
+export function providerEnvText(current: string, provider: ProviderId, model: string, key: string): string {
+  const gateway = /^\s*AI_GATEWAY_URL\s*=\s*(\S*)/m.exec(current)?.[1] ?? '';
+  const values: Record<string, string | null> = { AI_MODEL: aiModelFor(provider, model), AI_API_KEY: key };
+  if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(gateway)) values['AI_GATEWAY_URL'] = null;
+  return setEnvValues(current, values);
+}
+
+/** A `.gitignore`'s text with `.env` added on a line of its own. */
+export function withEnvIgnored(gitignore: string): string {
+  return `${gitignore}${gitignore === '' || gitignore.endsWith('\n') ? '' : '\n'}.env\n`;
+}
+
+/** The AI settings a project's `.env` makes for itself, which win over the
+ *  all-projects choice in that project (§7.2). */
+export function projectAiOverrides(text: string): string[] {
+  const set = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s*(?:export\s+)?(AI_MODEL|AI_API_KEY)\s*=\s*(.*?)\s*$/.exec(line);
+    if (m?.[1] && m[2] !== '' && m[2] !== '""' && m[2] !== "''") set.add(m[1]);
+  }
+  return [...set];
+}

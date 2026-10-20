@@ -137,7 +137,6 @@ import {
 import type { StatsSuite } from '../stats/types.js';
 import { canAskUser, createLineReader, NoAnswerError } from '../utils/ask-user.js';
 import { TestDeadline, testTimeoutError, timedOutResult } from './test-deadline.js';
-import { resolveBaseUrl } from '../utils/base-url.js';
 
 /**
  * What the report says in place of a root-cause analysis when the run had no
@@ -476,8 +475,7 @@ export async function runTest(
    */
   const keyless = !aiConfigured(config.ai) || !aiAllowed;
 
-  // A baseUrl beginning ./ or ../ is a page beside the test (resolveBaseUrl).
-  const baseUrl = test.config.baseUrl === undefined ? undefined : resolveBaseUrl(test.config.baseUrl, test.filePath);
+  const baseUrl = test.config.baseUrl;
   const conversationHistory: string[] = [];
   const csrfTokens: Record<string, string> = {};
 

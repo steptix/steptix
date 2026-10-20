@@ -30,11 +30,15 @@ installing the extension to a first passing test, with nothing to read.
   anything is saved, and lists them with the recommended one first (GPT 6
   Luna; Claude Sonnet 5.5 for Anthropic). The choice is saved for all your
   projects (the machine `.env`) or only this one, with an offer to keep a
-  project's `.env` out of git. A status-bar item shows what is in use, for
+  project's `.env` out of git; a `.env` git already tracks is refused, since
+  `.gitignore` cannot keep the key out of the next commit. The key is checked
+  again when it is saved, and the file is readable by you alone. A status-bar item shows what is in use, for
   example *AI: Copilot · GPT 6 Luna*; clicking it, or **Steptix: Choose AI**,
   opens the AI step. When Copilot runs out of requests, loses its permission
   or stops offering the model, the run says so with a **Choose AI** button.
 - **`steptix ai`** asks the same from a terminal and writes the same files.
+  Saving for all projects says so when this project's `.env` sets its own
+  AI, which it would go on using.
   A terminal run whose AI is Copilot says *Copilot works only inside VS
   Code…* when VS Code's bridge is not there.
 - **A sample project** in `templates/sample/`: `tests/first-test.md`, the
@@ -44,7 +48,8 @@ installing the extension to a first passing test, with nothing to read.
   project** creates the same files, then opens the folder and the test. Its
   first run needs no AI and no network.
 - **A baseUrl beginning `./` or `../`** is a page beside the test, opened as
-  its `file://` URL, from the CLI, VS Code and the MCP server alike.
+  its `file://` URL. The parser resolves it, so a run, a compile, a report
+  and the MCP server all get the same URL, and VS Code resolves it the same way.
 - **The first `steptix` command** after `npm i -g steptix` says whether
   Google Chrome was found and, if no AI is chosen, to run `steptix ai`.
 - **The config `steptix init` writes names no AI model**, so the AI chosen

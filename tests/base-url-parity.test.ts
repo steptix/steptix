@@ -1,12 +1,13 @@
 /**
  * A test's baseUrl beginning ./ or ../ is a page beside the test
  * (src/utils/base-url.ts). The VS Code extension resolves it with runner-core's
- * copy, the CLI and the MCP server with the framework's; held together here.
+ * copy, the framework's parser with its own; held together here.
  */
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { resolveBaseUrl } from '../src/utils/base-url.js';
+import { parseTestContent } from '../src/parser/markdown.js';
 // runner-core's source, as control-line-parity.test.ts explains.
 import { resolveBaseUrl as coreResolve } from '../runner-core/src/base-url.ts';
 
@@ -38,5 +39,17 @@ describe('resolveBaseUrl', () => {
     for (const value of ['../pages/sample-page.html', './a.html', ' ../b.html ', 'https://example.test', 'pages/x.html', '..\\c.html']) {
       expect(coreResolve(value, testFile)).toBe(resolveBaseUrl(value, testFile));
     }
+  });
+});
+
+describe('the parser', () => {
+  const content = ['# Login', '', '## Config', '- baseUrl: ../pages/sample-page.html', '', '## Steps', '1. Open the page', ''].join('\n');
+
+  it('resolves it once, so a run, a compile and a report all get a URL a browser can open', () => {
+    expect(parseTestContent(content, testFile).config.baseUrl).toBe(resolveBaseUrl('../pages/sample-page.html', testFile));
+  });
+
+  it('leaves it as written for an inline parse, which has no file to start from', () => {
+    expect(parseTestContent(content).config.baseUrl).toBe('../pages/sample-page.html');
   });
 });
