@@ -55,8 +55,13 @@ async function uiCommand(
   try {
     electronPath = require('electron') as unknown as string;
   } catch {
+    // The steptix package leaves out Electron and the app it runs
+    // (docs/specs/SPEC-install.md §10), so only a checkout has them.
     console.error(
-      chalk.red('Error: Could not find the electron package. Make sure it is installed.'),
+      chalk.red(
+        'The Steptix desktop app is not part of the steptix package. ' +
+          'Use the Steptix extension for VS Code to write and run tests in an editor.',
+      ),
     );
     process.exit(1);
   }

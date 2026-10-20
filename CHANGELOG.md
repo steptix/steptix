@@ -1,13 +1,56 @@
 # Changelog
 
 All notable changes to this project are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely. The
-framework's version follows [Semantic Versioning](https://semver.org/); while
-Steptix is in beta it carries a `-beta.N` suffix. The VS Code extensions keep
-plain `major.minor.patch` numbers, because the Marketplace does not accept a
-suffix; a beta extension is a pre-release build instead.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely. Versions
+follow [Semantic Versioning](https://semver.org/) as plain
+`major.minor.patch` numbers, with no `-beta` suffix, because the Marketplace
+accepts nothing else. The `steptix` package and the VS Code extension share
+`major.minor` and each keeps its own patch
+([SPEC-install.md](docs/specs/SPEC-install.md) §4.2). Until 1.0.0 the package
+carried a `-beta.N` suffix.
 
 ## Unreleased
+
+### Added — `npm i -g steptix`, and the launcher that sets it up
+
+The first part of [SPEC-install.md](docs/specs/SPEC-install.md): the
+`steptix` npm package is now something to install, and its command picks the
+server it runs.
+
+- **The first `steptix` command sets Steptix up.** It copies its own package
+  from npm's folder into `runtimes/<version>/` in the Steptix folder
+  (`%LOCALAPPDATA%\steptix`, `~/.steptix`), printing *Setting up Steptix
+  1.0.0 (first run only)…*, and runs every command from there. An update with
+  npm goes in beside the old version, so a running server is not touched.
+  A copy is made under a temporary name and renamed when complete, and one
+  install happens at a time across windows and terminals.
+- **The newest server of its own major.minor runs**, or the one chosen with
+  `steptix server use <version>` (`newest` undoes it). `steptix server list`
+  shows what is installed and where each came from, `steptix server remove`
+  removes one, and `steptix server install` sets up npm's copy without running
+  anything else. Versions nothing needs are removed once nothing runs from
+  them: each client records which major.minor it needs, the VS Code extension
+  included, and the newest, the one before it and a chosen one always stay.
+- **`steptix --version`** now also names the server it runs, its folder, and
+  whether it was chosen. The first line is unchanged.
+- **`steptix uninstall`** removes the servers after asking, warns first when
+  the VS Code extension uses them, refuses while one runs, and ends by naming
+  `npm rm -g steptix`.
+- **An older Node.js is refused up front**: *Steptix needs Node.js 22.21 or
+  later. You have 20.11. …*
+- **A checkout runs itself.** `node dist/index.js` in this repository, or an
+  `npm link` of it, sets nothing up and touches nothing in the Steptix folder.
+
+The package leaves out the Electron desktop app and what only it needs
+(Electron, Vite, React, CodeMirror); `steptix ui` says to use the VS Code
+extension. It ships its tested dependency versions in `npm-shrinkwrap.json`,
+which replaces `package-lock.json` at the root, and only the
+`templates/init` files `steptix init` copies.
+
+The package and the extension are both 1.0.0, which is newer than the
+package's 1.0.0-beta.1 and the extension's 0.5.x. The extension cannot yet
+start a server from a runtime set up this way; that comes with the next part
+of the spec.
 
 ### Fixed — a drag the browser gives up no longer hangs the run
 

@@ -72,6 +72,19 @@ export function getBuildInfo(): BuildInfo {
   return cachedBuild;
 }
 
+/**
+ * The build stamp of another copy of this package, such as the launcher's own
+ * when it has handed the command to a runtime (src/launcher/launch.ts).
+ * Unknown when it has none.
+ */
+export function buildInfoAt(packageRoot: string): BuildInfo {
+  try {
+    return parseBuildInfo(JSON.parse(readFileSync(join(packageRoot, 'dist', 'build-info.json'), 'utf-8')));
+  } catch {
+    return { commit: null, modified: null };
+  }
+}
+
 /** A stamp as read from disk. Anything malformed is unknown, and `modified`
  *  without a commit says nothing, so it is unknown too. */
 export function parseBuildInfo(raw: unknown): BuildInfo {

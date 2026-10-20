@@ -190,10 +190,15 @@ describe('getBuildInfo', () => {
   it.runIf(hasGit)('end to end: the built CLI names the commit `pretest` just built from', () => {
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf-8' }).trim();
     const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8')) as { version: string };
-    const out = execFileSync(process.execPath, [path.join(REPO_ROOT, 'dist', 'index.js'), '--version'], {
+    // The first line. The lines after it name the server the launcher runs
+    // (docs/specs/SPEC-install.md §4.8), here this checkout.
+    const [out, server] = execFileSync(process.execPath, [path.join(REPO_ROOT, 'dist', 'index.js'), '--version'], {
       encoding: 'utf-8',
-    }).trim();
+    })
+      .trim()
+      .split('\n');
     const commit = head.slice(0, 7);
     expect([`${pkg.version} (${commit})`, `${pkg.version} (${commit}, modified)`]).toContain(out);
+    expect(server).toBe(`Server: this checkout, ${path.resolve(REPO_ROOT)}`);
   });
 });

@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 /**
+ * First the Node.js check, then the launcher (src/launcher/launch.ts), which
+ * decides which installed runtime runs this command and, when that is not
+ * this package, imports that runtime's copy of this file instead of going on.
+ * Both are dynamic imports for the reason given below, and both keep stdout
+ * clean for `steptix mcp`.
+ *
  * `steptix mcp` deliberately bypasses the commander program.
  *
  * Two reasons, both load-bearing:
@@ -22,7 +28,15 @@
  * imports, so a guard placed above `import { createCli }` would run *after*
  * that whole graph had already evaluated. Keep them dynamic.
  */
-if (process.argv[2] === 'mcp') {
+const { nodeVersionProblem } = await import('./launcher/node-check.js');
+const nodeProblem = nodeVersionProblem(process.versions.node);
+const launch = nodeProblem === null ? await (await import('./launcher/launch.js')).prepareLaunch(process.argv.slice(2)) : null;
+if (nodeProblem !== null) {
+  process.stderr.write(nodeProblem + '\n');
+  process.exitCode = 1;
+} else if (launch?.kind === 'hand-off') {
+  await import(launch.entry);
+} else if (process.argv[2] === 'mcp') {
   // Both redirects happen BEFORE the MCP module graph is imported. `main()`
   // used to do the global one, which left a window: the SDK, zod and ajv all
   // evaluate during that dynamic import, and an import-time `console.log` in

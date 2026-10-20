@@ -80,7 +80,7 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: |
-            package-lock.json
+            npm-shrinkwrap.json
             runner-core/package-lock.json
             flick-vscode/package-lock.json
             steptix-vscode/package-lock.json
@@ -100,7 +100,7 @@ jobs:
             fixtures/tools/node_modules
             flick-vscode/node_modules
             steptix-vscode/node_modules
-          key: node-modules-${{ runner.os }}-node${{ steps.node.outputs.node-version }}-${{ hashFiles('package-lock.json', 'runner-core/package-lock.json', 'fixtures/tools/package-lock.json', 'flick-vscode/package-lock.json', 'steptix-vscode/package-lock.json') }}
+          key: node-modules-${{ runner.os }}-node${{ steps.node.outputs.node-version }}-${{ hashFiles('npm-shrinkwrap.json', 'runner-core/package-lock.json', 'fixtures/tools/package-lock.json', 'flick-vscode/package-lock.json', 'steptix-vscode/package-lock.json') }}
 
       # Order matters: runner-core first (its `prepare` builds the dist/ that
       # steptix-vscode's file: dep links to), and the root before
