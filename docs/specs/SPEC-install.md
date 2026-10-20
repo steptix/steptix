@@ -295,6 +295,31 @@ The live test runner and an Extension Development Host start their own
 servers from the checkout. A checkout's server and extension share
 major.minor (§4.2), so the version checks pass without either setting.
 
+### 4.13 Files say which version wrote them
+
+Two Steptix versions can work on the same project. `steptix run` in a
+terminal runs the tests in its own process (`src/cli/commands/run.ts`), not
+through VS Code's server, so when the terminal's major.minor differs from the
+extension's (§4.2), both read and write the same files.
+
+So every file Steptix writes in a project to read back later records the
+Steptix version that wrote it. Compiled step files and their cache are the
+first; the change that adds the stamp lists the rest. Reports are for people,
+not for Steptix to read back, so they need none.
+
+When Steptix reads such a file:
+
+- **Written by the same or an older major.minor:** it reads it as today.
+  Newer versions keep reading what older ones wrote.
+- **Written by a newer major.minor:** it does not guess at it and does not
+  rewrite it. It stops on that file and says so: *"These steps were compiled
+  by Steptix 1.5. This is Steptix 1.4. Update it with npm i -g steptix."* (or
+  *"Update the Steptix extension"* in VS Code). A test that depends on the
+  file fails with that message rather than running something else.
+
+Patches never change these files' format (§4.2), so the check compares
+major.minor only.
+
 ## 5. Installing
 
 ### 5.1 Scenario 1: from a terminal only
@@ -604,6 +629,33 @@ Both may notice there is no server. One installs, the other shows *"Waiting
 for Steptix to finish installing in another window"* and continues when it is
 done (§4.7). Neither asks twice.
 
+### 6.8 The terminal falls behind VS Code
+
+VS Code updates the extension by itself; npm updates the terminal's `steptix`
+only when the user asks. So the two can drift onto different major.minor
+versions, and then two versions work on the same project (§4.13).
+
+When the extension starts, it looks at npm's install of `steptix` (as in
+§5.3). If its major.minor is older than the extension's, the extension says
+so once for that version:
+
+> *The steptix command in your terminal is 1.4. VS Code is on 1.5. Update it
+> so both work on your projects the same way: npm i -g steptix*
+> **[Copy command]** **[Don't show again]**
+
+- **Copy command** puts `npm i -g steptix` on the clipboard. The extension
+  never runs it itself (§4.9).
+- **Don't show again** stops the notice for good.
+- **Only major.minor counts.** A different patch is not mentioned, because
+  patches do not change how the two behave (§4.2).
+- **The other way round:** if the terminal is on a newer major.minor than the
+  extension (VS Code's own updates turned off, for example), it says
+  *"The steptix command in your terminal is 1.5, newer than this extension
+  (1.4). Update the extension."*
+- **No npm install, no notice.** The `steptix` script the extension puts in
+  `bin/` (§5.5) always runs a server matching the extension, so it cannot
+  fall behind.
+
 ## 7. First-run setup
 
 ### 7.1 The welcome page
@@ -746,6 +798,19 @@ Steptix uses Google Chrome by default. If Chrome is not installed, the step
 says so and offers **Download a browser for Steptix**, which runs `steptix
 browsers`.
 
+Two gaps here are tracked in
+[steptix/steptix#109](https://github.com/steptix/steptix/issues/109) and must
+be closed before this ships:
+
+- `steptix browsers` exists today only in the Windows installer's launcher,
+  which this spec retires, so it has to become a command of the `steptix`
+  package.
+- Each Playwright version needs its own build of Firefox, WebKit and
+  Playwright's Chromium. A server update that moves Playwright (§6.2) must
+  fetch the new builds of the browsers the user had downloaded, and a missing
+  build must fail with Steptix's own message naming `steptix browsers
+  install`, not Playwright's.
+
 ### 7.5 From a terminal
 
 The first `steptix` command prints the same checks as lines: whether Google
@@ -847,6 +912,13 @@ which is the expected result: the user still has Steptix installed.
   existing setup (`steptix-vscode/src/extension/lm-bridge-setup.ts`).
 - **New:** `steptix ai` for the terminal (§7.2).
 - **New:** the sample project, built and compiled for each release (§7.3).
+- **New:** the version stamp in every file Steptix writes in a project to
+  read back, and the refusal to use one from a newer major.minor (§4.13).
+- **New:** the notice when the terminal's `steptix` is on a different
+  major.minor from the extension (§6.8).
+- **New:** `steptix browsers` as a command of the package, and keeping
+  Playwright's browser builds in step with server updates
+  ([#109](https://github.com/steptix/steptix/issues/109), §7.4).
 - **Changed:** the server's `/health` answer also says who started it: VS Code
   automatically, or a person by hand (§6.4). It already reports the version,
   the process number and whether a test is running.
@@ -909,6 +981,9 @@ copy of the npm registry:
 | `serverAutoStart.command` set: no install offer, the configured server runs; `useInstalledRuntime` off: no install offer, no start | §4.12 |
 | A new server patch runs a test with the oldest and the newest extension patch of its minor | §4.2 |
 | An extension never runs a server of another major.minor, newer or older | §4.2 |
+| Steps compiled by a newer major.minor: the older `steptix run` stops on them with the update message and leaves the file unchanged | §4.13 |
+| npm's `steptix` on an older major.minor than the extension: the notice appears once, and not for a patch difference | §6.8 |
+| `steptix browsers install firefox` from the npm package; a Firefox test still runs after a server update that moves Playwright | §7.4 |
 | `server use` the previous version, both sides run it; `server use newest` undoes it | §6.5 |
 | Only the newest of each needed major.minor, the previous and a chosen version are kept | §4.3 |
 | Two windows install at once: one download, both work | §6.7 |
