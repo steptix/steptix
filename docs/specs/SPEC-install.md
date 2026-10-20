@@ -311,11 +311,21 @@ When Steptix reads such a file:
 
 - **Written by the same or an older major.minor:** it reads it as today.
   Newer versions keep reading what older ones wrote.
-- **Written by a newer major.minor:** it does not guess at it and does not
-  rewrite it. It stops on that file and says so: *"These steps were compiled
-  by Steptix 1.5. This is Steptix 1.4. Update it with npm i -g steptix."* (or
-  *"Update the Steptix extension"* in VS Code). A test that depends on the
-  file fails with that message rather than running something else.
+- **Written by a newer major.minor:** it ignores the file, never rewrites
+  it, carries on, and says so. A version difference does not make a test
+  wrong, so it does not fail one:
+  - **Compiled steps** are a speed-up, not the test. The steps run with the
+    AI instead, exactly as steps that were never compiled do, so the result
+    means the same. The file is left as it is, so the newer version still has
+    its compiled steps.
+  - **The output and the report say what happened:** *"3 steps were compiled
+    by Steptix 1.5 and ran with the AI instead. Update with npm i -g steptix
+    to use them."* (or *"Update the Steptix extension"* in VS Code).
+  - **Only when there is nothing to fall back on**, such as a run with no AI
+    chosen, does the step fail, as any uncompiled step without an AI does
+    today. That message names the update too.
+  - **Other stamped files** follow the same rule: ignored, never rewritten,
+    and a warning.
 
 Patches never change these files' format (§4.2), so the check compares
 major.minor only.
@@ -913,7 +923,8 @@ which is the expected result: the user still has Steptix installed.
 - **New:** `steptix ai` for the terminal (§7.2).
 - **New:** the sample project, built and compiled for each release (§7.3).
 - **New:** the version stamp in every file Steptix writes in a project to
-  read back, and the refusal to use one from a newer major.minor (§4.13).
+  read back, and setting aside one from a newer major.minor with a warning
+  (§4.13).
 - **New:** the notice when the terminal's `steptix` is on a different
   major.minor from the extension (§6.8).
 - **New:** `steptix browsers` as a command of the package, and keeping
@@ -981,7 +992,7 @@ copy of the npm registry:
 | `serverAutoStart.command` set: no install offer, the configured server runs; `useInstalledRuntime` off: no install offer, no start | §4.12 |
 | A new server patch runs a test with the oldest and the newest extension patch of its minor | §4.2 |
 | An extension never runs a server of another major.minor, newer or older | §4.2 |
-| Steps compiled by a newer major.minor: the older `steptix run` stops on them with the update message and leaves the file unchanged | §4.13 |
+| Steps compiled by a newer major.minor: the older `steptix run` runs them with the AI, warns with the update message, and leaves the file unchanged; with no AI chosen, those steps fail with the same message | §4.13 |
 | npm's `steptix` on an older major.minor than the extension: the notice appears once, and not for a patch difference | §6.8 |
 | `steptix browsers install firefox` from the npm package; a Firefox test still runs after a server update that moves Playwright | §7.4 |
 | `server use` the previous version, both sides run it; `server use newest` undoes it | §6.5 |
