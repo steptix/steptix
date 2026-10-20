@@ -10,6 +10,7 @@ import type { RunSummary } from '../../report/types.js';
 import { countStepOrigins, formatTokenCount } from '../../report/generator.js';
 import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 import { nonNegativeInt } from '../parse-args.js';
+import { COPILOT_IN_TERMINAL, copilotOutOfReach } from '../../ai/copilot-terminal.js';
 
 export interface RunOptions {
   config?: string;
@@ -80,6 +81,8 @@ async function runCommand(
   });
 
   spinner.succeed('Configuration loaded');
+  // Compiled steps still run; the ones that need the AI would fail to connect.
+  if (await copilotOutOfReach(config.ai)) console.warn(chalk.yellow(COPILOT_IN_TERMINAL));
 
   // Load env+data bundle for the run-wide selector, if any. Per-test
   // overrides (frontmatter `env:`) get loaded on demand below. The CLI is

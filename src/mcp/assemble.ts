@@ -58,6 +58,7 @@ import type {
   ResolveProject,
   RunSettings,
 } from './types.js';
+import { resolveBaseUrl } from '../utils/base-url.js';
 
 /**
  * `run_steps` has no file, but the server derives the project root, the
@@ -658,7 +659,8 @@ function projectConfig(
   const resolved = interpolateValues(raw, project, filePath, warnings);
 
   const out: WireConfig = {};
-  if (resolved['baseUrl'] !== undefined) out.baseUrl = resolved['baseUrl'];
+  // A baseUrl beginning ./ or ../ is a page beside the test (resolveBaseUrl).
+  if (resolved['baseUrl'] !== undefined) out.baseUrl = resolveBaseUrl(resolved['baseUrl'], filePath);
   if (resolved['timeout'] !== undefined) out.timeout = resolved['timeout'];
   // The raw spec, unvalidated (stories/per-test-viewport.md §7). This whitelist
   // is a real projection — a key absent from here never reaches the wire, so an

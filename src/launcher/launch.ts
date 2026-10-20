@@ -48,6 +48,7 @@ import {
   type Layout,
   type Runtime,
 } from './runtimes.js';
+import { firstRunLines } from './first-run.js';
 import { compareVersions, defaultRequirement, satisfies } from './versions.js';
 
 export type InstallKind = 'checkout' | 'npm' | 'runtime';
@@ -99,6 +100,9 @@ export interface LaunchDeps {
   applyHooks?: (runtimeDir: string, args: string[]) => Promise<void>;
   /** Runs `fn` when the process exits: `process.once('exit')` unless a test stubs it. */
   onExit?: (fn: () => void) => void;
+  /** What the first set-up says about the browser and the AI: {@link firstRunLines}
+   *  for this machine unless a test stubs it. */
+  firstRun?: (machineEnv: string) => string[];
 }
 
 export type LaunchPlan =
@@ -198,7 +202,17 @@ export async function prepareLaunch(args: string[], deps: LaunchDeps = {}): Prom
           onCopy: (v) => log(`Setting up Steptix ${v} (first run only)…`),
           onWait: () => log('Waiting for Steptix to finish setting up in another window or terminal…'),
         });
-        if (result.installed) runtimes = listRuntimes(layout);
+        if (result.installed) {
+          // The very first set-up on this machine, not an update beside an
+          // older version: say whether a browser and an AI are there (§7.5).
+          if (runtimes.length === 0) {
+            const lines =
+              deps.firstRun ??
+              ((machineEnv: string) => firstRunLines({ cwd: process.cwd(), machineEnv, env: process.env, platform }));
+            for (const line of lines(path.join(layout.root, '.env'))) log(line);
+          }
+          runtimes = listRuntimes(layout);
+        }
       } catch (err) {
         // Whatever stopped the copy, npm's own copy still works, so the
         // command runs. A local install cannot be copied and works where it

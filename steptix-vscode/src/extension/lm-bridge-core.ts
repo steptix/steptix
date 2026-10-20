@@ -957,3 +957,24 @@ export function mapCompletionError(
   }
   return mapped;
 }
+
+/**
+ * What to tell the user, with a Choose AI button, when Copilot stops
+ * answering (SPEC-install.md §7.2): its month's requests are used up, the
+ * permission was taken back, or it no longer offers the model Steptix uses.
+ * Null for every other failure, which the step's own error message covers.
+ */
+export function copilotTroubleNotice(error: BridgeError): string | null {
+  switch (error.body.error.code) {
+    case 'quota_exhausted':
+      return "Copilot has used up this month's requests. Compiled tests still run. To keep working now, switch to an AI provider.";
+    case 'no_permissions':
+      return 'Steptix no longer has permission to use Copilot. Choose the AI again to grant it, or switch to an AI provider.';
+    case 'model_not_found':
+      return /gpt-6-luna/i.test(error.body.error.message)
+        ? 'Your Copilot no longer offers GPT 6 Luna. Pick another Copilot model, or switch to an AI provider.'
+        : 'Your Copilot no longer offers the model Steptix uses. Pick another Copilot model, or switch to an AI provider.';
+    default:
+      return null;
+  }
+}

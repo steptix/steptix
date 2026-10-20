@@ -33,9 +33,7 @@
     "dist/",
     "!dist/ui/",
     "schema/",
-    "templates/init/tests/example.md",
-    "templates/init/tests/sections-demo.md",
-    "templates/init/context/app.md",
+    "templates/sample/",
     "NOTICE",
     "npm-shrinkwrap.json"
   ],

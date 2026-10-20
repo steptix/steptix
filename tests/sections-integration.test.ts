@@ -11,9 +11,10 @@ import { clearSkillCache, expandSkills } from '../src/skills/expander.js';
  * resolution, expansion, frames, origins and both provenance tags — against a
  * real file on disk rather than an inline string.
  *
- * This is the rich internal fixture. The self-contained file that `steptix init`
- * ships to users is a *different* file (no skill dependency); it is guarded
- * separately in the final `describe` block below so it can't silently drift.
+ * This is the rich internal fixture. The self-contained demo in the live
+ * suite's workspace, templates/init, is a *different* file (no skill
+ * dependency); it is guarded separately in the final `describe` block below
+ * so it can't silently drift.
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -129,17 +130,16 @@ describe('fixtures/tests/sections-demo.md', () => {
 });
 
 /**
- * The file `steptix init` scaffolds into every new project. It is self-contained
- * — a section is defined and called twice, with no skill dependency — so a
- * fresh project can run it immediately. These assertions pin that shape, not
- * the template's wording or line numbers: if an edit to the template breaks
- * parsing or provenance, every new project's `steptix run` would break
- * silently, and this catches it. Rewording a step does not trip it.
+ * The demo in templates/init, the live suite's workspace. It is self-contained
+ * — a section is defined and called twice, with no skill dependency — so it
+ * runs with nothing beside it. These assertions pin that shape, not the
+ * file's wording or line numbers: if an edit breaks parsing or provenance,
+ * this catches it. Rewording a step does not trip it.
  *
  * Deliberately mirrors nothing from the fixture above: the two files diverge
  * on purpose (see the header comment), so they need independent guards.
  */
-describe('templates/init/tests/sections-demo.md (the file `steptix init` ships)', () => {
+describe('templates/init/tests/sections-demo.md (the self-contained demo)', () => {
   it('parses self-contained (no skillsDir needed) into one section called twice', async () => {
     // Pass no skillsDir at all — the demo must resolve without one.
     const parsed = await parseTestFile(shippedDemoFile, {});

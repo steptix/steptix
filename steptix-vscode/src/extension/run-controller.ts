@@ -31,6 +31,7 @@ import {
   reportError,
   describeStepFailure,
   isSkippedPass,
+  resolveBaseUrl,
   resolveEnvFile,
   resolveSection,
   userRootEnvPath,
@@ -3168,7 +3169,7 @@ export class RunController {
     const rawConfig = parseConfig(text);
     const rawParameters = parseParameters(text);
     const resolvedParameters = resolveSection(rawParameters, env);
-    const sessionConfig = sessionConfigFrom(rawConfig, env);
+    const sessionConfig = sessionConfigFrom(rawConfig, env, filePath);
 
     const logging = resolveLoggingOverride(rawConfig, settings);
 
@@ -5856,7 +5857,7 @@ export class RunController {
       this.lastRunApiKey = apiKey;
 
       const text = this.document.getText();
-      const sessionConfig = sessionConfigFrom(parseConfig(text), env);
+      const sessionConfig = sessionConfigFrom(parseConfig(text), env, filePath);
       const includeConfig = !this.configSentForSession && Object.keys(sessionConfig).length > 0;
       const request: RecordStepsRequest = {
         testFilePath: filePath,
@@ -6179,15 +6180,17 @@ function resolveValue(value: string, env: Record<string, string>): string {
  * The write-once per-session `config` block from a test's `## Config`, with
  * `$VAR` values resolved against the env. Shared by a run's first request and
  * a recording's, which the server treats alike (stories/steptix-record-steps.md,
- * decision 3).
+ * decision 3). A baseUrl beginning `./` or `../` is a page beside the test
+ * (`testFile`), sent as its file:// URL, as the CLI does (resolveBaseUrl).
  */
 function sessionConfigFrom(
   rawConfig: Record<string, string>,
   env: Record<string, string>,
+  testFile: string,
 ): { baseUrl?: string; timeout?: string; viewport?: string } {
   const sessionConfig: { baseUrl?: string; timeout?: string; viewport?: string } = {};
   const baseUrl = rawConfig['baseUrl'];
-  if (baseUrl) sessionConfig.baseUrl = resolveValue(baseUrl, env);
+  if (baseUrl) sessionConfig.baseUrl = resolveBaseUrl(resolveValue(baseUrl, env), testFile);
   const timeout = rawConfig['timeout'];
   if (timeout) sessionConfig.timeout = resolveValue(timeout, env);
   // Forwarded raw, exactly like baseUrl: the server resolves the preset and

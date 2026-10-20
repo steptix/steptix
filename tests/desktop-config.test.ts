@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import Ajv from 'ajv';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { loadConfig } from '../src/config/loader.js';
-import { initCommand, SCAFFOLD_CONFIG } from '../src/cli/commands/init.js';
+import { initCommand, scaffoldConfig } from '../src/cli/commands/init.js';
 
 const dirs: string[] = [];
 
@@ -178,9 +178,11 @@ describe('steptix init — a new project does not inherit the fixture workspace\
     expect(config.tests.toolsDir).toBe('./tools/src');
   });
 
-  it('still scaffolds the example tests beside it', async () => {
+  it('still scaffolds the sample test beside it', async () => {
+    // The sample project replaced the localhost:3000 examples
+    // (SPEC-install.md §7.3); tests/init-sample.test.ts covers it in full.
     const dir = await initInto();
-    expect(existsSync(path.join(dir, 'tests', 'example.md'))).toBe(true);
+    expect(existsSync(path.join(dir, 'tests', 'first-test.md'))).toBe(true);
     expect(existsSync(path.join(dir, 'context', 'app.md'))).toBe(true);
   });
 
@@ -196,7 +198,7 @@ describe('steptix init — a new project does not inherit the fixture workspace\
   });
 
   it('the scaffold is what init writes, and it is valid JSON with no desktop section at all', () => {
-    const scaffold = JSON.parse(SCAFFOLD_CONFIG);
+    const scaffold = JSON.parse(scaffoldConfig());
     expect(scaffold.desktop).toBeUndefined();
   });
 });

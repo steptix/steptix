@@ -8,6 +8,7 @@ import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 import { AiClient } from '../../ai/client.js';
 import { TokenTracker } from '../../utils/tokens.js';
 import { setVerbose, logger } from '../../utils/logger.js';
+import { COPILOT_IN_TERMINAL, copilotOutOfReach } from '../../ai/copilot-terminal.js';
 import {
   compileTest,
   type CompileEvent,
@@ -78,6 +79,12 @@ async function compileCommand(target: string, opts: CompileOptions): Promise<voi
   config = applyCliOverrides(config, {
     ...(opts.headless !== undefined && { headless: opts.headless }),
   });
+
+  // Compiling needs the AI throughout, so it stops here rather than at the first step.
+  if (await copilotOutOfReach(config.ai)) {
+    console.error(COPILOT_IN_TERMINAL);
+    process.exit(1);
+  }
 
   const envName = opts.env?.trim() || process.env['AUTOMATION_ENV']?.trim() || undefined;
   let bundle;

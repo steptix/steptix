@@ -2,7 +2,7 @@
   "name": "steptix-vscode",
   "displayName": "Steptix",
   "publisher": "steptix",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -444,6 +444,14 @@
       {
         "command": "steptix.uninstallServer",
         "title": "Steptix: Uninstall Server"
+      },
+      {
+        "command": "steptix.welcome",
+        "title": "Steptix: Welcome"
+      },
+      {
+        "command": "steptix.chooseAi",
+        "title": "Steptix: Choose AI"
       }
     ],
     "menus": {
@@ -789,7 +797,7 @@
     "build:extension": "node esbuild.extension.js",
     "build:webview": "vite build --config vite.config.webview.js",
     "build:notices": "node scripts/third-party-notices.mjs",
-    "build": "npm run build:runner-core && npm run copy:schema && npm run build:webview && npm run build:extension && npm run build:notices",
+    "build": "npm run build:runner-core && npm run copy:schema && npm run copy:sample && npm run build:webview && npm run build:extension && npm run build:notices",
     "watch:extension": "node esbuild.extension.js --watch",
     "watch:webview": "vite build --config vite.config.webview.js --watch",
     "watch": "concurrently -n webview,extension -c blue,green \"npm:watch:webview\" \"npm:watch:extension\"",
@@ -799,7 +807,8 @@
     "test": "node --test tests/*.test.js",
     "test:integration": "npm run build && node tests/integration/runTest.cjs",
     "test:live": "npm run build && node tests/integration/runLiveTest.cjs",
-    "test:install": "node tests/integration/runInstallTest.cjs"
+    "test:install": "node tests/integration/runInstallTest.cjs",
+    "copy:sample": "node -e \"const fs=require('fs');fs.rmSync('sample',{recursive:true,force:true});fs.cpSync('../templates/sample','sample',{recursive:true,filter:(src)=>!require('path').basename(src).startsWith('.')})\""
   },
   "dependencies": {
     "steptix-runner-core": "file:../runner-core",

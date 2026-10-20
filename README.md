@@ -99,11 +99,28 @@ again after an update if a launch says the build is not downloaded yet.
 npx steptix list
 ```
 
-### Initialize a new project
+### Create a sample project
 
 ```bash
-npx steptix init
+npx steptix init my-tests
+cd my-tests
+npx steptix run tests/first-test.md
 ```
+
+The sample is a test of a page that lives in the project, with its steps
+already compiled, so its first run needs no AI and no network. The VS Code
+extension's **Create a sample project** makes the same files.
+
+### Choose the AI
+
+```bash
+npx steptix ai
+```
+
+It asks for a provider (OpenAI, Anthropic or OpenRouter), checks your API key
+with it, offers its models with Steptix's recommended one first, and saves the
+choice for all your projects or only this one. GitHub Copilot works only inside
+VS Code: choose it there.
 
 ## Runner UI
 

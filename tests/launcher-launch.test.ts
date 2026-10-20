@@ -39,6 +39,7 @@ function deps(packageRoot: string): LaunchDeps {
       hooked.push(dir);
     },
     onExit: () => {},
+    firstRun: (machineEnv) => [`first-run checks with ${path.basename(machineEnv)}`],
   };
 }
 
@@ -61,7 +62,8 @@ describe('from npm', () => {
 
     const plan = await prepareLaunch(['run', 'tests/a.md'], deps(npm));
 
-    expect(logged).toEqual(['Setting up Steptix 1.4.0 (first run only)…']);
+    // Then, on the machine's very first set-up, the browser and AI checks (§7.5).
+    expect(logged).toEqual(['Setting up Steptix 1.4.0 (first run only)…', 'first-run checks with .env']);
     expect(plan).toMatchObject({ kind: 'hand-off', entry: entryOf('1.4.0') });
     expect(hooked).toEqual([path.join(layout.runtimesDir, '1.4.0')]);
     expect(currentLaunch({ store })).toMatchObject({ launcherKind: 'npm', runtime: { version: '1.4.0' }, chosen: false });

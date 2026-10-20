@@ -430,6 +430,27 @@ export function sha256Of(data: Uint8Array): string {
 }
 
 // ---------------------------------------------------------------------------
+// The browser (§7.4)
+// ---------------------------------------------------------------------------
+
+/** Where Google Chrome's stable channel installs: the browser Steptix runs
+ *  tests in by default (§7.4). The same places as the launcher's first-run
+ *  check (chromePaths in the framework's src/launcher/first-run.ts). */
+export function chromePaths(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string[] {
+  if (platform === 'win32') {
+    return [env['ProgramFiles'], env['ProgramFiles(x86)'], env['LOCALAPPDATA']]
+      .filter((dir): dir is string => typeof dir === 'string' && dir !== '')
+      .map((dir) => path.win32.join(dir, 'Google', 'Chrome', 'Application', 'chrome.exe'));
+  }
+  if (platform === 'darwin') return ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'];
+  return ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/opt/google/chrome/chrome'];
+}
+
+export function chromeFound(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, exists = existsSync): boolean {
+  return chromePaths(platform, env).some((p) => exists(p));
+}
+
+// ---------------------------------------------------------------------------
 // npm's own install of steptix (§5.3, §6.8)
 // ---------------------------------------------------------------------------
 

@@ -11,6 +11,46 @@ carried a `-beta.N` suffix.
 
 ## Unreleased
 
+### Added — the welcome page, choosing the AI, and a sample project that runs as it is
+
+The third part of [SPEC-install.md](docs/specs/SPEC-install.md): from
+installing the extension to a first passing test, with nothing to read.
+
+- **The welcome page** opens the first time the extension starts, and
+  **Steptix: Welcome** opens it again. Four steps, in any order: the server
+  (install it, with or without `steptix` on PATH), the AI, the browser
+  (whether Google Chrome was found), and a first test (**Create a sample
+  project** or **Open a folder**). The AI and the sample need no server, so
+  they can be done while it downloads.
+- **Choosing the AI.** GitHub Copilot comes first when it offers GPT 6 Luna,
+  Steptix's recommended model; otherwise an AI provider does, with Copilot
+  still offered. **Use Copilot** asks VS Code's own permission and writes the
+  lines **Steptix: Use Copilot for AI** writes. A provider (OpenAI, Anthropic
+  or OpenRouter) takes your key, checks it by asking for its models before
+  anything is saved, and lists them with the recommended one first (GPT 6
+  Luna; Claude Sonnet 5.5 for Anthropic). The choice is saved for all your
+  projects (the machine `.env`) or only this one, with an offer to keep a
+  project's `.env` out of git. A status-bar item shows what is in use, for
+  example *AI: Copilot · GPT 6 Luna*; clicking it, or **Steptix: Choose AI**,
+  opens the AI step. When Copilot runs out of requests, loses its permission
+  or stops offering the model, the run says so with a **Choose AI** button.
+- **`steptix ai`** asks the same from a terminal and writes the same files.
+  A terminal run whose AI is Copilot says *Copilot works only inside VS
+  Code…* when VS Code's bridge is not there.
+- **A sample project** in `templates/sample/`: `tests/first-test.md`, the
+  page it tests in `pages/`, its steps already compiled, a `context/app.md`
+  about the page, and the config. `steptix init` creates it, replacing the
+  `localhost:3000` login example that could not run, and **Create a sample
+  project** creates the same files, then opens the folder and the test. Its
+  first run needs no AI and no network.
+- **A baseUrl beginning `./` or `../`** is a page beside the test, opened as
+  its `file://` URL, from the CLI, VS Code and the MCP server alike.
+- **The first `steptix` command** after `npm i -g steptix` says whether
+  Google Chrome was found and, if no AI is chosen, to run `steptix ai`.
+- **The config `steptix init` writes names no AI model**, so the AI chosen
+  for all projects reaches a new project; the built-in default is the same
+  model.
+
 ### Added — the VS Code extension installs and updates the server
 
 The second part of [SPEC-install.md](docs/specs/SPEC-install.md). The

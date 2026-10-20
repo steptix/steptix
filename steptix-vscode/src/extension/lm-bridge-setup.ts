@@ -476,3 +476,67 @@ function toShape(err: unknown): { code?: string; name?: string; message?: string
   }
   return { message: String(err) };
 }
+
+/**
+ * Copilot's models as the welcome page's AI step lists them (SPEC-install.md
+ * §7.2), or null when this VS Code has no language-model API. An empty list
+ * means none yet: VS Code may list Copilot's models only once the user has
+ * acted, which is why the step asks when it is opened.
+ */
+export async function copilotModels(bridge: LmBridge): Promise<LmModelHandle[] | null> {
+  const facade = bridge.lmFacade();
+  if (!facade.available()) return null;
+  try {
+    return (await facade.selectChatModels()).filter((m) => m.vendor === 'copilot');
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The welcome page's **Use Copilot** (SPEC-install.md §7.2): the same setup
+ * as **Steptix: Use Copilot for AI**, with the model and the file already
+ * chosen on the page. It turns the bridge on, makes the one request VS Code
+ * raises its consent dialog for (Allow or Cancel), and writes the three lines
+ * the setup writes into `envPath`: the machine `.env` for all projects, or a
+ * project's own.
+ */
+export async function useCopilotFor(
+  bridge: LmBridge,
+  args: { modelId: string; envPath: string; privateFile: boolean },
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const models = await copilotModels(bridge);
+  if (models === null) {
+    return { ok: false, message: 'This VS Code has no language-model API, which Steptix needs to reach Copilot. Update VS Code.' };
+  }
+  const model = models.find((m) => m.id === args.modelId);
+  if (!model) return { ok: false, message: `Copilot does not offer ${args.modelId} in this window.` };
+
+  const config = vscode.workspace.getConfiguration('steptix');
+  if (!config.get<boolean>(LM_BRIDGE_ENABLED, false)) {
+    await config.update(LM_BRIDGE_ENABLED, true, vscode.ConfigurationTarget.Global);
+  }
+  await bridge.sync();
+  if (!(await warmUp(model))) return { ok: false, message: 'Copilot did not answer. Choose Allow when VS Code asks.' };
+
+  const existing = await readIfPresent(args.envPath);
+  const plan = planEnvUpdate({
+    text: existing,
+    model: `gateway/${qualifiedModelId(model)}`,
+    gatewayUrl: bridge.gatewayUrl(),
+    token: await bridge.ensureToken(),
+    envName: null,
+  });
+  if (plan.unchanged) return { ok: true };
+  const tmpPath = `${args.envPath}.tmp-${process.pid}`;
+  try {
+    await fs.mkdir(path.dirname(args.envPath), { recursive: true });
+    await fs.writeFile(tmpPath, plan.text, { encoding: 'utf8', ...(args.privateFile && { mode: 0o600 }) });
+    await fs.rename(tmpPath, args.envPath);
+  } catch (err) {
+    await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+    return { ok: false, message: `Could not write ${args.envPath}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  log(`wrote ${plan.changes.map((c) => c.key).join(', ')} to ${args.envPath}`);
+  return { ok: true };
+}

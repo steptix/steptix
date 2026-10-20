@@ -1,0 +1,15 @@
+{
+  "browser": {
+    "headed": true
+  },
+  "tests": {
+    "dir": "./tests",
+    "dataDir": "./data",
+    "contextDir": "./context",
+    "skillsDir": "./skills",
+    "toolsDir": "./tools/src"
+  },
+  "reports": {
+    "outputDir": "./reports"
+  }
+}
