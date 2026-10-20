@@ -609,10 +609,12 @@ Use Copilot for AI**:
    it, or make a new one."* A provider it cannot reach gives the network's
    reason and says a company may need its proxy set for VS Code.
 3. **Choose the model.** The list puts Steptix's recommended model first:
-   GPT 6 Luna for OpenAI, and for OpenRouter when it offers it. Anthropic's
-   recommended model is still to be chosen (§11). Then come every model the
-   key can use, then *Type a model id…*. The recommended models ship with
-   each release.
+   - OpenAI: GPT 6 Luna (`openai/gpt-6-luna`),
+   - Anthropic: Claude Sonnet 5.5 (`anthropic/claude-sonnet-5-5`),
+   - OpenRouter: GPT 6 Luna, when OpenRouter offers it.
+
+   Then come every model the key can use, then *Type a model id…*. The
+   recommended models ship with each release.
 4. **Save.** From then on the key is shown only by its last four characters.
 
 **What is saved, and where.** A provider writes `AI_MODEL`, with the
@@ -645,7 +647,8 @@ stops offering GPT 6 Luna, it says *"Your Copilot no longer offers GPT 6 Luna.
 Pick another Copilot model, or switch to an AI provider."*
 
 **From a terminal: `steptix ai`.** It asks the same questions: provider, key
-(checked the same way), model with GPT 6 Luna first, and where to save. It
+(checked the same way), model with the provider's recommended model first,
+and where to save. It
 writes the same files. Copilot is not offered, because it works only inside
 VS Code, and it says so. A terminal command that needs the AI while Copilot
 is configured says *"Copilot works only inside VS Code. To use the AI from a
@@ -820,7 +823,7 @@ copy of the npm registry:
 | Extension-installed server, `steptix` works in VS Code's terminal | §5.5 |
 | The AI step works while the server downloads | §7.1 |
 | A stand-in Copilot that offers GPT 6 Luna is chosen to begin with; one that does not, or none, starts on the provider form | §7.2 |
-| A wrong key is refused before anything is saved; a good one lists models with GPT 6 Luna first | §7.2 |
+| A wrong key is refused before anything is saved; a good one lists models with the provider's recommended model first | §7.2 |
 | Saved for all projects reaches a project with no `.env`; only this project wins over it | §7.2 |
 | `steptix ai` writes what the welcome page writes | §7.2 |
 | The sample project's first Run passes with no AI chosen and the network off | §7.3 |
@@ -845,9 +848,7 @@ copy of the npm registry:
    change. That rule exists so the Extensions panel shows a new number after
    each install of a work-in-progress build. A suffix such as `1.4.0-dev.17`
    would keep that signal without using up release numbers.
-2. **Anthropic's recommended model.** GPT 6 Luna is not an Anthropic model, so
-   the provider form needs one to put first for Anthropic (§7.2).
-3. **The terminal's sample project.** `steptix init` should create the same
+2. **The terminal's sample project.** `steptix init` should create the same
    sample as **Create a sample project** (§7.3), so both ways in start from
    the same place. What it creates today needs checking first.
 
