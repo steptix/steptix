@@ -847,7 +847,12 @@ copy of the npm registry:
    release (§4.2), the extension's patch number can no longer go up on every
    change. That rule exists so the Extensions panel shows a new number after
    each install of a work-in-progress build. A suffix such as `1.4.0-dev.17`
-   would keep that signal without using up release numbers.
+   does not work: the Marketplace accepts only plain `1.4.0`-style numbers.
+   The simplest answer is to keep the bump, applied to the extension and the
+   `steptix` package together by one command, and to release whatever number
+   `main` has reached, so releases skip numbers (1.0.0, then 1.0.14). Skipped
+   numbers cost users nothing. Bumping only the extension would break §4.2:
+   a dev extension at 1.0.14 would refuse a checkout's server at 1.0.0.
 2. **The terminal's sample project.** `steptix init` should create the same
    sample as **Create a sample project** (§7.3), so both ways in start from
    the same place. What it creates today needs checking first.
