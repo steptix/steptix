@@ -66,6 +66,20 @@ extension's `package.json` carries `"preview": true`, which puts a
 release, the label comes off and a separate pre-release channel may start
 (§11).
 
+**The number changes only at release.** Each `package.json` holds the
+version that will be released next, and is changed only when releasing, where
+the number is chosen to say what the release is: a patch for fixes, a new
+minor for features (for both pieces together, §4.2), a new major for a
+breaking change. Nothing bumps it on ordinary changes, so parallel pull
+requests never conflict on it.
+
+Builds between releases share a number, so they are told apart by the commit
+they were built from. The extension shows it in the status bar and the Output
+panel, for example *Steptix 1.0.0 · 3f9a1c2*, with *· modified* added for a
+build with uncommitted changes; the server already reports both at
+`/health`. After installing a build of your own, that commit, not the
+Extensions panel's number, is what says the new build is the one running.
+
 Not published: the Electron desktop app, and the Flick extension
 (`flick-vscode`), which is being retired.
 
@@ -815,6 +829,47 @@ release and checked by the release test (§10.1).
 
 **Open a folder** is for people who already have tests.
 
+**`steptix init` creates the same sample.** Both ways in start from the same
+place: **Create a sample project** in VS Code and `steptix init [dir]` in a
+terminal produce the same files, from one source in the package
+(`templates/sample/`, new). The release test checks they match.
+
+That is a change. Today `steptix init` (`src/cli/commands/init.ts`) creates:
+
+| File | What it is | Runs as created? |
+| --- | --- | --- |
+| `steptix.config.json` | written from `SCAFFOLD_CONFIG`: model `openai/gpt-6-luna`, headed browser, the standard folders | n/a |
+| `tests/example.md` | a login test against `http://localhost:3000`, needing `$TEST_PASSWORD` | No: there is no app at that address |
+| `tests/sections-demo.md` | an inline-sections demo against the same address | No, for the same reason |
+| `context/app.md` | a placeholder description of a login app | n/a |
+| `tests/`, `context/`, `reports/` | empty folders | n/a |
+
+Its closing message asks the user to edit the config and the example before
+the first run. So neither test can pass on a new machine, and none is
+compiled.
+
+What stays from today:
+
+- **The config** keeps coming from `SCAFFOLD_CONFIG`, never from
+  `templates/init/steptix.config.json`. That file belongs to the live test
+  suite's fixture workspace and turns on settings a new project must not have
+  (`desktop.enabled`, a `toolsDir` that climbs out of the project), which is
+  why `init.ts` keeps the two apart.
+- **The folders** `tests/`, `context/` and `reports/`.
+- **`--force`**, and skipping files that already exist.
+
+What changes:
+
+- `tests/example.md` and `tests/sections-demo.md` are replaced by the sample's
+  `tests/first-test.md`, `pages/sample-page.html` and compiled steps.
+- `context/app.md` describes the sample page instead of an imaginary login
+  app.
+- The closing message says *"Run it: steptix run tests/first-test.md"*.
+- The sample lives in its own `templates/sample/`, not in `templates/init/`,
+  which stays the live suite's fixture workspace. The npm package has to
+  ship `templates/sample/`, and only the parts of `templates/` that
+  `steptix init` uses.
+
 ### 7.4 A browser
 
 Steptix uses Google Chrome by default. If Chrome is not installed, the step
@@ -874,14 +929,30 @@ or browsers Steptix downloaded.
 
 ### 9.1 Installed from a terminal
 
+Removal is two commands, each removing what it installed: Steptix cleans its
+own folder, and npm removes what npm installed.
+
 1. `steptix uninstall` removes every server in `runtimes/` after asking to
    confirm. If a server is running, it says so and asks the user to stop it
-   first (`steptix stop`).
+   first (`steptix stop`). If the VS Code extension still uses those servers
+   (it has recorded itself in the Steptix folder, §4.3), the confirmation
+   says so first: *"The Steptix extension in VS Code uses these servers. It
+   will download one again on its next Run. Remove them anyway? [y/N]"*.
+   When it is done, it says *"To remove the steptix command too, run: npm rm
+   -g steptix"*.
 2. `npm rm -g steptix` removes the launcher and npm's copy of the server.
 
+`steptix uninstall` does not run `npm rm -g steptix` itself. It would fail
+where npm needs `sudo` (macOS and Linux installs made with `sudo`), and with
+nvm it would act on whichever Node.js happens to be active, not the one
+Steptix was installed with.
+
 If they skip step 1, the copies in `runtimes/` stay. npm gives a package no
-reliable way to clean up after itself, so the npm package's readme says to
-run `steptix uninstall` first.
+reliable way to clean up after itself (npm 7 and later run no uninstall
+scripts), so the npm package's readme says to run `steptix uninstall` first.
+
+Someone with both VS Code and the terminal who wants to drop only the
+terminal command runs only step 2. VS Code's servers stay.
 
 ### 9.2 Installed from the Marketplace
 
@@ -934,7 +1005,11 @@ which is the expected result: the user still has Steptix installed.
   release, **Steptix: Choose AI** and the status-bar item. Copilot reuses the
   existing setup (`steptix-vscode/src/extension/lm-bridge-setup.ts`).
 - **New:** `steptix ai` for the terminal (§7.2).
-- **New:** the sample project, built and compiled for each release (§7.3).
+- **New:** the sample project in `templates/sample/`, built and compiled for
+  each release (§7.3).
+- **Changed:** `steptix init` creates that sample instead of the
+  `localhost:3000` login example, keeping `SCAFFOLD_CONFIG` and `--force`
+  (§7.3).
 - **New:** the version stamp in every file Steptix writes in a project to
   read back, and setting aside one from a newer major.minor with a warning
   (§4.13).
@@ -959,8 +1034,12 @@ which is the expected result: the user still has Steptix installed.
   extension is at 0.5.x and the package at 1.0.0-beta.1; 1.0.0 is newer than
   both, so every existing install sees it as an update. The extension states
   the server patch it needs, and checks npm for newer server patches (§6.2).
-  The CLAUDE.md rule that bumps the extension's patch version on every change
-  needs replacing to fit (§11).
+  Numbers change only at release (§3.1), so CLAUDE.md's "bump the patch
+  version on every change" section and its install loop are rewritten around
+  the commit the extension shows instead.
+- **New:** the extension shows the commit it was built from, and whether the
+  build had uncommitted changes, in the status bar and the Output panel
+  (§3.1).
 - **Changed:** CLAUDE.md's platform rule gains a note pointing at the
   Windows-first exception in §3.2, so it is not mistaken for a gap to fix.
 - **Retired:** the Windows installer (`packaging/runtime/`,
@@ -1000,6 +1079,8 @@ copy of the npm registry:
 | Saved for all projects reaches a project with no `.env`; only this project wins over it | §7.2 |
 | `steptix ai` writes what the welcome page writes | §7.2 |
 | The sample project's first Run passes with no AI chosen and the network off | §7.3 |
+| `steptix init` and **Create a sample project** produce the same files; `steptix run tests/first-test.md` in the new folder passes with no AI and no network | §7.3 |
+| `steptix uninstall` warns when the VS Code extension uses the servers, and ends by naming `npm rm -g steptix` | §9.1 |
 | Offline file and `.vsix` installed with the network switched off, a test runs | §5.6 |
 | Update from npm while a server runs: the server keeps serving, the next start is the new version | §6.1, §6.3 |
 | Extension updates to a new minor: it fetches the matching server without asking, before any Run, and a terminal on the same minor runs it too | §6.2 |
@@ -1021,8 +1102,9 @@ copy of the npm registry:
 
 ## 11. Still to settle
 
-1. **Version numbering.** Fixed so far: plain `major.minor.patch`, and every
-   release a preview on the normal channels until Steptix goes stable (§3.1).
+1. **Channels, for when Steptix goes stable.** Settled (§3.1): plain
+   `major.minor.patch`, numbers that change only at release, and every
+   release a preview on the normal channels until Steptix goes stable.
    Ruled out: date-based numbers such as `2026.10.0`, because they cannot
    carry a pre-release channel.
 
@@ -1055,25 +1137,8 @@ copy of the npm registry:
    release is a tag on `main`, and a short-lived `release/x.y` branch is cut
    from a stable tag only when that stable release needs an urgent fix.
 
-   **When the number changes**, one of:
-   - **Every change** raises the patch number of the piece it changed, and
-     a release ships whatever `main` has reached (1.0.0, then 1.0.4). This
-     is today's rule, extended to the package. Parallel PRs conflict on the
-     version lines, and a new minor still needs a deliberate bump of both.
-   - **Only at release.** `package.json` holds the next release's number
-     and changes only when releasing, where the number is chosen to say
-     what the release is. Builds between releases are told apart by the
-     commit, shown by the extension (*Steptix 1.0.0 · 3f9a1c2*), which the
-     server already reports at `/health`.
-   - **The release pipeline picks it.** As the previous option, but pushing a
-     tag makes GitHub Actions write the number into the piece being released,
-     then build, test and publish it.
-
-   Whichever is chosen replaces CLAUDE.md's "bump the patch version on every
-   change" section, which exists so a local install shows a new number.
-2. **The terminal's sample project.** `steptix init` should create the same
-   sample as **Create a sample project** (§7.3), so both ways in start from
-   the same place. What it creates today needs checking first.
+   Later, the release pipeline could set the number from a pushed tag
+   instead of a hand edit (§3.1).
 
 The release test cannot sign in to a real Copilot account, so the Copilot
 checks in §10.1 use a stand-in language-model provider registered in the test's
