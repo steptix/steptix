@@ -53,6 +53,19 @@ did the user have to do anything they would not have guessed?
 All of them are released together and carry the same version number (§4.2).
 The first release is 1.0.0 for all of them (§10).
 
+Version numbers are plain `major.minor.patch`, because the Marketplace accepts
+nothing else (no `-beta` or `-dev` suffix). There are two channels:
+
+| Channel | Minor number | Marketplace | npm | Who gets it |
+| --- | --- | --- | --- | --- |
+| Stable | even: 1.0.x, 1.2.x | normal release | the `latest` tag | everyone, by default |
+| Pre-release | odd: 1.1.x, 1.3.x | published as a pre-release | the `next` tag | people who chose *Switch to Pre-Release Version* in VS Code, or ran `npm i -g steptix@next` |
+
+A pre-release extension installs the server of its own version, as any
+extension does (§4.2), so a pre-release user gets the matching pre-release
+server without choosing anything else. In a terminal, `npm i -g steptix` stays
+on stable; only `steptix@next` moves to pre-release.
+
 Not published: the Electron desktop app, and the Flick extension
 (`flick-vscode`), which is being retired.
 
@@ -843,17 +856,33 @@ copy of the npm registry:
 
 ## 11. Still to settle
 
-1. **How builds between releases are numbered.** With one version number per
-   release (§4.2), the extension's patch number can no longer go up on every
-   change. That rule exists so the Extensions panel shows a new number after
-   each install of a work-in-progress build. A suffix such as `1.4.0-dev.17`
-   does not work: the Marketplace accepts only plain `1.4.0`-style numbers.
-   The simplest answer is to keep the bump, applied to the extension and the
-   `steptix` package together by one command, and to release whatever number
-   `main` has reached, so releases skip numbers (1.0.0, then 1.0.14). Skipped
-   numbers cost users nothing. Bumping only the extension would break §4.2:
-   a dev extension at 1.0.14 would refuse a checkout's server at 1.0.0.
-2. **The terminal's sample project.** `steptix init` should create the same
+1. **When the version number changes.** Settled: plain `major.minor.patch`
+   with a stable and a pre-release channel (§3.1); date-based numbers are
+   ruled out because they cannot carry the channels. Still to choose, one of:
+   - **Every change** raises the patch number in the extension and the
+     `steptix` package together, by one command, and a release ships
+     whatever `main` has reached (1.0.0, then 1.0.4). This is today's rule,
+     extended. Parallel PRs conflict on the version lines, and every change
+     reads as a patch. Bumping only the extension would break §4.2: a dev
+     extension at 1.0.4 would refuse a checkout's server at 1.0.0.
+   - **Only at release.** `package.json` holds the next release's number
+     and changes only when releasing, where the number is chosen to say
+     what the release is. Builds between releases are told apart by the
+     commit, shown by the extension (*Steptix 1.0.0 · 3f9a1c2*), which the
+     server already reports at `/health`.
+   - **The release pipeline picks it.** As the previous option, but pushing a
+     tag such as `v1.1.0` makes GitHub Actions write the number into both
+     packages, then build, test and publish.
+
+   Whichever is chosen replaces CLAUDE.md's "bump the patch version on every
+   change" section, which exists so a local install shows a new number.
+2. **Mixing channels.** A user on the pre-release extension and the stable
+   `steptix` in a terminal has two versions on the machine. Under §4.2 the
+   newest runs for both, so the terminal would run the pre-release server.
+   Either that is accepted (one server, the newest), or a stable extension or
+   launcher skips pre-release servers, at the cost of two versions competing
+   for one port (§6.4).
+3. **The terminal's sample project.** `steptix init` should create the same
    sample as **Create a sample project** (§7.3), so both ways in start from
    the same place. What it creates today needs checking first.
 
