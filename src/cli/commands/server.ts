@@ -9,7 +9,7 @@
  */
 
 import { createInterface } from 'node:readline/promises';
-import type { Command } from 'commander';
+import { Option, type Command } from 'commander';
 import { currentLaunch, type LaunchInfo } from '../../launcher/launch.js';
 import {
   cleanUp,
@@ -93,7 +93,11 @@ export function versionDetails(info: LaunchInfo = currentLaunch()): string {
 // server install (§5.3)
 // ---------------------------------------------------------------------------
 
-export async function serverInstall(info: LaunchInfo, opts: { json?: boolean }, io: ServerIo): Promise<number> {
+export async function serverInstall(
+  info: LaunchInfo,
+  opts: { json?: boolean; source?: RuntimeSource },
+  io: ServerIo,
+): Promise<number> {
   const report = (runtime: Runtime, installed: boolean) => {
     if (opts.json) {
       io.out(JSON.stringify({ version: runtime.version, dir: runtime.dir, source: runtime.source, installed }));
@@ -115,6 +119,7 @@ export async function serverInstall(info: LaunchInfo, opts: { json?: boolean }, 
   }
   try {
     const result = await installPackage(info.launcherRoot, info.layout, {
+      ...(opts.source && { source: opts.source }),
       onCopy: (v) => io.err(`Setting up Steptix ${v}…`),
       onWait: () => io.err('Waiting for Steptix to finish setting up in another window or terminal…'),
     });
@@ -330,7 +335,12 @@ export function registerServerCommand(program: Command): void {
     .command('install')
     .description("Set up this steptix's own version as an installed server")
     .option('--json', 'Print the result as JSON')
-    .action(async (opts: { json?: boolean }) => finish(await serverInstall(currentLaunch(), opts, consoleIo())));
+    // For the VS Code extension, which installs into a temporary npm folder
+    // and then sets that copy up here, so `server list` says where it came from.
+    .addOption(new Option('--source <source>').choices(['npm', 'extension', 'offline file']).hideHelp())
+    .action(async (opts: { json?: boolean; source?: RuntimeSource }) =>
+      finish(await serverInstall(currentLaunch(), opts, consoleIo())),
+    );
 
   server
     .command('list')

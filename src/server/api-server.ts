@@ -59,7 +59,7 @@ import { captureTabScreenshot } from '../browser/screenshot.js';
 import { PageCaptureError } from '../browser/dom-cleaner.js';
 import { createLoginBroker, type FieldHint, type LoginBroker } from '../credentials/index.js';
 import { IdleMonitor, startIdleReaper } from './idle-monitor.js';
-import { HEALTH_SERVICE_ID, type HealthResponse } from './health.js';
+import { HEALTH_SERVICE_ID, startedByOf, type HealthResponse } from './health.js';
 // Its own module so a CLIENT-side test can run a payload it just built through
 // the exact rules that would 400 it here. Behaviour is unchanged — this is the
 // same function, moved.
@@ -441,6 +441,8 @@ export function createApiServer(
   const version = getPackageVersion();
   const build = getBuildInfo();
   const startedAt = new Date().toISOString();
+  // Read once: who started this process does not change while it runs.
+  const startedBy = startedByOf(process.env);
   let shuttingDown = false;
 
   // JSON body parsing
@@ -486,6 +488,7 @@ export function createApiServer(
       // field exists to kill).
       inspector: inspectorUrl() ?? null,
       idleTimeoutMinutes: idleMonitor.timeoutMinutes,
+      startedBy,
     };
     res.status(200).json(body);
   });

@@ -32,7 +32,7 @@ export interface Runtime {
   version: string;
   /** `<Steptix folder>/runtimes/<version>`. */
   dir: string;
-  /** Null for a folder that predates the record, or whose record is unreadable. */
+  /** Null when the record names no source this version knows. */
   source: RuntimeSource | null;
 }
 
@@ -95,9 +95,11 @@ export function readPackageInfo(dir: string): PackageInfo | null {
 
 /**
  * The runtime in `runtimes/<name>`, or null when that folder is not one: a
- * `steptix` package whose version is the folder's name, with its entry point.
- * Anything else there — a partial copy, a folder from the retired Windows
- * installer — is not a server to run or to remove.
+ * `steptix` package whose version is the folder's name, with its entry point
+ * and the record the install that made it wrote. Anything else there — a
+ * partial copy, a folder from the Windows runtime installer, one copied in by
+ * hand — is not a server to run or to remove. The VS Code extension applies
+ * the same test (listInstalledServers in steptix-vscode's install-core.ts).
  */
 export function readRuntime(runtimesDir: string, name: string): Runtime | null {
   if (parseVersion(name) === null) return null;
@@ -105,15 +107,14 @@ export function readRuntime(runtimesDir: string, name: string): Runtime | null {
   const pkg = readPackageInfo(dir);
   if (pkg?.name !== 'steptix' || pkg.version !== name) return null;
   if (!fs.existsSync(path.join(dir, 'dist', 'index.js'))) return null;
-  let source: RuntimeSource | null = null;
+  let record: { source?: unknown };
   try {
-    const record = JSON.parse(fs.readFileSync(path.join(dir, INSTALL_RECORD), 'utf-8')) as { source?: unknown };
-    if (record.source === 'npm' || record.source === 'extension' || record.source === 'offline file') {
-      source = record.source;
-    }
+    record = JSON.parse(fs.readFileSync(path.join(dir, INSTALL_RECORD), 'utf-8')) as { source?: unknown };
   } catch {
-    // No record: shown as an unknown source.
+    return null;
   }
+  const source =
+    record.source === 'npm' || record.source === 'extension' || record.source === 'offline file' ? record.source : null;
   return { version: name, dir, source };
 }
 
@@ -342,6 +343,9 @@ export interface InstallResult {
 }
 
 export interface InstallOptions extends LockDeps {
+  /** Where the copy says it came from. Defaults to the package's own kind:
+   *  `offline file` for an offline file, else `npm`. */
+  source?: RuntimeSource;
   /** Called just before copying, so the caller can say it is setting up. */
   onCopy?: (version: string) => void;
 }
@@ -386,7 +390,7 @@ export async function installPackage(
         // verbatimSymlinks: npm's `.bin` links are relative and must stay so,
         // or they would point back into npm's folder.
         fs.cpSync(packageRoot, partial, { recursive: true, verbatimSymlinks: true });
-        const source: RuntimeSource = pkg.steptixDistribution === 'offline' ? 'offline file' : 'npm';
+        const source: RuntimeSource = opts.source ?? (pkg.steptixDistribution === 'offline' ? 'offline file' : 'npm');
         fs.writeFileSync(
           path.join(partial, INSTALL_RECORD),
           JSON.stringify({ version, source, from: packageRoot }, null, 2) + '\n',

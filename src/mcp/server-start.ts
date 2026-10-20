@@ -42,6 +42,7 @@ import {
   type HealthProbeResult,
 } from '../server/health.js';
 import { ensureMachineKey, userRootEnvPath, PRIVATE_DIR_MODE } from '../env/user-root.js';
+import { STARTED_BY_VAR } from '../server/health.js';
 import {
   autoStartFailed,
   autoStartSuppressed,
@@ -614,6 +615,9 @@ function childEnv(project: ProjectContext): NodeJS.ProcessEnv {
   // from `process.env`, and that value is deliberately kept out of the map we
   // send to the server. The child and the client must agree on it regardless.
   const overlay: Record<string, string> = { STEPTIX_SERVER_API_KEY: project.apiKey };
+  // /health then says an MCP client started it, so the VS Code extension
+  // never takes it for one of its own to replace (SPEC-install.md §6.4).
+  overlay[STARTED_BY_VAR] = 'mcp';
   for (const [key, value] of Object.entries(project.env)) {
     if (UNSAFE_CHILD_ENV_KEYS.has(key.toLowerCase())) continue;
     overlay[key] = value;

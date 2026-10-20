@@ -60,6 +60,12 @@ describe('server install', () => {
     expect(err).toEqual(['Setting up Steptix 1.4.0…']);
   });
 
+  it('records the VS Code extension as the source when it does the install', async () => {
+    expect(await serverInstall(npmLaunch(), { json: true, source: 'extension' }, io())).toBe(0);
+    expect(JSON.parse(out[0]!)).toMatchObject({ version: '1.4.0', source: 'extension' });
+    expect(listRuntimes(layout)[0]?.source).toBe('extension');
+  });
+
   it('says it was set up already', async () => {
     writeFakeRuntime(layout, '1.4.0');
     expect(await serverInstall(npmLaunch(), {}, io())).toBe(0);

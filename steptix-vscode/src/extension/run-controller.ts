@@ -115,6 +115,7 @@ import {
   type AutoStartConfig,
   type AutoStartGuard,
   type HealthProbe,
+  type RuntimeDiscovery,
   type ServerSpawner,
 } from './server-manager.js';
 import {
@@ -122,6 +123,7 @@ import {
   resolveServerUrl,
   type ResolvedServerUrl,
 } from './server-url.js';
+import type { RunServerSetup } from './server-setup.js';
 
 /**
  * Subset of the ApiClient surface we depend on. Defining it lets tests
@@ -1025,6 +1027,10 @@ export class RunController {
        * calling it again returns the same close — and never rejects.
        */
       previousSessionClose?: () => Promise<void>;
+      /** Installing, updating and replacing servers (SPEC-install.md). Absent
+       *  in the electron harness, which fakes the server; then a down server
+       *  is started from the Windows runtime installer's layout, as before. */
+      setup?: RunServerSetup;
     } = {},
   ) {
     this.boundDocument = document;
@@ -1588,19 +1594,54 @@ export class RunController {
     serverUrl: string;
     /** Where `serverUrl` came from — named by STX033. */
     serverUrlSource: string;
+    /** The key to stop a server with, for replacing one that does not match. */
+    apiKey: () => string | undefined;
     signal: AbortSignal;
     log: (line: string) => void;
   }): Promise<ServerReadiness> {
     const { serverUrl, serverUrlSource, signal, log } = args;
     this.currentInspectorUrl = undefined;
 
-    const probe = await this.healthProbe(serverUrl, HEALTH_PROBE_TIMEOUT_MS, signal);
+    let probe = await this.healthProbe(serverUrl, HEALTH_PROBE_TIMEOUT_MS, signal);
     if (signal.aborted) return { kind: 'aborted' };
+
+    // Installing and updating servers (SPEC-install.md §6.4, §5.2), unless a
+    // developer setting switches it off (§4.12). A running server of another
+    // major.minor is replaced or refused first; a down one is installed if
+    // need be, and the installed runtime is what `decideServerAction` starts.
+    const setup = this.server.setup?.managed() ? this.server.setup : undefined;
+    if (setup && probe.kind === 'healthy') {
+      const verdict = await setup.checkRunning({
+        serverUrl,
+        health: probe.health,
+        signal,
+        log,
+        probe: this.healthProbe,
+        apiKey: args.apiKey,
+      });
+      if (verdict.kind === 'aborted' || signal.aborted) return { kind: 'aborted' };
+      if (verdict.kind === 'fail') return { kind: 'fail', payload: verdict.payload };
+      if (verdict.kind === 'replaced') {
+        probe = await this.healthProbe(serverUrl, HEALTH_PROBE_TIMEOUT_MS, signal);
+        if (signal.aborted) return { kind: 'aborted' };
+      }
+    }
+    let discover: RuntimeDiscovery | undefined;
+    if (setup && probe.kind === 'down' && isLoopbackUrl(serverUrl)) {
+      const runtime = await setup.ensureRuntime({ signal, log });
+      if (runtime.kind === 'aborted' || signal.aborted) return { kind: 'aborted' };
+      if (runtime.kind === 'fail') {
+        log(`${runtime.payload.code} ${runtime.payload.diagnosis}`);
+        return { kind: 'fail', payload: runtime.payload };
+      }
+      discover = () => ({ runtimesDir: path.dirname(runtime.runtime.dir), runtime: runtime.runtime });
+    }
 
     const action = decideServerAction(
       serverUrl,
       probe,
       readAutoStartSettings(vscode.workspace.getConfiguration('steptix')),
+      ...(discover ? [discover] : []),
     );
 
     switch (action.kind) {
@@ -3187,6 +3228,10 @@ export class RunController {
     const ready = await this.ensureServerReady({
       serverUrl,
       serverUrlSource: target.serverUrlSource,
+      apiKey: () => {
+        const keyed = this.resolveApiKey(target);
+        return keyed.kind === 'proceed' ? keyed.apiKey : undefined;
+      },
       signal: ac.signal,
       log,
     });
@@ -5780,6 +5825,10 @@ export class RunController {
       const ready = await this.ensureServerReady({
         serverUrl,
         serverUrlSource: target.serverUrlSource,
+        apiKey: () => {
+          const keyed = this.resolveApiKey(target);
+          return keyed.kind === 'proceed' ? keyed.apiKey : undefined;
+        },
         signal: ac.signal,
         log,
       });

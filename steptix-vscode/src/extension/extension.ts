@@ -6,10 +6,11 @@ import {
   type WebviewStateMsg,
   type WebviewToHostMsg,
   isSkippedPass,
-  ownMinorRequirement,
   stepFailureDetail,
   writeClientRecord,
 } from 'steptix-runner-core';
+import { ServerSetup, type RunServerSetup } from './server-setup.js';
+import { serverRequirement } from './install-core.js';
 import { ActiveFileTracker, markLineMovesFor } from './active-file-tracker.js';
 import { moveLineKeyed } from './mark-lines-core.js';
 import { DecorationManager, computeStepsSummary, dataTablesOf } from './decorations.js';
@@ -207,6 +208,13 @@ class RunControllerRegistry implements vscode.Disposable {
   /** ONE guard for every controller: a failed auto-start must not be retried
    *  once per test in a Test Explorer batch. */
   private readonly autoStartGuard = new AutoStartGuard();
+  /** Installing and updating servers (server-setup.ts), for every controller.
+   *  Unset under the test harness, which fakes the server. */
+  private serverSetup: RunServerSetup | undefined;
+
+  setServerSetup(setup: RunServerSetup): void {
+    this.serverSetup = setup;
+  }
   /**
    * The workbench-level compile-tail signals — the status bar item and the
    * per-compile toast (stories/compile-tail-progress.md).
@@ -586,6 +594,7 @@ class RunControllerRegistry implements vscode.Disposable {
         logPath: this.serverLogPath,
         keepAliveIntervalMs: this.keepAliveIntervalMs,
         autoStartGuard: this.autoStartGuard,
+        ...(this.serverSetup && { setup: this.serverSetup }),
         // `.steps.ts`-breakpoint auto-attach (stories/codebehind-debugging.md
         // §Flow 1). Editor controllers only — batch runs ignore breakpoints
         // by design, and an attach from an earlier editor run covers them
@@ -660,7 +669,14 @@ class RunControllerRegistry implements vscode.Disposable {
       undefined, // pollSleep — real timer
       // A flask run needs the same server as an editor run, so it gets the
       // same pre-run check and auto-start.
-      { healthProbe: this.healthProbe, spawnServer: this.spawnServer, logPath: this.serverLogPath, keepAliveIntervalMs: this.keepAliveIntervalMs, autoStartGuard: this.autoStartGuard },
+      {
+        healthProbe: this.healthProbe,
+        spawnServer: this.spawnServer,
+        logPath: this.serverLogPath,
+        keepAliveIntervalMs: this.keepAliveIntervalMs,
+        autoStartGuard: this.autoStartGuard,
+        ...(this.serverSetup && { setup: this.serverSetup }),
+      },
     );
     // Recorded for batch controllers too: a batch run in flight must keep its
     // document when a different file lands on its path (`bindingFor`).
@@ -2377,7 +2393,7 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
   // an installed extension: an Extension Development Host or a test run
   // would leave a record naming a checkout in the user's real Steptix folder.
   const ownVersion = String(context.extension.packageJSON.version);
-  const requires = ownMinorRequirement(ownVersion);
+  const requires = serverRequirement(context.extension.packageJSON as { version?: unknown; steptixServer?: unknown });
   if (requires !== null && context.extensionMode === vscode.ExtensionMode.Production) {
     try {
       writeClientRecord({ kind: 'vscode', version: ownVersion, requires, location: context.extensionPath });
@@ -2425,6 +2441,14 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
   const view = new SteptixRunnerView(context, tracker);
   const serverStatusBar = new ServerStatusBar(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
   const registry = new RunControllerRegistry(view, tracker, serverLogPath, serverStatusBar);
+  // Installing, updating and replacing the server (SPEC-install.md). The
+  // test harness fakes the server, so under it the commands are registered
+  // but nothing is looked for, asked or replaced.
+  const serverSetup = new ServerSetup(context, out, serverStatusBar);
+  context.subscriptions.push(serverSetup);
+  const settingUpServers = context.extensionMode !== vscode.ExtensionMode.Test;
+  if (settingUpServers) registry.setServerSetup(serverSetup);
+  void serverSetup.activate({ checks: settingUpServers });
   // Record Steps keeps an in-flight recording's writes in the workspace's
   // state; one a reload cut off is offered for removal now
   // (SPEC-record-steps.md §7).
@@ -2713,6 +2737,7 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
       probe: (url, timeoutMs, signal) => registry.probeHealthNow(url, timeoutMs, signal),
       spawn: (spawnArgs) => registry.spawnServerNow(spawnArgs),
       onStarted: (serverUrl) => registry.forgetAutoStartFailure(serverUrl),
+      ...(settingUpServers && { setup: serverSetup }),
     }),
   );
 

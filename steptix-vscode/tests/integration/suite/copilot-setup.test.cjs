@@ -20,7 +20,7 @@ const vscode = require('vscode');
 const { freeFetchablePort } = require('../../../../tests/listen-fetchable.cjs');
 const { FakeLm } = require('../fakes/fake-lm.cjs');
 
-const EXT_ID = 'pkent.steptix-vscode';
+const EXT_ID = 'steptix.steptix-vscode';
 const FIXTURES_DIR =
   process.env.STEPTIX_FIXTURES_DIR || path.resolve(__dirname, '..', 'fixtures');
 const BASE_ENV = path.join(FIXTURES_DIR, '.env');

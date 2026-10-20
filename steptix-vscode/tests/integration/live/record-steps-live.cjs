@@ -22,7 +22,7 @@ const path = require('node:path');
 const vscode = require('vscode');
 const { freeFetchablePort } = require('../../../../tests/listen-fetchable.cjs');
 
-const EXT_ID = 'pkent.steptix-vscode';
+const EXT_ID = 'steptix.steptix-vscode';
 const TEST_APP_PORT = 8787;
 const APP = `http://localhost:${TEST_APP_PORT}`;
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', '..');

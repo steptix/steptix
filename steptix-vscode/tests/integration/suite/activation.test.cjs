@@ -3,7 +3,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const vscode = require('vscode');
 
-const EXT_ID = 'pkent.steptix-vscode';
+const EXT_ID = 'steptix.steptix-vscode';
 const SIDEBAR_VIEW_ID = 'steptix.runner';
 
 const FIXTURES_DIR =

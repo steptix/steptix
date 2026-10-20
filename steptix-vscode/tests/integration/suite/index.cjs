@@ -5,7 +5,7 @@ const Mocha = require('mocha');
 const { glob } = require('glob');
 const vscode = require('vscode');
 
-const EXT_ID = 'pkent.steptix-vscode';
+const EXT_ID = 'steptix.steptix-vscode';
 
 async function run() {
   const mocha = new Mocha({
