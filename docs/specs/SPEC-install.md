@@ -54,17 +54,8 @@ All of them are released together and carry the same version number (§4.2).
 The first release is 1.0.0 for all of them (§10).
 
 Version numbers are plain `major.minor.patch`, because the Marketplace accepts
-nothing else (no `-beta` or `-dev` suffix). There are two channels:
-
-| Channel | Minor number | Marketplace | npm | Who gets it |
-| --- | --- | --- | --- | --- |
-| Stable | even: 1.0.x, 1.2.x | normal release | the `latest` tag | everyone, by default |
-| Pre-release | odd: 1.1.x, 1.3.x | published as a pre-release | the `next` tag | people who chose *Switch to Pre-Release Version* in VS Code, or ran `npm i -g steptix@next` |
-
-A pre-release extension installs the server of its own version, as any
-extension does (§4.2), so a pre-release user gets the matching pre-release
-server without choosing anything else. In a terminal, `npm i -g steptix` stays
-on stable; only `steptix@next` moves to pre-release.
+nothing else (no `-beta` or `-dev` suffix). How they change, and whether there
+is a pre-release channel beside stable, is still open (§11).
 
 Not published: the Electron desktop app, and the Flick extension
 (`flick-vscode`), which is being retired.
@@ -856,9 +847,23 @@ copy of the npm registry:
 
 ## 11. Still to settle
 
-1. **When the version number changes.** Settled: plain `major.minor.patch`
-   with a stable and a pre-release channel (§3.1); date-based numbers are
-   ruled out because they cannot carry the channels. Still to choose, one of:
+1. **Version numbering.** Fixed so far: plain `major.minor.patch` (§3.1).
+   Ruled out: date-based numbers such as `2026.10.0`, because they cannot
+   carry a pre-release channel.
+
+   **Leading idea: a stable and a pre-release channel.**
+
+   | Channel | Minor number | Marketplace | npm | Who gets it |
+   | --- | --- | --- | --- | --- |
+   | Stable | even: 1.0.x, 1.2.x | normal release | the `latest` tag | everyone, by default |
+   | Pre-release | odd: 1.1.x, 1.3.x | published as a pre-release | the `next` tag | people who chose *Switch to Pre-Release Version* in VS Code, or ran `npm i -g steptix@next` |
+
+   A pre-release extension would install the server of its own version, as
+   any extension does (§4.2), so a pre-release user gets the matching server
+   without choosing anything else. In a terminal, `npm i -g steptix` would
+   stay on stable; only `steptix@next` moves to pre-release.
+
+   **When the number changes**, one of:
    - **Every change** raises the patch number in the extension and the
      `steptix` package together, by one command, and a release ships
      whatever `main` has reached (1.0.0, then 1.0.4). This is today's rule,
@@ -876,7 +881,7 @@ copy of the npm registry:
 
    Whichever is chosen replaces CLAUDE.md's "bump the patch version on every
    change" section, which exists so a local install shows a new number.
-2. **Mixing channels.** A user on the pre-release extension and the stable
+2. **Mixing channels**, if there are channels. A user on the pre-release extension and the stable
    `steptix` in a terminal has two versions on the machine. Under §4.2 the
    newest runs for both, so the terminal would run the pre-release server.
    Either that is accepted (one server, the newest), or a stable extension or
