@@ -44,6 +44,19 @@ npx steptix run --browser firefox
 npx steptix run --env staging
 ```
 
+### Download a browser
+
+Steptix drives the Google Chrome you installed, and needs nothing more for it.
+Firefox, WebKit and Playwright's own Chromium are downloaded builds; fetch the
+one a test uses before running it:
+
+```bash
+npx steptix browsers install firefox
+```
+
+Each Steptix version needs the builds that match its Playwright, so run it
+again after an update if a launch says the build is not downloaded yet.
+
 ### List tests
 
 ```bash
