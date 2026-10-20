@@ -166,19 +166,42 @@ describe('steptix serve — port errors', () => {
     });
   }
 
-  it('exits 1 naming the machine .env when the port it names is taken', async () => {
+  /** `serve` while something else holds the port the machine .env names. */
+  async function runServeOnTakenPort(): Promise<{
+    code: number | null;
+    output: string;
+    port: number;
+    envPath: string;
+  }> {
     const blocker: Server = createServer();
     await new Promise<void>((r) => blocker.listen(0, '127.0.0.1', () => r()));
     const address = blocker.address();
     const port = typeof address === 'object' && address !== null ? address.port : 0;
     try {
       const envPath = writeMachineEnv(`STEPTIX_SERVER_URL=http://127.0.0.1:${port}\n`);
-      const { code, output } = await runServe([]);
-      expect(code).toBe(1);
-      expect(output).toContain(`Port ${port} (from STEPTIX_SERVER_URL in ${envPath}) is already in use`);
+      return { ...(await runServe([])), port, envPath };
     } finally {
       await new Promise<void>((r) => blocker.close(() => r()));
     }
+  }
+
+  it('exits 1 naming the machine .env when the port it names is taken', async () => {
+    const { code, output, port, envPath } = await runServeOnTakenPort();
+    expect(code).toBe(1);
+    expect(output).toContain(`Port ${port} (from STEPTIX_SERVER_URL in ${envPath}) is already in use`);
+  }, 40_000);
+
+  it('names its version and folder first, so a start that fails still says which build it was', async () => {
+    const { code, output } = await runServeOnTakenPort();
+    expect(code).toBe(1);
+    const { version } = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8')) as {
+      version: string;
+    };
+    const started = output.indexOf(`Steptix ${version}`);
+    expect(started).toBeGreaterThanOrEqual(0);
+    // Node runs the main module from its real path, so compare against that.
+    expect(output).toContain(`starting from ${fs.realpathSync(REPO_ROOT)}`);
+    expect(started).toBeLessThan(output.indexOf('is already in use'));
   }, 40_000);
 
   it('exits 1 before binding anything when the machine STEPTIX_SERVER_URL has no port', async () => {

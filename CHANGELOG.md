@@ -52,6 +52,46 @@ package's 1.0.0-beta.1 and the extension's 0.5.x. The extension cannot yet
 start a server from a runtime set up this way; that comes with the next part
 of the spec.
 
+### Added — `steptix browsers` downloads Firefox, WebKit and Chromium
+
+`steptix browsers install firefox` (or `webkit`, `chromium`) downloads the
+browser build Steptix's Playwright launches, and `steptix browsers
+install-deps` installs the system packages those builds need on Linux. It was
+only in the Windows runtime installer's launcher before; now it is a CLI
+command, listed in `steptix --help`, wherever Steptix is installed. Google
+Chrome, the default, is the copy you installed and needs neither.
+
+So that everything after `browsers` reaches Playwright, `-V`/`--version`
+now count as Steptix's own only before the command name: `steptix --version`
+works as before, and `steptix run --version` is an unknown option.
+
+When a Firefox or WebKit launch fails because the build is not downloaded —
+on a new install, or after an update moved Playwright to a newer build — the
+error now says so and names the command, instead of Playwright's advice to run
+`npx playwright install`:
+
+```text
+Steptix needs a Firefox build that is not downloaded yet. Run: steptix browsers install firefox
+```
+
+Downloading the new builds by itself during an update is still to come
+(issue #109).
+
+### Added — the server says which build started, and from where
+
+`steptix serve` now opens its console output with the version and the folder
+it runs from, before it binds the port:
+
+```text
+[INFO]  Steptix 1.0.0-beta.1 (fcda88c) starting from C:\Projects\steptix
+[INFO]  Sessions API server listening on http://127.0.0.1:3111
+```
+
+The version reads as `steptix --version` does — with the commit, and
+`, modified` when the build held uncommitted changes. With several
+checkouts or an installed runtime on one machine, this is how to tell which
+one a console belongs to. A start that dies on a taken port prints it too.
+
 ### Fixed — a drag the browser gives up no longer hangs the run
 
 When a page's own `dragstart` handler moves, hides or removes the element

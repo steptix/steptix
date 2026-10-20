@@ -10,6 +10,7 @@ import { logger } from '../utils/logger.js';
 import { loopbackFetch } from './loopback-fetch.js';
 import { installNoticeRecorder } from './notices.js';
 import { answerDialog } from './dialogs.js';
+import { explainMissingBuild, type PlaywrightEngine } from './missing-build.js';
 
 /**
  * How much bigger the headed OS window is than the page inside it, when
@@ -88,10 +89,9 @@ async function assertChannelAvailable(channel: string): Promise<void> {
       `Unknown chromium channel "${channel}". Supported: ${[...known].join(', ')}.`,
     );
   }
-  // Lazy-load the executable resolver — Playwright doesn't expose channel
-  // path resolution on its public API, so we shell out to a single launch
-  // attempt with a short args probe. Failure mode: process.platform-specific
-  // binary search for the well-known install paths.
+  // Playwright doesn't expose channel path resolution on its public API, so
+  // look for the binary in the channel's well-known install locations for
+  // this platform instead.
   if (channel === 'chrome') return; // default — no extra check
   const platform = process.platform;
   const candidatePaths = channelInstallPaths(channel, platform);
@@ -110,6 +110,30 @@ async function assertChannelAvailable(channel: string): Promise<void> {
       candidatePaths.map((p) => `  - ${p}`).join('\n') +
       `\nInstall the browser, or set a different channel.`,
     );
+  }
+}
+
+/**
+ * Launch one of Playwright's own downloaded builds (Firefox, WebKit), and
+ * when the build is missing, fail with Steptix's message naming
+ * `steptix browsers install <engine>` instead of Playwright's advice to run
+ * `npx playwright install` (issue #109). Playwright's full error stays in the
+ * log and as the new error's `cause`.
+ *
+ * Not used for Chromium: `launchBrowser` always launches it on a channel
+ * (installed Chrome or Edge), which `assertChannelAvailable` checks itself.
+ */
+async function launchPlaywrightBuild(
+  engine: PlaywrightEngine,
+  launch: () => Promise<Browser>,
+): Promise<Browser> {
+  try {
+    return await launch();
+  } catch (err) {
+    const explained = explainMissingBuild(err, engine);
+    if (!explained) throw err;
+    logger.debug(`Playwright could not launch ${engine}: ${err instanceof Error ? err.message : String(err)}`);
+    throw explained;
   }
 }
 
@@ -1495,10 +1519,10 @@ export async function launchBrowser(
   let browser: Browser;
   switch (browserType) {
     case 'firefox':
-      browser = await firefox.launch(launchOptions);
+      browser = await launchPlaywrightBuild('firefox', () => firefox.launch(launchOptions));
       break;
     case 'webkit':
-      browser = await webkit.launch(launchOptions);
+      browser = await launchPlaywrightBuild('webkit', () => webkit.launch(launchOptions));
       break;
     case 'chromium':
     default: {
