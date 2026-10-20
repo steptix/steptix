@@ -21,7 +21,8 @@ A third way, a single downloaded file, serves machines with no internet access
 (§5.6).
 
 Whichever way someone starts, they get the server, the extension (if they
-use VS Code) and the `steptix` command, all running the same version. Nothing
+use VS Code) and the `steptix` command, all running versions that belong
+together. Nothing
 is downloaded twice, and nobody has to read instructions to get from "I
 installed it" to "my first test runs".
 
@@ -50,8 +51,9 @@ did the user have to do anything they would not have guessed?
 | Extension `steptix.steptix-vscode` | VS Code Marketplace, and as a `.vsix` file on GitHub Releases | Published by the `steptix` publisher. |
 | Offline files `steptix-<version>-<platform>.tgz` | GitHub Releases | One per supported platform (§5.6). |
 
-All of them are released together and carry the same version number (§4.2).
-The first release is 1.0.0 for all of them (§10).
+The extension and the `steptix` package share the first two numbers of their
+version; the last number is each one's own (§4.2). The first release is 1.0.0
+for both (§10).
 
 Version numbers are plain `major.minor.patch`, because the Marketplace accepts
 nothing else (no `-beta` or `-dev` suffix).
@@ -137,25 +139,46 @@ The extension and the launcher look there and nowhere else when choosing what
 to run. A folder is copied in under a temporary name and renamed when it is
 complete, so a half-finished copy is never picked up.
 
-### 4.2 Released together; the newest one runs
+### 4.2 Versions share major.minor; the newest matching server runs
 
-The extension and the `steptix` package are released together with one
-version number. Extension 1.4.0 was tested with server 1.4.0, and that is the
-server it installs.
+A version has three numbers, `major.minor.patch`. The extension and the
+`steptix` package share the first two. The last is each one's own:
+
+| | Version |
+| --- | --- |
+| `steptix` package (server and command) | 1.4.3 |
+| VS Code extension | 1.4.1 |
+
+- **A new feature, or anything that changes how the extension and the server
+  work together, is a new minor for both,** released together: 1.4.x to
+  1.5.0.
+- **A fix to one of them is a new patch of that one alone,** released alone:
+  server 1.4.3 while the extension stays at 1.4.1.
+- **Each extension and launcher states the server it needs:** the same
+  major.minor, and at least a given patch, normally `.0`. It asks for a
+  higher patch only when a fix of its own relies on a fix in the server. The
+  launcher needs its own major.minor.
 
 Which server runs:
 
-- **Normally, the newest one** in `runtimes/`. The extension and the launcher
-  choose the same way, so the terminal and VS Code never run different
-  versions.
-- **Never one older than the extension or launcher asking.** Extension 1.4.0
-  does not run server 1.3.0; it installs 1.4.0 (§6.2).
+- **Normally, the newest matching one** in `runtimes/`: the newest with the
+  right major.minor and at least the needed patch. The extension and the
+  launcher choose the same way, so when they share a major.minor the terminal
+  and VS Code run the same server.
+- **Never one that does not match.** Extension 1.4.1 runs neither server
+  1.3.x nor 1.5.x; it installs the newest 1.4.x (§6.2).
 - **Unless the user chose one** with `steptix server use <version>` (§6.5).
 
-VS Code and npm update at different times, so the server can be newer than
-the extension or launcher talking to it. A server therefore keeps working with
-an extension or launcher older than itself, and the release test checks that
-(§10.1).
+Which server the extension installs: the newest published patch of its
+major.minor (npm's `steptix@1.4`), not a number fixed inside the extension.
+So a server fix reaches VS Code users without a new extension release (§6.2).
+
+Within one major.minor, a newer server patch keeps working with every
+extension patch of that minor, because a patch never changes how the two work
+together. The release test checks that (§10.1).
+
+A plugin for another editor, such as a future JetBrains one, follows the same
+rule (§12).
 
 ### 4.3 A running server is never changed; the previous version is kept
 
@@ -163,11 +186,16 @@ Updating never writes into a server's folder. A new version goes into a new
 folder beside it. The running server carries on until it stops, and the next
 start uses the new one.
 
-Steptix keeps three kinds of version and removes the rest:
+Steptix keeps these and removes the rest:
 
-- the newest,
-- the one before it, so going back needs no download (§6.5),
+- for each major.minor that an installed extension or launcher needs, the
+  newest server of it,
+- the version before the newest, so going back needs no download (§6.5),
 - one the user chose with `steptix server use`, if any.
+
+Each extension and launcher writes its own version into the Steptix folder
+when it starts, so the clean-up knows which major.minor versions are still
+needed.
 
 A version is removed only when nothing is running from it. If something is,
 it is removed the next time Steptix checks.
@@ -264,8 +292,8 @@ behaviour off rather than fighting it:
   about one. With no server running, it says so, as today.
 
 The live test runner and an Extension Development Host start their own
-servers from the checkout. A checkout's server and extension carry the same
-version (§4.2), so the version checks pass without either setting.
+servers from the checkout. A checkout's server and extension share
+major.minor (§4.2), so the version checks pass without either setting.
 
 ## 5. Installing
 
@@ -325,8 +353,8 @@ Steptix folder, so it is theirs. Nothing later needs `sudo`.
    page and in the Output panel:
    1. If no suitable Node.js is available (§4.6), it downloads its own copy
       into `<Steptix folder>/node/`.
-   2. With that Node.js's npm, it installs the `steptix` package, the same
-      version as the extension, into `runtimes/<version>/`.
+   2. With that Node.js's npm, it installs the newest `steptix` package
+      matching the extension (§4.2) into `runtimes/<version>/`.
    3. The welcome page says *"You can carry on with the steps below while
       this finishes"*, so the user chooses the AI meanwhile (§7.2).
 5. **The server starts** on the first Run, as it does today.
@@ -346,14 +374,16 @@ was never copied into `runtimes/`, because that happens on the first command.
    It runs `steptix server install`, which does exactly what the first
    terminal command would have done: copy the package from npm's folder into
    `runtimes/<version>/`. It reports the folder and version back.
-4. **If that version is at least the extension's**, the extension uses it
+4. **If that version matches the extension** (§4.2), the extension uses it
    without asking anything, and says *"Using Steptix 1.4.0 installed with
    npm"*.
-5. **If it is older**, the extension installs 1.4.0 without asking, as any
+5. **If it does not match**, for example npm's is 1.3.x and the extension
+   1.4.x, the extension installs the newest 1.4.x without asking, as any
    server update does (§6.2), showing *"Updating the Steptix server to
    1.4.0…"*. It installs into the Steptix folder as in §5.2 step 4, and does
-   not update the user's npm install (§4.9). The terminal's `steptix` runs
-   1.4.0 from then on too, because the newest one runs (§4.2).
+   not update the user's npm install (§4.9). The terminal's `steptix` keeps
+   running its own 1.3.x until the user updates it with npm, because each
+   runs a server matching itself (§4.2).
 6. **The server runs** on the `node` on PATH, which the user already has
    (§4.6). Nothing is downloaded.
 7. **The `steptix` command** already works everywhere through npm, so the
@@ -372,9 +402,9 @@ The server is already in `runtimes/`, put there by the first `steptix`
 command.
 
 1. **They install the extension.**
-2. **It finds the server in `runtimes/`.** If it is at least the extension's
-   version, it uses it, says which version and where from, and asks nothing.
-   If it is older, as in §5.3 step 5.
+2. **It finds the server in `runtimes/`.** If it matches the extension
+   (§4.2), it uses it, says which version and where from, and asks nothing.
+   If it does not, as in §5.3 step 5.
 3. **Nothing is downloaded**, and nothing about PATH is asked.
 
 ### 5.5 Scenario 5: from the Marketplace, then wanting the `steptix` command
@@ -405,8 +435,9 @@ terminal.
 - **If `steptix` is already on PATH** (scenarios 3 and 4), the extension
   skips all of this.
 - **If they later run `npm i -g steptix` anyway**, there are two `steptix`
-  commands on PATH. Both run the newest server in `runtimes/`, so it makes no
-  difference which one the terminal finds first.
+  commands on PATH. Both pick a server the same way (§4.2), so while they
+  share a major.minor it makes no difference which one the terminal finds
+  first.
 
 ### 5.6 Scenario 6: a machine with no internet access
 
@@ -458,8 +489,8 @@ is refused at install with a message naming the right one.
 ### 6.2 Updating the extension
 
 1. VS Code updates the extension from the Marketplace, on its own.
-2. The new extension needs the server of its own version (§4.2). If that is
-   not in `runtimes/`, it first checks npm's install (§5.3), and otherwise
+2. The new extension needs a server matching it (§4.2). If none is in
+   `runtimes/`, it first checks npm's install (§5.3), and otherwise
    **starts fetching it straight away, without asking** (§4.5). It does not
    wait for a Run, so the download is usually finished before one.
 3. A notification shows *"Updating the Steptix server to 1.4.0…"* with
@@ -469,7 +500,13 @@ is refused at install with a message naming the right one.
 4. Once it is in place, an older server that is still running is replaced
    as §6.4 says: straight away when it is idle, after its test when it is
    busy.
-5. The terminal's `steptix` moves to the new version too (§4.2).
+5. The terminal's `steptix` uses it too when it has the same major.minor
+   (§4.2).
+
+**A server fix between extension releases** (server 1.4.3 while the
+extension stays at 1.4.1) arrives the same way. When VS Code starts, and
+once a day after that, the extension asks npm for the newest patch of its
+major.minor and fetches a newer one without asking.
 
 Updates still ask in these cases:
 
@@ -490,27 +527,28 @@ and nothing it is doing is cut short.
 
 What happens to it next depends on who needs it:
 
-- **After an update from npm**, the extension may still be the same version
-  as the running server. Then nothing happens: the server stops when it has
-  been idle long enough, and the next start runs the newest version.
-- **After the extension updates**, the running server is older than the
-  extension, which never runs an older server (§4.2). §6.4 says what the
-  extension does about it.
+- **After an update from npm**, the running server may still match the
+  extension. Then nothing happens: the server stops when it has been idle
+  long enough, and the next start runs the newest matching version.
+- **After the extension updates**, the running server may no longer match
+  it, and the extension never runs a server that does not match (§4.2). §6.4
+  says what the extension does about it.
 
-### 6.4 An older server is still running
+### 6.4 A running server that does not match
 
 The extension's server keeps running for up to 60 minutes after its last use,
 and a user may have started one by hand with `steptix serve`. So right after
-the extension updates, the server already running is often older than the
-extension.
+the extension updates, the server already running is often an older one. It
+can also be one started for another major.minor, for example by a terminal
+on a different channel (§11).
 
 Before each Run, the extension asks the running server about itself. The
 server already reports its version, its process number and whether a test is
 running in it. It also reports **who started it**: VS Code, automatically, or
 a person, by hand. That last one is new.
 
-- **It is the extension's version or newer:** the extension uses it.
-- **It is older, and VS Code started it:**
+- **It matches the extension** (§4.2): the extension uses it.
+- **It does not match, and VS Code started it:**
   - If no test is running in it, the extension stops it and starts the right
     version, showing *"Updating the Steptix server to 1.4.0…"* while it does.
     The Run carries on once the new server is ready.
@@ -518,15 +556,14 @@ a person, by hand. That last one is new.
     extension, for example), the extension waits for that test to finish,
     showing *"Waiting for a test in another window to finish before updating
     the Steptix server"*, then does the same.
-- **It is older, and a person started it:** the extension never stops it on
-  its own. It says: *"A Steptix server you started (1.3.0, at
-  http://127.0.0.1:3100) is older than this extension (1.4.0). Stop it and
-  press Run again, or start the new version yourself with `steptix serve`.
+- **It does not match, and a person started it:** the extension never stops
+  it on its own. It says: *"A Steptix server you started (1.3.0, at
+  http://127.0.0.1:3100) does not match this extension (1.4.1). Stop it and
+  press Run again, or start a matching one yourself with `steptix serve`.
   [Stop it] [Cancel]"*. **Stop it** stops that server, and only because the
   user asked.
 - **It is a version the user chose with `steptix server use`** (§6.5): as
-  above, the extension does not run it if it is older than the extension, and
-  says why.
+  above, the extension does not run it if it does not match, and says why.
 
 The launcher follows the same rules for a terminal command that needs the
 running server.
@@ -539,8 +576,8 @@ download.
 1. **`steptix server use 1.3.0`** makes 1.3.0 the version both the terminal
    and the extension run, from the next start. `steptix server list` shows
    what is installed, which one runs, and where each came from.
-2. **The extension must not be newer than the server it runs** (§4.2). If
-   extension 1.4.0 finds the user chose 1.3.0, it says: *"You chose Steptix
+2. **The server must still match the extension** (§4.2). If extension
+   1.4.0 finds the user chose 1.3.0, it says: *"You chose Steptix
    server 1.3.0, but this extension is 1.4.0. Install extension 1.3.0 to
    match (Extensions view → Steptix → Install Another Version), or go back to
    the newest server. [Use newest] [Show how]"*.
@@ -821,11 +858,13 @@ which is the expected result: the user still has Steptix installed.
   also needs a PNG icon (the Marketplace does not accept SVG for it) and a
   Marketplace description, and `"preview": true` in its `package.json` while
   every release is a preview (§3.1).
-- **Changed:** one version number for the extension and the `steptix`
-  package (§4.2), starting at **1.0.0** for both. Today the extension is at
-  0.5.x and the package at 1.0.0-beta.1; 1.0.0 is newer than both, so every
-  existing install sees it as an update. The CLAUDE.md rule that bumps the
-  extension's patch version on every change needs replacing to fit (§11).
+- **Changed:** the extension and the `steptix` package share major.minor,
+  each with its own patch (§4.2), starting at **1.0.0** for both. Today the
+  extension is at 0.5.x and the package at 1.0.0-beta.1; 1.0.0 is newer than
+  both, so every existing install sees it as an update. The extension states
+  the server patch it needs, and checks npm for newer server patches (§6.2).
+  The CLAUDE.md rule that bumps the extension's patch version on every change
+  needs replacing to fit (§11).
 - **Changed:** CLAUDE.md's platform rule gains a note pointing at the
   Windows-first exception in §3.2, so it is not mistaken for a gap to fix.
 - **Retired:** the Windows installer (`packaging/runtime/`,
@@ -862,14 +901,16 @@ copy of the npm registry:
 | The sample project's first Run passes with no AI chosen and the network off | §7.3 |
 | Offline file and `.vsix` installed with the network switched off, a test runs | §5.6 |
 | Update from npm while a server runs: the server keeps serving, the next start is the new version | §6.1, §6.3 |
-| Extension updates and needs a newer server: it fetches it without asking, before any Run, and the terminal runs it too | §6.2 |
-| Older server started by VS Code, idle: the extension replaces it and the Run passes | §6.4 |
-| Older server started by VS Code, test running: the extension waits, then replaces it | §6.4 |
-| Older server started by hand: the extension asks and does not stop it on its own | §6.4 |
+| Extension updates to a new minor: it fetches the matching server without asking, before any Run, and a terminal on the same minor runs it too | §6.2 |
+| A new server patch is published with no new extension: the extension fetches it without asking | §6.2 |
+| Non-matching server started by VS Code, idle: the extension replaces it and the Run passes | §6.4 |
+| Non-matching server started by VS Code, test running: the extension waits, then replaces it | §6.4 |
+| Non-matching server started by hand: the extension asks and does not stop it on its own | §6.4 |
 | `serverAutoStart.command` set: no install offer, the configured server runs; `useInstalledRuntime` off: no install offer, no start | §4.12 |
-| The previous release's extension runs a test against this release's server | §4.2 |
+| A new server patch runs a test with the oldest and the newest extension patch of its minor | §4.2 |
+| An extension never runs a server of another major.minor, newer or older | §4.2 |
 | `server use` the previous version, both sides run it; `server use newest` undoes it | §6.5 |
-| Only the newest, the previous and a chosen version are kept | §4.3 |
+| Only the newest of each needed major.minor, the previous and a chosen version are kept | §4.3 |
 | Two windows install at once: one download, both work | §6.7 |
 | Install interrupted, then retried | §8.3 |
 | Each uninstall removes what §9 says, and nothing else | §9 |
@@ -889,41 +930,44 @@ copy of the npm registry:
    | Stable | even: 1.0.x, 1.2.x | normal release | the `latest` tag | everyone, by default |
    | Pre-release | odd: 1.1.x, 1.3.x | published as a pre-release | the `next` tag | people who chose *Switch to Pre-Release Version* in VS Code, or ran `npm i -g steptix@next` |
 
-   A pre-release extension would install the server of its own version, as
-   any extension does (§4.2), so a pre-release user gets the matching server
-   without choosing anything else. In a terminal, `npm i -g steptix` would
-   stay on stable; only `steptix@next` moves to pre-release.
+   The channel lives in the minor number, which every piece shares (§4.2),
+   while patches stay each piece's own:
+
+   | | Stable | Pre-release |
+   | --- | --- | --- |
+   | `steptix` package | 1.4.3 | 1.5.2 |
+   | VS Code extension | 1.4.1 | 1.5.4 |
+
+   A pre-release extension installs the newest server of its own odd minor,
+   so a pre-release user gets the matching server without choosing anything
+   else. In a terminal, `npm i -g steptix` would stay on stable; only
+   `steptix@next` moves to pre-release. The channels never mix: a stable
+   client runs only servers of its even minor and a pre-release one only of
+   its odd minor. When both run on one machine, they take turns on the one
+   port as §6.4 says. A pre-release graduates when its minor moves to the
+   next even number for every piece together (1.5.x to 1.6.0).
 
    Branches would stay simple: `main` is always the next preview, a stable
    release is a tag on `main`, and a short-lived `release/x.y` branch is cut
    from a stable tag only when that stable release needs an urgent fix.
 
    **When the number changes**, one of:
-   - **Every change** raises the patch number in the extension and the
-     `steptix` package together, by one command, and a release ships
-     whatever `main` has reached (1.0.0, then 1.0.4). This is today's rule,
-     extended. Parallel PRs conflict on the version lines, and every change
-     reads as a patch. Bumping only the extension would break §4.2: a dev
-     extension at 1.0.4 would refuse a checkout's server at 1.0.0.
+   - **Every change** raises the patch number of the piece it changed, and
+     a release ships whatever `main` has reached (1.0.0, then 1.0.4). This
+     is today's rule, extended to the package. Parallel PRs conflict on the
+     version lines, and a new minor still needs a deliberate bump of both.
    - **Only at release.** `package.json` holds the next release's number
      and changes only when releasing, where the number is chosen to say
      what the release is. Builds between releases are told apart by the
      commit, shown by the extension (*Steptix 1.0.0 · 3f9a1c2*), which the
      server already reports at `/health`.
    - **The release pipeline picks it.** As the previous option, but pushing a
-     tag such as `v1.1.0` makes GitHub Actions write the number into both
-     packages, then build, test and publish.
+     tag makes GitHub Actions write the number into the piece being released,
+     then build, test and publish it.
 
    Whichever is chosen replaces CLAUDE.md's "bump the patch version on every
    change" section, which exists so a local install shows a new number.
-2. **Mixing channels**, once there are channels. A user on the pre-release
-   extension and the stable `steptix` in a terminal has two versions on the
-   machine. Under §4.2 the
-   newest runs for both, so the terminal would run the pre-release server.
-   Either that is accepted (one server, the newest), or a stable extension or
-   launcher skips pre-release servers, at the cost of two versions competing
-   for one port (§6.4).
-3. **The terminal's sample project.** `steptix init` should create the same
+2. **The terminal's sample project.** `steptix init` should create the same
    sample as **Create a sample project** (§7.3), so both ways in start from
    the same place. What it creates today needs checking first.
 
@@ -934,6 +978,15 @@ VS Code.
 ## 12. Not in this spec
 
 Each of these is a later change of its own:
+
+- **A plugin for another editor, such as JetBrains.** It shares major.minor
+  with the server and keeps its own patch, exactly like the VS Code extension
+  (§4.2), so a fix to one editor's plugin never forces a release of the
+  other. It uses the same `runtimes/` folder and rules, so a user with both
+  editors gets one server. To keep one copy of the install logic, finding,
+  installing and updating servers live in the `steptix` command (`steptix
+  server install`, `list`, `use`), and each editor adds only a small start:
+  find or download Node.js, run `steptix server install`, show progress.
 
 - **Desktop permissions on macOS and Linux.** Desktop automation needs
   Accessibility and Screen Recording permission on macOS, and an X11 session
