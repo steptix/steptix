@@ -170,7 +170,10 @@ the machine: first in `runtimes/`, then in npm's own install of `steptix`
 ### 4.5 Ask before downloading, never after the user already chose
 
 - **In VS Code**, installing the extension is not a request to download a
-  server. The extension asks first, and says how big the download is.
+  server. The extension asks first, and says how big the download is. It asks
+  **once**, right after the extension is installed (§5.2). After Not now it
+  never asks again on its own, not after a restart and not in another window.
+  It asks again only when a Run needs the server.
 - **In a terminal**, `npm i -g steptix` already was the request. Nothing asks
   again.
 
@@ -264,7 +267,8 @@ so they have it.
    *"Setting up Steptix 1.4.0 (first run only)…"*, copies its package from
    npm's folder into `runtimes/1.4.0/`, and then runs the command they typed
    from there. This takes a few seconds and needs no network.
-3. **First-run setup** (§7) checks for a browser and an AI key.
+3. **First-run setup** (§7.5) checks for a browser and whether an AI is
+   chosen, and points to `steptix ai` if not.
 
 **If their Node.js is too old:** npm warns during the install, and the
 launcher refuses to run with *"Steptix needs Node.js 22.21 or later. You have
@@ -279,20 +283,38 @@ Steptix folder, so it is theirs. Nothing later needs `sudo`.
 **Before:** VS Code. Node.js is optional.
 
 1. **They install Steptix from the Extensions view.** The extension starts
-   and opens a short welcome page (§7).
+   straight away, whatever folder is open, and opens the welcome page (§7.1).
 2. **The extension looks for a server** (§4.4). It finds none.
-3. **It asks:** *"Steptix needs its local server to run tests (about N MB to
-   download). [Install] [Not now]"*. It asks when it first starts, so that
-   the server is usually ready before the first Run. If they chose Not now, it
-   asks again when they press Run.
-4. **On Install**, with progress shown in the notification and detail in the
-   Output panel:
+3. **It asks, once,** in a notification:
+
+   > *Steptix needs its local server to run tests. About N MB to download.*
+   > **[Install]** **[Install and add steptix to PATH]** **[Not now]**
+
+   - **Install** installs the server. `steptix` then works in VS Code's own
+     terminals and nowhere else, so nothing changes outside VS Code (§5.5).
+   - **Install and add steptix to PATH** does the same and also makes
+     `steptix` work in every terminal (§5.5).
+   - **Not now** does nothing. VS Code remembers the answer for the user, not
+     for the window or the folder, so the question does not come back after a
+     restart or in another window. The next time a Run needs the server, the
+     same three answers appear again, with **Cancel** in place of Not now.
+   - The welcome page's server step offers the same choice: an **Install
+     server** button and an *Also add steptix to PATH, for every terminal*
+     checkbox.
+   - If `steptix` is already on PATH (scenarios 3 and 4), the PATH answer and
+     the checkbox do not appear.
+
+   Asking right after the install, rather than on the first Run, means the
+   server is usually ready by the time the user has a test to run.
+4. **On Install**, with progress shown in the notification, on the welcome
+   page and in the Output panel:
    1. If no suitable Node.js is available (§4.6), it downloads its own copy
       into `<Steptix folder>/node/`.
    2. With that Node.js's npm, it installs the `steptix` package, the same
       version as the extension, into `runtimes/<version>/`.
-5. **The server starts** as it does today, and the Run carries on.
-6. **The `steptix` command** is set up as in §5.5.
+   3. The welcome page says *"You can carry on with the steps below while
+      this finishes"*, so the user chooses the AI meanwhile (§7.2).
+5. **The server starts** on the first Run, as it does today.
 
 If they press Run while the download is still going, the Run waits for it
 rather than failing.
@@ -349,16 +371,19 @@ terminal.
   installs the server, it puts a small `steptix` script in
   `<Steptix folder>/bin/` and adds that folder to the PATH of VS Code's
   terminals only. Nothing outside VS Code changes.
-- **For other terminals**, the extension asks once, after the first
-  successful install: *"Use the steptix command in other terminals too? [Add
-  it] [No thanks]"*.
+- **For other terminals**, the user chose at install time: the **Install and
+  add steptix to PATH** answer, or the checkbox on the welcome page (§5.2).
+  There is no separate question about it later. Anyone who wants it afterwards
+  uses **Steptix: Add steptix to PATH**, from the Command Palette or the link
+  on the welcome page's server step.
   - Windows: it adds the folder to the end of the user's own PATH, leaving
     every other entry as it was.
   - macOS and Linux: it adds a link in `~/.local/bin` if that folder is on
     PATH, otherwise one line to the shell's startup file (`~/.zshrc` or
-    `~/.bashrc`), and says which.
-  - Terminals that are already open need to be reopened, and the message says
-    so.
+    `~/.bashrc`).
+  - When it is done it says *"steptix is on PATH. Reopen any terminal that is
+    already open."*, and on macOS and Linux also what it changed, for example
+    *"Added a line to ~/.zshrc."*
   - The script in `bin/` starts the launcher in the newest `runtimes/` folder
     with the Node.js the server uses (§4.6), so it works even for someone who
     never installed Node.js.
@@ -512,17 +537,148 @@ done (§4.7). Neither asks twice.
 
 ## 7. First-run setup
 
-Both ways in end with the same two checks, on the welcome page in VS Code and
-as a printed message in a terminal:
+### 7.1 The welcome page
 
-1. **An AI key.** If none is set, it says where to put one. Helping a new
-   user get a key in the first place is a later change (§12).
-2. **A browser.** Steptix uses Google Chrome by default. If Chrome is not
-   installed, it says so and offers `steptix browsers`, which downloads a
-   browser Steptix can use instead.
+The extension opens it the first time it starts (§5.2), and **Steptix:
+Welcome** opens it again at any time. It holds four steps, each showing its
+state, and they can be done in any order:
+
+1. **Steptix server:** *Not installed*, *Installing* (with progress, and
+   which Node.js it uses), or *Ready* (the version, and whether `steptix` is
+   on PATH, with a link to add it).
+2. **AI:** which AI Steptix uses (§7.2).
+3. **Browser:** whether Google Chrome was found (§7.4).
+4. **Your first test:** **Create a sample project** or **Open a folder**
+   (§7.3).
+
+None of steps 2 to 4 needs the server, so the user can do them while step 1
+downloads. The AI step checks keys and lists models from the extension
+itself, Copilot's dialog and models come from VS Code, and saving the choice
+is a file write.
 
 The machine key is created the first time the server starts, as today. The
 user never sees it.
+
+### 7.2 Choosing the AI
+
+There are two kinds of AI, and the step offers both:
+
+- **GitHub Copilot**, through VS Code. No API key.
+- **An AI provider:** OpenAI, Anthropic or OpenRouter, with the user's own
+  API key and a choice of model.
+
+**Which one is chosen to begin with.** Steptix recommends **GPT 6 Luna**,
+`openai/gpt-6-luna`, which is already its default model.
+
+- **Copilot offers GPT 6 Luna:** Copilot is chosen to begin with, marked
+  *Offers GPT 6 Luna*, and the button says **Use Copilot**.
+- **Copilot is there but does not offer GPT 6 Luna:** the provider form is
+  chosen to begin with. Copilot is still offered, saying *"Your Copilot does
+  not offer GPT 6 Luna, the model Steptix recommends. You can still use it
+  with one of the models it does offer."*
+- **No Copilot:** the provider form on its own.
+
+The model is the test because VS Code does not tell an extension which
+Copilot plan the user has: an extension sees only each model's name, id,
+vendor, family, version and input limit. A free plan, or a company policy
+that leaves the model out, shows up as Copilot not offering GPT 6 Luna, which
+is what matters to Steptix anyway. If VS Code lists Copilot's models only
+after the user has acted the first time
+([copilot-lm-bridge.md](../../stories/copilot-lm-bridge.md), Consent), the
+check runs when the user opens the AI step, which shows *"Checking GitHub
+Copilot…"* meanwhile.
+
+**Using Copilot.** **Use Copilot** runs the existing setup behind **Steptix:
+Use Copilot for AI**:
+
+1. VS Code asks, once, whether Steptix may use Copilot's models: **Allow** or
+   **Cancel**. This is VS Code's own dialog.
+2. Steptix picks GPT 6 Luna. The model list holds only the models Copilot
+   offers.
+3. The step explains the cost in one line: *"Uses Copilot requests when
+   Steptix works out or repairs a step. A test that has been compiled runs
+   without any."*
+
+**Using a provider.**
+
+1. **Choose the provider:** OpenAI, Anthropic or OpenRouter. A link beside
+   the key field goes to that provider's page for making a key.
+2. **Paste the key and press Check key.** The extension asks the provider
+   for the models the key can use. A refusal says so before anything is
+   saved: *"Anthropic did not accept this key. Check that you copied all of
+   it, or make a new one."* A provider it cannot reach gives the network's
+   reason and says a company may need its proxy set for VS Code.
+3. **Choose the model.** The list puts Steptix's recommended model first:
+   GPT 6 Luna for OpenAI, and for OpenRouter when it offers it. Anthropic's
+   recommended model is still to be chosen (§11). Then come every model the
+   key can use, then *Type a model id…*. The recommended models ship with
+   each release.
+4. **Save.** From then on the key is shown only by its last four characters.
+
+**What is saved, and where.** A provider writes `AI_MODEL`, with the
+provider's prefix (`openai/…`, `anthropic/…`, `openrouter/…`), and
+`AI_API_KEY`. Copilot writes the three lines its setup already writes
+(`AI_MODEL=gateway/copilot/…`, `AI_GATEWAY_URL` and the bridge's
+`AI_API_KEY`). Beside the Save button it says *"For all your projects.
+Change"*:
+
+- **All my projects** (the default) writes `<Steptix folder>/.env`, which
+  already gives AI settings to any project that sets none of its own. This
+  also works before any folder is open.
+- **Only this project** writes the project's `.env`, which wins over the
+  all-projects one. It needs an open folder.
+- If the project is a git repository and its `.env` is not ignored, Steptix
+  says so and offers to add it to `.gitignore` before writing a key there.
+- A project `.env` with an empty `AI_API_KEY=` line blocks the all-projects
+  key. When the open project has one, the step says so instead of saving a
+  choice that would not reach it.
+
+**Changing it later.** A status-bar item shows what is in use, for example
+*AI: Copilot · GPT 6 Luna*. Clicking it, or **Steptix: Choose AI**, opens the
+AI step again.
+
+**When Copilot stops answering.** When the month's requests are used up, or
+the permission was taken back, the step that needed the AI says so with a
+**Choose AI** button: *"Copilot has used up this month's requests. Compiled
+tests still run. To keep working now, switch to an AI provider."* If Copilot
+stops offering GPT 6 Luna, it says *"Your Copilot no longer offers GPT 6 Luna.
+Pick another Copilot model, or switch to an AI provider."*
+
+**From a terminal: `steptix ai`.** It asks the same questions: provider, key
+(checked the same way), model with GPT 6 Luna first, and where to save. It
+writes the same files. Copilot is not offered, because it works only inside
+VS Code, and it says so. A terminal command that needs the AI while Copilot
+is configured says *"Copilot works only inside VS Code. To use the AI from a
+terminal, run steptix ai."* instead of failing to connect.
+
+### 7.3 The first test: a sample project
+
+**Create a sample project** asks where to put it, then creates a folder with:
+
+- `tests/first-test.md`, a short test of four steps,
+- `pages/sample-page.html`, the page it tests, inside the project, so it
+  works without a network and never changes under the test,
+- `steptix.config.json`,
+- the test's steps already compiled.
+
+It then opens the folder and the test. Because the steps are compiled, the
+first Run makes no AI calls at all: it passes before an AI is chosen, and
+costs a Copilot user nothing. The sample is built and compiled for each
+release and checked by the release test (§10.1).
+
+**Open a folder** is for people who already have tests.
+
+### 7.4 A browser
+
+Steptix uses Google Chrome by default. If Chrome is not installed, the step
+says so and offers **Download a browser for Steptix**, which runs `steptix
+browsers`.
+
+### 7.5 From a terminal
+
+The first `steptix` command prints the same checks as lines: whether Google
+Chrome was found, and, if no AI is chosen, *"No AI chosen yet. Run steptix ai
+to choose one."*
 
 ## 8. When things go wrong
 
@@ -609,6 +765,16 @@ which is the expected result: the user still has Steptix installed.
   (`steptix-vscode/src/extension/server-manager.ts`). Today it gives up when
   no runtime is installed. It will find, install and update servers as above,
   and replace an older running server as §6.4 says.
+- **New:** the install question with its three answers, asked once and
+  remembered for the user (§5.2), and **Steptix: Add steptix to PATH** (§5.5).
+- **New:** the welcome page and **Steptix: Welcome** (§7.1).
+- **New:** the AI step (§7.2): the check for GPT 6 Luna among Copilot's
+  models, the provider form that asks OpenAI, Anthropic and OpenRouter for
+  their model lists, the list of recommended models shipped with each
+  release, **Steptix: Choose AI** and the status-bar item. Copilot reuses the
+  existing setup (`steptix-vscode/src/extension/lm-bridge-setup.ts`).
+- **New:** `steptix ai` for the terminal (§7.2).
+- **New:** the sample project, built and compiled for each release (§7.3).
 - **Changed:** the server's `/health` answer also says who started it: VS Code
   automatically, or a person by hand (§6.4). It already reports the version,
   the process number and whether a test is running.
@@ -649,7 +815,15 @@ copy of the npm registry:
 | Extension with Node.js 22.21+ on PATH downloads only the server and runs on the user's Node.js | §5.2, §4.6 |
 | Extension with no Node.js, or an older one, on PATH downloads Node.js and the server, a test runs | §5.2, §4.6 |
 | npm install never run, then the extension: no download, uses npm's copy | §5.3 |
+| The install question appears once: Not now, then a restart and a second window, and it does not come back; a Run asks again | §5.2, §4.5 |
+| Install and add steptix to PATH: `steptix` runs in a new terminal outside VS Code | §5.2, §5.5 |
 | Extension-installed server, `steptix` works in VS Code's terminal | §5.5 |
+| The AI step works while the server downloads | §7.1 |
+| A stand-in Copilot that offers GPT 6 Luna is chosen to begin with; one that does not, or none, starts on the provider form | §7.2 |
+| A wrong key is refused before anything is saved; a good one lists models with GPT 6 Luna first | §7.2 |
+| Saved for all projects reaches a project with no `.env`; only this project wins over it | §7.2 |
+| `steptix ai` writes what the welcome page writes | §7.2 |
+| The sample project's first Run passes with no AI chosen and the network off | §7.3 |
 | Offline file and `.vsix` installed with the network switched off, a test runs | §5.6 |
 | Update from npm while a server runs: the server keeps serving, the next start is the new version | §6.1, §6.3 |
 | Extension needs a newer server: it installs it, and the terminal runs it too | §6.2 |
@@ -671,12 +845,20 @@ copy of the npm registry:
    change. That rule exists so the Extensions panel shows a new number after
    each install of a work-in-progress build. A suffix such as `1.4.0-dev.17`
    would keep that signal without using up release numbers.
+2. **Anthropic's recommended model.** GPT 6 Luna is not an Anthropic model, so
+   the provider form needs one to put first for Anthropic (§7.2).
+3. **The terminal's sample project.** `steptix init` should create the same
+   sample as **Create a sample project** (§7.3), so both ways in start from
+   the same place. What it creates today needs checking first.
+
+The release test cannot sign in to a real Copilot account, so the Copilot
+checks in §10.1 use a stand-in language-model provider registered in the test's
+VS Code.
 
 ## 12. Not in this spec
 
 Each of these is a later change of its own:
 
-- **Getting a new user an AI key.** §7 only says where the key goes.
 - **Desktop permissions on macOS and Linux.** Desktop automation needs
   Accessibility and Screen Recording permission on macOS, and an X11 session
   on most Linux desktops. First-run setup will check and explain these once
