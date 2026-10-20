@@ -345,6 +345,10 @@ major.minor only.
 **Before:** the user has Node.js 22.21 or later and npm. They are using npm,
 so they have it.
 
+This is the way in for anyone without VS Code, such as a CI machine or
+someone who works only in a terminal. VS Code users never need it: the
+extension gives them the `steptix` command too (§5.5).
+
 1. **They run `npm i -g steptix`.** npm downloads the whole package, with its
    normal progress display. `steptix` now works in every new terminal,
    because npm's folder is already on PATH.
@@ -523,7 +527,8 @@ is refused at install with a message naming the right one.
 
 ### 6.1 Updating from a terminal
 
-1. `npm i -g steptix@latest` downloads the new version into npm's folder. Nothing in `runtimes/` changes, so a running server is not affected.
+1. `npm i -g steptix` again downloads the newest version into npm's folder.
+   Nothing in `runtimes/` changes, so a running server is not affected.
 2. The next `steptix` command, or the extension's next Run, whichever comes
    first, copies the new version into its own folder (§4.1).
 3. The previous version stays, and anything older is removed once nothing is
@@ -966,6 +971,11 @@ which is the expected result: the user still has Steptix installed.
 - **Release:** npm packages are published from GitHub Actions with npm's
   provenance record, which shows which commit and build produced them. The
   `.vsix` and the offline files go on the same GitHub release.
+- **The first npm release takes over the name.** npm's `steptix` today holds
+  only a `0.0.1` placeholder, which `npm i -g steptix` would install. The
+  first real release goes to the `latest` tag so that the same command
+  installs it, and the placeholder is deprecated with a message pointing at
+  the real versions.
 
 ### 10.1 Every release is tested end to end
 
@@ -976,7 +986,7 @@ copy of the npm registry:
 
 | Check | Scenario |
 | --- | --- |
-| `npm i -g`, first command copies the package, a test runs | §5.1 |
+| `npm i -g steptix` from the test registry, first command copies the package, a test runs | §5.1 |
 | A test project's own tool (`steptix/tools`) and a generated code-behind file (`steptix/codebehind`) both load against the installed server, with and without a local `steptix` in the project | §3.4 |
 | Extension with Node.js 22.21+ on PATH downloads only the server and runs on the user's Node.js | §5.2, §4.6 |
 | Extension with no Node.js, or an older one, on PATH downloads Node.js and the server, a test runs | §5.2, §4.6 |
