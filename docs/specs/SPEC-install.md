@@ -54,8 +54,15 @@ All of them are released together and carry the same version number (§4.2).
 The first release is 1.0.0 for all of them (§10).
 
 Version numbers are plain `major.minor.patch`, because the Marketplace accepts
-nothing else (no `-beta` or `-dev` suffix). How they change, and whether there
-is a pre-release channel beside stable, is still open (§11).
+nothing else (no `-beta` or `-dev` suffix).
+
+**For now, every release is a preview.** It goes out on the normal channels:
+the Marketplace's ordinary release, and npm's `latest` tag, so `npm i -g
+steptix` and the Install button work as every scenario below describes. The
+extension's `package.json` carries `"preview": true`, which puts a
+**Preview** label on its Marketplace page. When Steptix is ready for a stable
+release, the label comes off and a separate pre-release channel may start
+(§11).
 
 Not published: the Electron desktop app, and the Flick extension
 (`flick-vscode`), which is being retired.
@@ -791,7 +798,8 @@ which is the expected result: the user still has Steptix installed.
   existing `pkent.steptix-vscode` install has to be uninstalled once by hand,
   and the docs and CLAUDE.md that name the old ID change with it. Publishing
   also needs a PNG icon (the Marketplace does not accept SVG for it) and a
-  Marketplace description.
+  Marketplace description, and `"preview": true` in its `package.json` while
+  every release is a preview (§3.1).
 - **Changed:** one version number for the extension and the `steptix`
   package (§4.2), starting at **1.0.0** for both. Today the extension is at
   0.5.x and the package at 1.0.0-beta.1; 1.0.0 is newer than both, so every
@@ -847,11 +855,13 @@ copy of the npm registry:
 
 ## 11. Still to settle
 
-1. **Version numbering.** Fixed so far: plain `major.minor.patch` (§3.1).
+1. **Version numbering.** Fixed so far: plain `major.minor.patch`, and every
+   release a preview on the normal channels until Steptix goes stable (§3.1).
    Ruled out: date-based numbers such as `2026.10.0`, because they cannot
    carry a pre-release channel.
 
-   **Leading idea: a stable and a pre-release channel.**
+   **Leading idea for when Steptix goes stable: a stable and a pre-release
+   channel.**
 
    | Channel | Minor number | Marketplace | npm | Who gets it |
    | --- | --- | --- | --- | --- |
@@ -862,6 +872,10 @@ copy of the npm registry:
    any extension does (§4.2), so a pre-release user gets the matching server
    without choosing anything else. In a terminal, `npm i -g steptix` would
    stay on stable; only `steptix@next` moves to pre-release.
+
+   Branches would stay simple: `main` is always the next preview, a stable
+   release is a tag on `main`, and a short-lived `release/x.y` branch is cut
+   from a stable tag only when that stable release needs an urgent fix.
 
    **When the number changes**, one of:
    - **Every change** raises the patch number in the extension and the
@@ -881,8 +895,9 @@ copy of the npm registry:
 
    Whichever is chosen replaces CLAUDE.md's "bump the patch version on every
    change" section, which exists so a local install shows a new number.
-2. **Mixing channels**, if there are channels. A user on the pre-release extension and the stable
-   `steptix` in a terminal has two versions on the machine. Under §4.2 the
+2. **Mixing channels**, once there are channels. A user on the pre-release
+   extension and the stable `steptix` in a terminal has two versions on the
+   machine. Under §4.2 the
    newest runs for both, so the terminal would run the pre-release server.
    Either that is accepted (one server, the newest), or a stable extension or
    launcher skips pre-release servers, at the cost of two versions competing
