@@ -303,8 +303,11 @@ through VS Code's server, so when the terminal's major.minor differs from the
 extension's (§4.2), both read and write the same files.
 
 So every file Steptix writes in a project to read back later records the
-Steptix version that wrote it. Compiled step files and their cache are the
-first; the change that adds the stamp lists the rest. Reports are for people,
+Steptix version that wrote it, once, at the top of the file, not on each
+step. A test's compiled steps live in one generated file beside it, so that
+file carries one stamp, such as *compiled by Steptix 1.5.2*, and the test's
+own `.md` is not touched. Compiled step files and their cache are the first;
+the change that adds the stamp lists the rest. Reports are for people,
 not for Steptix to read back, so they need none.
 
 When Steptix reads such a file:
