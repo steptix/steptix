@@ -81,6 +81,13 @@ describe('steptix installed by npm', () => {
     const listed = JSON.parse(list.stdout) as { runtimes: Array<{ version: string; source: string; runsHere: boolean }> };
     expect(listed.runtimes).toEqual([expect.objectContaining({ version, source: 'npm', runsHere: true })]);
 
+    // A runtime with a file missing says so and what to do.
+    fs.rmSync(path.join(runtimeDir, 'dist', 'cli', 'index.js'));
+    const damaged = steptix('list');
+    expect(damaged.code).toBe(1);
+    expect(damaged.stderr).toContain(`Steptix server ${version} in `);
+    expect(damaged.stderr).toContain(`Remove it with steptix server remove ${version} and run the command again.`);
+
     // Uninstalling removes it and names the second command.
     const removed = steptix('uninstall', '--yes');
     expect(removed.code).toBe(0);

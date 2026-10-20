@@ -15,13 +15,14 @@
  * - `server-choice.json` holds the version chosen with `steptix server use`
  *   (§6.5).
  *
- * Imports only Node built-ins: the launcher runs before every command, and
- * `steptix mcp` keeps stdout to itself.
+ * Imports only Node built-ins and modules that import nothing else: the
+ * launcher runs before every command, and `steptix mcp` keeps stdout to itself.
  */
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { isPidAlive } from '../utils/pid-alive.js';
 import { compareVersions, parseVersion, satisfies } from './versions.js';
 
 /** Where an installed server came from, as `steptix server list` shows it. */
@@ -183,15 +184,7 @@ export function writeChoice(layout: Layout, version: string | null): void {
 // Processes
 // ---------------------------------------------------------------------------
 
-/** Is process `pid` alive? A process we may not signal still exists. */
-export function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
+const processAlive = isPidAlive;
 
 export interface ProcessDeps {
   isAlive?: (pid: number) => boolean;
@@ -320,6 +313,13 @@ export async function ifInstallLockFree<T>(
 export class InstallError extends Error {}
 
 /**
+ * The package cannot be copied because its dependencies live outside it: a
+ * local install, which npm hoists into the project's own `node_modules`. It
+ * works where it is, so the launcher runs it there without a word.
+ */
+export class NotSelfContainedError extends InstallError {}
+
+/**
  * Dependencies of the package at `packageRoot` that a copy in `targetDir`
  * could not load. npm puts a global package's dependencies inside it, so a
  * copy takes them along. A local install hoists them into the project's own
@@ -367,14 +367,14 @@ export async function installPackage(
   const target = path.join(layout.runtimesDir, version);
   const missing = missingDependencies(packageRoot, pkg, target);
   if (missing.length > 0) {
-    throw new InstallError(
+    throw new NotSelfContainedError(
       `The steptix package in ${packageRoot} does not hold its own dependencies (${missing.slice(0, 3).join(', ')}` +
         `${missing.length > 3 ? ', …' : ''}), so a copy of it would not start. Install it with npm i -g steptix.`,
     );
   }
   return withInstallLock(
     layout,
-    () => {
+    async () => {
       // Another process may have installed it while this one waited.
       const now = readRuntime(layout.runtimesDir, version);
       if (now) return { runtime: now, installed: false };
@@ -393,7 +393,7 @@ export async function installPackage(
           path.join(partial, INSTALL_RECORD),
           JSON.stringify({ version, source, from: packageRoot }, null, 2) + '\n',
         );
-        fs.renameSync(partial, target);
+        await renamePatiently(partial, target, opts.sleep);
       } catch (err) {
         fs.rmSync(partial, { recursive: true, force: true, maxRetries: 3 });
         throw new InstallError(`Could not copy Steptix ${version} into ${target}: ${(err as Error).message}`);
@@ -404,6 +404,34 @@ export async function installPackage(
     },
     opts,
   );
+}
+
+const RENAME_ATTEMPTS = 10;
+
+/**
+ * Rename a folder just written, trying again for a while when Windows says it
+ * is busy. A virus scanner reads new files as they are written and holds them
+ * open for a moment, and a folder holding an open file cannot be renamed:
+ * EPERM, EACCES or EBUSY. npm retries the same way. Elsewhere those codes
+ * mean a permission that waiting will not change.
+ */
+export async function renamePatiently(
+  from: string,
+  to: string,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      const busy = platform === 'win32' && (code === 'EPERM' || code === 'EACCES' || code === 'EBUSY');
+      if (!busy || attempt >= RENAME_ATTEMPTS) throw err;
+      await sleep(100 * attempt);
+    }
+  }
 }
 
 /**
@@ -618,27 +646,37 @@ export function removeRuntimes(layout: Layout, runtimes: Runtime[], deps: Proces
   return result;
 }
 
+/** The installed runtimes nothing needs any more. */
+function unneededRuntimes(layout: Layout, runtimes: Runtime[], opts: ProcessDeps & { keep?: Iterable<string> }): Runtime[] {
+  const keep = versionsToKeep({
+    runtimes,
+    clients: readClientRecords(layout),
+    choice: readChoice(layout),
+    inUse: new Set(versionsInUse(layout, opts).keys()),
+    ...(opts.keep ? { extra: opts.keep } : {}),
+  });
+  return runtimes.filter((r) => !keep.has(r.version));
+}
+
 /**
  * Remove the versions nothing needs any more, if no other process holds the
  * lock right now. Returns what was removed, or undefined when it was skipped.
+ *
+ * Usually there is nothing to remove, so that is worked out first, without the
+ * lock, from `runtimes` when the caller has just listed them. Only when there
+ * is something does it take the lock, and then it works it out again.
  */
 export async function cleanUp(
   layout: Layout,
-  opts: LockDeps & { keep?: Iterable<string> } = {},
+  opts: LockDeps & { keep?: Iterable<string>; runtimes?: Runtime[] } = {},
 ): Promise<RemoveResult | undefined> {
+  if (unneededRuntimes(layout, opts.runtimes ?? listRuntimes(layout), opts).length === 0) {
+    return { removed: [], skipped: [] };
+  }
   return ifInstallLockFree(
     layout,
     () => {
-      const runtimes = listRuntimes(layout);
-      const inUse = new Set(versionsInUse(layout, opts).keys());
-      const keep = versionsToKeep({
-        runtimes,
-        clients: readClientRecords(layout),
-        choice: readChoice(layout),
-        inUse,
-        ...(opts.keep ? { extra: opts.keep } : {}),
-      });
-      const remove = runtimes.filter((r) => !keep.has(r.version));
+      const remove = unneededRuntimes(layout, listRuntimes(layout), opts);
       return remove.length === 0 ? { removed: [], skipped: [] } : removeRuntimes(layout, remove, opts);
     },
     opts,

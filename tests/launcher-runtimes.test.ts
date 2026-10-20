@@ -4,7 +4,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cleanUp,
   InstallError,
@@ -14,6 +14,7 @@ import {
   readChoice,
   readClientRecords,
   removeRuntimes,
+  renamePatiently,
   selectRuntime,
   versionsInUse,
   versionsToKeep,
@@ -145,6 +146,37 @@ describe('installPackage', () => {
 
     expect(result.installed).toBe(true);
     expect(fs.existsSync(layout.lockFile)).toBe(false);
+  });
+});
+
+describe('renamePatiently', () => {
+  const busy = () => Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+
+  it('tries again on Windows while a scanner holds a new file open', async () => {
+    const from = path.join(scratch, 'from');
+    fs.mkdirSync(from);
+    const to = path.join(scratch, 'to');
+    const rename = vi.spyOn(fs, 'renameSync');
+    rename.mockImplementationOnce(() => { throw busy(); }).mockImplementationOnce(() => { throw busy(); });
+    const waits: number[] = [];
+    try {
+      await renamePatiently(from, to, async (ms) => void waits.push(ms), 'win32');
+    } finally {
+      rename.mockRestore();
+    }
+    expect(waits).toEqual([100, 200]);
+    expect(fs.existsSync(to)).toBe(true);
+  });
+
+  it('gives up at once elsewhere, where EPERM is a permission', async () => {
+    const rename = vi.spyOn(fs, 'renameSync').mockImplementation(() => { throw busy(); });
+    const waits: number[] = [];
+    try {
+      await expect(renamePatiently('a', 'b', async (ms) => void waits.push(ms), 'linux')).rejects.toThrow('not permitted');
+    } finally {
+      rename.mockRestore();
+    }
+    expect(waits).toEqual([]);
   });
 });
 

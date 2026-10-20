@@ -21,8 +21,9 @@
  *   extension starts): hands off the same way, to the chosen runtime or the
  *   newest one of its own major.minor, which is usually itself.
  *
- * Imports only Node built-ins and the launcher's own modules: `steptix mcp`
- * runs through here too, and nothing may print on its stdout.
+ * Imports only Node built-ins and modules that import nothing else
+ * (src/launcher/, src/env/user-root-dir.ts, src/utils/pid-alive.ts):
+ * `steptix mcp` runs through here too, and nothing may print on its stdout.
  */
 
 import fs from 'node:fs';
@@ -32,11 +33,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { userRootDir } from '../env/user-root-dir.js';
 import {
   cleanUp,
+  INSTALL_RECORD,
   InstallError,
   installPackage,
   layoutOf,
   listRuntimes,
   markInUse,
+  NotSelfContainedError,
   readChoice,
   readPackageInfo,
   selectRuntime,
@@ -58,7 +61,9 @@ export interface LaunchInfo {
   requires: string;
   layout: Layout;
   /** The runtime running the command, or null when it runs from
-   *  `launcherRoot` without one (a checkout, a copy that failed). */
+   *  `launcherRoot` without one: a checkout, npm's copy when no runtime
+   *  matches, and `steptix server` and `steptix uninstall`, which never
+   *  pick one. */
   runtime: Runtime | null;
   /** True when `runtime` is the version chosen with `steptix server use`. */
   chosen: boolean;
@@ -95,7 +100,9 @@ export interface LaunchDeps {
   onExit?: (fn: () => void) => void;
 }
 
-export type LaunchPlan = { kind: 'here' } | { kind: 'hand-off'; entry: string };
+export type LaunchPlan =
+  | { kind: 'here' }
+  | { kind: 'hand-off'; /** The runtime's entry point, as a URL to import. */ entry: string; version: string; dir: string };
 
 function realpath(p: string): string {
   try {
@@ -105,30 +112,22 @@ function realpath(p: string): string {
   }
 }
 
-function caseInsensitive(platform: NodeJS.Platform): boolean {
-  return platform === 'win32' || platform === 'darwin';
-}
-
-function fold(p: string, platform: NodeJS.Platform): string {
-  return caseInsensitive(platform) ? p.toLowerCase() : p;
-}
-
-/** Is `inner` the folder `outer` or inside it? Both are real paths. */
-function isWithin(inner: string, outer: string, platform: NodeJS.Platform): boolean {
-  const rel = path.relative(fold(outer, platform), fold(inner, platform));
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-}
-
 function samePath(a: string, b: string, platform: NodeJS.Platform): boolean {
-  return fold(realpath(a), platform) === fold(realpath(b), platform);
+  const fold = (p: string) => (platform === 'win32' || platform === 'darwin' ? p.toLowerCase() : p);
+  return fold(realpath(a)) === fold(realpath(b));
 }
 
-export function installKindOf(packageRoot: string, layout: Layout, platform: NodeJS.Platform = process.platform): InstallKind {
+/**
+ * Where this package is, read from the package alone, never from the user
+ * root: a runtime is a folder in some `runtimes/` that an install recorded
+ * itself in, and an npm install is a `node_modules/steptix`.
+ */
+export function installKindOf(packageRoot: string): InstallKind {
   const real = realpath(packageRoot);
-  if (isWithin(real, realpath(layout.runtimesDir), platform)) return 'runtime';
-  return path.basename(path.dirname(real)).toLowerCase() === 'node_modules' ? 'npm' : 'checkout';
+  const parent = path.basename(path.dirname(real)).toLowerCase();
+  if (parent === 'runtimes' && fs.existsSync(path.join(real, INSTALL_RECORD))) return 'runtime';
+  return parent === 'node_modules' ? 'npm' : 'checkout';
 }
-
 
 /** The launch made for this process, or what it would be with no launch step
  *  (vitest, or code imported without going through `src/index.ts`). */
@@ -141,11 +140,16 @@ export function currentLaunch(deps: LaunchDeps = {}): LaunchInfo {
 function describeHere(deps: LaunchDeps): LaunchInfo {
   const root = deps.packageRoot ?? PACKAGE_ROOT;
   const version = readPackageInfo(root)?.version ?? 'unknown';
-  const layout = layoutOf(deps.userRoot ?? userRootDir());
+  const kind = installKindOf(root);
+  // A runtime belongs to the Steptix folder it sits in. Everything else uses
+  // the user's, worked out from the environment without touching the disk.
+  const layout = layoutOf(
+    kind === 'runtime' ? path.dirname(path.dirname(path.resolve(root))) : (deps.userRoot ?? userRootDir()),
+  );
   return {
     launcherRoot: root,
     launcherVersion: version,
-    launcherKind: installKindOf(root, layout, deps.platform),
+    launcherKind: kind,
     requires: defaultRequirement(version) ?? version,
     layout,
     runtime: null,
@@ -181,29 +185,36 @@ export async function prepareLaunch(args: string[], deps: LaunchDeps = {}): Prom
 
   if (MANAGEMENT_COMMANDS.has(args[0] ?? '')) return { kind: 'here' };
 
+  let runtimes = listRuntimes(layout);
   if (info.launcherKind === 'npm') {
     // Set up this version unless a matching one at least as new is there
     // already. The clean-up removes an older patch, so copying one back on
     // every command would only have it removed again.
-    const covered = listRuntimes(layout).some(
-      (r) => satisfies(r.version, requires) && compareVersions(r.version, version) >= 0,
-    );
+    const covered = runtimes.some((r) => satisfies(r.version, requires) && compareVersions(r.version, version) >= 0);
     if (!covered) {
       try {
-        await installPackage(root, layout, {
+        const result = await installPackage(root, layout, {
           onCopy: (v) => log(`Setting up Steptix ${v} (first run only)…`),
           onWait: () => log('Waiting for Steptix to finish setting up in another window or terminal…'),
         });
+        if (result.installed) runtimes = listRuntimes(layout);
       } catch (err) {
-        if (!(err instanceof InstallError)) throw err;
-        log(`${err.message}\nRunning Steptix from ${root} this time.`);
-        await applyHooks(root, args);
-        return { kind: 'here' };
+        // Whatever stopped the copy, npm's own copy still works, so the
+        // command runs. A local install cannot be copied and works where it
+        // is, so that one runs a matching installed runtime, or else itself,
+        // quietly.
+        if (!(err instanceof NotSelfContainedError)) {
+          const why =
+            err instanceof InstallError
+              ? err.message
+              : `Could not set up Steptix ${version} in ${layout.runtimesDir}: ${(err as Error).message}`;
+          log(`${why}\nRunning Steptix from ${root} this time.`);
+        }
       }
     }
   }
 
-  const selection = selectRuntime(listRuntimes(layout), requires, readChoice(layout));
+  const selection = selectRuntime(runtimes, requires, readChoice(layout));
   if (selection.chosenMissing !== null) {
     log(
       `You chose Steptix server ${selection.chosenMissing} with steptix server use, but it is no longer ` +
@@ -212,8 +223,9 @@ export async function prepareLaunch(args: string[], deps: LaunchDeps = {}): Prom
   }
   const target = selection.runtime;
   if (!target) {
-    // Nothing installed matches and nothing was chosen: a runtime of an older
-    // major.minor than every other one there, say. It still runs itself.
+    // Nothing installed matches and nothing was chosen: npm's copy could not
+    // be set up, or this is a runtime of an older major.minor than any other
+    // there. It runs itself.
     await applyHooks(root, args);
     return { kind: 'here' };
   }
@@ -222,7 +234,7 @@ export async function prepareLaunch(args: string[], deps: LaunchDeps = {}): Prom
 
   (deps.onExit ?? ((fn) => process.once('exit', fn)))(markInUse(layout, target.version));
   try {
-    await cleanUp(layout, { keep: [target.version] });
+    await cleanUp(layout, { keep: [target.version], runtimes });
   } catch {
     // Removing old versions is housekeeping; the command still runs.
   }
@@ -230,7 +242,13 @@ export async function prepareLaunch(args: string[], deps: LaunchDeps = {}): Prom
   await applyHooks(target.dir, args);
   return samePath(root, target.dir, platform)
     ? { kind: 'here' }
-    : { kind: 'hand-off', entry: pathToFileURL(path.join(target.dir, 'dist', 'index.js')).href };
+    : {
+        kind: 'hand-off',
+        entry: pathToFileURL(path.join(target.dir, 'dist', 'index.js')).href,
+        version: target.version,
+        // Real, as Node names the files it loads in its errors.
+        dir: realpath(target.dir),
+      };
 }
 
 /**

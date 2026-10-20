@@ -49,9 +49,9 @@ describe('installKindOf', () => {
     const checkout = writeFakePackage(path.join(scratch, 'checkout'), { version: '1.0.0' });
     const npm = writeFakePackage(npmPackageDir(scratch), { version: '1.0.0' });
     const runtime = writeFakeRuntime(layout, '1.0.0');
-    expect(installKindOf(checkout, layout)).toBe('checkout');
-    expect(installKindOf(npm, layout)).toBe('npm');
-    expect(installKindOf(runtime, layout)).toBe('runtime');
+    expect(installKindOf(checkout)).toBe('checkout');
+    expect(installKindOf(npm)).toBe('npm');
+    expect(installKindOf(runtime)).toBe('runtime');
   });
 });
 
@@ -62,7 +62,7 @@ describe('from npm', () => {
     const plan = await prepareLaunch(['run', 'tests/a.md'], deps(npm));
 
     expect(logged).toEqual(['Setting up Steptix 1.4.0 (first run only)…']);
-    expect(plan).toEqual({ kind: 'hand-off', entry: entryOf('1.4.0') });
+    expect(plan).toMatchObject({ kind: 'hand-off', entry: entryOf('1.4.0') });
     expect(hooked).toEqual([path.join(layout.runtimesDir, '1.4.0')]);
     expect(currentLaunch({ store })).toMatchObject({ launcherKind: 'npm', runtime: { version: '1.4.0' }, chosen: false });
   });
@@ -81,7 +81,7 @@ describe('from npm', () => {
     logged = [];
     store = {};
 
-    expect(await prepareLaunch(['list'], deps(npm))).toEqual({ kind: 'hand-off', entry: entryOf('1.4.0') });
+    expect(await prepareLaunch(['list'], deps(npm))).toMatchObject({ kind: 'hand-off', entry: entryOf('1.4.0') });
     expect(logged).toEqual([]);
   });
 
@@ -89,7 +89,7 @@ describe('from npm', () => {
     const npm = writeFakePackage(npmPackageDir(scratch), { version: '1.4.0' });
     writeFakeRuntime(layout, '1.4.3', 'extension');
 
-    expect(await prepareLaunch(['list'], deps(npm))).toEqual({ kind: 'hand-off', entry: entryOf('1.4.3') });
+    expect(await prepareLaunch(['list'], deps(npm))).toMatchObject({ kind: 'hand-off', entry: entryOf('1.4.3') });
     expect(listRuntimes(layout).map((r) => r.version)).toEqual(['1.4.3']);
   });
 
@@ -97,7 +97,7 @@ describe('from npm', () => {
     writeFakeRuntime(layout, '1.4.0');
     const npm = writeFakePackage(npmPackageDir(scratch), { version: '1.4.1' });
 
-    expect(await prepareLaunch(['list'], deps(npm))).toEqual({ kind: 'hand-off', entry: entryOf('1.4.1') });
+    expect(await prepareLaunch(['list'], deps(npm))).toMatchObject({ kind: 'hand-off', entry: entryOf('1.4.1') });
     expect(listRuntimes(layout).map((r) => r.version)).toEqual(['1.4.0', '1.4.1']);
   });
 
@@ -105,7 +105,7 @@ describe('from npm', () => {
     writeFakeRuntime(layout, '1.5.0');
     const npm = writeFakePackage(npmPackageDir(scratch), { version: '1.4.0' });
 
-    expect(await prepareLaunch(['list'], deps(npm))).toEqual({ kind: 'hand-off', entry: entryOf('1.4.0') });
+    expect(await prepareLaunch(['list'], deps(npm))).toMatchObject({ kind: 'hand-off', entry: entryOf('1.4.0') });
   });
 
   it('runs the version chosen with steptix server use', async () => {
@@ -113,7 +113,7 @@ describe('from npm', () => {
     writeChoice(layout, '1.3.0');
     const npm = writeFakePackage(npmPackageDir(scratch), { version: '1.4.0' });
 
-    expect(await prepareLaunch(['list'], deps(npm))).toEqual({ kind: 'hand-off', entry: entryOf('1.3.0') });
+    expect(await prepareLaunch(['list'], deps(npm))).toMatchObject({ kind: 'hand-off', entry: entryOf('1.3.0') });
     expect(currentLaunch({ store })).toMatchObject({ chosen: true });
   });
 
@@ -121,16 +121,40 @@ describe('from npm', () => {
     writeChoice(layout, '1.3.0');
     const npm = writeFakePackage(npmPackageDir(scratch), { version: '1.4.0' });
 
-    expect(await prepareLaunch(['list'], deps(npm))).toEqual({ kind: 'hand-off', entry: entryOf('1.4.0') });
+    expect(await prepareLaunch(['list'], deps(npm))).toMatchObject({ kind: 'hand-off', entry: entryOf('1.4.0') });
     expect(logged.at(-1)).toMatch(/You chose Steptix server 1\.3\.0 .* no longer installed.*steptix server use newest/);
   });
 
-  it('runs from npm\'s folder, saying why, when it cannot be set up', async () => {
-    const npm = writeFakePackage(npmPackageDir(scratch), { version: '1.4.0', dependencies: { hoisted: '^1' } });
+  it('runs from npm\'s folder, saying why, when the Steptix folder cannot be written', async () => {
+    const npm = writeFakePackage(npmPackageDir(scratch), { version: '1.4.0' });
+    // A file where the runtimes folder should be.
+    fs.mkdirSync(layout.root, { recursive: true });
+    fs.writeFileSync(layout.runtimesDir, '');
 
     expect(await prepareLaunch(['list'], deps(npm))).toEqual({ kind: 'here' });
-    expect(logged.join('\n')).toMatch(/does not hold its own dependencies[\s\S]*Running Steptix from .* this time\./);
+    expect(logged.join('\n')).toMatch(/^Could not set up Steptix 1\.4\.0 in .*\nRunning Steptix from .* this time\.$/);
     expect(hooked).toEqual([npm]);
+  });
+
+  describe('a local install, whose dependencies npm hoisted out of it', () => {
+    const local = () => {
+      writeFakePackage(path.join(scratch, 'npm', 'node_modules', 'hoisted'), { version: '1.0.0' });
+      return writeFakePackage(npmPackageDir(scratch), { version: '1.4.0', dependencies: { hoisted: '^1' } });
+    };
+
+    it('runs itself, quietly, when no matching runtime is installed', async () => {
+      const npm = local();
+      expect(await prepareLaunch(['list'], deps(npm))).toEqual({ kind: 'here' });
+      expect(logged).toEqual([]);
+      expect(hooked).toEqual([npm]);
+      expect(listRuntimes(layout)).toEqual([]);
+    });
+
+    it('hands off to a matching runtime that is installed', async () => {
+      writeFakeRuntime(layout, '1.4.2');
+      expect(await prepareLaunch(['list'], deps(local()))).toMatchObject({ kind: 'hand-off', entry: entryOf('1.4.2') });
+      expect(logged).toEqual([]);
+    });
   });
 
   it('sets nothing up for the commands that manage the runtimes', async () => {
@@ -164,7 +188,7 @@ describe('from a runtime folder', () => {
     const dir = writeFakeRuntime(layout, '1.4.0');
     writeFakeRuntime(layout, '1.3.0');
     writeChoice(layout, '1.3.0');
-    expect(await prepareLaunch(['list'], deps(dir))).toEqual({ kind: 'hand-off', entry: entryOf('1.3.0') });
+    expect(await prepareLaunch(['list'], deps(dir))).toMatchObject({ kind: 'hand-off', entry: entryOf('1.3.0') });
   });
 });
 

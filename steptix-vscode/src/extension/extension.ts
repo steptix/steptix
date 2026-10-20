@@ -2373,10 +2373,12 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
   out.appendLine(`[${ts()}] Steptix activate() — version=${context.extension.packageJSON.version}`);
 
   // Say which server this extension needs, so the launcher's clean-up of
-  // `<user root>/runtimes` keeps one (docs/specs/SPEC-install.md §4.3).
+  // `<user root>/runtimes` keeps one (docs/specs/SPEC-install.md §4.3). Only
+  // an installed extension: an Extension Development Host or a test run
+  // would leave a record naming a checkout in the user's real Steptix folder.
   const ownVersion = String(context.extension.packageJSON.version);
   const requires = ownMinorRequirement(ownVersion);
-  if (requires !== null) {
+  if (requires !== null && context.extensionMode === vscode.ExtensionMode.Production) {
     try {
       writeClientRecord({ kind: 'vscode', version: ownVersion, requires, location: context.extensionPath });
     } catch (err) {
