@@ -14,6 +14,7 @@ import { registerServeCommand } from './commands/serve.js';
 import { registerStatusCommand } from './commands/status.js';
 import { registerStopCommand } from './commands/stop.js';
 import { registerStatsCommand } from './commands/stats.js';
+import { registerBrowsersCommand } from './commands/browsers.js';
 
 export function createCli(): Command {
   const program = new Command();
@@ -21,7 +22,13 @@ export function createCli(): Command {
   program
     .name('steptix')
     .description('AI-powered UI test automation using natural language Markdown test files')
-    .version(describeVersion({ version: getPackageVersion(), ...getBuildInfo() }));
+    .version(describeVersion({ version: getPackageVersion(), ...getBuildInfo() }))
+    // `-V`/`--version` and `-h`/`--help` belong to the program only before a
+    // command name. Without this, commander takes them anywhere on the line,
+    // and `steptix browsers -V` would print Steptix's version instead of
+    // reaching `browsers`, which hands its arguments to Playwright's CLI
+    // (passThroughOptions there needs this).
+    .enablePositionalOptions();
 
   registerRunCommand(program);
   registerCompileCommand(program);
@@ -33,6 +40,7 @@ export function createCli(): Command {
   registerStatusCommand(program);
   registerStopCommand(program);
   registerStatsCommand(program);
+  registerBrowsersCommand(program);
 
   // Listed so `steptix --help` shows it, but deliberately given no action: the
   // real `mcp` entry is intercepted in `src/index.ts` before commander is
