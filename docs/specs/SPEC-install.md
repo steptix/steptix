@@ -185,6 +185,10 @@ the machine: first in `runtimes/`, then in npm's own install of `steptix`
   **once**, right after the extension is installed (§5.2). After Not now it
   never asks again on its own, not after a restart and not in another window.
   It asks again only when a Run needs the server.
+- **Updates do not ask.** Once a server is on the machine, by any route, the
+  user has said yes to having one. When the extension updates and needs a
+  newer server, it fetches that server by itself (§6.2). The only question
+  left is the first install.
 - **In a terminal**, `npm i -g steptix` already was the request. Nothing asks
   again.
 
@@ -345,11 +349,11 @@ was never copied into `runtimes/`, because that happens on the first command.
 4. **If that version is at least the extension's**, the extension uses it
    without asking anything, and says *"Using Steptix 1.4.0 installed with
    npm"*.
-5. **If it is older**, the extension asks: *"Steptix 1.3.0 from npm is
-   older than this extension (1.4.0). [Install 1.4.0] [Not now]"*.
-   Install works as in §5.2 step 4. It does not update the user's npm install
-   (§4.9). The terminal's `steptix` runs 1.4.0 from then on too, because the
-   newest one runs (§4.2).
+5. **If it is older**, the extension installs 1.4.0 without asking, as any
+   server update does (§6.2), showing *"Updating the Steptix server to
+   1.4.0…"*. It installs into the Steptix folder as in §5.2 step 4, and does
+   not update the user's npm install (§4.9). The terminal's `steptix` runs
+   1.4.0 from then on too, because the newest one runs (§4.2).
 6. **The server runs** on the `node` on PATH, which the user already has
    (§4.6). Nothing is downloaded.
 7. **The `steptix` command** already works everywhere through npm, so the
@@ -455,12 +459,29 @@ is refused at install with a message naming the right one.
 
 1. VS Code updates the extension from the Marketplace, on its own.
 2. The new extension needs the server of its own version (§4.2). If that is
-   not in `runtimes/`, it first checks npm's install (§5.3), then asks: *"This
-   Steptix update needs server 1.4.0. [Update now] [Later]"*, and installs it
-   as in §5.2.
-3. If they choose Later, the next Run asks again, because the Run cannot work
-   without it.
-4. The terminal's `steptix` moves to the new version too (§4.2).
+   not in `runtimes/`, it first checks npm's install (§5.3), and otherwise
+   **starts fetching it straight away, without asking** (§4.5). It does not
+   wait for a Run, so the download is usually finished before one.
+3. A notification shows *"Updating the Steptix server to 1.4.0…"* with
+   progress, then *"Steptix server 1.4.0 is ready."* The old server keeps
+   working until then. If a Run starts before the update is finished, it
+   waits for it.
+4. Once it is in place, an older server that is still running is replaced
+   as §6.4 says: straight away when it is idle, after its test when it is
+   busy.
+5. The terminal's `steptix` moves to the new version too (§4.2).
+
+Updates still ask in these cases:
+
+- **No server was ever installed** (the user chose Not now): the install
+  question of §5.2, as before.
+- **The update fails**, for example with no network: the message of §8.1,
+  with Retry and Offline install. The old server is not removed.
+- **The user chose a version with `steptix server use`**: the new version is
+  installed beside it, but the choice stands, and the extension says why it
+  will not run it (§6.5).
+- **`steptix.serverAutoStart.command` is set, or `useInstalledRuntime` is
+  off**: nothing is fetched (§4.12).
 
 ### 6.3 Updating while a server is running
 
@@ -841,7 +862,7 @@ copy of the npm registry:
 | The sample project's first Run passes with no AI chosen and the network off | §7.3 |
 | Offline file and `.vsix` installed with the network switched off, a test runs | §5.6 |
 | Update from npm while a server runs: the server keeps serving, the next start is the new version | §6.1, §6.3 |
-| Extension needs a newer server: it installs it, and the terminal runs it too | §6.2 |
+| Extension updates and needs a newer server: it fetches it without asking, before any Run, and the terminal runs it too | §6.2 |
 | Older server started by VS Code, idle: the extension replaces it and the Run passes | §6.4 |
 | Older server started by VS Code, test running: the extension waits, then replaces it | §6.4 |
 | Older server started by hand: the extension asks and does not stop it on its own | §6.4 |
