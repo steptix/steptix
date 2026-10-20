@@ -312,15 +312,20 @@ When Steptix reads such a file:
 - **Written by the same or an older major.minor:** it reads it as today.
   Newer versions keep reading what older ones wrote.
 - **Written by a newer major.minor:** it ignores the file, never rewrites
-  it, carries on, and says so. A version difference does not make a test
+  it on its own, carries on, and says so. A version difference does not make a test
   wrong, so it does not fail one:
   - **Compiled steps** are a speed-up, not the test. The steps run with the
     AI instead, exactly as steps that were never compiled do, so the result
     means the same. The file is left as it is, so the newer version still has
     its compiled steps.
-  - **The output and the report say what happened:** *"3 steps were compiled
-    by Steptix 1.5 and ran with the AI instead. Update with npm i -g steptix
-    to use them."* (or *"Update the Steptix extension"* in VS Code).
+  - **The output and the report say what happened, and the two ways out:**
+    *"3 steps were compiled by Steptix 1.5 and ran with the AI instead.
+    Update with npm i -g steptix to use them, or recompile them with this
+    version: steptix compile tests/login.md."* In VS Code it says *"Update
+    the Steptix extension"*, and **Compile** recompiles the test.
+  - **Recompiling is the user's choice, never automatic.** It replaces the
+    newer version's compiled steps with this version's, which the newer
+    version still reads (newer reads older), and it spends AI calls.
   - **Only when there is nothing to fall back on**, such as a run with no AI
     chosen, does the step fail, as any uncompiled step without an AI does
     today. That message names the update too.
