@@ -231,8 +231,11 @@ export function unsupportedPlatformMessage(platform: NodeJS.Platform, arch: stri
 /**
  * About how much the first install downloads, for the install question
  * (§5.2): the package and its dependencies as npm fetches them, compressed.
- * An estimate until the release measures it (§10.1); Node.js adds
- * {@link NODE_DOWNLOAD_MB} when the extension has to fetch it too.
+ * For 1.0.0 the install test (tests/integration/runInstallTest.cjs, which
+ * prints npm's cache size) measured 58 MB of package tarballs, plus npm's
+ * package metadata, which travels compressed. Node.js adds
+ * {@link NODE_DOWNLOAD_MB} when the extension has to fetch it too: its
+ * Windows x64 zip is about 30 MB.
  */
 export const SERVER_DOWNLOAD_MB = 70;
 export const NODE_DOWNLOAD_MB = 30;
@@ -380,6 +383,21 @@ export async function chooseNode(args: {
   return own ? { exe: own.exe, version: own.version, origin: 'steptix' } : null;
 }
 
+/**
+ * `env` with the folder of `nodeExe` first on PATH, for a process that runs
+ * under that Node.js and starts others that expect `node` on PATH: npm runs a
+ * package's install script (esbuild's, say) through a shell as `node …`. With
+ * Steptix's own Node.js, which is never on the user's PATH (§4.6), that would
+ * find no `node`. Windows' variable may be spelled `Path`, and is kept so.
+ */
+export function withNodeOnPath(env: NodeJS.ProcessEnv, nodeExe: string, platform: NodeJS.Platform): NodeJS.ProcessEnv {
+  const key = platform === 'win32' ? (Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'Path') : 'PATH';
+  const current = env[key] ?? '';
+  const paths = platform === 'win32' ? path.win32 : path.posix;
+  const dir = paths.dirname(nodeExe);
+  return { ...env, [key]: current ? `${dir}${paths.delimiter}${current}` : dir };
+}
+
 /** The archive nodejs.org publishes for a platform, without its version:
  *  `win-x64.zip`, `darwin-arm64.tar.gz`, `linux-x64.tar.gz`. */
 export function nodeArchiveSuffix(platform: NodeJS.Platform, arch: string): string | null {
@@ -482,6 +500,10 @@ export function staleTerminalNotice(terminalVersion: string, extensionVersion: s
  * `steptix server use` choice. It is written again whenever the extension
  * starts, so the Node.js and the requirement it bakes in stay current.
  */
+/** In every script the extension writes to bin/, so it never replaces one it
+ *  did not write, such as the Windows runtime installer's `steptix.cmd`. */
+export const BIN_SCRIPT_MARK = 'Written by the Steptix extension for VS Code';
+
 export function binScripts(args: {
   nodeExe: string;
   requires: string;
@@ -526,14 +548,14 @@ if (!pick) {
     const runnerPath = path.win32.join(args.binDir, 'run-newest.mjs');
     return {
       'run-newest.mjs': { content: runner },
-      'steptix.cmd': { content: `@echo off\r\n"${args.nodeExe}" "${runnerPath}" %*\r\n` },
+      'steptix.cmd': { content: `@echo off\r\nrem ${BIN_SCRIPT_MARK}\r\n"${args.nodeExe}" "${runnerPath}" %*\r\n` },
     };
   }
   const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
   const runnerPath = path.posix.join(args.binDir, 'run-newest.mjs');
   return {
     'run-newest.mjs': { content: runner },
-    steptix: { content: `#!/bin/sh\nexec ${quote(args.nodeExe)} ${quote(runnerPath)} "$@"\n`, mode: 0o755 },
+    steptix: { content: `#!/bin/sh\n# ${BIN_SCRIPT_MARK}\nexec ${quote(args.nodeExe)} ${quote(runnerPath)} "$@"\n`, mode: 0o755 },
   };
 }
 

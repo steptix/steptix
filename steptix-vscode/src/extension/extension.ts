@@ -2443,12 +2443,15 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
   const registry = new RunControllerRegistry(view, tracker, serverLogPath, serverStatusBar);
   // Installing, updating and replacing the server (SPEC-install.md). The
   // test harness fakes the server, so under it the commands are registered
-  // but nothing is looked for, asked or replaced.
+  // but nothing is looked for, asked or replaced — except in the install
+  // test (tests/integration/runInstallTest.cjs), which turns the run path's
+  // part back on with STEPTIX_TEST_SERVER_SETUP=1 and drives the rest itself.
   const serverSetup = new ServerSetup(context, out, serverStatusBar);
   context.subscriptions.push(serverSetup);
-  const settingUpServers = context.extensionMode !== vscode.ExtensionMode.Test;
+  const underTest = context.extensionMode === vscode.ExtensionMode.Test;
+  const settingUpServers = !underTest || process.env['STEPTIX_TEST_SERVER_SETUP'] === '1';
   if (settingUpServers) registry.setServerSetup(serverSetup);
-  void serverSetup.activate({ checks: settingUpServers });
+  void serverSetup.activate({ checks: !underTest });
   // Record Steps keeps an in-flight recording's writes in the workspace's
   // state; one a reload cut off is offered for removal now
   // (SPEC-record-steps.md §7).

@@ -33,6 +33,7 @@ import {
   staleTerminalNotice,
   tryTakeLock,
   unsupportedPlatformMessage,
+  withNodeOnPath,
 } from '../src/extension/install-core.ts';
 
 const made = [];
@@ -245,10 +246,10 @@ test('the commands name the Node.js and the runner by full path, quoted', () => 
   });
   assert.equal(
     win['steptix.cmd'].content,
-    '@echo off\r\n"C:\\Users\\Ada\\node.exe" "C:\\Users\\Ada\\AppData\\Local\\steptix\\bin\\run-newest.mjs" %*\r\n',
+    '@echo off\r\nrem Written by the Steptix extension for VS Code\r\n"C:\\Users\\Ada\\node.exe" "C:\\Users\\Ada\\AppData\\Local\\steptix\\bin\\run-newest.mjs" %*\r\n',
   );
   const posix = binScripts({ nodeExe: "/opt/o'node/bin/node", requires: '1.0.0', platform: 'linux', binDir: '/home/ada/.steptix/bin' });
-  assert.equal(posix.steptix.content, `#!/bin/sh\nexec '/opt/o'\\''node/bin/node' '/home/ada/.steptix/bin/run-newest.mjs' "$@"\n`);
+  assert.equal(posix.steptix.content, `#!/bin/sh\n# Written by the Steptix extension for VS Code\nexec '/opt/o'\\''node/bin/node' '/home/ada/.steptix/bin/run-newest.mjs' "$@"\n`);
   assert.equal(posix.steptix.mode, 0o755);
 });
 
@@ -308,4 +309,16 @@ test('Windows: a node.cmd shim is not taken for node, since it cannot run withou
   writeFileSync(path.join(bin, 'node.cmd'), '');
   assert.equal(findOnPath('node', { Path: bin, PATHEXT: '.COM;.EXE;.BAT;.CMD' }, 'win32', [], ['.EXE']), null);
   assert.equal(findOnPath('node', { Path: bin, PATHEXT: '.COM;.EXE;.BAT;.CMD' }, 'win32'), path.join(bin, 'node.cmd'));
+});
+
+test("npm's child processes find the Node.js npm runs under, even one not on PATH", () => {
+  // npm runs a package's install script through a shell as `node …`; with
+  // Steptix's own Node.js nothing else would put `node` on PATH. Observed in
+  // the install test: esbuild's postinstall failed with "'node' is not
+  // recognized" until this was added.
+  const win = withNodeOnPath({ Path: 'C:\\Windows' }, 'C:\\Users\\Ada\\steptix\\node\\22.23.3\\node.exe', 'win32');
+  assert.equal(win.Path, 'C:\\Users\\Ada\\steptix\\node\\22.23.3;C:\\Windows');
+  assert.equal(win.PATH, undefined, 'keeps the spelling it found');
+  const posix = withNodeOnPath({ PATH: '/usr/bin' }, '/home/ada/.steptix/node/22.23.3/bin/node', 'linux');
+  assert.equal(posix.PATH, '/home/ada/.steptix/node/22.23.3/bin:/usr/bin');
 });

@@ -16,6 +16,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -28,6 +29,7 @@ import { reportError, userRootDir, type ErrorPayload } from 'steptix-runner-core
 import {
   addShellRcLine,
   addToWindowsPath,
+  BIN_SCRIPT_MARK,
   binScripts,
   chooseNode,
   clearServerChoice,
@@ -217,9 +219,20 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
   // Finding what is on the machine
   // -------------------------------------------------------------------------
 
-  /** npm's own `steptix` command on PATH, never the script this extension put in bin/. */
-  private npmCommand(): string | null {
+  /**
+   * A `steptix` command on PATH other than the script this extension put in
+   * bin/: npm's, or the Windows runtime installer's. Either makes the PATH
+   * offer moot (§5.2, §5.5).
+   */
+  private steptixOnPath(): string | null {
     return findOnPath('steptix', process.env, this.platform, [this.binDir]);
+  }
+
+  /** npm's own `steptix` package behind that command, which is a server on
+   *  the machine (§5.3). The installer's command has none. */
+  private npmPackageOnPath(): string | null {
+    const command = this.steptixOnPath();
+    return command ? npmPackageOfCommand(command, this.platform) : null;
   }
 
   /**
@@ -228,8 +241,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
    * could not read the shell's PATH.
    */
   private async npmPackage(node: NodeChoice | null): Promise<string | null> {
-    const command = this.npmCommand();
-    const fromPath = command ? npmPackageOfCommand(command, this.platform) : null;
+    const fromPath = this.npmPackageOnPath();
     if (fromPath) return fromPath;
     if (!node) return null;
     const npmCli = npmCliBeside(node.exe, this.platform);
@@ -304,7 +316,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
 
   /** A server of another major.minor, or npm's own package, is on the machine. */
   private anythingInstalled(): boolean {
-    return listInstalledServers(path.join(this.userRoot, 'runtimes')).length > 0 || this.npmCommand() !== null;
+    return listInstalledServers(path.join(this.userRoot, 'runtimes')).length > 0 || this.npmPackageOnPath() !== null;
   }
 
   /** §5.3: set up npm's own copy, which costs no download. True when that
@@ -350,7 +362,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     const install = 'Install';
     const withPath = 'Install and add steptix to PATH';
     const notNow = when === 'start' ? 'Not now' : 'Cancel';
-    const answers = [install, ...(this.npmCommand() ? [] : [withPath]), notNow];
+    const answers = [install, ...(this.steptixOnPath() ? [] : [withPath]), notNow];
     if (when === 'start') await this.context.globalState.update(ASKED_KEY, true);
     const answer = await vscode.window.showInformationMessage(
       when === 'start'
@@ -665,7 +677,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
    */
   private async prepareTerminals(node: NodeChoice | null): Promise<void> {
     const collection = this.context.environmentVariableCollection;
-    if (this.npmCommand() || !node) {
+    if (this.steptixOnPath() || !node) {
       collection.delete('PATH');
       return;
     }
@@ -683,15 +695,42 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     mkdirSync(this.binDir, { recursive: true });
     for (const [name, file] of Object.entries(binScripts({ nodeExe: node.exe, requires: this.requires, platform: this.platform, binDir: this.binDir }))) {
       const target = path.join(this.binDir, name);
+      if (existsSync(target) && !readFileSync(target, 'utf-8').includes(BIN_SCRIPT_MARK)) {
+        throw new Error(`${target} belongs to another Steptix install, so it was left as it is`);
+      }
       writeFileSync(target, file.content);
       if (file.mode !== undefined) chmodSync(target, file.mode);
     }
   }
 
+  /** Remove what writeBinScripts and Add steptix to PATH wrote, and bin/ when
+   *  that leaves it empty. Another install's files there stay. */
+  private removeBinScripts(): void {
+    let names: string[];
+    try {
+      names = readdirSync(this.binDir);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const file = path.join(this.binDir, name);
+      let text = '';
+      try {
+        text = readFileSync(file, 'utf-8');
+      } catch {
+        // A folder, or unreadable: not one of ours.
+      }
+      const ours =
+        name === 'run-newest.mjs' || name === path.basename(pathChangesFile(this.userRoot)) || text.includes(BIN_SCRIPT_MARK);
+      if (ours) rmSync(file, { force: true });
+    }
+    if (readdirSync(this.binDir).length === 0) rmSync(this.binDir, { recursive: true, force: true });
+  }
+
   /** **Steptix: Add steptix to PATH**: `steptix` in every terminal, not only VS Code's. */
   async addToPath(): Promise<void> {
-    if (this.npmCommand()) {
-      void vscode.window.showInformationMessage('steptix is already on PATH, installed with npm.');
+    if (this.steptixOnPath()) {
+      void vscode.window.showInformationMessage(`steptix is already on PATH: ${this.steptixOnPath()}.`);
       return;
     }
     const node = await this.nodeNow();
@@ -835,12 +874,11 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     }
     this.context.environmentVariableCollection.delete('PATH');
     this.nodeCache = undefined;
-    for (const dir of [this.binDir, path.join(this.userRoot, 'node')]) {
-      try {
-        rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
-      } catch (err) {
-        problems.push(`could not remove ${dir}: ${(err as Error).message}`);
-      }
+    try {
+      this.removeBinScripts();
+      rmSync(path.join(this.userRoot, 'node'), { recursive: true, force: true, maxRetries: 3 });
+    } catch (err) {
+      problems.push((err as Error).message);
     }
     this.status?.setInstallState('not-installed');
     if (problems.length > 0) {

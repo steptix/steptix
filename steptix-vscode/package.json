@@ -798,7 +798,8 @@
     "pretest": "npm run build --prefix .. && npm run build:runner-core",
     "test": "node --test tests/*.test.js",
     "test:integration": "npm run build && node tests/integration/runTest.cjs",
-    "test:live": "npm run build && node tests/integration/runLiveTest.cjs"
+    "test:live": "npm run build && node tests/integration/runLiveTest.cjs",
+    "test:install": "node tests/integration/runInstallTest.cjs"
   },
   "dependencies": {
     "steptix-runner-core": "file:../runner-core",

@@ -43,6 +43,7 @@ import {
   sha256Of,
   tryTakeLock,
   probeNode,
+  withNodeOnPath,
   type InstalledServer,
   type NodeChoice,
   type NodeProbe,
@@ -292,7 +293,7 @@ async function setUpPackage(
 ): Promise<InstalledServer> {
   const run = deps.run ?? defaultRunner;
   const args = [path.join(pkgDir, 'dist', 'index.js'), 'server', 'install', '--json', ...(source ? ['--source', source] : [])];
-  const result = await run(node.exe, args, { cwd: pkgDir, env: deps.env, ...(deps.signal && { signal: deps.signal }) });
+  const result = await run(node.exe, args, { cwd: pkgDir, env: withNodeOnPath(deps.env, node.exe, deps.platform), ...(deps.signal && { signal: deps.signal }) });
   const reported = lastJsonLine(result.stdout) as { version?: unknown; dir?: unknown } | undefined;
   if (result.code !== 0 || typeof reported?.version !== 'string') {
     throw new InstallFailure(
@@ -367,7 +368,7 @@ async function downloadAndSetUp(deps: InstallerDeps, node: NodeChoice, spec: str
     const result = await run(
       node.exe,
       [npmCli, 'install', '-g', '--prefix', scratch, spec, '--no-audit', '--no-fund', '--loglevel=error'],
-      { cwd: scratch, env: deps.env, ...(deps.signal && { signal: deps.signal }) },
+      { cwd: scratch, env: withNodeOnPath(deps.env, node.exe, deps.platform), ...(deps.signal && { signal: deps.signal }) },
     );
     if (result.code !== 0) {
       throw new InstallFailure('server-download', npmReason(result.stderr), tail(`${result.stderr}\n${result.stdout}`, 30));
@@ -398,7 +399,7 @@ export async function newestPublishedServer(deps: InstallerDeps, node: NodeChoic
   const npmCli = npmCliBeside(node.exe, deps.platform);
   if (!npmCli) return null;
   const result = await run(node.exe, [npmCli, 'view', npmSpecFor(requires), 'version', '--json'], {
-    env: deps.env,
+    env: withNodeOnPath(deps.env, node.exe, deps.platform),
     ...(deps.signal && { signal: deps.signal }),
   });
   if (result.code !== 0) return null;
