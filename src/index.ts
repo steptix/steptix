@@ -40,9 +40,13 @@ if (nodeProblem !== null) {
   } catch (err) {
     // A runtime with files missing (a clean-up tool, a disk error) fails to
     // load here. Say which and what to do; anything else is the command's own.
+    // Matched on the end of the runtime's path, which every spelling of the
+    // Steptix folder (a short name, a link) shares.
     const code = (err as NodeJS.ErrnoException).code;
     const message = err instanceof Error ? err.message : String(err);
-    if ((code !== 'ERR_MODULE_NOT_FOUND' && code !== 'MODULE_NOT_FOUND') || !message.includes(launch.dir)) throw err;
+    const { sep } = await import('node:path');
+    const inRuntime = message.includes(`${sep}runtimes${sep}${launch.version}${sep}`);
+    if ((code !== 'ERR_MODULE_NOT_FOUND' && code !== 'MODULE_NOT_FOUND') || !inRuntime) throw err;
     process.stderr.write(
       `Steptix server ${launch.version} in ${launch.dir} is damaged and could not start: ${message}\n` +
         `Remove it with steptix server remove ${launch.version} and run the command again.\n`,

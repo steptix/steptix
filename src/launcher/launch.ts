@@ -21,9 +21,10 @@
  *   extension starts): hands off the same way, to the chosen runtime or the
  *   newest one of its own major.minor, which is usually itself.
  *
- * Imports only Node built-ins and modules that import nothing else
- * (src/launcher/, src/env/user-root-dir.ts, src/utils/pid-alive.ts):
- * `steptix mcp` runs through here too, and nothing may print on its stdout.
+ * Imports only Node built-ins and modules that themselves import only Node
+ * built-ins and each other (src/launcher/, src/env/user-root-dir.ts,
+ * src/utils/pid-alive.ts): `steptix mcp` runs through here too, and nothing
+ * may print on its stdout.
  */
 
 import fs from 'node:fs';
@@ -207,7 +208,7 @@ export async function prepareLaunch(args: string[], deps: LaunchDeps = {}): Prom
           const why =
             err instanceof InstallError
               ? err.message
-              : `Could not set up Steptix ${version} in ${layout.runtimesDir}: ${(err as Error).message}`;
+              : `Could not set up Steptix ${version} in ${layout.runtimesDir}: ${err instanceof Error ? err.message : String(err)}`;
           log(`${why}\nRunning Steptix from ${root} this time.`);
         }
       }
@@ -246,8 +247,7 @@ export async function prepareLaunch(args: string[], deps: LaunchDeps = {}): Prom
         kind: 'hand-off',
         entry: pathToFileURL(path.join(target.dir, 'dist', 'index.js')).href,
         version: target.version,
-        // Real, as Node names the files it loads in its errors.
-        dir: realpath(target.dir),
+        dir: target.dir,
       };
 }
 

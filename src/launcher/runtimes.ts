@@ -15,7 +15,7 @@
  * - `server-choice.json` holds the version chosen with `steptix server use`
  *   (§6.5).
  *
- * Imports only Node built-ins and modules that import nothing else: the
+ * Imports only Node built-ins and modules that import only those: the
  * launcher runs before every command, and `steptix mcp` keeps stdout to itself.
  */
 
@@ -184,8 +184,6 @@ export function writeChoice(layout: Layout, version: string | null): void {
 // Processes
 // ---------------------------------------------------------------------------
 
-const processAlive = isPidAlive;
-
 export interface ProcessDeps {
   isAlive?: (pid: number) => boolean;
   pid?: number;
@@ -232,7 +230,7 @@ function readLockOwner(lockFile: string): LockOwner | null | 'unreadable' {
 function tryTakeLock(layout: Layout, deps: LockDeps): boolean {
   const pid = deps.pid ?? process.pid;
   const now = deps.now ?? Date.now;
-  const isAlive = deps.isAlive ?? processAlive;
+  const isAlive = deps.isAlive ?? isPidAlive;
   fs.mkdirSync(layout.runtimesDir, { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -478,7 +476,7 @@ export function markInUse(layout: Layout, version: string, deps: ProcessDeps = {
 /** Versions some live process runs from, each with its pids. Marks left by
  *  processes that have gone are removed on the way. */
 export function versionsInUse(layout: Layout, deps: ProcessDeps = {}): Map<string, number[]> {
-  const isAlive = deps.isAlive ?? processAlive;
+  const isAlive = deps.isAlive ?? isPidAlive;
   const out = new Map<string, number[]>();
   let names: string[];
   try {
@@ -582,7 +580,7 @@ export interface KeepInput {
   choice: string | null;
   inUse: ReadonlySet<string>;
   /** Also kept, such as the version this process is about to run. */
-  extra?: Iterable<string>;
+  extra?: readonly string[];
 }
 
 /**
@@ -647,7 +645,7 @@ export function removeRuntimes(layout: Layout, runtimes: Runtime[], deps: Proces
 }
 
 /** The installed runtimes nothing needs any more. */
-function unneededRuntimes(layout: Layout, runtimes: Runtime[], opts: ProcessDeps & { keep?: Iterable<string> }): Runtime[] {
+function unneededRuntimes(layout: Layout, runtimes: Runtime[], opts: ProcessDeps & { keep?: readonly string[] }): Runtime[] {
   const keep = versionsToKeep({
     runtimes,
     clients: readClientRecords(layout),
@@ -668,7 +666,7 @@ function unneededRuntimes(layout: Layout, runtimes: Runtime[], opts: ProcessDeps
  */
 export async function cleanUp(
   layout: Layout,
-  opts: LockDeps & { keep?: Iterable<string>; runtimes?: Runtime[] } = {},
+  opts: LockDeps & { keep?: readonly string[]; runtimes?: Runtime[] } = {},
 ): Promise<RemoveResult | undefined> {
   if (unneededRuntimes(layout, opts.runtimes ?? listRuntimes(layout), opts).length === 0) {
     return { removed: [], skipped: [] };
