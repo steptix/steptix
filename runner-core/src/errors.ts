@@ -120,8 +120,14 @@ export interface ErrorContextMap {
    *  (`detail` is §8.4's sentence). */
   STX034: { situation: 'declined' | 'failed' | 'unsupported'; detail?: string };
   /** The running or chosen server does not match this extension's
-   *  major.minor, and the extension may not replace it (§6.4, §6.5). */
-  STX035: { serverUrl: string; serverVersion: string; extensionVersion: string; reason: 'person' | 'chosen' };
+   *  major.minor, and the extension may not replace it (§6.4, §6.5): a
+   *  person started it, the user chose it, or it did not stop when asked. */
+  STX035: {
+    serverUrl: string;
+    serverVersion: string;
+    extensionVersion: string;
+    reason: 'person' | 'chosen' | 'not-stopped';
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -282,7 +288,12 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
             fix: 'Press Run to try again. Without network access, install from the offline files on the Steptix release page instead.',
           },
   STX035: (ctx) =>
-    ctx.reason === 'person'
+    ctx.reason === 'not-stopped'
+      ? {
+          diagnosis: `The Steptix server at ${ctx.serverUrl} (${ctx.serverVersion}) does not match this extension (${ctx.extensionVersion}), and it did not stop when asked`,
+          fix: 'If a test is still running in it, let it finish. Then stop it with "Steptix: Stop Server" (or `steptix stop`) and press Run again.',
+        }
+      : ctx.reason === 'person'
       ? {
           diagnosis: `A Steptix server you started (${ctx.serverVersion}, at ${ctx.serverUrl}) does not match this extension (${ctx.extensionVersion})`,
           fix: 'Stop it and press Run again, or start a matching one yourself with `steptix serve`.',

@@ -134,14 +134,14 @@ test("choosing Node.js: the user's own when new enough, else Steptix's copy, els
   mkdirSync(path.dirname(ownExe), { recursive: true });
   writeFileSync(ownExe, '');
 
-  const yours = await chooseNode({ userRoot: root, env, platform: process.platform, versionOf: async () => '24.0.0' });
+  const yours = await chooseNode({ userRoot: root, env, platform: process.platform, probe: async (exe) => ({ version: '24.0.0', exe }) });
   assert.deepEqual(yours, { exe: path.join(bin, exe), version: '24.0.0', origin: 'yours' });
 
-  const tooOld = await chooseNode({ userRoot: root, env, platform: process.platform, versionOf: async () => '20.11.0' });
+  const tooOld = await chooseNode({ userRoot: root, env, platform: process.platform, probe: async (exe) => ({ version: '20.11.0', exe }) });
   assert.deepEqual(tooOld, { exe: ownExe, version: '22.22.0', origin: 'steptix' });
 
   rmSync(path.join(root, 'node'), { recursive: true });
-  assert.equal(await chooseNode({ userRoot: root, env, platform: process.platform, versionOf: async () => '20.11.0' }), null);
+  assert.equal(await chooseNode({ userRoot: root, env, platform: process.platform, probe: async (exe) => ({ version: '20.11.0', exe }) }), null);
 });
 
 test('STEPTIX_NODE names the user\'s Node.js', async () => {
@@ -151,7 +151,7 @@ test('STEPTIX_NODE names the user\'s Node.js', async () => {
     userRoot: root,
     env: { STEPTIX_NODE: named, PATH: '' },
     platform: process.platform,
-    versionOf: async (exe) => (exe === named ? '22.21.0' : null),
+    probe: async (exe) => (exe === named ? { version: '22.21.0', exe } : null),
   });
   assert.deepEqual(chosen, { exe: named, version: '22.21.0', origin: 'yours' });
 });
@@ -226,7 +226,7 @@ test("the bin script runs the newest server of the extension's major.minor", () 
   writeRuntime(runtimes, '1.5.0'); // a newer major.minor npm put there
   const bin = path.join(root, 'bin');
   mkdirSync(bin);
-  const scripts = binScripts({ nodeExe: process.execPath, requires: '1.4.0', platform: process.platform });
+  const scripts = binScripts({ nodeExe: process.execPath, requires: '1.4.0', platform: process.platform, binDir: bin });
   for (const [name, file] of Object.entries(scripts)) writeFileSync(path.join(bin, name), file.content, { mode: file.mode });
   assert.ok(scripts[process.platform === 'win32' ? 'steptix.cmd' : 'steptix'], 'writes the command for this platform');
   // The runner itself, as the command starts it.
@@ -234,11 +234,21 @@ test("the bin script runs the newest server of the extension's major.minor", () 
   assert.equal(out.trim(), 'steptix 1.4.2 ran: list --json');
 });
 
-test('the Windows command names the Node.js, and the POSIX one quotes it', () => {
-  const win = binScripts({ nodeExe: 'C:\\Users\\Ada\\node.exe', requires: '1.0.0', platform: 'win32' });
-  assert.equal(win['steptix.cmd'].content, '@echo off\r\n"C:\\Users\\Ada\\node.exe" "%~dp0run-newest.mjs" %*\r\n');
-  const posix = binScripts({ nodeExe: "/opt/o'node/bin/node", requires: '1.0.0', platform: 'linux' });
-  assert.equal(posix.steptix.content, `#!/bin/sh\nexec '/opt/o'\\''node/bin/node' "$(dirname "$0")/run-newest.mjs" "$@"\n`);
+test('the commands name the Node.js and the runner by full path, quoted', () => {
+  // Not by the command's own folder: on macOS and Linux it is reached
+  // through a link in ~/.local/bin.
+  const win = binScripts({
+    nodeExe: 'C:\\Users\\Ada\\node.exe',
+    requires: '1.0.0',
+    platform: 'win32',
+    binDir: 'C:\\Users\\Ada\\AppData\\Local\\steptix\\bin',
+  });
+  assert.equal(
+    win['steptix.cmd'].content,
+    '@echo off\r\n"C:\\Users\\Ada\\node.exe" "C:\\Users\\Ada\\AppData\\Local\\steptix\\bin\\run-newest.mjs" %*\r\n',
+  );
+  const posix = binScripts({ nodeExe: "/opt/o'node/bin/node", requires: '1.0.0', platform: 'linux', binDir: '/home/ada/.steptix/bin' });
+  assert.equal(posix.steptix.content, `#!/bin/sh\nexec '/opt/o'\\''node/bin/node' '/home/ada/.steptix/bin/run-newest.mjs' "$@"\n`);
   assert.equal(posix.steptix.mode, 0o755);
 });
 
@@ -274,4 +284,28 @@ test('the download lock: one holder, taken over when its process has gone', () =
   assert.equal(tryTakeLock(file, { pid: 300, isAlive: () => true }), false);
   releaseLock(file, 200);
   assert.equal(tryTakeLock(file, { pid: 300, isAlive: () => true }), true);
+});
+
+test("a version manager's shim: the Node.js used is the real one behind it", async () => {
+  const root = scratch();
+  const bin = path.join(root, 'shims');
+  mkdirSync(bin);
+  const exe = process.platform === 'win32' ? 'node.exe' : 'node';
+  writeFileSync(path.join(bin, exe), '');
+  const real = path.join(root, 'versions', '22.22.0', exe);
+  const chosen = await chooseNode({
+    userRoot: root,
+    env: { PATH: bin, Path: bin },
+    platform: process.platform,
+    probe: async () => ({ version: '22.22.0', exe: real }),
+  });
+  assert.deepEqual(chosen, { exe: real, version: '22.22.0', origin: 'yours' });
+});
+
+test('Windows: a node.cmd shim is not taken for node, since it cannot run without a shell', () => {
+  const bin = path.join(scratch(), 'shims');
+  mkdirSync(bin);
+  writeFileSync(path.join(bin, 'node.cmd'), '');
+  assert.equal(findOnPath('node', { Path: bin, PATHEXT: '.COM;.EXE;.BAT;.CMD' }, 'win32', [], ['.EXE']), null);
+  assert.equal(findOnPath('node', { Path: bin, PATHEXT: '.COM;.EXE;.BAT;.CMD' }, 'win32'), path.join(bin, 'node.cmd'));
 });

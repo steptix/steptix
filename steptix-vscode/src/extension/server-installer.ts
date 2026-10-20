@@ -33,7 +33,6 @@ import {
   listInstalledServers,
   nodeArchiveFrom,
   nodeExeIn,
-  nodeVersionOf,
   npmCliBeside,
   npmSpecFor,
   partialName,
@@ -43,8 +42,10 @@ import {
   serverSatisfies,
   sha256Of,
   tryTakeLock,
+  probeNode,
   type InstalledServer,
   type NodeChoice,
+  type NodeProbe,
 } from './install-core.ts';
 
 /** Why an install failed, and so which of §8's messages fits. */
@@ -115,8 +116,8 @@ export interface InstallerDeps {
   /** Called once when another window holds the download lock. */
   onWait?: () => void;
   signal?: AbortSignal;
-  /** How a Node.js says its version: `node --version` unless a test fakes it. */
-  versionOf?: (exe: string) => Promise<string | null>;
+  /** How a Node.js says what it is: {@link probeNode} unless a test fakes it. */
+  probe?: NodeProbe;
   /** Where nodejs.org's current Node.js 22 folder is. */
   nodeDistUrl?: string;
 }
@@ -184,7 +185,7 @@ export async function downloadNode(deps: InstallerDeps): Promise<NodeChoice> {
       userRoot: deps.userRoot,
       env: {},
       platform: deps.platform,
-      ...(deps.versionOf && { versionOf: deps.versionOf }),
+      ...(deps.probe && { probe: deps.probe }),
     });
     if (present) return present;
 
@@ -235,7 +236,7 @@ export async function downloadNode(deps: InstallerDeps): Promise<NodeChoice> {
       rmSync(partial, { recursive: true, force: true, maxRetries: 3 });
     }
     const exe = nodeExeIn(final, deps.platform);
-    const version = await (deps.versionOf ?? nodeVersionOf)(exe);
+    const version = (await (deps.probe ?? probeNode)(exe))?.version;
     if (version !== archive.version) {
       throw new InstallFailure('other', `The Node.js unpacked into ${final} does not start.`);
     }
@@ -266,7 +267,7 @@ export async function ensureNode(deps: InstallerDeps, allowDownload: boolean): P
     userRoot: deps.userRoot,
     env: deps.env,
     platform: deps.platform,
-    ...(deps.versionOf && { versionOf: deps.versionOf }),
+    ...(deps.probe && { probe: deps.probe }),
   });
   if (found || !allowDownload) return found;
   return downloadNode(deps);

@@ -207,7 +207,7 @@ async function fakeTar(_exe, args) {
 test('downloads Node.js into the Steptix folder when its fingerprint matches', async () => {
   const root = scratch();
   const bytes = new Uint8Array([1, 2, 3, 4]);
-  const { deps: d } = deps(root, { fetch: fakeNodejsOrg(bytes), run: fakeTar, versionOf: async () => '22.22.1', arch: 'x64' });
+  const { deps: d } = deps(root, { fetch: fakeNodejsOrg(bytes), run: fakeTar, probe: async (exe) => ({ version: '22.22.1', exe }), arch: 'x64' });
 
   const node = await downloadNode(d);
 
@@ -220,7 +220,7 @@ test('downloads Node.js into the Steptix folder when its fingerprint matches', a
 
 test('refuses a Node.js download that does not match its fingerprint', async () => {
   const root = scratch();
-  const { deps: d } = deps(root, { fetch: fakeNodejsOrg(new Uint8Array([1, 2, 3]), { lie: true }), run: fakeTar, versionOf: async () => '22.22.1' });
+  const { deps: d } = deps(root, { fetch: fakeNodejsOrg(new Uint8Array([1, 2, 3]), { lie: true }), run: fakeTar, probe: async (exe) => ({ version: '22.22.1', exe }) });
   await assert.rejects(downloadNode(d), (err) => {
     assert.equal(err.kind, 'node-download');
     assert.match(err.message, /did not match the fingerprint nodejs\.org publishes/);

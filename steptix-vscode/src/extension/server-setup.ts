@@ -175,6 +175,20 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     this.out.appendLine(`[${new Date().toISOString().slice(11, 23)}] install: ${line}`);
   }
 
+  /** The Node.js the server would run on now, asked at most once a minute:
+   *  every start checks it (§4.6), and asking costs a process. */
+  private nodeCache: { at: number; choice: Promise<NodeChoice | null> } | undefined;
+
+  private nodeNow(): Promise<NodeChoice | null> {
+    if (!this.nodeCache || Date.now() - this.nodeCache.at > 60_000) {
+      this.nodeCache = {
+        at: Date.now(),
+        choice: chooseNode({ userRoot: this.userRoot, env: process.env, platform: this.platform }),
+      };
+    }
+    return this.nodeCache.choice;
+  }
+
   private get userRoot(): string {
     return userRootDir();
   }
@@ -268,7 +282,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     const pick = currentPick(this.userRoot, this.requires);
     if (pick.kind === 'run') {
       this.logUsing(pick.server, pick.chosen);
-      await this.prepareTerminals(await chooseNode({ userRoot: this.userRoot, env: process.env, platform: this.platform }));
+      await this.prepareTerminals(await this.nodeNow());
       void this.patchCheck();
       return;
     }
@@ -296,7 +310,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
   /** §5.3: set up npm's own copy, which costs no download. True when that
    *  gave a server that matches. */
   private async useNpmPackage(): Promise<boolean> {
-    const node = await chooseNode({ userRoot: this.userRoot, env: process.env, platform: this.platform });
+    const node = await this.nodeNow();
     if (!node) return false;
     const pkg = await this.npmPackage(node);
     if (!pkg) return false;
@@ -331,7 +345,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
       void vscode.window.showInformationMessage(unsupported);
       return null;
     }
-    const node = await chooseNode({ userRoot: this.userRoot, env: process.env, platform: this.platform });
+    const node = await this.nodeNow();
     const mb = SERVER_DOWNLOAD_MB + (node ? 0 : NODE_DOWNLOAD_MB);
     const install = 'Install';
     const withPath = 'Install and add steptix to PATH';
@@ -374,7 +388,14 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
    * first. `install` is the user's yes; `update` comes without asking.
    */
   install(opts: { mode: 'install' | 'update'; addToPath?: boolean; version?: string }): Promise<InstalledServer | null> {
-    if (this.pending) return this.pending;
+    if (this.pending) {
+      // One install at a time; a caller who also asked for PATH still gets it.
+      if (!opts.addToPath) return this.pending;
+      return this.pending.then(async (server) => {
+        if (server) await this.addToPath();
+        return server;
+      });
+    }
     const unsupported = unsupportedPlatformMessage(this.platform, this.arch);
     if (unsupported) {
       void vscode.window.showInformationMessage(unsupported);
@@ -388,6 +409,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
 
   private async runInstall(opts: { mode: 'install' | 'update'; addToPath?: boolean; version?: string }): Promise<InstalledServer | null> {
     this.status?.setInstallState('installing');
+    this.nodeCache = undefined;
     try {
       const server = await vscode.window.withProgress(
         {
@@ -469,7 +491,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     if (!this.managed() || this.pending) return;
     const pick = currentPick(this.userRoot, this.requires);
     if (pick.kind !== 'run') return;
-    const node = await chooseNode({ userRoot: this.userRoot, env: process.env, platform: this.platform });
+    const node = await this.nodeNow();
     if (!node) return;
     const newest = await newestPublishedServer(this.deps(), node, this.requires);
     const installed = listInstalledServers(path.join(this.userRoot, 'runtimes'))
@@ -553,7 +575,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     // the machine, so the user has already said yes to what it needs.
     let node: NodeChoice | null;
     try {
-      node = await ensureNode(this.deps(), true);
+      node = (await this.nodeNow()) ?? (await ensureNode(this.deps(), true));
     } catch (err) {
       this.reportFailure(err, () => undefined);
       return { kind: 'fail', payload: reportError('STX034', { situation: 'failed', detail: (err as Error).message }) };
@@ -621,7 +643,12 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     if (!stopped) {
       return {
         kind: 'fail',
-        payload: reportError('STX035', { serverUrl, serverVersion: health.version, extensionVersion: this.version, reason: 'person' }),
+        payload: reportError('STX035', {
+          serverUrl,
+          serverVersion: health.version,
+          extensionVersion: this.version,
+          reason: 'not-stopped',
+        }),
       };
     }
     return { kind: 'replaced' };
@@ -654,7 +681,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
 
   private writeBinScripts(node: NodeChoice): void {
     mkdirSync(this.binDir, { recursive: true });
-    for (const [name, file] of Object.entries(binScripts({ nodeExe: node.exe, requires: this.requires, platform: this.platform }))) {
+    for (const [name, file] of Object.entries(binScripts({ nodeExe: node.exe, requires: this.requires, platform: this.platform, binDir: this.binDir }))) {
       const target = path.join(this.binDir, name);
       writeFileSync(target, file.content);
       if (file.mode !== undefined) chmodSync(target, file.mode);
@@ -667,7 +694,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
       void vscode.window.showInformationMessage('steptix is already on PATH, installed with npm.');
       return;
     }
-    const node = await chooseNode({ userRoot: this.userRoot, env: process.env, platform: this.platform });
+    const node = await this.nodeNow();
     if (!node || currentPick(this.userRoot, this.requires).kind !== 'run') {
       void vscode.window.showWarningMessage('Install the Steptix server first: run "Steptix: Install Server".');
       return;
@@ -772,7 +799,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     const problems: string[] = [];
     const newest = runtimes.at(-1);
     if (newest) {
-      const node = await chooseNode({ userRoot: this.userRoot, env: process.env, platform: this.platform });
+      const node = await this.nodeNow();
       if (!node) {
         problems.push('no Node.js was found to run the removal');
       } else {
@@ -807,6 +834,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
       }
     }
     this.context.environmentVariableCollection.delete('PATH');
+    this.nodeCache = undefined;
     for (const dir of [this.binDir, path.join(this.userRoot, 'node')]) {
       try {
         rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
@@ -830,7 +858,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
 
   private async staleTerminalCheck(): Promise<void> {
     if (this.context.globalState.get<boolean>(STALE_DISMISSED_KEY)) return;
-    const node = await chooseNode({ userRoot: this.userRoot, env: process.env, platform: this.platform });
+    const node = await this.nodeNow();
     const pkg = await this.npmPackage(node);
     const terminal = pkg ? packageVersionAt(pkg) : null;
     if (!terminal) return;

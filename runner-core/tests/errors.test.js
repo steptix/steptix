@@ -241,4 +241,8 @@ test('STX035 names both versions, and the way out for a server started by hand o
   assert.ok(chosen.diagnosis.startsWith('You chose Steptix server 1.3.0, but this extension is 1.4.1'));
   assert.ok(chosen.fix.includes('Install Another Version'));
   assert.ok(chosen.fix.includes('steptix server use newest'));
+  const stuck = reportError('STX035', { ...SAMPLE_CONTEXTS.STX035, reason: 'not-stopped' });
+  assert.ok(stuck.diagnosis.endsWith('did not stop when asked'));
+  assert.ok(stuck.fix.includes('Steptix: Stop Server'));
+  assert.ok(!stuck.diagnosis.includes('you started'), 'does not say the user started it');
 });

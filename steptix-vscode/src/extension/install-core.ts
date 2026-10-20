@@ -231,8 +231,8 @@ export function unsupportedPlatformMessage(platform: NodeJS.Platform, arch: stri
 /**
  * About how much the first install downloads, for the install question
  * (§5.2): the package and its dependencies as npm fetches them, compressed.
- * Measured at release time; Node.js adds {@link NODE_DOWNLOAD_MB} when the
- * extension has to fetch it too.
+ * An estimate until the release measures it (§10.1); Node.js adds
+ * {@link NODE_DOWNLOAD_MB} when the extension has to fetch it too.
  */
 export const SERVER_DOWNLOAD_MB = 70;
 export const NODE_DOWNLOAD_MB = 30;
@@ -299,21 +299,27 @@ export function ownNodeCopies(userRoot: string, platform: NodeJS.Platform): Arra
     .sort((a, b) => compareVersions(b.version, a.version));
 }
 
-/** Search PATH for an executable, as a shell would, without running one. */
+/**
+ * Search PATH for an executable, as a shell would, without running one.
+ * `exts` narrows Windows' PATHEXT, for a program that must be run without a
+ * shell: Node cannot run a `.cmd` that way.
+ */
 export function findOnPath(
   name: string,
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
   exclude: string[] = [],
+  exts?: string[],
 ): string | null {
   const pathVar = platform === 'win32' ? (env['Path'] ?? env['PATH'] ?? '') : (env['PATH'] ?? '');
-  const exts = platform === 'win32' ? (env['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean) : [''];
+  const tried =
+    platform === 'win32' ? (exts ?? (env['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)) : [''];
   const fold = (p: string) => (platform === 'win32' || platform === 'darwin' ? p.toLowerCase() : p);
   const skip = new Set(exclude.map((d) => fold(path.resolve(d))));
   for (const dir of pathVar.split(platform === 'win32' ? ';' : ':')) {
     const trimmed = dir.trim().replace(/^"(.*)"$/, '$1');
     if (!trimmed || skip.has(fold(path.resolve(trimmed)))) continue;
-    for (const ext of exts) {
+    for (const ext of tried) {
       const candidate = path.join(trimmed, name + ext.toLowerCase());
       try {
         if (statSync(candidate).isFile()) return candidate;
@@ -325,14 +331,31 @@ export function findOnPath(
   return null;
 }
 
-/** Run `node --version` and parse it. Null when it cannot be run. */
-export function nodeVersionOf(exe: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile(exe, ['--version'], { timeout: 15_000, windowsHide: true }, (err, stdout) => {
-      resolve(err ? null : parseNodeVersion(String(stdout)));
-    });
+/** What a Node.js says about itself: its version, and the executable it
+ *  really is. */
+export type NodeProbe = (exe: string) => Promise<{ version: string; exe: string } | null>;
+
+/**
+ * Ask a `node` for its version and its own path. The path is the real
+ * executable behind a version manager's shim (Volta, fnm, asdf), which is
+ * where npm sits beside it. Null when it cannot be run.
+ */
+export const probeNode: NodeProbe = (exe) =>
+  new Promise((resolve) => {
+    execFile(
+      exe,
+      ['-p', "process.versions.node + ' ' + process.execPath"],
+      { timeout: 15_000, windowsHide: true },
+      (err, stdout) => {
+        // `22.22.0 C:\Program Files\nodejs\node.exe`: the version has no
+        // space in it, and the path may.
+        const line = String(stdout).trim();
+        const space = line.indexOf(' ');
+        const parsed = space > 0 ? parseNodeVersion(line.slice(0, space)) : null;
+        resolve(err || !parsed ? null : { version: parsed, exe: line.slice(space + 1) });
+      },
+    );
   });
-}
 
 /**
  * The Node.js to run the server with, in §4.6's order: the user's own (on
@@ -344,14 +367,14 @@ export async function chooseNode(args: {
   userRoot: string;
   env: NodeJS.ProcessEnv;
   platform: NodeJS.Platform;
-  versionOf?: (exe: string) => Promise<string | null>;
+  probe?: NodeProbe;
 }): Promise<NodeChoice | null> {
-  const versionOf = args.versionOf ?? nodeVersionOf;
+  const probe = args.probe ?? probeNode;
   const named = args.env['STEPTIX_NODE']?.trim();
-  const yours = named || findOnPath('node', args.env, args.platform);
+  const yours = named || findOnPath('node', args.env, args.platform, [], ['.EXE']);
   if (yours) {
-    const version = await versionOf(yours);
-    if (version && nodeIsNewEnough(version)) return { exe: yours, version, origin: 'yours' };
+    const found = await probe(yours);
+    if (found && nodeIsNewEnough(found.version)) return { exe: found.exe, version: found.version, origin: 'yours' };
   }
   const own = ownNodeCopies(args.userRoot, args.platform)[0];
   return own ? { exe: own.exe, version: own.version, origin: 'steptix' } : null;
@@ -463,6 +486,10 @@ export function binScripts(args: {
   nodeExe: string;
   requires: string;
   platform: NodeJS.Platform;
+  /** Where the scripts go. The command names its runner by this full path,
+   *  not by its own folder: Add steptix to PATH may reach it through a link
+   *  in another folder (§5.5). */
+  binDir: string;
 }): Record<string, { content: string; mode?: number }> {
   const runner = `// Written by the Steptix extension for VS Code. It runs the newest Steptix
 // server installed in ../runtimes that matches ${args.requires}'s major.minor,
@@ -496,15 +523,17 @@ if (!pick) {
 }
 `;
   if (args.platform === 'win32') {
+    const runnerPath = path.win32.join(args.binDir, 'run-newest.mjs');
     return {
       'run-newest.mjs': { content: runner },
-      'steptix.cmd': { content: `@echo off\r\n"${args.nodeExe}" "%~dp0run-newest.mjs" %*\r\n` },
+      'steptix.cmd': { content: `@echo off\r\n"${args.nodeExe}" "${runnerPath}" %*\r\n` },
     };
   }
-  const quoted = `'${args.nodeExe.replace(/'/g, `'\\''`)}'`;
+  const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+  const runnerPath = path.posix.join(args.binDir, 'run-newest.mjs');
   return {
     'run-newest.mjs': { content: runner },
-    steptix: { content: `#!/bin/sh\nexec ${quoted} "$(dirname "$0")/run-newest.mjs" "$@"\n`, mode: 0o755 },
+    steptix: { content: `#!/bin/sh\nexec ${quote(args.nodeExe)} ${quote(runnerPath)} "$@"\n`, mode: 0o755 },
   };
 }
 

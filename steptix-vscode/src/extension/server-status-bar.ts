@@ -9,7 +9,7 @@ import {
   type HealthProbe,
   type HealthProbeResult,
 } from './server-manager.js';
-import type { InstallState } from './server-setup.js';
+import { INSTALL_SERVER_COMMAND, type InstallState } from './server-setup.js';
 import { resolveServerUrl, type ServerUrlOrigin } from './server-url.js';
 
 /** Command the status-bar item invokes. Exported so the registration and the
@@ -180,14 +180,19 @@ export class ServerStatusBar implements vscode.Disposable {
 
   /** Show the install state, and say whether it did. */
   private renderInstallState(): boolean {
-    if (this.installState === null) return false;
+    if (this.installState === null) {
+      this.item.command = SERVER_MENU_COMMAND;
+      return false;
+    }
+    // A click does what the item says is missing.
+    this.item.command = this.installState === 'not-installed' ? INSTALL_SERVER_COMMAND : SERVER_MENU_COMMAND;
     this.item.text =
       this.installState === 'installing' ? '$(sync~spin) Steptix: installing server…' : '$(circle-slash) Steptix: server not installed';
     this.item.tooltip = [
       this.buildLine,
       this.installState === 'installing'
         ? 'Installing the Steptix server.'
-        : 'The Steptix server is not installed. Run "Steptix: Install Server", or press Run.',
+        : 'The Steptix server is not installed. Click to install it.',
     ]
       .filter(Boolean)
       .join('\n');
