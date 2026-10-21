@@ -10,8 +10,7 @@ import type { Command } from 'commander';
  * arguments to Playwright's own CLI. Google Chrome, the default, is the copy
  * the user installed and needs nothing from here.
  *
- * The same subcommands the Windows runtime launcher allows
- * (packaging/runtime/runtime-launcher.cjs); anything else is refused before
+ * Only these subcommands are allowed; anything else is refused before
  * Playwright sees it, so `steptix browsers` cannot become a back door to the
  * rest of Playwright's CLI (`test`, `codegen`, ...).
  */
@@ -63,7 +62,7 @@ export function registerBrowsersCommand(program: Command): void {
     )
     .argument('[args...]', 'install [chromium|firefox|webkit], install-deps, or --help')
     // Everything after `browsers` is Playwright's to parse — `--help`
-    // included, as the runtime launcher passes it — so commander must not
+    // included — so commander must not
     // claim any of it: no help option here, and the program's own options
     // are positional (src/cli/index.ts), so they stop at the command name.
     .helpOption(false)

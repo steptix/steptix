@@ -437,7 +437,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
   /**
    * Point the user root (%LOCALAPPDATA%\steptix, or $XDG_CONFIG_HOME/steptix)
    * at a fresh temp folder for each test. The extension host is this process,
-   * so the runtime discovery and the machine .env read these very variables.
+   * so the machine .env is read through these very variables.
    */
   function withUserRoot(extraVars = []) {
     const vars = ['LOCALAPPDATA', 'XDG_CONFIG_HOME', ...extraVars];
@@ -462,28 +462,32 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
 
   describe('the installed runtime, with no command setting', () => {
     const userRoot = withUserRoot();
-    /** Where the installer would have put version 1.0.0 under that root. */
+    /** Where ServerSetup would have installed version 1.0.0 under that root. */
     let runtimeDir;
 
     beforeEach(() => {
-      const runtimes = path.join(userRoot.base, 'steptix', 'runtimes');
-      runtimeDir = path.join(runtimes, '1.0.0');
-      for (const [version, file] of [
-        ['1.0.0', 'runtime-launcher.cjs'],
-        ['1.0.0', 'steptix.cmd'],
-        ['1.0.0', path.join('server', 'dist', 'index.js')],
-        // An older one beside it, as an upgrade leaves: the newest must win.
-        ['1.0.0-beta.1', 'runtime-launcher.cjs'],
-        ['1.0.0-beta.1', 'steptix.cmd'],
-        ['1.0.0-beta.1', path.join('server', 'dist', 'index.js')],
-      ]) {
-        const full = path.join(runtimes, version, file);
-        fs.mkdirSync(path.dirname(full), { recursive: true });
-        fs.writeFileSync(full, '');
-      }
+      runtimeDir = path.join(userRoot.base, 'steptix', 'runtimes', '1.0.0');
+      fs.mkdirSync(path.join(runtimeDir, 'dist'), { recursive: true });
+      fs.writeFileSync(path.join(runtimeDir, 'dist', 'index.js'), '');
+      // ServerSetup is unset in this harness. This stands in for it, handing
+      // the run path the runtime its ensureRuntime would have found.
+      hooks.setServerHooks({
+        serverSetup: {
+          managed: () => true,
+          ensureRuntime: async () => ({
+            kind: 'ready',
+            runtime: { version: '1.0.0', dir: runtimeDir, node: process.execPath },
+          }),
+          checkRunning: async () => ({ kind: 'use' }),
+        },
+      });
     });
 
-    it('down: starts the newest installed runtime, in its own folder, on STEPTIX_SERVER_URL\'s port', async () => {
+    afterEach(() => {
+      hooks.setServerHooks({ serverSetup: null });
+    });
+
+    it('down: starts the installed runtime under its Node.js, in its own folder, on STEPTIX_SERVER_URL\'s port', async () => {
       probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
       spawnBringsServerUp = true;
       await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 10, useInstalledRuntime: true });
@@ -493,7 +497,8 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
 
       assert.equal(spawns.length, 1, 'exactly one spawn');
       assert.equal(spawns[0].cwd, runtimeDir, 'never the workspace folder');
-      assert.ok(spawns[0].command.includes(runtimeDir), spawns[0].command);
+      assert.ok(spawns[0].command.includes(path.join(runtimeDir, 'dist', 'index.js')), spawns[0].command);
+      assert.ok(spawns[0].command.includes(process.execPath), spawns[0].command);
       const port = new URL(fixtureServerUrl()).port;
       assert.ok(
         spawns[0].command.endsWith(`serve --port ${port} --idle-timeout 60`),
@@ -529,7 +534,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
       assert.equal(spawns.length, 1);
       const { fix } = hooks.lastRunError();
       assert.ok(fix?.includes(runtimeDir), fix);
-      assert.match(fix, /Node\.js/);
+      assert.match(fix, /Uninstall Server/);
     });
   });
 

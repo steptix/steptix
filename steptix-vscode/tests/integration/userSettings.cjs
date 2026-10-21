@@ -9,9 +9,9 @@ const path = require('node:path');
  * have the extension start the runtime the developer installed under
  * %LOCALAPPDATA%\steptix\runtimes — in the fast suite every run's probe of the
  * fixture's dead port would spawn a real server, and in a live shard a crashed
- * server would be silently replaced by an older build. The installed-runtime
- * test (runRuntimeTest.cjs) is the one launch that wants it, and it starts
- * from an empty profile, the way a first-time user does.
+ * server would be silently replaced by an older build. The install test
+ * (runInstallTest.cjs) is the one launch that wants it, and it starts from an
+ * empty profile, the way a first-time user does.
  */
 const SUITE_SETTINGS = {
   'steptix.serverAutoStart.useInstalledRuntime': false,

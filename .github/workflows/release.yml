@@ -1,0 +1,133 @@
+# A Steptix release (docs/specs/SPEC-install.md §3.1, §10): build the files a
+# release publishes, install and run them the way a user would
+# (scripts/release-test.mjs, §10.1), and only then publish them.
+#
+#   - Push a tag `v<version>`, where <version> is the root package.json's.
+#     That builds, tests and publishes.
+#   - Or run it by hand (Actions → Release → Run workflow). That builds and
+#     tests only, unless `publish` is ticked, and then needs the tag too.
+#
+# What is published, from the same files the test ran:
+#   - `steptix` to npm's `latest` tag, with npm's provenance record, which
+#     shows the commit and build that produced it;
+#   - the extension to the VS Code Marketplace, as the `steptix` publisher;
+#   - a GitHub release holding the .vsix and the offline files.
+#
+# Windows x64 only for now: a platform is supported once its files pass the
+# release test there (§3.2), and the others come next. Add each to the matrix
+# when its turn comes; nothing else here is Windows-only.
+#
+# Secrets, in the `release` environment (which can require an approval):
+#   NPM_TOKEN   an npm automation token with publish rights to `steptix`
+#   VSCE_PAT    an Azure DevOps token for the `steptix` Marketplace publisher
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish after the release test passes (needs the v<version> tag on this commit)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    environment: release
+    timeout-minutes: 120
+    permissions:
+      contents: write # the GitHub release
+      id-token: write # npm's provenance record
+    strategy:
+      matrix:
+        os: [windows-latest]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # Clean installs, no caches: a release is built from the lockfiles alone.
+      # Order matters as in unit-tests.yml: runner-core first, the root before
+      # fixtures/tools.
+      - name: Install
+        shell: bash
+        run: |
+          npm ci
+          npm ci --prefix runner-core
+          npm ci --prefix fixtures/tools
+          npm ci --prefix steptix-vscode
+
+      # The tag names the version; the package.json files must agree, and
+      # share major.minor (§4.2; build-release.mjs checks the second).
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then
+            if [ "$GITHUB_REF" != "refs/tags/v$version" ]; then
+              echo "::error::publishing needs the tag v$version on this commit, not $GITHUB_REF"
+              exit 1
+            fi
+          fi
+
+      - name: Build the release files
+        run: node scripts/build-release.mjs
+
+      # The extension's part drives a VS Code of its own on the runner's
+      # desktop, and Google Chrome is on the hosted Windows image.
+      - name: Release test
+        run: node scripts/release-test.mjs
+
+      - name: Keep the files
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files-${{ matrix.os }}
+          path: dist-release/
+
+      - name: Publish to npm
+        if: github.event_name == 'push' || inputs.publish
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish "dist-release/steptix-${{ steps.version.outputs.version }}.tgz" --provenance --access public --tag latest
+          # The name's old 0.0.1 placeholder (§10): saying where the real
+          # versions are is harmless to repeat on every release.
+          npm deprecate steptix@0.0.1 "A placeholder. Install the latest steptix: npm i -g steptix" || true
+
+      - name: Publish to the Marketplace
+        if: github.event_name == 'push' || inputs.publish
+        shell: bash
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          vsix=$(ls dist-release/*.vsix)
+          npx --prefix steptix-vscode vsce publish --packagePath "$vsix"
+
+      - name: GitHub release
+        if: github.event_name == 'push' || inputs.publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${{ steps.version.outputs.version }}
+          gh release create "v$v" dist-release/*.vsix dist-release/steptix-$v-*.tgz \
+            --title "Steptix $v" \
+            --notes "Install from a terminal with npm i -g steptix, or from the VS Code Marketplace. For a machine with no internet access, download the offline file for its platform and the .vsix below (docs/specs/SPEC-install.md §5.6)."

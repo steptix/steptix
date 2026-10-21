@@ -1031,7 +1031,7 @@ export class RunController {
       previousSessionClose?: () => Promise<void>;
       /** Installing, updating and replacing servers (SPEC-install.md). Absent
        *  in the electron harness, which fakes the server; then a down server
-       *  is started from the Windows runtime installer's layout, as before. */
+       *  is started only from the command setting. */
       setup?: RunServerSetup;
     } = {},
   ) {

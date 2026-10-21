@@ -75,7 +75,6 @@ import {
   requestServerShutdown,
   waitUntilDown,
   describeServerVersion,
-  findInstalledRuntime,
   type HealthProbe,
   type InstalledRuntime,
   type ServerHealth,
@@ -234,15 +233,14 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
 
   /**
    * A `steptix` command on PATH other than the script this extension put in
-   * bin/: npm's, or the Windows runtime installer's. Either makes the PATH
-   * offer moot (§5.2, §5.5).
+   * bin/, such as npm's. One makes the PATH offer moot (§5.2, §5.5).
    */
   private steptixOnPath(): string | null {
     return findOnPath('steptix', process.env, this.platform, [this.binDir]);
   }
 
   /** npm's own `steptix` package behind that command, which is a server on
-   *  the machine (§5.3). The installer's command has none. */
+   *  the machine (§5.3). Null for a command with none behind it. */
   private npmPackageOnPath(): string | null {
     const command = this.steptixOnPath();
     return command ? npmPackageOfCommand(command, this.platform) : null;
@@ -625,16 +623,6 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     }
 
     let server: InstalledServer | null = pick.kind === 'run' ? pick.server : null;
-    if (!server) {
-      // A matching runtime from the Windows runtime installer, which ships
-      // until the release that replaces it, runs as it did before: through
-      // its own steptix.cmd, which finds its Node.js itself.
-      const legacy = findInstalledRuntime(path.join(this.userRoot, 'runtimes'));
-      if (legacy && serverSatisfies(legacy.version, this.requires)) {
-        args.log(`Steptix server ${legacy.version} from the Windows runtime installer, in ${legacy.dir}`);
-        return { kind: 'ready', runtime: legacy };
-      }
-    }
     if (!server && (await this.useNpmPackage())) {
       const again = currentPick(this.userRoot, this.requires);
       server = again.kind === 'run' ? again.server : null;

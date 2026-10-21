@@ -24,7 +24,6 @@ import {
   defaultHealthProbe,
   describeHealth,
   describeServerVersion,
-  findInstalledRuntime,
   isLoopbackUrl,
   readAutoStartSettings,
   readLogTail,
@@ -554,7 +553,11 @@ test('decide: a running server is used whatever port the command would pick', ()
 const UNCONFIGURED = { command: '', cwd: '', readyTimeoutSeconds: 20, useInstalledRuntime: true };
 const DOWN = { kind: 'down', detail: 'refused' };
 const RUNTIMES_DIR = path.resolve(path.sep, 'lad', 'steptix', 'runtimes');
-const RUNTIME = { version: '1.0.0-beta.1', dir: path.join(RUNTIMES_DIR, '1.0.0-beta.1') };
+const RUNTIME = {
+  version: '1.0.0-beta.1',
+  dir: path.join(RUNTIMES_DIR, '1.0.0-beta.1'),
+  node: path.resolve(path.sep, 'lad', 'steptix', 'node', 'bin', 'node'),
+};
 /** A discovery that finds `runtime`, counting how often it was asked. */
 function discovery(runtime) {
   const fn = () => {
@@ -570,6 +573,18 @@ test('decide: down + no command + no runtime installed ⇒ skip, naming where it
   assert.equal(action.kind, 'skip');
   assert.match(action.reason, /serverAutoStart\.command/);
   assert.ok(action.reason.includes(RUNTIMES_DIR), action.reason);
+});
+
+test('decide: down + no command + no discovery ⇒ skip, naming <user root>/runtimes', () => {
+  // The callers pass a discovery only once ServerSetup has a server for them;
+  // without one there is nothing installed to start.
+  withMachineEnv(null, (envPath) => {
+    const action = decideServerAction(LOCAL, DOWN, UNCONFIGURED);
+    assert.equal(action.kind, 'skip');
+    assert.match(action.reason, /serverAutoStart\.command/);
+    assert.match(action.reason, /no Steptix server is installed/);
+    assert.ok(action.reason.includes(path.join(path.dirname(envPath), 'runtimes')), action.reason);
+  });
 });
 
 test('decide: down + no command + a runtime installed ⇒ spawn that runtime on the URL\'s port', () => {
@@ -613,7 +628,7 @@ test('decide: useInstalledRuntime off ⇒ skip, however many runtimes are instal
   assert.equal(discover.calls, 0);
 });
 
-test('decide: a healthy server costs no runtime scan, and a REMOTE url never starts the runtime', () => {
+test('decide: a healthy server asks for no runtime, and a REMOTE url never starts the runtime', () => {
   const discover = discovery(RUNTIME);
   decideServerAction(LOCAL, { kind: 'healthy', health: { service: HEALTH_SERVICE_ID } }, UNCONFIGURED, discover);
   const remote = decideServerAction('http://build-box:3100', DOWN, UNCONFIGURED, discover);
@@ -710,50 +725,6 @@ test('servePortOfCommand: no -p ⇒ the machine STEPTIX_SERVER_URL port, else 31
 // The installed runtime
 // ---------------------------------------------------------------------------
 
-/** A runtimes folder holding `versions`, each with the files named (default:
- *  everything a startable runtime has on any platform). */
-function runtimesFolder(versions, files = ['runtime-launcher.cjs', 'server/dist/index.js', 'steptix.cmd']) {
-  const dir = tempDir('steptix-runtimes-');
-  for (const version of versions) {
-    for (const file of files) {
-      const full = path.join(dir, version, ...file.split('/'));
-      mkdirSync(path.dirname(full), { recursive: true });
-      writeFileSync(full, '');
-    }
-  }
-  return dir;
-}
-
-test('runtime: the newest version wins, by semver rather than by spelling', () => {
-  const dir = runtimesFolder(['1.0.0-beta.2', '1.0.0-beta.10', '0.9.0', '1.0.0-alpha.3']);
-  const runtime = findInstalledRuntime(dir);
-  assert.deepEqual(runtime, { version: '1.0.0-beta.10', dir: path.join(dir, '1.0.0-beta.10') });
-});
-
-test('runtime: a release outranks its prereleases', () => {
-  const dir = runtimesFolder(['1.0.0-beta.1', '1.0.0', '1.0.0-rc.1']);
-  assert.equal(findInstalledRuntime(dir).version, '1.0.0');
-});
-
-test('runtime: a folder missing a launch file is skipped — the leftovers of an unfinished uninstall', () => {
-  const dir = runtimesFolder(['1.0.0-beta.1']);
-  // A newer folder an uninstall could not finish removing: its server is gone.
-  mkdirSync(path.join(dir, '1.0.0-beta.2'), { recursive: true });
-  writeFileSync(path.join(dir, '1.0.0-beta.2', 'runtime-launcher.cjs'), '');
-  assert.equal(findInstalledRuntime(dir).version, '1.0.0-beta.1');
-});
-
-test('runtime: steptix.cmd is required on Windows only', () => {
-  const dir = runtimesFolder(['1.0.0'], ['runtime-launcher.cjs', 'server/dist/index.js']);
-  assert.equal(findInstalledRuntime(dir, 'win32'), null);
-  assert.equal(findInstalledRuntime(dir, 'linux').version, '1.0.0');
-  assert.equal(findInstalledRuntime(dir, 'darwin').version, '1.0.0');
-});
-
-test('runtime: no runtimes folder at all is null, not a throw', () => {
-  assert.equal(findInstalledRuntime(path.join(tmpdir(), 'steptix-no-such-runtimes-dir')), null);
-});
-
 test('compareVersions: semver precedence, and names that are not versions sort first', () => {
   const sorted = ['1.0.0', 'scratch', '1.0.0-beta.2', '1.0.0-beta', '0.10.0', '1.0.0-beta.11', '0.9.9', '1.0.0-beta.alpha']
     .sort(compareVersions);
@@ -769,28 +740,7 @@ test('compareVersions: semver precedence, and names that are not versions sort f
   ]);
 });
 
-test('runtime command: Windows goes through steptix.cmd, quoted for a path with spaces', () => {
-  const runtime = { version: '1.0.0', dir: path.join(tmpdir(), 'local app data', 'steptix', 'runtimes', '1.0.0') };
-  assert.equal(
-    runtimeServeCommand(runtime, 'http://localhost:3100', { platform: 'win32' }),
-    `"${path.join(runtime.dir, 'steptix.cmd')}" serve --port 3100 --idle-timeout 60`,
-  );
-});
-
-test('runtime command: elsewhere the launcher runs under Node — STEPTIX_NODE when set, as steptix.cmd does', () => {
-  const runtime = { version: '1.0.0', dir: path.join(tmpdir(), "it's here", '1.0.0') };
-  const launcher = path.join(runtime.dir, 'runtime-launcher.cjs').replace(/'/g, `'\\''`);
-  assert.equal(
-    runtimeServeCommand(runtime, 'http://127.0.0.1:3200/', { platform: 'linux', env: {} }),
-    `'node' '${launcher}' serve --port 3200 --idle-timeout 60`,
-  );
-  assert.equal(
-    runtimeServeCommand(runtime, 'http://127.0.0.1:3200', { platform: 'darwin', env: { STEPTIX_NODE: '/opt/node 22/bin/node' } }),
-    `'/opt/node 22/bin/node' '${launcher}' serve --port 3200 --idle-timeout 60`,
-  );
-});
-
-test('runtime command: one the launcher laid out runs its own dist/index.js under the Node.js chosen for it', () => {
+test('runtime command: the runtime runs its own dist/index.js under the Node.js chosen for it', () => {
   // SPEC-install.md §4.6: the Node.js is chosen by the extension, so it is
   // named, never looked up on PATH by a script.
   const dir = path.join(tmpdir(), 'local app data', 'steptix', 'runtimes', '1.0.0');
@@ -801,14 +751,14 @@ test('runtime command: one the launcher laid out runs its own dist/index.js unde
   );
   const posix = { version: '1.0.0', dir, node: "/home/o'neil/.steptix/node/22.22.1/bin/node" };
   assert.equal(
-    runtimeServeCommand(posix, 'http://127.0.0.1:3100', { platform: 'linux', env: { STEPTIX_NODE: '/ignored' } }),
+    runtimeServeCommand(posix, 'http://127.0.0.1:3100', { platform: 'linux' }),
     `'/home/o'\\''neil/.steptix/node/22.22.1/bin/node' '${path.join(dir, 'dist', 'index.js')}' serve --port 3100 --idle-timeout 60`,
   );
 });
 
 test('runtime command: a URL with no port starts the server on its scheme\'s', () => {
-  const runtime = { version: '1.0.0', dir: path.join(tmpdir(), '1.0.0') };
-  assert.match(runtimeServeCommand(runtime, 'http://localhost', { platform: 'linux', env: {} }), /--port 80 /);
+  const runtime = { version: '1.0.0', dir: path.join(tmpdir(), '1.0.0'), node: path.join(tmpdir(), 'node') };
+  assert.match(runtimeServeCommand(runtime, 'http://localhost', { platform: 'linux' }), /--port 80 /);
 });
 
 test('isLoopbackUrl accepts both IPv6 loopback spellings', () => {

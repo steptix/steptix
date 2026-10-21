@@ -1,17 +1,14 @@
 import { spawn } from 'node:child_process';
 import {
   appendFileSync,
-  existsSync,
   openSync,
   closeSync,
-  readdirSync,
   readSync,
   statSync,
   truncateSync,
   mkdirSync,
 } from 'node:fs';
 import * as path from 'node:path';
-import { compareVersions } from './install-core.ts';
 import {
   bareServePort,
   describeFetchError,
@@ -389,82 +386,32 @@ export function readAutoStartSettings(
 /**
  * A Steptix server installed under the user root: one the launcher or the
  * extension set up in `runtimes/<version>/` (docs/specs/SPEC-install.md §3.3),
- * which `node` names, or one the Windows runtime installer (packaging/runtime)
- * put there, which does not.
+ * with its entry point at `dist/index.js`. That folder is outside every
+ * workspace, which is what makes it safe to start without a setting: no repo
+ * the user merely opened can put a runtime there.
  */
 export interface InstalledRuntime {
   version: string;
   /** Its folder: `<user root>/runtimes/<version>`. */
   dir: string;
-  /** The Node.js that runs it, chosen as §4.6 says. Set for a runtime laid
-   *  out by the launcher; absent for the Windows installer's, which finds
-   *  its own through `steptix.cmd`. */
-  node?: string;
+  /** The Node.js that runs it, chosen as §4.6 says. */
+  node: string;
 }
 
 export interface RuntimeSearch {
   /** Where installed runtimes live — named when there is none. */
   runtimesDir: string;
-  /** The newest startable one there, or null. */
+  /** The one to start, or null. */
   runtime: InstalledRuntime | null;
 }
 
+/** Finds the installed runtime to start. The extension's ServerSetup
+ *  (server-setup.ts, `ensureRuntime`) is what supplies it. */
 export type RuntimeDiscovery = () => RuntimeSearch;
 
-/**
- * The files a runtime folder must hold to be started. A folder missing one is
- * not a runtime to pick: an uninstall that could not finish — a running server
- * holds files open — leaves one behind.
- */
-function runtimeLaunchFiles(platform: NodeJS.Platform): string[] {
-  return [
-    'runtime-launcher.cjs',
-    path.join('server', 'dist', 'index.js'),
-    // What the Windows installer ships for finding Node; elsewhere the
-    // launcher is run by `node` directly (runtimeServeCommand).
-    ...(platform === 'win32' ? ['steptix.cmd'] : []),
-  ];
-}
-
-/**
- * The newest startable runtime in `runtimesDir`, or null.
- *
- * Newest rather than any: the installer puts each version in a folder of its
- * own and leaves the others, so after an upgrade both are there, and the one
- * just installed is the one meant.
- */
-export function findInstalledRuntime(
-  runtimesDir: string,
-  platform: NodeJS.Platform = process.platform,
-): InstalledRuntime | null {
-  let names: string[];
-  try {
-    names = readdirSync(runtimesDir);
-  } catch {
-    return null;
-  }
-  const files = runtimeLaunchFiles(platform);
-  const newest = names
-    .filter((name) => files.every((file) => existsSync(path.join(runtimesDir, name, file))))
-    .sort(compareVersions)
-    .at(-1);
-  return newest === undefined ? null : { version: newest, dir: path.join(runtimesDir, newest) };
-}
-
-/**
- * Where the installer puts runtimes: `<user root>/runtimes`, beside the
- * machine key. A location the user's own installer wrote, outside every
- * workspace — which is what makes it safe to start without a setting: no repo
- * the user merely opened can put a runtime there.
- */
-export const defaultRuntimeDiscovery: RuntimeDiscovery = () => {
-  const runtimesDir = path.join(userRootDir(), 'runtimes');
-  return { runtimesDir, runtime: findInstalledRuntime(runtimesDir) };
-};
-
-// The version order, now in install-core.ts so the framework's parity test
-// can load it without runner-core; re-exported for this module's callers.
-export { compareVersions };
+// The version order lives in install-core.ts; re-exported for this module's
+// callers.
+export { compareVersions } from './install-core.ts';
 
 /**
  * Put in the environment of every server this extension starts, so its
@@ -485,34 +432,22 @@ const AUTO_START_IDLE_TIMEOUT_MINUTES = 60;
  * own default (3100) need not be it — a `STEPTIX_SERVER_URL` naming another port
  * would otherwise start a server where nobody is looking and time out.
  *
- * A runtime the launcher laid out runs its own `dist/index.js` under the
- * Node.js chosen for it, and that launcher adds the localhost inspector for
- * `serve` (src/launcher/launch.ts).
- *
- * One from the Windows runtime installer runs, on Windows, through its
- * `steptix.cmd`, which is how that installer means it to be run and where its
- * "Node from STEPTIX_NODE, else PATH" rule lives. Elsewhere there is no such
- * script, so the same rule is applied here and its launcher run by Node
- * directly; that launcher adds the inspector too.
+ * The runtime's own `dist/index.js` runs under the Node.js chosen for it, and
+ * its launcher adds the localhost inspector for `serve` (src/launcher/launch.ts).
  */
 export function runtimeServeCommand(
   runtime: InstalledRuntime,
   serverUrl: string,
-  opts: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv } = {},
+  opts: { platform?: NodeJS.Platform } = {},
 ): string {
   const platform = opts.platform ?? process.platform;
   const port = serverUrlPort(serverUrl);
   const args = `serve --port ${port} --idle-timeout ${AUTO_START_IDLE_TIMEOUT_MINUTES}`;
-  if (runtime.node) {
-    // Node's `shell: true` hands a Windows line to `cmd /d /s /c` inside a
-    // pair of quotes of its own, which `/s` strips, so each word is quoted
-    // and the line is not.
-    const quote = platform === 'win32' ? (v: string) => `"${v}"` : shellQuote;
-    return `${quote(runtime.node)} ${quote(path.join(runtime.dir, 'dist', 'index.js'))} ${args}`;
-  }
-  if (platform === 'win32') return `"${path.join(runtime.dir, 'steptix.cmd')}" ${args}`;
-  const node = (opts.env ?? process.env)['STEPTIX_NODE']?.trim() || 'node';
-  return `${shellQuote(node)} ${shellQuote(path.join(runtime.dir, 'runtime-launcher.cjs'))} ${args}`;
+  // Node's `shell: true` hands a Windows line to `cmd /d /s /c` inside a pair
+  // of quotes of its own, which `/s` strips, so each word is quoted and the
+  // line is not.
+  const quote = platform === 'win32' ? (v: string) => `"${v}"` : shellQuote;
+  return `${quote(runtime.node)} ${quote(path.join(runtime.dir, 'dist', 'index.js'))} ${args}`;
 }
 
 /** One POSIX `sh` word, whatever it holds. */
@@ -569,8 +504,9 @@ export type ServerAction =
 /**
  * `settings.command` wins whenever it is set: a user who wrote one (a
  * framework checkout, a pinned runtime) meant it. Only an empty one falls to
- * the installed runtime, and `discover` is called only then — a healthy
- * server costs no directory scan.
+ * the installed runtime, and `discover` is called only then. The callers pass
+ * one only once ServerSetup (server-setup.ts, `ensureRuntime`) has found or
+ * installed a server; without one, no Steptix server is installed to start.
  *
  * A command is started only when it will listen on `serverUrl`'s port
  * ({@link servePortOfCommand}, asked only then). The installed runtime needs
@@ -580,7 +516,7 @@ export function decideServerAction(
   serverUrl: string,
   probe: HealthProbeResult,
   settings: AutoStartSettings,
-  discover: RuntimeDiscovery = defaultRuntimeDiscovery,
+  discover?: RuntimeDiscovery,
   servePortOf: (command: string) => BareServePort | null = servePortOfCommand,
 ): ServerAction {
   switch (probe.kind) {
@@ -613,12 +549,14 @@ export function decideServerAction(
             '"steptix.serverAutoStart.useInstalledRuntime" is off',
         };
       }
-      const { runtimesDir, runtime } = discover();
+      const { runtimesDir, runtime } = discover
+        ? discover()
+        : { runtimesDir: path.join(userRootDir(), 'runtimes'), runtime: null };
       if (!runtime) {
         return {
           kind: 'skip',
           reason:
-            '"steptix.serverAutoStart.command" is not set and no Steptix runtime ' +
+            '"steptix.serverAutoStart.command" is not set and no Steptix server ' +
             `is installed in ${runtimesDir}`,
         };
       }

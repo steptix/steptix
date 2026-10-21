@@ -513,6 +513,10 @@ export function staleTerminalNotice(terminalVersion: string, extensionVersion: s
 // The `steptix` script in <user root>/bin (§5.5)
 // ---------------------------------------------------------------------------
 
+/** In every script the extension writes to bin/, so it never replaces one it
+ *  did not write. */
+export const BIN_SCRIPT_MARK = 'Written by the Steptix extension for VS Code';
+
 /**
  * What the extension writes to `<user root>/bin/`: `steptix.cmd` on Windows,
  * `steptix` elsewhere, both starting `run-newest.mjs` with the Node.js the
@@ -521,10 +525,6 @@ export function staleTerminalNotice(terminalVersion: string, extensionVersion: s
  * `steptix server use` choice. It is written again whenever the extension
  * starts, so the Node.js and the requirement it bakes in stay current.
  */
-/** In every script the extension writes to bin/, so it never replaces one it
- *  did not write, such as the Windows runtime installer's `steptix.cmd`. */
-export const BIN_SCRIPT_MARK = 'Written by the Steptix extension for VS Code';
-
 export function binScripts(args: {
   nodeExe: string;
   requires: string;

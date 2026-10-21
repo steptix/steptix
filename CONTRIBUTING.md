@@ -74,10 +74,9 @@ need to run it; a maintainer does before merging when a change needs it. The
   in `fixtures/test-app`, or the local desktop. Never a third-party website.
 - **No real secrets in any file.** In tests, use fakes that say what they are,
   such as `'compile-api-key'`, never random-looking strings.
-- **A version bump when the extension changes.** If your change touches code
-  bundled into the Steptix extension (anything under `steptix-vscode/` outside
-  its tests, or under `runner-core/`), bump the patch number of
-  `steptix-vscode/package.json` and its `package-lock.json`.
+- **No version bumps.** Leave the `version` fields alone: they change only
+  when a release is made. A build you install is told apart by its commit,
+  which the extension shows in the status bar.
 
 [CLAUDE.md](CLAUDE.md) holds the full set of project conventions, with the
 reasons behind them.
