@@ -3,6 +3,9 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { StepResult } from '../report/types.js';
 import { logger } from '../utils/logger.js';
+import { writtenByNewer } from '../utils/file-stamp.js';
+import { getPackageVersion } from '../utils/version.js';
+import { codeBehindStamp, withCodeBehindStamp } from './stamp.js';
 import { aiEntryFor, type GeneratedEntry } from './generate.js';
 import type { CodeBehindBinding } from './loader.js';
 import { resolveCodeBehindCacheDir } from './loader.js';
@@ -93,13 +96,42 @@ export class Candidate {
   private readonly entryText = new Map<string, string>();
   private materialised: string[] = [];
   private persisted: string[] = [];
+  private readonly newer = new Map<string, string>();
 
-  /** The file as it stands, loading the on-disk original the first time. */
+  /**
+   * The file as it stands, loading the on-disk original the first time.
+   *
+   * A file a newer major.minor compiled reads as no file at all
+   * (docs/specs/SPEC-install.md §4.13): this version did not write its
+   * entries and does not run them, so it does not splice into them either.
+   * Compiling is the user's choice to replace them with this version's,
+   * which the newer version still reads.
+   */
   async read(file: string): Promise<string | null> {
     if (!this.original.has(file)) {
-      this.original.set(file, await readIfExists(file));
+      const onDisk = await readIfExists(file);
+      const stamp = onDisk === null ? undefined : codeBehindStamp(onDisk);
+      if (stamp !== undefined && writtenByNewer(stamp)) {
+        this.newer.set(file, stamp);
+        this.original.set(file, null);
+      } else {
+        this.original.set(file, onDisk);
+      }
     }
     return this.current.get(file) ?? this.original.get(file) ?? null;
+  }
+
+  /** The files this compile replaces rather than splices into, because a
+   *  newer major.minor compiled them, with the version each says. */
+  replacedNewer(): ReadonlyMap<string, string> {
+    return this.newer;
+  }
+
+  /** Set a file's proposed content, stamped with this version (§4.13). */
+  private async propose(file: string, content: string): Promise<void> {
+    const formatted = await formatCodeBehindSource(content, file);
+    const version = getPackageVersion();
+    this.current.set(file, version === 'unknown' ? formatted : withCodeBehindStamp(formatted, version));
   }
 
   contentOf(file: string): string | undefined {
@@ -134,13 +166,7 @@ export class Candidate {
     const read = await this.read(binding.file);
     // An empty file holds no entry list to splice into: it is written as new.
     const before = read !== null && read.trim() !== '' ? read : null;
-    this.current.set(
-      binding.file,
-      await formatCodeBehindSource(
-        before === null ? createFile(request) : spliceEntry(before, request).text,
-        binding.file,
-      ),
-    );
+    await this.propose(binding.file, before === null ? createFile(request) : spliceEntry(before, request).text);
     this.entryText.set(entryKeyOf(binding), entryCode);
   }
 
@@ -188,12 +214,12 @@ export class Candidate {
       this.current.delete(binding.file);
       return true;
     }
-    this.current.set(binding.file, await formatCodeBehindSource(next, binding.file));
+    await this.propose(binding.file, next);
     return true;
   }
 
   async replaceFile(file: string, content: string): Promise<void> {
-    this.current.set(file, await formatCodeBehindSource(content, file));
+    await this.propose(file, content);
   }
 
   /** Files whose content differs from what is on disk today. */

@@ -9,6 +9,7 @@
  */
 
 import type { ErrorPayload } from './errors.js';
+import type { NewerCompiled } from './newer-compiled.js';
 
 // ---------------------------------------------------------------------------
 // Server-side run events (mirrored from SSE)
@@ -341,6 +342,13 @@ export interface OutputEvent {
   type: 'output';
   msg: string;
   kind: 'info' | 'warn' | 'error';
+  /**
+   * On the notice about compiled steps a newer major.minor wrote, which ran
+   * with the AI instead (docs/specs/SPEC-install.md §4.13), so a client can
+   * say it in its own words (`outputText`, newer-compiled.ts). Additive: a
+   * client that does not know it prints `msg`.
+   */
+  newerCompiled?: NewerCompiled;
 }
 
 /**

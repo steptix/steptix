@@ -39,6 +39,8 @@ import {
   type CdpDiscoveryTab,
   type CdpEngine,
 } from './cdp-discovery.js';
+import { STAMP_FIELD, stampOf, writtenByNewer } from '../utils/file-stamp.js';
+import { getPackageVersion } from '../utils/version.js';
 
 export type { LaunchableEngine };
 
@@ -536,10 +538,18 @@ function writeProfileMarker(
     // only way the reuse branch can later say whether the running browser
     // matches the config — the flag is not visible on the port, and the
     // marker is rewritten by every launch, so it always describes the live one.
-    writeFile(
-      path.join(profileDir, PROFILE_MARKER),
-      `${JSON.stringify({ engine, profile, createdBy: 'steptix', hideAutomation }, null, 2)}\n`,
-    );
+    // That includes a marker a newer Steptix wrote: this launch is the live
+    // browser now, and the stamp says which version started it
+    // (docs/specs/SPEC-install.md §4.13).
+    const version = getPackageVersion();
+    const marker = {
+      ...(version !== 'unknown' && { [STAMP_FIELD]: version }),
+      engine,
+      profile,
+      createdBy: 'steptix',
+      hideAutomation,
+    };
+    writeFile(path.join(profileDir, PROFILE_MARKER), `${JSON.stringify(marker, null, 2)}\n`);
   } catch {
     // A profile without a marker still works; it just cannot be `reset`
     // (§12 guard 4 refuses it), which fails loudly and safely later rather
@@ -549,8 +559,9 @@ function writeProfileMarker(
 
 /**
  * What the marker says the last launch on this profile was started with.
- * `null` when there is no marker, it is unreadable, or it predates the field
- * — a claim we cannot make rather than a default we would be inventing.
+ * `null` when there is no marker, it is unreadable, it predates the field, or
+ * a newer major.minor wrote it (§4.13) — a claim we cannot make rather than a
+ * default we would be inventing.
  */
 export function readProfileMarker(
   profileDir: string,
@@ -559,6 +570,7 @@ export function readProfileMarker(
   const readFileSync = deps?.readFileSync ?? ((p: string) => fs.readFileSync(p, 'utf8'));
   try {
     const parsed: unknown = JSON.parse(readFileSync(path.join(profileDir, PROFILE_MARKER)));
+    if (writtenByNewer(stampOf(parsed))) return { hideAutomation: null };
     const value =
       typeof parsed === 'object' && parsed !== null
         ? (parsed as Record<string, unknown>)['hideAutomation']

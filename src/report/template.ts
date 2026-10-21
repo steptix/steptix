@@ -282,6 +282,9 @@ export function getReportTemplate(): string {
     .badge-conf-low { background: #fee2e2; color: var(--fail); }
 
     /* Interactive banner — marks where an [interactive] prompt opened, followed by user-typed commands as numbered sub-steps. */
+    /* What the run says about itself, outside any one step: compiled steps a newer Steptix wrote (SPEC-install.md §4.13). */
+    .run-notices { margin: 0 0 16px; padding: 10px 14px 10px 32px; background: #fffbeb; border: 1px solid #fde68a; border-left: 3px solid #f59e0b; border-radius: 6px; color: #78350f; font-size: 0.9rem; }
+    .run-notices li + li { margin-top: 4px; }
     .interactive-banner { display: flex; align-items: baseline; gap: 10px; margin: 6px 0 10px; padding: 8px 14px; background: #eef2ff; border: 1px solid #c7d2fe; border-left: 3px solid #6366f1; border-radius: 6px; }
     .interactive-banner-label { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #4338ca; }
     .interactive-banner-hint { font-size: 0.85rem; color: #3730a3; font-style: italic; }
@@ -456,6 +459,12 @@ export function getReportTemplate(): string {
       <span class="label">Total Tokens</span>
     </div>
   </div>
+
+  {{#if notices.length}}
+  <ul class="run-notices">
+    {{#each notices}}<li>{{this}}</li>{{/each}}
+  </ul>
+  {{/if}}
 
   {{{diagnosisHtml}}}
 

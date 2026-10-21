@@ -2,6 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { StepStatus } from '../report/types.js';
 import { logger } from '../utils/logger.js';
+import { leftAloneMessage, STAMP_FIELD, stampOf, writtenByNewer } from '../utils/file-stamp.js';
+import { getPackageVersion } from '../utils/version.js';
 import { resolveCodeBehindCacheDir, type CodeBehindBinding } from './loader.js';
 
 /**
@@ -93,6 +95,9 @@ export interface LastRunStep {
 }
 
 export interface LastRunSidecar {
+  /** The Steptix version that wrote it (docs/specs/SPEC-install.md §4.13).
+   *  Absent from a sidecar written before stamps, which reads as older. */
+  [STAMP_FIELD]?: string;
   /** Absolute path of the test file this describes. */
   test: string;
   /** ISO 8601 timestamp of the run. */
@@ -217,12 +222,20 @@ export async function writeLastRun(
   // hand-edited into nonsense must cost a streak, never a run.
   let carried = steps;
   try {
-    const previous = await readLastRun(markdownFile);
-    carried = carryStaleRuns(previous?.steps ?? [], steps);
+    const previous = await readSidecar(markdownFile);
+    // A newer major.minor's sidecar is left as it is (§4.13): this version
+    // neither reads its streaks nor writes over them.
+    if (previous.newer !== undefined) {
+      logger.warn(leftAloneMessage(file, previous.newer));
+      return;
+    }
+    carried = carryStaleRuns(previous.sidecar?.steps ?? [], steps);
   } catch (err) {
     logger.debug(`Could not carry code-behind stale counts forward: ${String(err)}`);
   }
+  const version = getPackageVersion();
   const payload: LastRunSidecar = {
+    ...(version !== 'unknown' && { [STAMP_FIELD]: version }),
     test: path.resolve(markdownFile),
     ranAt: new Date().toISOString(),
     steps: carried,
@@ -265,6 +278,9 @@ export async function clearStale(
     changed = true;
   }
   if (!changed) return;
+  // This version writes it now, so it says so (§4.13).
+  const version = getPackageVersion();
+  if (version !== 'unknown') sidecar[STAMP_FIELD] = version;
   try {
     await fs.writeFile(
       lastRunPathFor(markdownFile),
@@ -276,20 +292,29 @@ export async function clearStale(
   }
 }
 
-/** Read the sidecar, or null when there is none / it is unreadable. */
+/** Read the sidecar, or null when there is none, it is unreadable, or a
+ *  newer major.minor wrote it (§4.13). */
 export async function readLastRun(markdownFile: string): Promise<LastRunSidecar | null> {
+  return (await readSidecar(markdownFile)).sidecar;
+}
+
+/** The sidecar this version can use, and the version that wrote it when that
+ *  is a newer major.minor, in which case `sidecar` is null. Never throws. */
+async function readSidecar(markdownFile: string): Promise<{ sidecar: LastRunSidecar | null; newer?: string }> {
   try {
     const raw = await fs.readFile(lastRunPathFor(markdownFile), 'utf-8');
     const parsed: unknown = JSON.parse(raw);
+    const stamp = stampOf(parsed);
+    if (stamp !== undefined && writtenByNewer(stamp)) return { sidecar: null, newer: stamp };
     if (
       typeof parsed !== 'object' ||
       parsed === null ||
       !Array.isArray((parsed as LastRunSidecar).steps)
     ) {
-      return null;
+      return { sidecar: null };
     }
-    return parsed as LastRunSidecar;
+    return { sidecar: parsed as LastRunSidecar };
   } catch {
-    return null;
+    return { sidecar: null };
   }
 }

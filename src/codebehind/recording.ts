@@ -5,6 +5,8 @@ import type { ActionTargeting, TypedRoute } from '../browser/actions.js';
 import type { ObservedRequest } from '../browser/page-state.js';
 import type { AssertionResult, StepResult, StepStatus, SubActionResult } from '../report/types.js';
 import { logger } from '../utils/logger.js';
+import { majorMinorLabel, STAMP_FIELD, stampOf, writtenByNewer } from '../utils/file-stamp.js';
+import { getPackageVersion } from '../utils/version.js';
 import { supersededListReads, unprovenListRead } from '../runner/list-read-review.js';
 import {
   isSecretName,
@@ -72,6 +74,9 @@ export type RecordedAction = AIAction & {
 };
 
 export interface RecordingManifest {
+  /** The Steptix version that wrote the recording (docs/specs/SPEC-install.md
+   *  §4.13), for the whole directory. Absent from one written before stamps. */
+  [STAMP_FIELD]?: string;
   /** Absolute path of the test. */
   test: string;
   startedAt: string;
@@ -82,6 +87,12 @@ export interface RecordingManifest {
   /** Parameter NAMES in play. Never values. */
   parameters: string[];
   source: 'cli' | 'server';
+}
+
+/** The manifest's version stamp, or nothing when this build's version is unknown. */
+function versionStamp(): { [STAMP_FIELD]?: string } {
+  const version = getPackageVersion();
+  return version === 'unknown' ? {} : { [STAMP_FIELD]: version };
 }
 
 export interface RecordedStep {
@@ -295,6 +306,7 @@ export async function writeRecording(testFilePath: string, input: RecordingInput
     }
 
     const manifest: RecordingManifest = {
+      ...versionStamp(),
       test: path.resolve(testFilePath),
       startedAt: input.startedAt,
       finishedAt: new Date().toISOString(),
@@ -615,6 +627,17 @@ export async function spliceRecording(
   try {
     await fs.mkdir(dir, { recursive: true });
     const existing = await readManifestAndSteps(dir);
+    // A newer major.minor recorded it (§4.13): its step records are not this
+    // version's to mix with, and a compile is the user's choice to replace
+    // them, so this run's steps start a recording of their own.
+    const stamp = stampOf(existing.manifest);
+    if (stamp !== undefined && writtenByNewer(stamp)) {
+      logger.warn(
+        `The recording at ${dir} was made by Steptix ${majorMinorLabel(stamp)}, newer than this version; ` +
+          'this compile replaces it with its own.',
+      );
+      return await writeRecording(testFilePath, input);
+    }
     // Every recorded step, by identity, in file order — each claimed at most
     // once so two sends of the same text splice into two different slots.
     const bySlot = new Map<number, RecordedStep>();
@@ -659,6 +682,7 @@ export async function spliceRecording(
     // parameter names are the union too.
     const all = [...bySlot.values()];
     const manifest: RecordingManifest = {
+      ...versionStamp(),
       test: path.resolve(testFilePath),
       startedAt: existing.manifest?.startedAt ?? input.startedAt,
       finishedAt: new Date().toISOString(),

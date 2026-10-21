@@ -673,6 +673,13 @@ export interface TestReport {
    * file a strict replay could not load. Absent when the steps tell the story.
    */
   error?: string;
+  /**
+   * What the run says about itself outside any one step, shown above the
+   * steps: today, compiled steps a newer Steptix wrote, which ran with the AI
+   * instead (docs/specs/SPEC-install.md §4.13). Omitted when there is nothing
+   * to say.
+   */
+  notices?: string[];
   testName: string;
   filePath: string;
   tags: string[];

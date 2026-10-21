@@ -4,6 +4,8 @@ import { matchText } from '../parser/section-match.js';
 import type { ExpandedFrame, ExpandedStepOrigin } from '../skills/expander.js';
 import { bundleAndImport } from '../tools/reload.js';
 import { logger } from '../utils/logger.js';
+import { writtenByNewer } from '../utils/file-stamp.js';
+import { codeBehindStamp } from './stamp.js';
 import type { StepCodeEntry } from './types.js';
 
 /**
@@ -80,6 +82,21 @@ export interface CodeBehindBinding {
   scope: CodeBehindVarScope;
   /** The matched entry, or undefined (no entry, or discarded after failure). */
   entry?: StepCodeEntry | undefined;
+  /**
+   * The version that compiled this step's entry, when it is a newer
+   * major.minor than this one (docs/specs/SPEC-install.md §4.13). The entry is
+   * not used, so the step runs with the AI, and a step that cannot (a run with
+   * no AI) says which update would run it.
+   */
+  newerStamp?: string;
+}
+
+/** A compiled steps file a newer major.minor wrote, which this version
+ *  leaves unused (§4.13), and how many of this run's steps it has entries for. */
+export interface NewerCodeBehind {
+  file: string;
+  version: string;
+  steps: number;
 }
 
 /** Bindings already warned about by {@link warnBindingOnce}. Weak, because a
@@ -125,6 +142,8 @@ export class CodeBehindRegistry {
      * `node_modules` replayed 4/4 "as code" under AI and the compile went green.
      */
     readonly loadErrors: ReadonlyArray<{ file: string; error: string }> = [],
+    /** Files left unused because a newer major.minor compiled them (§4.13). */
+    readonly newerFiles: ReadonlyArray<NewerCodeBehind> = [],
   ) {}
 
   /** The binding for expanded step `index` (0-based), if any. */
@@ -257,6 +276,13 @@ export async function buildCodeBehindRegistry(
   const bindings: (CodeBehindBinding | undefined)[] = targets.map((target) => {
     if (!target) return undefined;
     const file = loaded.get(target.file);
+    if (file?.newer !== undefined) {
+      // A newer version's entry is not run, only counted, so the run can say
+      // how many steps went to the AI because of it.
+      return file.lookup(target.section, target.source, target.occurrence)
+        ? { ...target, newerStamp: file.newer }
+        : { ...target };
+    }
     const entry = file?.lookup(target.section, target.source, target.occurrence);
     if (entry) {
       let set = claimed.get(target.file);
@@ -266,7 +292,17 @@ export async function buildCodeBehindRegistry(
     return { ...target, ...(entry !== undefined && { entry }) };
   });
 
+  const newerFiles: NewerCodeBehind[] = [];
   for (const [file, load] of loaded) {
+    if (load.newer === undefined) continue;
+    const steps = bindings.filter((b) => b?.file === file && b.newerStamp !== undefined).length;
+    newerFiles.push({ file, version: load.newer, steps });
+  }
+
+  for (const [file, load] of loaded) {
+    // A newer version's entries are its own business: one this version's
+    // steps do not match may be a step only that version knows.
+    if (load.newer !== undefined) continue;
     const used = claimed.get(file) ?? new Set<StepCodeEntry>();
     for (const entry of load.entries) {
       if (used.has(entry)) continue;
@@ -282,7 +318,7 @@ export async function buildCodeBehindRegistry(
   for (const [file, load] of loaded) {
     if (load.error !== undefined) loadErrors.push({ file, error: load.error });
   }
-  return new CodeBehindRegistry(bindings, loadErrors);
+  return new CodeBehindRegistry(bindings, loadErrors, newerFiles);
 }
 
 /**
@@ -379,6 +415,9 @@ interface LoadedCodeBehind {
   ): StepCodeEntry | undefined;
   /** Why the file yielded no entries, when it exists and failed to load. */
   error?: string;
+  /** The version that compiled the file, when it is a newer major.minor:
+   *  `lookup` then only says whether an entry exists, and none is run. */
+  newer?: string;
 }
 
 const EMPTY_LOAD: LoadedCodeBehind = { entries: [], lookup: () => undefined };
@@ -396,26 +435,33 @@ async function loadCodeBehindFile(
   warn: (message: string) => void,
   cacheDir: string = resolveCodeBehindCacheDir(file),
 ): Promise<LoadedCodeBehind> {
-  // Stat first. Most tests have no code-behind, and without this every step
-  // batch would pay an esbuild load to discover that — and `bundleToolModule`
-  // would create an `.steptix-codebehind-cache` dir beside every test file on the
-  // way to failing.
+  // Read first: the stamp is in the text (§4.13), and most tests have no
+  // code-behind, so without this every step batch would pay an esbuild load
+  // to discover that — and `bundleToolModule` would create an
+  // `.steptix-codebehind-cache` dir beside every test file on the way to failing.
+  let text: string;
   try {
-    await fs.access(file);
+    text = await fs.readFile(file, 'utf-8');
   } catch {
     return EMPTY_LOAD;
   }
+  // A newer major.minor compiled it (§4.13): its steps run with the AI, and
+  // the file is left as it is so that version still has them.
+  const stamp = codeBehindStamp(text);
+  const newer = stamp !== undefined && writtenByNewer(stamp) ? stamp : undefined;
+  // What is wrong with a newer version's entries is not this version's to say.
+  const say = newer !== undefined ? () => {} : warn;
 
   let entries: StepCodeEntry[];
   try {
     const { module } = await bundleAndImport(file, cacheDir);
     const exported = module['default'];
     if (!Array.isArray(exported)) {
-      warn(
+      say(
         `Code-behind file ${file} must default-export defineSteps([...]) — ` +
           `got ${exported === undefined ? 'no default export' : typeof exported}. Ignoring it.`,
       );
-      return EMPTY_LOAD;
+      return { ...EMPTY_LOAD, ...(newer !== undefined && { newer }) };
     }
     entries = exported as StepCodeEntry[];
   } catch (err) {
@@ -423,6 +469,9 @@ async function loadCodeBehindFile(
     // A missing sibling file is the normal case, not a problem: most tests
     // have no code-behind. Anything else is worth saying out loud — and
     // recording, so a strict replay can refuse to pretend.
+    // A newer version's file may use what this version lacks, and is not run
+    // anyway: no load error, only nothing to count.
+    if (newer !== undefined) return { ...EMPTY_LOAD, newer };
     if (!isMissingFile(err)) {
       warn(`Failed to load code-behind file ${file}: ${message}. Steps fall back to AI.`);
       return { ...EMPTY_LOAD, error: message };
@@ -434,7 +483,7 @@ async function loadCodeBehindFile(
   const kept: StepCodeEntry[] = [];
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object' || typeof entry.source !== 'string') {
-      warn(`Ignoring malformed code-behind entry in ${file} (no string \`source\`).`);
+      say(`Ignoring malformed code-behind entry in ${file} (no string \`source\`).`);
       continue;
     }
     const hasRun = typeof entry.run === 'function';
@@ -444,7 +493,7 @@ async function loadCodeBehindFile(
       // (stories/codebehind-loops-and-conditions.md, decision 4). Guessing
       // which half the author meant would run the wrong one on half the lines
       // this could bind to, so the entry is dropped and the line runs under AI.
-      warn(
+      say(
         `Code-behind entry in ${file} for "${entry.source}" has both a \`run\` ` +
           `and a \`condition\` function — an entry is one or the other. Ignoring ` +
           `it, so the line runs under AI.`,
@@ -460,7 +509,7 @@ async function loadCodeBehindFile(
       // is kept whatever it binds to. A mismatch — a `condition` on an
       // ordinary step, a `run` on a guard — is caught where the entry is
       // used, which warns once and runs the line under AI.
-      warn(
+      say(
         `Code-behind entry in ${file} for "${entry.source}" has neither a ` +
           `\`run\` function, a \`condition\` function nor \`ai: true\` — ignoring ` +
           `it, so the step runs under AI.`,
@@ -476,6 +525,7 @@ async function loadCodeBehindFile(
 
   return {
     entries: kept,
+    ...(newer !== undefined && { newer }),
     lookup(section, source, occurrence) {
       const key = `${section ? matchText(section) : ''}\u0000${source}`;
       return index.get(key)?.[occurrence];

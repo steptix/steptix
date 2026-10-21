@@ -137,6 +137,7 @@ import {
 import type { StatsSuite } from '../stats/types.js';
 import { canAskUser, createLineReader, NoAnswerError } from '../utils/ask-user.js';
 import { TestDeadline, testTimeoutError, timedOutResult } from './test-deadline.js';
+import { newerCompiledNotice, terminalUpdateWords } from '../codebehind/stamp.js';
 
 /**
  * What the report says in place of a root-cause analysis when the run had no
@@ -775,6 +776,16 @@ export async function runTest(
   // A strict run — a compile's replay — exists to find out whether the code
   // works on its own. A file that did not load has no code to run, so the
   // answer is "no", not "every step passed under AI".
+  // Compiled steps a newer major.minor wrote ran with the AI instead
+  // (docs/specs/SPEC-install.md §4.13): said once, here and in the report.
+  // Not by a compile's own runs, which are the recompiling it advises.
+  const compileRun =
+    extras.captureStepContext === true || extras.codeBehindStrict === true || extras.codeBehindCandidates !== undefined;
+  const newerNotices = (compileRun ? [] : codeBehind.newerFiles).map((newer) =>
+    newerCompiledNotice(newer, terminalUpdateWords(path.relative(process.cwd(), test.filePath) || test.filePath)),
+  );
+  // Said once per test, not once per data row; every row's report keeps it.
+  if ((dataRowIndex ?? 0) === 0) for (const notice of newerNotices) logger.warn(notice);
   const strictLoadError =
     extras.codeBehindStrict && codeBehind.loadErrors.length > 0
       ? `code-behind file ${codeBehind.loadErrors[0]!.file} could not be loaded: ${codeBehind.loadErrors[0]!.error}`
@@ -3085,6 +3096,7 @@ export async function runTest(
         ...(healedTokens > 0 && { healedTokens }),
       }),
       ...(strictLoadError !== undefined && { error: strictLoadError }),
+      ...(newerNotices.length > 0 && { notices: newerNotices }),
     }, secretsNow());
 
     // The author already wrote the root cause (stories/step-failure-outcomes.md,

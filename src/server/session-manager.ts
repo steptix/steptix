@@ -135,7 +135,8 @@ import {
   type ExpandedFrame,
   type ExpandedStepOrigin,
 } from '../skills/expander.js';
-import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
+import { buildCodeBehindRegistry, CodeBehindRegistry, type NewerCodeBehind } from '../codebehind/loader.js';
+import { newerCompiledNotice, SERVER_UPDATE_WORDS } from '../codebehind/stamp.js';
 import {
   detachedBodyExpansion,
   detachedRowReads,
@@ -927,7 +928,15 @@ export type RunEvent =
    * push, pop clean, and paint ✓ for work that never ran.
    */
   | { type: 'step:skip'; line: number; frame?: FrameInfo; reason: string }
-  | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
+  | {
+      type: 'output';
+      msg: string;
+      kind: 'info' | 'warn' | 'error';
+      /** On the notice about compiled steps a newer major.minor wrote
+       *  (docs/specs/SPEC-install.md §4.13), so a client can say it in its own
+       *  words: VS Code names the extension update and its Compile command. */
+      newerCompiled?: NewerCodeBehind;
+    }
   | { type: 'capture'; line: number; name: string; value: string; source: 'capture' | 'toolOutput' | 'assignment' | 'generated' }
   | {
       type: 'done';
@@ -4574,6 +4583,12 @@ export class SessionManager {
         testFilePath: request.testFilePath,
         ...(cb?.candidateFiles && { candidateFiles: cb.candidateFiles }),
       });
+      // Their steps run with the AI instead (§4.13), and the run says so;
+      // a compile's own runs do not, being the recompiling it advises.
+      const compileRun = captureStepContext || cb?.strict === true || cb?.candidateFiles !== undefined;
+      for (const newer of compileRun ? [] : codeBehind.newerFiles) {
+        emit({ type: 'output', kind: 'warn', msg: newerCompiledNotice(newer, SERVER_UPDATE_WORDS), newerCompiled: newer });
+      }
       // A detached step whose entry reads a looped section's row has no row to
       // read. It runs under AI, as it did before detached steps bound at all,
       // and the author is told why it did not run as code.
@@ -8461,6 +8476,9 @@ export class SessionManager {
           ...(overallStatus === 'aborted' && { aborted: true }),
           ...(session.sessionConfig.baseUrl !== undefined && { baseUrl: session.sessionConfig.baseUrl }),
           ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
+          ...(codeBehind.newerFiles.length > 0 && !captureStepContext && !cb?.strict && !cb?.candidateFiles && {
+            notices: codeBehind.newerFiles.map((newer) => newerCompiledNotice(newer, SERVER_UPDATE_WORDS)),
+          }),
         }, secretsNow());
 
         // A row of a data-driven run writes no report of its own: it joins the
