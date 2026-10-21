@@ -420,6 +420,7 @@ const NOT_YET = [
   'Install and add steptix to PATH: steptix runs in a new terminal outside VS Code (§5.5)',
   'The welcome page: the AI step while the server downloads, a stand-in Copilot, a wrong and a good key, where the choice is saved, and steptix ai writing the same files (§7.1, §7.2)',
   'The .vsix installed with the network switched off (§5.6)',
+  "The sample's first Run with the whole machine's network off, the browser's included (§7.3)",
   'Extension updates to a new minor, and a new server patch with no new extension (§6.2)',
   'Non-matching servers started by VS Code (idle and busy) and by hand (§6.4)',
   'serverAutoStart.command and useInstalledRuntime off (§4.12)',
