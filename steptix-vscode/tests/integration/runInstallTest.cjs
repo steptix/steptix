@@ -34,6 +34,7 @@ const { downloadAndUnzipVSCode } = require('@vscode/test-electron');
 // the one case freeFetchablePort is for.
 const { freeFetchablePort } = require('../../../tests/listen-fetchable.cjs');
 const { startTestRegistry } = require('../../../tests/npm-test-registry.cjs');
+const { packageVersionOf, unpackVsix } = require('../../../tests/release-files.cjs');
 
 /** Pinned with the other runners. */
 const VSCODE_VERSION = '1.95.0';
@@ -57,27 +58,6 @@ function pathWithoutNode(value) {
     .split(path.delimiter)
     .filter((dir) => dir && !names.some((n) => fs.existsSync(path.join(dir, n))))
     .join(path.delimiter);
-}
-
-/** The version inside a packed `steptix` tarball. Read by a bare name from
- *  inside `scratch`: GNU tar reads the `C:` of a Windows path as a remote host. */
-function packageVersionOf(tarball, scratch) {
-  const copy = path.join(scratch, path.basename(tarball));
-  if (path.resolve(tarball) !== path.resolve(copy)) fs.copyFileSync(tarball, copy);
-  return JSON.parse(run('tar', ['-xzOf', path.basename(copy), 'package/package.json'], { cwd: scratch })).version;
-}
-
-/** A `.vsix` is a zip whose `extension/` folder is the extension as VS Code
- *  installs it; that folder is what runs. */
-function unpackVsix(vsix, dir) {
-  fs.mkdirSync(dir, { recursive: true });
-  fs.copyFileSync(vsix, path.join(dir, 'extension.zip'));
-  if (process.platform === 'win32') {
-    run('powershell.exe', ['-NoProfile', '-Command', 'Expand-Archive -Force extension.zip -DestinationPath .'], { cwd: dir, shell: false });
-  } else {
-    run('unzip', ['-q', '-o', 'extension.zip'], { cwd: dir });
-  }
-  return path.join(dir, 'extension');
 }
 
 /**
@@ -116,7 +96,7 @@ async function main() {
       process.env.STEPTIX_INSTALL_TEST_TARBALL ??
       path.join(scratch, run('npm', ['pack', repoRoot, '--pack-destination', scratch], { cwd: scratch }).trim().split(/\r?\n/).at(-1));
     testRegistry.publish(tarball);
-    const version = packageVersionOf(tarball, scratch);
+    const version = packageVersionOf(tarball, path.join(scratch, 'tarball'));
     console.log(`published steptix ${version} to ${registry}`);
 
     // The Steptix folder and the project.

@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const { startTestRegistry } = require('../tests/npm-test-registry.cjs');
 const { freeFetchablePort } = require('../tests/listen-fetchable.cjs');
+const { unpackVsix, untar } = require('../tests/release-files.cjs');
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name) => {
@@ -50,8 +51,10 @@ if (!npmName || !offlineName || !vsixName) {
 }
 const version = /^steptix-(\d+\.\d+\.\d+)\.tgz$/.exec(npmName)[1];
 const [major, minor, patch] = version.split('.').map(Number);
-/** The next patch, published alongside to test updating (§6.1, §4.3, §6.5). */
+/** The next two patches, published alongside to test updating and which
+ *  versions are kept (§6.1, §4.3, §6.5). */
 const nextPatch = `${major}.${minor}.${patch + 1}`;
+const thirdPatch = `${major}.${minor}.${patch + 2}`;
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-release-test-'));
 console.log(`release test folder: ${scratch}`);
@@ -124,17 +127,32 @@ function machine(name, registry) {
  *  update checks. Repacked rather than rebuilt, so it is the same code. */
 function repackAs(newVersion) {
   const dir = path.join(scratch, `repack-${newVersion}`);
-  fs.mkdirSync(dir, { recursive: true });
-  // By a bare name from inside the folder: GNU tar reads the `C:` of an
-  // absolute Windows path as a remote host.
-  fs.copyFileSync(path.join(filesDir, npmName), path.join(dir, npmName));
-  mustRun('tar', ['-xzf', npmName], { cwd: dir, shell: false });
+  untar(path.join(filesDir, npmName), dir);
   const manifestPath = path.join(dir, 'package', 'package.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   manifest.version = newVersion;
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   const out = mustRun('npm', ['pack', '--ignore-scripts', '--pack-destination', dir], { cwd: path.join(dir, 'package') });
   return path.join(dir, out.trim().split(/\r?\n/).at(-1));
+}
+
+/** The server version `steptix` runs, from `--version`'s `Server:` line. Its
+ *  first line is the launcher's own version, npm's copy, which is not the
+ *  one a `server use` choice changes. */
+function runningVersion(m) {
+  return /^Server: (\d+\.\d+\.\d+)/m.exec(m.steptix(['--version']).stdout)?.[1] ?? null;
+}
+
+/** Resolves once `child` has exited, killing its process tree after `ms`. */
+async function exited(child, ms) {
+  if (child.exitCode !== null) return;
+  const done = new Promise((resolve) => child.once('exit', resolve));
+  const timer = setTimeout(() => {
+    if (win) spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    else child.kill('SIGKILL');
+  }, ms);
+  await done;
+  clearTimeout(timer);
 }
 
 /** A copy of the sample project made by `steptix init`. */
@@ -182,7 +200,6 @@ const registry = await startTestRegistry(path.join(scratch, 'registry'));
 registry.npmrcText = fs.readFileSync(registry.npmrc, 'utf8');
 try {
   registry.publish(path.join(filesDir, npmName));
-  const nextTarball = repackAs(nextPatch);
 
   // §5.1 ---------------------------------------------------------------------
   const a = machine('terminal', registry);
@@ -200,19 +217,17 @@ try {
   });
 
   // §7.3 ---------------------------------------------------------------------
-  await check('the sample passes with no AI chosen and no network', '§7.3', () => {
+  // Node's network only: the browser's is not cut, which the sample's local
+  // page does not need. §10.1's "network off" for the whole machine is a
+  // row this test does not check yet.
+  await check("the sample passes with no AI chosen and Node's network shut off", '§7.3', () => {
     expect(project, 'no sample project (the check above failed)');
     runSample(a, project, offlineEnv(a.env));
   });
 
   await check('steptix init and Create a sample project produce the same files', '§7.3', () => {
     expect(project, 'no sample project');
-    const unpacked = path.join(scratch, 'vsix');
-    fs.mkdirSync(unpacked, { recursive: true });
-    fs.copyFileSync(path.join(filesDir, vsixName), path.join(unpacked, 'extension.zip'));
-    if (win) mustRun('powershell.exe', ['-NoProfile', '-Command', 'Expand-Archive -Force extension.zip -DestinationPath .'], { cwd: unpacked, shell: false });
-    else mustRun('unzip', ['-q', '-o', 'extension.zip'], { cwd: unpacked });
-    const fromExtension = path.join(unpacked, 'extension', 'sample');
+    const fromExtension = path.join(unpackVsix(path.join(filesDir, vsixName), path.join(scratch, 'vsix')), 'sample');
     const list = (dir) =>
       fs.readdirSync(dir, { recursive: true, withFileTypes: true })
         .filter((e) => e.isFile())
@@ -293,31 +308,34 @@ try {
         throw new Error(`no server answered on ${port}`);
       };
       expect((await health()).version === version, `the server is not ${version}`);
-      registry.publish(nextTarball);
+      registry.publish(repackAs(nextPatch));
       const update = a.npm(['i', '-g', `steptix@${nextPatch}`]);
       expect(update.status === 0, `npm i -g steptix@${nextPatch} exited ${update.status}:\n${update.out}`);
       expect((await health()).version === version, 'the running server changed under the update');
-      const next = a.steptix(['--version']);
-      expect(next.out.includes(nextPatch), `steptix --version after the update says:\n${next.out}`);
+      expect(runningVersion(a) === nextPatch, `steptix --version after the update runs ${runningVersion(a)}`);
     } finally {
       // By its own URL: a bare stop looks at the machine .env's port.
       a.steptix(['stop', '--url', `http://127.0.0.1:${port}`, '--force']);
-      await new Promise((resolve) => (server.exitCode !== null ? resolve() : server.once('exit', resolve)));
+      await exited(server, 60_000);
     }
   });
 
-  await check('the newest of each needed major.minor and the previous version are kept', '§4.3', () => {
-    const kept = a.runtimes();
-    expect(kept.includes(version) && kept.includes(nextPatch), `runtimes/ holds ${kept.join(', ')}`);
+  await check('only the newest of a major.minor and the previous version are kept', '§4.3', () => {
+    registry.publish(repackAs(thirdPatch));
+    const update = a.npm(['i', '-g', `steptix@${thirdPatch}`]);
+    expect(update.status === 0, `npm i -g steptix@${thirdPatch} exited ${update.status}:\n${update.out}`);
+    expect(runningVersion(a) === thirdPatch, `steptix --version runs ${runningVersion(a)}`);
+    const kept = a.runtimes().sort();
+    expect(JSON.stringify(kept) === JSON.stringify([nextPatch, thirdPatch]), `runtimes/ holds ${kept.join(', ')}, not ${nextPatch} and ${thirdPatch}`);
   });
 
   await check('server use the previous version runs it; server use newest undoes it', '§6.5', () => {
-    const use = a.steptix(['server', 'use', version]);
-    expect(use.status === 0, `server use ${version} exited ${use.status}:\n${use.out}`);
-    expect(a.steptix(['--version']).out.includes(version), 'steptix --version does not run the chosen version');
+    const use = a.steptix(['server', 'use', nextPatch]);
+    expect(use.status === 0, `server use ${nextPatch} exited ${use.status}:\n${use.out}`);
+    expect(runningVersion(a) === nextPatch, `steptix --version runs ${runningVersion(a)}, not the chosen ${nextPatch}`);
     const newest = a.steptix(['server', 'use', 'newest']);
     expect(newest.status === 0, `server use newest exited ${newest.status}:\n${newest.out}`);
-    expect(a.steptix(['--version']).out.includes(nextPatch), 'steptix --version does not run the newest again');
+    expect(runningVersion(a) === thirdPatch, `steptix --version runs ${runningVersion(a)}, not the newest ${thirdPatch}`);
   });
 
   // §9.1 ---------------------------------------------------------------------
@@ -358,9 +376,7 @@ try {
 
   await check('an offline file for another platform is refused, naming its platform', '§5.6', () => {
     const dir = path.join(scratch, 'wrong-platform');
-    fs.mkdirSync(dir, { recursive: true });
-    fs.copyFileSync(path.join(filesDir, offlineName), path.join(dir, offlineName));
-    mustRun('tar', ['-xzf', offlineName], { cwd: dir, shell: false });
+    untar(path.join(filesDir, offlineName), dir);
     const manifestPath = path.join(dir, 'package', 'package.json');
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     expect(String(manifest.os) === process.platform && String(manifest.cpu) === process.arch, `the offline file says os ${manifest.os}, cpu ${manifest.cpu}`);

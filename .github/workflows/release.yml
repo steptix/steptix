@@ -14,8 +14,11 @@
 #   - a GitHub release holding the .vsix and the offline files.
 #
 # Windows x64 only for now: a platform is supported once its files pass the
-# release test there (§3.2), and the others come next. Add each to the matrix
-# when its turn comes; nothing else here is Windows-only.
+# release test there (§3.2), and the others come next. This one job builds,
+# tests and publishes everything, so adding a platform is more than a matrix
+# entry: each platform's job builds and tests its own offline file, and the
+# npm, Marketplace and release steps move to a job that runs once, after all
+# of them pass, and publishes every platform's offline file.
 #
 # Secrets, in the `release` environment (which can require an approval):
 #   NPM_TOKEN   an npm automation token with publish rights to `steptix`
@@ -61,14 +64,12 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       # Clean installs, no caches: a release is built from the lockfiles alone.
-      # Order matters as in unit-tests.yml: runner-core first, the root before
-      # fixtures/tools.
+      # runner-core before steptix-vscode, whose file: dependency it is.
       - name: Install
         shell: bash
         run: |
           npm ci
           npm ci --prefix runner-core
-          npm ci --prefix fixtures/tools
           npm ci --prefix steptix-vscode
 
       # The tag names the version; the package.json files must agree, and
