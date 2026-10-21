@@ -9,6 +9,7 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { majorMinorLabel, writtenByNewer, STAMP_FIELD } from '../src/utils/file-stamp.js';
 import { getPackageVersion } from '../src/utils/version.js';
@@ -78,9 +79,15 @@ describe('the compiled steps stamp', () => {
     expect(withCodeBehindStamp('// a\r\n// b\r\nx\r\n', '1.0.0')).toBe('// a\r\n// Compiled by Steptix 1.0.0.\r\n// b\r\nx\r\n');
   });
 
-  it('is on the sample project the install ships', async () => {
-    const sample = await fs.readFile(path.resolve('templates/sample/tests/first-test.steps.ts'), 'utf8');
-    expect(codeBehindStamp(sample)).toBe(OWN);
+  it('is on the sample project the install ships, and this version runs it', async () => {
+    const sample = await fs.readFile(
+      fileURLToPath(new URL('../templates/sample/tests/first-test.steps.ts', import.meta.url)),
+      'utf8',
+    );
+    // Any stamp up to this major.minor runs: newer versions read what older
+    // ones wrote, so a patch release needs no recompiled sample.
+    expect(codeBehindStamp(sample)).toBeDefined();
+    expect(writtenByNewer(codeBehindStamp(sample))).toBe(false);
   });
 });
 
@@ -96,6 +103,13 @@ describe('what the run says', () => {
         'to use them, or recompile them with this version: Steptix: Compile Code-behind.',
     );
     expect(outputText({ msg: 'the server words', newerCompiled: newer })).toBe(newerCompiledText(newer));
+    // VS Code's own words differ only in the ways out, never in what happened.
+    const firstSentence = (text: string) => text.slice(0, text.indexOf('. ') + 1);
+    for (const steps of [0, 1, 3]) {
+      expect(firstSentence(newerCompiledText({ ...newer, steps }))).toBe(
+        firstSentence(newerCompiledNotice({ ...newer, steps }, terminalUpdateWords('t.md'), '0.9.0').replace('this 0.9', 'this version')),
+      );
+    }
     expect(outputText({ msg: 'anything else' })).toBe('anything else');
     expect(newerCompiledNotice({ ...newer, steps: 1 }, terminalUpdateWords('t.md'))).toMatch(/^1 step was compiled/);
     expect(newerCompiledStepNote('1.5.2', '1.4.0')).toBe(

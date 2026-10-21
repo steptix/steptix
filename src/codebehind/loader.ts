@@ -466,12 +466,12 @@ async function loadCodeBehindFile(
     entries = exported as StepCodeEntry[];
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // A missing sibling file is the normal case, not a problem: most tests
-    // have no code-behind. Anything else is worth saying out loud — and
-    // recording, so a strict replay can refuse to pretend.
     // A newer version's file may use what this version lacks, and is not run
     // anyway: no load error, only nothing to count.
     if (newer !== undefined) return { ...EMPTY_LOAD, newer };
+    // A missing sibling file is the normal case, not a problem: most tests
+    // have no code-behind. Anything else is worth saying out loud — and
+    // recording, so a strict replay can refuse to pretend.
     if (!isMissingFile(err)) {
       warn(`Failed to load code-behind file ${file}: ${message}. Steps fall back to AI.`);
       return { ...EMPTY_LOAD, error: message };

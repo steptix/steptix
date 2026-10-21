@@ -24,7 +24,7 @@ function majorMinor(version: string): string {
 /** The line VS Code shows for the notice. */
 export function newerCompiledText(newer: NewerCompiled): string {
   const by = `Steptix ${majorMinor(newer.version)}`;
-  const base = newer.file.split(/[\/]/).pop() ?? newer.file;
+  const base = newer.file.split(/[\\/]/).pop() ?? newer.file;
   const what =
     newer.steps > 0
       ? `${newer.steps} step${newer.steps === 1 ? ' was' : 's were'} compiled by ${by} and ran with the AI instead.`
