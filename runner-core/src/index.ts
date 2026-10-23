@@ -2,6 +2,8 @@ export * from './errors.js';
 export * from './env-file.js';
 export * from './user-root.js';
 export * from './runtime-clients.js';
+export * from './base-url.js';
+export * from './ai-providers.js';
 export * from './url-port.js';
 export * from './control-line.js';
 export * from './use-step.js';

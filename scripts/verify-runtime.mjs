@@ -232,7 +232,7 @@ try {
 
   await steptix('init');
   await fs.access(path.join(project, 'steptix.config.json'));
-  await fs.access(path.join(project, 'tests/example.md'));
+  await fs.access(path.join(project, 'tests/first-test.md'));
   checks.push('Project scaffolding from the packaged templates');
 
   // A project with nothing installed in it, outside any checkout: the

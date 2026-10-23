@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Steptix sample page</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; color: #1f2328; }
+  label { display: block; margin-bottom: 0.25rem; }
+  input { font: inherit; padding: 0.4rem; width: 16rem; }
+  button { font: inherit; padding: 0.4rem 1rem; margin-left: 0.5rem; }
+  #message { margin-top: 1.5rem; font-weight: 600; min-height: 1.5em; }
+</style>
+</head>
+<body>
+<h1>Sample page</h1>
+<p>A page that lives in the sample project, for its first test.</p>
+<form id="form">
+  <label for="name">Name</label>
+  <input id="name" name="name" type="text" autocomplete="off">
+  <button type="submit">Save</button>
+</form>
+<p id="message" role="status" aria-live="polite"></p>
+<script>
+  document.getElementById('form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const name = document.getElementById('name').value.trim();
+    document.getElementById('message').textContent = name ? 'Saved for ' + name : 'Type a name first';
+  });
+</script>
+</body>
+</html>

@@ -51,6 +51,7 @@ import {
   STEPS_HEADING_RE,
 } from './line-grammar.js';
 import { logger } from '../utils/logger.js';
+import { resolveBaseUrl } from '../utils/base-url.js';
 
 /** Valid `## Hooks` scope prefixes — case-insensitive match, stored lowercase. */
 const HOOK_SCOPES = new Set(['before', 'beforeeach', 'aftereach', 'after']);
@@ -478,6 +479,12 @@ export function parseTestContent(rawContent: string, filePath = '<inline>'): Par
 
 function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
   const { sections, frontmatter, title } = parseSections(rawContent, filePath);
+  // A baseUrl beginning ./ or ../ is a page beside the test, made its file://
+  // URL here so every consumer, a run, a compile or a report, gets one a
+  // browser can open (resolveBaseUrl). An inline parse has no file to start from.
+  if (sections.config.baseUrl !== undefined && path.isAbsolute(filePath)) {
+    sections.config.baseUrl = resolveBaseUrl(sections.config.baseUrl, filePath);
+  }
 
   return {
     filePath,

@@ -69,6 +69,7 @@ import {
   type InstallerDeps,
 } from './server-installer.js';
 import { describeExtensionBuild, extensionBuild } from './extension-build.js';
+import type { WelcomeState } from './welcome-core.js';
 import {
   readAutoStartSettings,
   requestServerShutdown,
@@ -158,6 +159,17 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
   private pending: Promise<InstalledServer | null> | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly disposables: vscode.Disposable[] = [];
+  private readonly changed = new vscode.EventEmitter<void>();
+  /** Fires when the install starts, moves on or ends, for the welcome page. */
+  readonly onDidChange = this.changed.event;
+  /** What the install in progress is doing, in a few words. */
+  private progressText: string | null = null;
+
+  private setState(state: InstallState): void {
+    this.status?.setInstallState(state);
+    if (state !== 'installing') this.progressText = null;
+    this.changed.fire();
+  }
 
   constructor(context: vscode.ExtensionContext, out: vscode.OutputChannel, status?: InstallStatusSink) {
     this.context = context;
@@ -169,6 +181,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
   }
 
   dispose(): void {
+    this.changed.dispose();
     if (this.timer) clearInterval(this.timer);
     for (const d of this.disposables) d.dispose();
   }
@@ -310,7 +323,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
       void this.install({ mode: 'update' });
       return;
     }
-    this.status?.setInstallState('not-installed');
+    this.setState('not-installed');
     if (!this.context.globalState.get<boolean>(ASKED_KEY)) void this.askAndInstall('start');
   }
 
@@ -420,7 +433,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
   }
 
   private async runInstall(opts: { mode: 'install' | 'update'; addToPath?: boolean; version?: string }): Promise<InstalledServer | null> {
-    this.status?.setInstallState('installing');
+    this.setState('installing');
     this.nodeCache = undefined;
     try {
       const server = await vscode.window.withProgress(
@@ -432,6 +445,8 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
           const deps = this.deps({
             onStep: (message) => {
               progress.report({ message });
+              this.progressText = message;
+              this.changed.fire();
               this.log(message);
             },
             onWait: () => {
@@ -455,14 +470,14 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
           return { server: result.server, node };
         },
       );
-      this.status?.setInstallState(null);
+      this.setState(null);
       this.logUsing(server.server, false);
       void vscode.window.showInformationMessage(`Steptix server ${server.server.version} is ready.`);
       await this.prepareTerminals(server.node);
       if (opts.addToPath) await this.addToPath();
       return server.server;
     } catch (err) {
-      this.status?.setInstallState(currentPick(this.userRoot, this.requires).kind === 'run' ? null : 'not-installed');
+      this.setState(currentPick(this.userRoot, this.requires).kind === 'run' ? null : 'not-installed');
       this.reportFailure(err, () => void this.install(opts));
       return null;
     }
@@ -515,6 +530,60 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
       this.log('a version was chosen with steptix server use, so the new one is installed beside it and not run');
     }
     await this.install({ mode: 'update', version: newest });
+  }
+
+  // -------------------------------------------------------------------------
+  // The welcome page's server step (§7.1)
+  // -------------------------------------------------------------------------
+
+  /** The welcome page's **Use newest server**: undo a `steptix server use`
+   *  choice, as a Run's Use newest does. */
+  useNewestServer(): void {
+    clearServerChoice(this.userRoot);
+    this.log('cleared the steptix server use choice: the newest matching server runs');
+    this.changed.fire();
+  }
+
+  async welcomeServerState(): Promise<WelcomeState['server']> {
+    const onPath = this.steptixOnPath() !== null || readPathChanges(this.userRoot).length > 0;
+    if (!this.managed()) {
+      return { state: 'yours', detail: 'Steptix starts the server your settings name ("steptix.serverAutoStart").', progress: null, onPath };
+    }
+    if (this.pending) {
+      return { state: 'installing', detail: 'Installing the Steptix server.', progress: this.progressText, onPath };
+    }
+    const pick = currentPick(this.userRoot, this.requires);
+    if (pick.kind === 'chosen-mismatch') {
+      // Installing would not help: the choice still wins over what is installed.
+      return {
+        state: 'chosen',
+        detail:
+          `You chose Steptix server ${pick.chosen} with steptix server use, but this extension is ${this.version}. ` +
+          `Install extension ${pick.chosen} to match, or go back to the newest server.`,
+        progress: null,
+        onPath,
+      };
+    }
+    if (pick.kind === 'run') {
+      const node = await this.nodeNow();
+      const runsOn = node ? `, running on ${node.origin === 'yours' ? 'your' : "Steptix's own"} Node.js ${node.version}` : '';
+      return {
+        state: 'ready',
+        detail: `Steptix ${pick.server.version}, ${sourcePhrase(pick.server.source)}${runsOn}.` +
+          (onPath ? ' The steptix command works in every terminal.' : " The steptix command works in VS Code's terminal."),
+        progress: null,
+        onPath,
+      };
+    }
+    const unsupported = unsupportedPlatformMessage(this.platform, this.arch);
+    if (unsupported) return { state: 'unsupported', detail: unsupported, progress: null, onPath };
+    const node = await this.nodeNow();
+    return {
+      state: 'not-installed',
+      detail: `Runs your tests on this machine. About ${SERVER_DOWNLOAD_MB + (node ? 0 : NODE_DOWNLOAD_MB)} MB to download.`,
+      progress: null,
+      onPath,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -880,7 +949,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     } catch (err) {
       problems.push((err as Error).message);
     }
-    this.status?.setInstallState('not-installed');
+    this.setState('not-installed');
     if (problems.length > 0) {
       void vscode.window.showWarningMessage(`Steptix: the servers are removed, but ${problems.join('; ')}.`);
       return;

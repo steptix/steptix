@@ -10,6 +10,7 @@ import {
   writeClientRecord,
 } from 'steptix-runner-core';
 import { ServerSetup, type RunServerSetup } from './server-setup.js';
+import { Welcome } from './welcome.js';
 import { serverRequirement } from './install-core.js';
 import { ActiveFileTracker, markLineMovesFor } from './active-file-tracker.js';
 import { moveLineKeyed } from './mark-lines-core.js';
@@ -2452,6 +2453,10 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
   const settingUpServers = !underTest || process.env['STEPTIX_TEST_SERVER_SETUP'] === '1';
   if (settingUpServers) registry.setServerSetup(serverSetup);
   void serverSetup.activate({ checks: !underTest });
+  // The welcome page, Choose AI and the AI status bar item (SPEC-install.md §7).
+  const welcome = new Welcome(context, serverSetup, lmBridge);
+  context.subscriptions.push(welcome);
+  if (!underTest) void welcome.onStart();
   // Record Steps keeps an in-flight recording's writes in the workspace's
   // state; one a reload cut off is offered for removal now
   // (SPEC-record-steps.md §7).

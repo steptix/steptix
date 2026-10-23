@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as http from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { getOutputChannel } from './output-channel.js';
+import { CHOOSE_AI_COMMAND } from './welcome-core.js';
 import {
   IMAGE_STRIP_WARNING,
   ZERO_USAGE,
@@ -13,6 +14,7 @@ import {
   lmUnavailableError,
   mapCompletionError,
   mapLmError,
+  copilotTroubleNotice,
   messageText,
   modelNotFoundError,
   modelSelectorAttempts,
@@ -890,7 +892,18 @@ export class LmBridge implements vscode.Disposable {
     res.end(payload);
   }
 
+  /** The Copilot failures already told about in this window, so a batch of
+   *  steps that all hit the same one shows one notice. */
+  private readonly troublesShown = new Set<string>();
+
   private writeError(res: http.ServerResponse, error: BridgeError): void {
+    const notice = copilotTroubleNotice(error);
+    if (notice !== null && !this.troublesShown.has(error.body.error.code)) {
+      this.troublesShown.add(error.body.error.code);
+      void vscode.window.showWarningMessage(notice, 'Choose AI', 'Not now').then((choice) => {
+        if (choice === 'Choose AI') void vscode.commands.executeCommand(CHOOSE_AI_COMMAND);
+      });
+    }
     // See `isTerminalError`: without this the client's own retry policy turns
     // one quota-exhausted call into three.
     this.writeJson(
