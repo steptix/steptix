@@ -11,6 +11,33 @@ carried a `-beta.N` suffix.
 
 ## Unreleased
 
+### Added — files say which version wrote them
+
+The fourth part of [SPEC-install.md](docs/specs/SPEC-install.md) (§4.13).
+VS Code's server and a `steptix run` in a terminal can be different
+major.minor versions working on the same project, so the files Steptix writes
+there to read back now say which version wrote them, and an older version
+leaves a newer one's alone.
+
+- **Compiled steps** carry `// Compiled by Steptix 1.0.0.` once, in the
+  opening comments of the `.steps.ts`. A version older than the one that
+  compiled them does not run them: their steps run with the AI, the file is
+  left as it is, and the output and the report say so, with the two ways out:
+  *"4 steps were compiled by Steptix 1.1 and ran with the AI instead. Update
+  with npm i -g steptix to use them, or recompile them with this version:
+  steptix compile tests/first-test.md."* VS Code says *Update the Steptix
+  extension* and names **Steptix: Compile Code-behind**. On a run with no
+  AI those steps fail, as any step without an AI does, and the failure names
+  the update too.
+- **Recompiling is the user's choice.** A compile over a newer version's file
+  starts it afresh and says so; the newer version still reads what it writes.
+- **The last-run file, a compile's recording and a browser profile's marker**
+  carry `"steptixVersion"`. A newer version's last-run file is neither read
+  nor written over; a compile records afresh rather than adding to a newer
+  recording; a newer marker's launch flags are not trusted.
+- The spec lists what is stamped and what is not, and why.
+- **Reports** have a notices list above the steps, where these notices go.
+
 ### Added — the welcome page, choosing the AI, and a sample project that runs as it is
 
 The third part of [SPEC-install.md](docs/specs/SPEC-install.md): from

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import type { ErrorPayload, FrameInfo, RunEvent } from 'steptix-runner-core';
-import { describeStepFailure, isSkippedPass } from 'steptix-runner-core';
+import { describeStepFailure, isSkippedPass, outputText } from 'steptix-runner-core';
 import { frameTargetUri } from './workspace.js';
 import type { TestDiscovery, DiscoveredTest, DiscoveryEvent } from './test-discovery.js';
 import type { RunController } from './run-controller.js';
@@ -557,7 +557,7 @@ export class SteptixTestController implements vscode.Disposable {
           break;
         }
         case 'output':
-          emit(`[${event.kind}] ${event.msg}`);
+          emit(`[${event.kind}] ${outputText(event)}`);
           if (event.kind === 'error') serverErrors.push(event.msg);
           break;
         case 'done':

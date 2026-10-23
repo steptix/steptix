@@ -96,6 +96,7 @@ import { envDataRefsIn, resolveEnvDataRef } from '../parser/interpolate-env-data
 import { parseOutputPrefixes, buildEnrichedInstruction } from '../server/run-helpers.js';
 import { redact, runSecrets } from '../utils/secrets.js';
 import { warnBindingOnce, type CodeBehindBinding } from '../codebehind/loader.js';
+import { newerCompiledStepNote } from '../codebehind/stamp.js';
 import { checkCodeMutation } from '../codebehind/generate.js';
 import {
   entrySourceText,
@@ -920,9 +921,17 @@ async function executeStepUnrecorded(
   }
   /** Attach the stale flag to whatever the AI flow produces. Runs no longer
    *  rewrite the file (stories/codebehind-compile.md), so this flag is the only
-   *  record that the committed code stopped working. */
-  const withStale = (result: StepResult): StepResult =>
-    staleAfterHeal ? { ...result, codeBehindStale: staleAfterHeal } : result;
+   *  record that the committed code stopped working.
+   *
+   *  And on a keyless run, a step whose entry a newer major.minor compiled
+   *  fails as any step with no AI does, with the update that would run it as
+   *  code named too (docs/specs/SPEC-install.md §4.13). */
+  const withStale = (result: StepResult): StepResult => {
+    const flagged = staleAfterHeal ? { ...result, codeBehindStale: staleAfterHeal } : result;
+    return opts.keyless && binding?.newerStamp !== undefined && flagged.status === 'failed'
+      ? { ...flagged, error: `${flagged.error ?? ''} ${newerCompiledStepNote(binding.newerStamp)}`.trim() }
+      : flagged;
+  };
 
   // --- A flow-control condition this run's values already answer ---
   //

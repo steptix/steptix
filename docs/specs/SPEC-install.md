@@ -324,6 +324,22 @@ own `.md` is not touched. Compiled step files and their cache are the first;
 the change that adds the stamp lists the rest. Reports are for people,
 not for Steptix to read back, so they need none.
 
+The stamped files:
+
+| File | Stamp | A newer major.minor's file |
+|---|---|---|
+| `<test>.steps.ts` | `// Compiled by Steptix 1.5.2.` in its opening comments | Its steps run with the AI; a compile starts the file afresh (below) |
+| `.steptix-codebehind-cache/<test>.last-run.json` | `"steptixVersion"` | Not read, and a run does not write over it |
+| `.steptix-codebehind-cache/<test>.recording/recording.json` | `"steptixVersion"`, for the whole folder | A compile records afresh instead of adding to it |
+| `.steptix/cdp-profiles/<profile>/.steptix-profile` | `"steptixVersion"` | Its launch flags are not trusted; a launch on the profile writes its own, as every launch does |
+
+Not stamped, and why: the extension's `.steptix/run-state.json` (only the
+extension reads it, and VS Code runs one version at a time); a project's
+`.env` (the user's settings, which every version reads alike); the run
+history a run can append to the test's `.md` (the test's own file); the
+`specs/` cache (nothing reads it back to decide anything); and the MCP
+server's log (only quoted in an error).
+
 When Steptix reads such a file:
 
 - **Written by the same or an older major.minor:** it reads it as today.

@@ -31,6 +31,7 @@ import {
   reportError,
   describeStepFailure,
   isSkippedPass,
+  outputText,
   resolveBaseUrl,
   resolveEnvFile,
   resolveSection,
@@ -356,7 +357,7 @@ export function compileLogLine(event: CompileEvent): string | null {
       if (inner.type === 'step:skip') {
         return `  ${' '.repeat(11)} ${skipCompileLogLine(inner.line, inner.reason)}`;
       }
-      if (inner.type === 'output') return `  ${' '.repeat(11)} [${inner.kind}] ${inner.msg}`;
+      if (inner.type === 'output') return `  ${' '.repeat(11)} [${inner.kind}] ${outputText(inner)}`;
       return null;
     }
     case 'compile:progress':
@@ -5532,7 +5533,7 @@ export class RunController {
         // failed generation leaves — plus anything else the server says out of
         // band. Logged as what it says rather than as `event output`, which is
         // all the fall-through below ever made of it.
-        log(`[${event.kind}] ${event.msg}`);
+        log(`[${event.kind}] ${outputText(event)}`);
       } else {
         log(`event ${event.type}${'line' in event ? ` line=${event.line}` : ''}`);
       }
@@ -5906,7 +5907,7 @@ export class RunController {
             }
             if (event.type === 'record:result') result = event;
             else if (event.type === 'done') done = event;
-            else if (event.type === 'output') log(`[${event.kind}] ${event.msg}`);
+            else if (event.type === 'output') log(`[${event.kind}] ${outputText(event)}`);
             else if (event.type === 'record:action') log(`recorded ${event.kind}: ${event.summary}`);
             else if (event.type === 'record:started') log(`recording from ${event.url}`);
             args.onEvent(event);

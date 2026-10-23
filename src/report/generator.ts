@@ -133,6 +133,7 @@ export function renderReport(report: TestReport): string {
     // The row is noise on a test with no code-behind at all, which is most of
     // them — shown only once there is something to say.
     showOrigins: origins.code > 0 || origins.stale > 0,
+    notices: report.notices ?? [],
     testName: report.testName,
     status,
     statusClass,

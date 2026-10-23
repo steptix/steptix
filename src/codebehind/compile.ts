@@ -4,6 +4,7 @@ import type { Config } from '../config/types.js';
 import type { ParsedTest } from '../parser/types.js';
 import type { StepResult, TestReport } from '../report/types.js';
 import type { TokenTracker } from '../utils/tokens.js';
+import { majorMinorLabel } from '../utils/file-stamp.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
@@ -2095,6 +2096,21 @@ export async function compileTest(callerOptions: CompileOptions): Promise<Compil
   // prints them and the server carries them as `output` frames, the way an
   // unresolved parameter is said.
   for (const message of loopWarnings) emit({ kind: 'note', level: 'warn', message });
+
+  // A file a newer major.minor compiled is replaced, not spliced into
+  // (Candidate.read, docs/specs/SPEC-install.md §4.13). Compiling was the
+  // user's choice; this says what it costs.
+  const replacing = candidate.changedFiles();
+  for (const [file, version] of candidate.replacedNewer()) {
+    if (!(file in replacing)) continue;
+    emit({
+      kind: 'note',
+      level: 'warn',
+      message:
+        `${path.basename(file)} was compiled by Steptix ${majorMinorLabel(version)}. ` +
+        `This compile replaces its steps with this version's, which Steptix ${majorMinorLabel(version)} still reads.`,
+    });
+  }
 
   const files = candidate.changedFiles();
   if (options.dryRun) {

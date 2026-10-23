@@ -4,6 +4,7 @@ export * from './user-root.js';
 export * from './runtime-clients.js';
 export * from './base-url.js';
 export * from './ai-providers.js';
+export * from './newer-compiled.js';
 export * from './url-port.js';
 export * from './control-line.js';
 export * from './use-step.js';
