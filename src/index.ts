@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 /**
+ * First the Node.js check, then the launcher (src/launcher/launch.ts), which
+ * decides which installed runtime runs this command and, when that is not
+ * this package, imports that runtime's copy of this file instead of going on.
+ * Both are dynamic imports for the reason given below, and both keep stdout
+ * clean for `steptix mcp`.
+ *
  * `steptix mcp` deliberately bypasses the commander program.
  *
  * Two reasons, both load-bearing:
@@ -22,7 +28,32 @@
  * imports, so a guard placed above `import { createCli }` would run *after*
  * that whole graph had already evaluated. Keep them dynamic.
  */
-if (process.argv[2] === 'mcp') {
+const { nodeVersionProblem } = await import('./launcher/node-check.js');
+const nodeProblem = nodeVersionProblem(process.versions.node);
+const launch = nodeProblem === null ? await (await import('./launcher/launch.js')).prepareLaunch(process.argv.slice(2)) : null;
+if (nodeProblem !== null) {
+  process.stderr.write(nodeProblem + '\n');
+  process.exitCode = 1;
+} else if (launch?.kind === 'hand-off') {
+  try {
+    await import(launch.entry);
+  } catch (err) {
+    // A runtime with files missing (a clean-up tool, a disk error) fails to
+    // load here. Say which and what to do; anything else is the command's own.
+    // Matched on the end of the runtime's path, which every spelling of the
+    // Steptix folder (a short name, a link) shares.
+    const code = (err as NodeJS.ErrnoException).code;
+    const message = err instanceof Error ? err.message : String(err);
+    const { sep } = await import('node:path');
+    const inRuntime = message.includes(`${sep}runtimes${sep}${launch.version}${sep}`);
+    if ((code !== 'ERR_MODULE_NOT_FOUND' && code !== 'MODULE_NOT_FOUND') || !inRuntime) throw err;
+    process.stderr.write(
+      `Steptix server ${launch.version} in ${launch.dir} is damaged and could not start: ${message}\n` +
+        `Remove it with steptix server remove ${launch.version} and run the command again.\n`,
+    );
+    process.exitCode = 1;
+  }
+} else if (process.argv[2] === 'mcp') {
   // Both redirects happen BEFORE the MCP module graph is imported. `main()`
   // used to do the global one, which left a window: the SDK, zod and ajv all
   // evaluate during that dynamic import, and an import-time `console.log` in

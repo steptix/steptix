@@ -14,8 +14,44 @@ For AI-assisted test generation, give your AI the [test-writing handbook](docs/t
 ## Install
 
 ```bash
-npm install
+npm i -g steptix
 ```
+
+Then run any `steptix` command. The first one sets Steptix up in your Steptix
+folder (`%LOCALAPPDATA%\steptix` on Windows, `~/.steptix` on macOS and Linux)
+and runs from there. It takes a few seconds and needs no network. The Steptix
+extension for VS Code uses the same folder, so the terminal and VS Code run
+the same server.
+
+To update, run `npm i -g steptix` again. The next command sets up the new
+version beside the old one, and a server that is running keeps running.
+
+| Command | What it does |
+| --- | --- |
+| `steptix --version` | This version, the server it runs, and where that server is |
+| `steptix server list` | The servers installed, where each came from, and which one runs |
+| `steptix server use <version>` | Run an installed older version from the next start |
+| `steptix server use newest` | Undo that choice |
+| `steptix server remove <version>` | Remove one installed server |
+
+To work on Steptix itself, clone this repository and run `npm install` in it
+instead; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Uninstall
+
+Two commands, in this order:
+
+```bash
+steptix uninstall
+npm rm -g steptix
+```
+
+`steptix uninstall` removes the servers in your Steptix folder and
+`npm rm -g steptix` removes the command. npm runs no clean-up of a package's
+own, so `npm rm -g steptix` alone leaves the servers behind. Neither touches
+your test projects, your machine key or browsers Steptix downloaded. If you
+use the VS Code extension, run only `npm rm -g steptix`: the extension still
+uses the servers.
 
 ## CLI Usage
 
@@ -668,7 +704,7 @@ Inside your test project's `tools/` directory:
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "steptix": "^1.0.0-beta.1",
+    "steptix": "^1.0.0",
     "playwright": "^1.59.1",
     "typescript": "^7.0.2"
   }

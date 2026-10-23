@@ -23,6 +23,7 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { logger } from '../utils/logger.js';
+import { isPidAlive } from '../utils/pid-alive.js';
 
 export interface ComputerLockRecord {
   pid: number;
@@ -45,26 +46,8 @@ export function computerLockPath(): string {
   return path.join(os.tmpdir(), 'steptix-computer.lock');
 }
 
-/**
- * Is a pid running?
- *
- * `process.kill(pid, 0)` sends no signal and only checks. ESRCH means no such
- * process — the lock is stale. EPERM means the process exists but belongs to
- * another user, which is very much alive. Anything else is unknown, and
- * unknown is treated as alive: refusing a run that could have gone ahead
- * costs a message, while taking over a live holder costs a mouse fight.
- */
-export function isPidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ESRCH') return false;
-    return true;
-  }
-}
+// Is a pid running? In a module of its own so the launcher can share it.
+export { isPidAlive };
 
 /** §5.9's refusal, in the spec's own words. */
 export function computerLockInUseMessage(record: ComputerLockRecord): string {

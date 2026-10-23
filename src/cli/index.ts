@@ -3,8 +3,8 @@ loadDefaultEnvFileSync();
 warnIfDeprecatedDataDirEnv();
 
 import { Command } from 'commander';
-import { describeVersion, getBuildInfo, getPackageVersion } from '../utils/version.js';
 import { registerRunCommand } from './commands/run.js';
+import { registerServerCommand, registerUninstallCommand, versionDetails } from './commands/server.js';
 import { registerCompileCommand } from './commands/compile.js';
 import { registerInitCommand } from './commands/init.js';
 import { registerListCommand } from './commands/list.js';
@@ -22,7 +22,13 @@ export function createCli(): Command {
   program
     .name('steptix')
     .description('AI-powered UI test automation using natural language Markdown test files')
-    .version(describeVersion({ version: getPackageVersion(), ...getBuildInfo() }))
+    // Worked out only when asked for: it reads the installed runtimes. Exits
+    // straight away, as commander's own .version() does.
+    .option('-V, --version', 'output the version, and the server it runs')
+    .on('option:version', () => {
+      process.stdout.write(versionDetails());
+      process.exit(0);
+    })
     // `-V`/`--version` and `-h`/`--help` belong to the program only before a
     // command name. Without this, commander takes them anywhere on the line,
     // and `steptix browsers -V` would print Steptix's version instead of
@@ -41,6 +47,8 @@ export function createCli(): Command {
   registerStopCommand(program);
   registerStatsCommand(program);
   registerBrowsersCommand(program);
+  registerServerCommand(program);
+  registerUninstallCommand(program);
 
   // Listed so `steptix --help` shows it, but deliberately given no action: the
   // real `mcp` entry is intercepted in `src/index.ts` before commander is

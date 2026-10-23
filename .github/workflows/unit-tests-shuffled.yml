@@ -34,7 +34,7 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: |
-            package-lock.json
+            npm-shrinkwrap.json
             runner-core/package-lock.json
             steptix-vscode/package-lock.json
             fixtures/tools/package-lock.json

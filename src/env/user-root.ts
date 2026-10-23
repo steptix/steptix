@@ -21,9 +21,9 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { parseEnvFile } from './loader.js';
+import { userRootDir, type UserRootDeps } from './user-root-dir.js';
 import { logger } from '../utils/logger.js';
 
 export const MACHINE_KEY_VAR = 'STEPTIX_SERVER_API_KEY';
@@ -40,32 +40,9 @@ export const MACHINE_KEY_VAR = 'STEPTIX_SERVER_API_KEY';
 export const PRIVATE_DIR_MODE = 0o700;
 export const PRIVATE_FILE_MODE = 0o600;
 
-/** Injection seam for tests — the path derives entirely from these. */
-export interface UserRootDeps {
-  env?: NodeJS.ProcessEnv;
-  platform?: NodeJS.Platform;
-  homedir?: () => string;
-}
-
-/** `%LOCALAPPDATA%\steptix` / `$XDG_CONFIG_HOME/steptix` / `~/.steptix`. */
-export function userRootDir(deps?: UserRootDeps): string {
-  const env = deps?.env ?? process.env;
-  const platform = deps?.platform ?? process.platform;
-  const homedir = deps?.homedir ?? os.homedir;
-
-  if (platform === 'win32') {
-    const localAppData = env['LOCALAPPDATA'];
-    const base =
-      localAppData !== undefined && localAppData.trim() !== ''
-        ? localAppData
-        : path.join(homedir(), 'AppData', 'Local');
-    return path.join(base, 'steptix');
-  }
-
-  const xdg = env['XDG_CONFIG_HOME'];
-  if (xdg !== undefined && xdg.trim() !== '') return path.join(xdg, 'steptix');
-  return path.join(homedir(), '.steptix');
-}
+// In a module of its own so the launcher can find the user root without
+// loading the logger (see user-root-dir.ts).
+export { userRootDir, type UserRootDeps };
 
 export function userRootEnvPath(deps?: UserRootDeps): string {
   return path.join(userRootDir(deps), '.env');

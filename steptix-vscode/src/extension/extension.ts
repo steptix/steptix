@@ -6,7 +6,9 @@ import {
   type WebviewStateMsg,
   type WebviewToHostMsg,
   isSkippedPass,
+  ownMinorRequirement,
   stepFailureDetail,
+  writeClientRecord,
 } from 'steptix-runner-core';
 import { ActiveFileTracker, markLineMovesFor } from './active-file-tracker.js';
 import { moveLineKeyed } from './mark-lines-core.js';
@@ -2369,6 +2371,22 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
   const out = getOutputChannel();
   const ts = () => new Date().toISOString().slice(11, 23);
   out.appendLine(`[${ts()}] Steptix activate() — version=${context.extension.packageJSON.version}`);
+
+  // Say which server this extension needs, so the launcher's clean-up of
+  // `<user root>/runtimes` keeps one (docs/specs/SPEC-install.md §4.3). Only
+  // an installed extension: an Extension Development Host or a test run
+  // would leave a record naming a checkout in the user's real Steptix folder.
+  const ownVersion = String(context.extension.packageJSON.version);
+  const requires = ownMinorRequirement(ownVersion);
+  if (requires !== null && context.extensionMode === vscode.ExtensionMode.Production) {
+    try {
+      writeClientRecord({ kind: 'vscode', version: ownVersion, requires, location: context.extensionPath });
+    } catch (err) {
+      out.appendLine(
+        `[${ts()}] could not record this extension in the Steptix folder: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
   // One rolling log for every server this extension starts. globalStorageUri
   // (not workspaceStorage) because a detached server outlives the window that
