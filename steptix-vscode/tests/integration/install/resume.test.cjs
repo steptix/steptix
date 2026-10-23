@@ -42,7 +42,8 @@ const sameFolder = (a, b) => {
   const canonical = (p) => fs.realpathSync.native(p);
   return process.platform === 'win32' ? canonical(a).toLowerCase() === canonical(b).toLowerCase() : canonical(a) === canonical(b);
 };
-const runtimesEntries = () => (fs.existsSync(path.join(ROOT(), 'runtimes')) ? fs.readdirSync(path.join(ROOT(), 'runtimes')) : []);
+/** What the extension's npm download holds (SPEC-install.md §3.3). */
+const downloadsEntries = () => (fs.existsSync(path.join(ROOT(), 'downloads')) ? fs.readdirSync(path.join(ROOT(), 'downloads')) : []);
 /** Steptix's own Node.js copies, with when each was made. */
 const ownNodes = () => {
   const dir = path.join(ROOT(), 'node');
@@ -112,7 +113,7 @@ describe(`an install cut off by Create a sample project (launch ${process.env.ST
     );
     assert.deepEqual(progress.map((p) => p.title), ['Installing the Steptix server']);
     assert.equal(ownNodes().length, 1, `Node.js comes first: ${JSON.stringify(ownNodes())}`);
-    assert.ok(runtimesEntries().some((n) => n.startsWith('.partial-npm-')), `npm's scratch folder: ${runtimesEntries()}`);
+    assert.ok(downloadsEntries().some((n) => n.startsWith('.partial-npm-')), `npm's scratch folder: ${downloadsEntries()}`);
     assert.deepEqual(
       readJson(WANTED()),
       { addToPath: false, pid: process.pid },
@@ -141,8 +142,8 @@ describe(`an install cut off by Create a sample project (launch ${process.env.ST
     const nodes = ownNodes();
     assert.equal(nodes.length, 1, `launch 1 downloaded Node.js: ${JSON.stringify(nodes)}`);
     // npm's scratch folder from launch 1 is not checked: npm may still be
-    // writing to it, and the launcher removes it at its next copy only once
-    // nothing holds it open (§8.3).
+    // writing to it, and the extension removes it at its next download only
+    // once nothing holds it open (§3.3, §8.3).
 
     await h.serverStartupChecks();
     assert.equal(await h.welcome.start(), 'server', 'the welcome page came back on the server step');

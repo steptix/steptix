@@ -36,6 +36,7 @@ import {
   clearServerChoice,
   compareVersions,
   downloadLockFile,
+  downloadsDir,
   findOnPath,
   globalPackageDir,
   installWantedByOther,
@@ -1197,6 +1198,8 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     try {
       this.removeBinScripts();
       rmSync(path.join(this.userRoot, 'node'), { recursive: true, force: true, maxRetries: 3 });
+      // What a cut-off download left (§3.3, §9.2).
+      rmSync(downloadsDir(this.userRoot), { recursive: true, force: true, maxRetries: 3 });
     } catch (err) {
       problems.push((err as Error).message);
     }

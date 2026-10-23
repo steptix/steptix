@@ -117,6 +117,9 @@ and release testing only, not the code:
   bin/
     steptix         a small script the extension sets up (§5.5), only if needed:
                     it starts the launcher in the newest runtimes/ folder
+  downloads/        only while the extension downloads a server with npm, before
+                    the launcher copies it into runtimes/; anything left there is
+                    removed at the next download
   .env              the machine key and server address, as today
   install-wanted.json    while an install the user said yes to is under way,
                          so one a reload or a restart cut off carries on (§8.3)
@@ -126,6 +129,12 @@ and release testing only, not the code:
 
 `runtimes/` is the folder the extension already looks in today, so it keeps
 its name.
+
+The extension's npm download goes in `downloads/`, not in `runtimes/`,
+because the launcher, before it copies a package into `runtimes/`, removes
+every unfinished copy it finds there as abandoned. A download kept beside
+them would be removed with them, while the launcher is copying from it.
+Each folder is cleaned by the one tool that writes it.
 
 ### 3.4 One package, because test projects import it by name
 
@@ -1096,7 +1105,9 @@ Retry uses it (§4.6).
 
 VS Code closed, the window reloaded, the machine slept, the disk filled up.
 The incomplete copy was never renamed into place (§4.1), so it is ignored and
-cleaned up on the next attempt, which starts again.
+cleaned up on the next attempt, which starts again. A download the extension
+had not finished is left in `downloads/` (§3.3) and removed at its next
+download.
 
 **An install the user said yes to carries on by itself.** The extension
 remembers, for the user, that an install is under way until it finishes. If
@@ -1156,6 +1167,7 @@ first. It removes:
 
 - every server in `runtimes/`,
 - Steptix's own Node.js, if it downloaded one,
+- anything left in `downloads/`,
 - the `steptix` script in `bin/`, and the PATH entry or startup-file line it
   added.
 
