@@ -32,6 +32,7 @@ import {
   servePortOfCommand,
   startServerAndWait,
   HEALTH_SERVICE_ID,
+  STARTED_BY_VSCODE,
 } from '../src/extension/server-manager.ts';
 
 /** A fresh temp dir, removed when the file is done. `maxRetries`: on Windows
@@ -483,7 +484,9 @@ test('decide: down + localhost + configured ⇒ spawn', () => {
     serves(SERVES_3100),
   );
   assert.equal(action.kind, 'spawn');
-  assert.deepEqual(action.config, CONFIGURED);
+  // Plus the mark that says VS Code started it, so a later extension may
+  // replace it with the version it needs (SPEC-install.md §6.4).
+  assert.deepEqual(action.config, { ...CONFIGURED, env: STARTED_BY_VSCODE });
 });
 
 test('decide: down + REMOTE url ⇒ skip, however configured', () => {
@@ -588,7 +591,9 @@ test('decide: a command setting wins over an installed runtime, which is not eve
     serves(SERVES_3100),
   );
   assert.equal(action.kind, 'spawn');
-  assert.deepEqual(action.config, CONFIGURED);
+  // Plus the mark that says VS Code started it, so a later extension may
+  // replace it with the version it needs (SPEC-install.md §6.4).
+  assert.deepEqual(action.config, { ...CONFIGURED, env: STARTED_BY_VSCODE });
   assert.equal(action.runtime, undefined);
   assert.equal(discover.calls, 0);
 });
@@ -782,6 +787,22 @@ test('runtime command: elsewhere the launcher runs under Node — STEPTIX_NODE w
   assert.equal(
     runtimeServeCommand(runtime, 'http://127.0.0.1:3200', { platform: 'darwin', env: { STEPTIX_NODE: '/opt/node 22/bin/node' } }),
     `'/opt/node 22/bin/node' '${launcher}' serve --port 3200 --idle-timeout 60`,
+  );
+});
+
+test('runtime command: one the launcher laid out runs its own dist/index.js under the Node.js chosen for it', () => {
+  // SPEC-install.md §4.6: the Node.js is chosen by the extension, so it is
+  // named, never looked up on PATH by a script.
+  const dir = path.join(tmpdir(), 'local app data', 'steptix', 'runtimes', '1.0.0');
+  const win = { version: '1.0.0', dir, node: 'C:\\Program Files\\nodejs\\node.exe' };
+  assert.equal(
+    runtimeServeCommand(win, 'http://127.0.0.1:3100', { platform: 'win32' }),
+    `"C:\\Program Files\\nodejs\\node.exe" "${path.join(dir, 'dist', 'index.js')}" serve --port 3100 --idle-timeout 60`,
+  );
+  const posix = { version: '1.0.0', dir, node: "/home/o'neil/.steptix/node/22.22.1/bin/node" };
+  assert.equal(
+    runtimeServeCommand(posix, 'http://127.0.0.1:3100', { platform: 'linux', env: { STEPTIX_NODE: '/ignored' } }),
+    `'/home/o'\\''neil/.steptix/node/22.22.1/bin/node' '${path.join(dir, 'dist', 'index.js')}' serve --port 3100 --idle-timeout 60`,
   );
 });
 

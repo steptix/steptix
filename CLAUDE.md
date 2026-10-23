@@ -48,7 +48,7 @@ with a note marking which sections described the removed desktop shell.
 
 `steptix-vscode/` is the Steptix VS Code extension — it uses VS Code's
 native editor surface and hosts the multi-test runner. Extension ID
-`pkent.steptix-vscode`.
+`steptix.steptix-vscode`.
 
 There used to be a second variant, `testbench-monaco/` (extension ID
 `pkent.testbench`), which hosted the editor inside a webview using Monaco.
@@ -92,7 +92,7 @@ Installing from two (a worktree and main, or two worktrees) collides:
 
 - **Same version in both** — the likely case, since two branches off one
   commit read the same version until someone bumps — and they extract into
-  the *same* `pkent.steptix-vscode-<version>/` directory. Last writer wins,
+  the *same* `steptix.steptix-vscode-<version>/` directory. Last writer wins,
   `--force` suppresses any prompt, and the Extensions panel shows that version
   either way: no signal about whose code is live. Genuinely concurrent
   installs are worse than last-write-wins, since two processes unzipping into

@@ -33,6 +33,26 @@ export interface HealthResponse {
   inspector: string | null;
   /** null when no idle shutdown is armed. */
   idleTimeoutMinutes: number | null;
+  /** Who started this server (docs/specs/SPEC-install.md §6.4). Absent on a
+   *  server predating it. */
+  startedBy: StartedBy;
+}
+
+/**
+ * `vscode`: the VS Code extension started it, and may replace it with the
+ * version it needs. `mcp`: an MCP client's auto-start did. `person`: someone
+ * ran `steptix serve` by hand, so nothing stops it on its own.
+ */
+export type StartedBy = 'vscode' | 'mcp' | 'person';
+
+/** The variable a client that starts `serve` sets to say it did. */
+export const STARTED_BY_VAR = 'STEPTIX_STARTED_BY';
+
+/** Who started this process, from its {@link STARTED_BY_VAR}. Anything but a
+ *  value a client sets reads as a person. */
+export function startedByOf(env: NodeJS.ProcessEnv): StartedBy {
+  const value = env[STARTED_BY_VAR];
+  return value === 'vscode' || value === 'mcp' ? value : 'person';
 }
 
 /**

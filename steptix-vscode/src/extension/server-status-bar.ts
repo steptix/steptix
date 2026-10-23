@@ -9,6 +9,7 @@ import {
   type HealthProbe,
   type HealthProbeResult,
 } from './server-manager.js';
+import { INSTALL_SERVER_COMMAND, type InstallState } from './server-setup.js';
 import { resolveServerUrl, type ServerUrlOrigin } from './server-url.js';
 
 /** Command the status-bar item invokes. Exported so the registration and the
@@ -162,6 +163,44 @@ export class ServerStatusBar implements vscode.Disposable {
     this.probe = probe;
   }
 
+  /** While no server is installed, or one is installing, the item says so in
+   *  every window, folder or not (SPEC-install.md §5.2). */
+  private installState: InstallState = null;
+  /** `Steptix 1.0.0 · 3f9a1c2`: which build of the extension this is (§3.1). */
+  private buildLine = '';
+
+  setInstallState(state: InstallState): void {
+    this.installState = state;
+    void this.refresh();
+  }
+
+  setBuildLine(line: string): void {
+    this.buildLine = line;
+  }
+
+  /** Show the install state, and say whether it did. */
+  private renderInstallState(): boolean {
+    if (this.installState === null) {
+      this.item.command = SERVER_MENU_COMMAND;
+      return false;
+    }
+    // A click does what the item says is missing.
+    this.item.command = this.installState === 'not-installed' ? INSTALL_SERVER_COMMAND : SERVER_MENU_COMMAND;
+    this.item.text =
+      this.installState === 'installing' ? '$(sync~spin) Steptix: installing server…' : '$(circle-slash) Steptix: server not installed';
+    this.item.tooltip = [
+      this.buildLine,
+      this.installState === 'installing'
+        ? 'Installing the Steptix server.'
+        : 'The Steptix server is not installed. Click to install it.',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    this.item.backgroundColor = undefined;
+    this.item.show();
+    return true;
+  }
+
   /**
    * Re-probe now.
    *
@@ -184,6 +223,7 @@ export class ServerStatusBar implements vscode.Disposable {
       if (!opts.background) this.refreshPending = true;
       return;
     }
+    if (this.renderInstallState()) return;
     this.probing = true;
     this.refreshPending = false;
     try {
@@ -212,7 +252,7 @@ export class ServerStatusBar implements vscode.Disposable {
         : result.kind === 'down'
           ? '$(circle-outline) STEPTIX'
           : '$(warning) STEPTIX';
-    this.item.tooltip = `${headline}\n${detail}`;
+    this.item.tooltip = [this.buildLine, `${headline}\n${detail}`].filter(Boolean).join('\n');
     this.item.backgroundColor = warn
       ? new vscode.ThemeColor('statusBarItem.warningBackground')
       : undefined;

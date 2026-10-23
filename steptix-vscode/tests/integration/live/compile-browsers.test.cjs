@@ -20,7 +20,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vscode = require('vscode');
 
-const EXT_ID = 'pkent.steptix-vscode';
+const EXT_ID = 'steptix.steptix-vscode';
 const TEST_APP_PORT = 8787;
 /** The five step lines in `compile-browsers.md`. */
 const STEP_LINES = [26, 27, 28, 29, 30];

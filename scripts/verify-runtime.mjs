@@ -299,7 +299,7 @@ async run(_args, {step}) { const value: string = 'tool-ok'; step.setVar('marker'
   if (existsSync(resultPath)) started = JSON.parse(await fs.readFile(resultPath, 'utf8'));
   const passed = vscodeRun.report && vscodeRun.report.failures === 0 && vscodeRun.report.results.some((r) => r.state === 'pass');
   if (!passed || vscodeRun.status !== 0) {
-    const serverLog = path.join(userDataDir, 'User', 'globalStorage', 'pkent.steptix-vscode', 'server.log');
+    const serverLog = path.join(userDataDir, 'User', 'globalStorage', 'steptix.steptix-vscode', 'server.log');
     const read = async (file) => fs.readFile(file, 'utf8').catch((error) => `(unreadable: ${error.message})`);
     const rows = vscodeRun.report
       ? vscodeRun.report.results.map((r) => `  ${r.state} ${r.title}${r.err ? `\n${r.err}` : ''}`).join('\n')

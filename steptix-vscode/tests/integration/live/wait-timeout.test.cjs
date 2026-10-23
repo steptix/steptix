@@ -38,7 +38,7 @@ const http = require('node:http');
 const vscode = require('vscode');
 const { listenFetchable } = require('../../../../tests/listen-fetchable.cjs');
 
-const EXT_ID = 'pkent.steptix-vscode';
+const EXT_ID = 'steptix.steptix-vscode';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

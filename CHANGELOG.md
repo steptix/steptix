@@ -11,6 +11,52 @@ carried a `-beta.N` suffix.
 
 ## Unreleased
 
+### Added — the VS Code extension installs and updates the server
+
+The second part of [SPEC-install.md](docs/specs/SPEC-install.md). The
+extension no longer needs a server installed some other way first.
+
+- **It asks once.** Right after it is installed: *Steptix needs its local
+  server to run tests. About 70 MB to download.* **Install**, **Install and
+  add steptix to PATH**, or **Not now**. After Not now it asks again only when
+  a Run needs the server. **Steptix: Install Server** asks nothing.
+- **It finds what is already there first**: a server in `runtimes/`, else
+  npm's own `steptix` (*Using Steptix 1.0.0 installed with npm.*), and
+  downloads only when neither matches. It never touches npm's own install.
+- **It installs through npm**, so a company registry and proxy in `~/.npmrc`
+  apply, into the Steptix folder. With no Node.js 22.21 or later on the
+  machine it downloads one from nodejs.org, checked against the fingerprint
+  nodejs.org publishes, into `<Steptix folder>/node/`, and uses it for Steptix
+  alone. One window installs; another waits for it.
+- **Updates do not ask.** An extension that needs a newer server fetches it
+  straight away, and a new server patch arrives at start and once a day.
+- **A running server that does not match is replaced** when VS Code started
+  it: at once when idle, after its test when one is running. One you started
+  yourself is never stopped without asking (**Stop it**). `/health` now says
+  who started a server (`startedBy`: `vscode`, `mcp` or `person`).
+- **`steptix` in terminals.** VS Code's own terminals get `steptix` from the
+  server the extension installed; **Steptix: Add steptix to PATH** puts it in
+  every terminal (the user `Path` on Windows; a link in `~/.local/bin` or a
+  line in `~/.zshrc` or `~/.bashrc` elsewhere).
+- **Steptix: Uninstall Server** removes the servers, the Node.js it
+  downloaded, the `steptix` command and the PATH change.
+- **Notices**: when npm's `steptix` is on another major.minor than the
+  extension, once per version; when a platform is not supported yet
+  (Windows x64 for now); and §8's messages for a failed download, each with
+  the button that fixes it. New run errors: STX034 (no server could be had)
+  and STX035 (a server that does not match and is not the extension's to
+  replace).
+- The status bar's tooltip and the Output panel show the build, for example
+  *Steptix 1.0.1 · 3f9a1c2*.
+- The extension is published by `steptix` now, as `steptix.steptix-vscode`,
+  marked **Preview**, and packaged for the normal channel. VS Code treats it
+  as a different extension from `pkent.steptix-vscode`: uninstall that one by
+  hand once.
+
+The developer settings switch all of this off: with
+`steptix.serverAutoStart.command` set, or `useInstalledRuntime` off, the
+extension installs, updates and replaces nothing, as before.
+
 ### Added — `npm i -g steptix`, and the launcher that sets it up
 
 The first part of [SPEC-install.md](docs/specs/SPEC-install.md): the

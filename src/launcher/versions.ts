@@ -29,8 +29,8 @@ export function parseVersion(version: string): ParsedVersion | null {
  * version sorts below every one that is.
  *
  * The same order as `compareVersions` in
- * steptix-vscode/src/extension/server-manager.ts, which picks the runtime the
- * extension starts.
+ * steptix-vscode/src/extension/install-core.ts, which picks the server the
+ * extension starts; tests/install-core-parity.test.ts holds the two together.
  */
 export function compareVersions(a: string, b: string): number {
   const va = parseVersion(a);

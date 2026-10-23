@@ -48,6 +48,8 @@ const SAMPLE_CONTEXTS = {
     servePort: 3100,
     servePortSource: 'the default',
   },
+  STX034: { situation: 'failed', detail: 'npm could not reach the registry' },
+  STX035: { serverUrl: 'http://127.0.0.1:3100', serverVersion: '1.3.0', extensionVersion: '1.4.1', reason: 'person' },
   STX032: {
     // Verbatim `danglingChainMemberError` output, which is verbatim the CLI
     // parser's — see tests/control-line-parity.test.ts.
@@ -181,7 +183,7 @@ test('STX028 still names both settings when no log is available', () => {
   assert.ok(!payload.message.includes('undefined'), 'no undefined leaks into the message');
 });
 
-test('STX028 for the installed runtime names its folder and what usually breaks it', () => {
+test('STX028 for the installed server names its folder and how to install it again', () => {
   // No command setting was involved, so a fix that only said "fix the
   // command setting" would send the user to a setting they never wrote.
   const payload = reportError('STX028', {
@@ -190,7 +192,9 @@ test('STX028 for the installed runtime names its folder and what usually breaks 
   });
   assert.ok(payload.message.includes('/home/x/.steptix/runtimes/1.0.0'), 'names the runtime folder');
   assert.ok(payload.message.includes('/ws/globalStorage/server.log'), 'still names the log');
-  assert.ok(/Node\.js/.test(payload.fix), 'says the runtime needs Node');
+  // The extension chooses the Node.js itself (SPEC-install.md §4.6), so the
+  // fix is to install the server again, not to go and find a Node.js.
+  assert.ok(payload.fix.includes('Steptix: Uninstall Server'), 'says how to install it again');
   assert.ok(payload.fix.endsWith('.'));
 });
 
@@ -211,4 +215,34 @@ test('every action runs a VS Code built-in or a command the extension contribute
     }
   }
   assert.ok(checked > 0, 'no action was checked');
+});
+
+test('STX034 says how to get the server for each way a run went without one', () => {
+  const declined = reportError('STX034', { situation: 'declined' });
+  assert.ok(declined.fix.includes('Steptix: Install Server'));
+  assert.ok(declined.fix.includes('npm i -g steptix'));
+  const failed = reportError('STX034', { situation: 'failed', detail: 'npm could not reach the registry' });
+  assert.ok(failed.diagnosis.endsWith('npm could not reach the registry'));
+  assert.ok(failed.fix.includes('offline files'));
+  const unsupported = reportError('STX034', {
+    situation: 'unsupported',
+    detail: 'Steptix does not run on Linux on ARM yet. Supported now: Windows x64.',
+  });
+  assert.ok(unsupported.diagnosis.startsWith('Steptix does not run on Linux on ARM yet'));
+  assert.ok(unsupported.fix.includes('Nothing was downloaded'));
+});
+
+test('STX035 names both versions, and the way out for a server started by hand or a chosen one', () => {
+  const person = reportError('STX035', SAMPLE_CONTEXTS.STX035);
+  assert.ok(person.diagnosis.includes('you started (1.3.0, at http://127.0.0.1:3100)'));
+  assert.ok(person.diagnosis.includes('this extension (1.4.1)'));
+  assert.ok(person.fix.includes('steptix serve'));
+  const chosen = reportError('STX035', { ...SAMPLE_CONTEXTS.STX035, reason: 'chosen' });
+  assert.ok(chosen.diagnosis.startsWith('You chose Steptix server 1.3.0, but this extension is 1.4.1'));
+  assert.ok(chosen.fix.includes('Install Another Version'));
+  assert.ok(chosen.fix.includes('steptix server use newest'));
+  const stuck = reportError('STX035', { ...SAMPLE_CONTEXTS.STX035, reason: 'not-stopped' });
+  assert.ok(stuck.diagnosis.endsWith('did not stop when asked'));
+  assert.ok(stuck.fix.includes('Steptix: Stop Server'));
+  assert.ok(!stuck.diagnosis.includes('you started'), 'does not say the user started it');
 });

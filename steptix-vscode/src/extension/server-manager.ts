@@ -11,6 +11,7 @@ import {
   mkdirSync,
 } from 'node:fs';
 import * as path from 'node:path';
+import { compareVersions } from './install-core.ts';
 import {
   bareServePort,
   describeFetchError,
@@ -51,6 +52,10 @@ export interface ServerHealth {
    *  null, and §7 treats them differently. */
   inspector?: string | null;
   idleTimeoutMinutes?: number | null;
+  /** Who started it (SPEC-install.md §6.4): `vscode` is a server this
+   *  extension may replace; anything else, or absent on a server predating
+   *  the field, is never stopped on its own. */
+  startedBy?: string;
 }
 
 /**
@@ -204,6 +209,8 @@ export interface SpawnServerArgs {
   cwd: string;
   /** Absolute path of the append-only log the child's stdout/stderr go to. */
   logPath: string;
+  /** Added to the child's environment. */
+  env?: Record<string, string>;
 }
 
 export type ServerSpawner = (args: SpawnServerArgs) => void;
@@ -219,7 +226,7 @@ const LOG_MAX_BYTES = 5 * 1024 * 1024;
  * Windows, where `shell: true` means the detached child is the shell and
  * kill/unref semantics differ from POSIX.
  */
-export const defaultServerSpawner: ServerSpawner = ({ command, cwd, logPath }) => {
+export const defaultServerSpawner: ServerSpawner = ({ command, cwd, logPath, env }) => {
   const logFd = openLogFile(logPath);
   try {
     const child = spawn(command, {
@@ -228,6 +235,7 @@ export const defaultServerSpawner: ServerSpawner = ({ command, cwd, logPath }) =
       detached: true,
       windowsHide: true,
       stdio: ['ignore', logFd, logFd],
+      ...(env && { env: { ...process.env, ...env } }),
     });
 
     // Node reports spawn failures ASYNCHRONOUSLY on the child's 'error'
@@ -335,6 +343,8 @@ export interface AutoStartConfig {
   command: string;
   cwd: string;
   readyTimeoutSeconds: number;
+  /** Added to the server's environment: the mark that this extension started it. */
+  env?: Record<string, string>;
 }
 
 /** The §5 settings table, already read and trimmed. */
@@ -373,14 +383,23 @@ export function readAutoStartSettings(
 }
 
 // ---------------------------------------------------------------------------
-// The installed runtime (packaging/runtime)
+// The installed runtime
 // ---------------------------------------------------------------------------
 
-/** A Steptix runtime the installer put under the user root. */
+/**
+ * A Steptix server installed under the user root: one the launcher or the
+ * extension set up in `runtimes/<version>/` (docs/specs/SPEC-install.md §3.3),
+ * which `node` names, or one the Windows runtime installer (packaging/runtime)
+ * put there, which does not.
+ */
 export interface InstalledRuntime {
   version: string;
   /** Its folder: `<user root>/runtimes/<version>`. */
   dir: string;
+  /** The Node.js that runs it, chosen as §4.6 says. Set for a runtime laid
+   *  out by the launcher; absent for the Windows installer's, which finds
+   *  its own through `steptix.cmd`. */
+  node?: string;
 }
 
 export interface RuntimeSearch {
@@ -443,40 +462,17 @@ export const defaultRuntimeDiscovery: RuntimeDiscovery = () => {
   return { runtimesDir, runtime: findInstalledRuntime(runtimesDir) };
 };
 
-const VERSION_PATTERN = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+// The version order, now in install-core.ts so the framework's parity test
+// can load it without runner-core; re-exported for this module's callers.
+export { compareVersions };
 
 /**
- * Semver precedence: a prerelease sorts below its release, and prerelease
- * identifiers compare numerically when both are numbers. A folder name that is
- * not a version sorts below every one that is.
+ * Put in the environment of every server this extension starts, so its
+ * `/health` says VS Code started it and a later extension may replace it
+ * with the version it needs (SPEC-install.md §6.4; `STARTED_BY_VAR` in the
+ * framework's src/server/health.ts).
  */
-export function compareVersions(a: string, b: string): number {
-  const va = VERSION_PATTERN.exec(a);
-  const vb = VERSION_PATTERN.exec(b);
-  if (!va || !vb) {
-    if (va || vb) return va ? 1 : -1;
-    return a < b ? -1 : a > b ? 1 : 0;
-  }
-  for (let i = 1; i <= 3; i++) {
-    const diff = Number(va[i]) - Number(vb[i]);
-    if (diff !== 0) return diff;
-  }
-  const pa = va[4]?.split('.') ?? [];
-  const pb = vb[4]?.split('.') ?? [];
-  // A release outranks every prerelease of itself.
-  if (pa.length === 0 || pb.length === 0) return pb.length - pa.length;
-  for (let i = 0; i < Math.min(pa.length, pb.length); i++) {
-    const x = pa[i]!;
-    const y = pb[i]!;
-    if (x === y) continue;
-    const xNumeric = /^\d+$/.test(x);
-    const yNumeric = /^\d+$/.test(y);
-    if (xNumeric && yNumeric) return Number(x) - Number(y);
-    if (xNumeric !== yNumeric) return xNumeric ? -1 : 1;
-    return x < y ? -1 : 1;
-  }
-  return pa.length - pb.length;
-}
+export const STARTED_BY_VSCODE: Record<string, string> = { STEPTIX_STARTED_BY: 'vscode' };
 
 /** How long a server Steptix started waits, with no work, before it stops
  *  itself — the value the setting descriptions suggest. */
@@ -489,11 +485,15 @@ const AUTO_START_IDLE_TIMEOUT_MINUTES = 60;
  * own default (3100) need not be it — a `STEPTIX_SERVER_URL` naming another port
  * would otherwise start a server where nobody is looking and time out.
  *
- * On Windows through `steptix.cmd`, which is how the installer means the
- * runtime to be run and where its "Node from STEPTIX_NODE, else PATH" rule
- * lives. Elsewhere there is no such script, so the same rule is applied here
- * and the launcher run by Node directly. The launcher adds the localhost
- * inspector for `serve` either way.
+ * A runtime the launcher laid out runs its own `dist/index.js` under the
+ * Node.js chosen for it, and that launcher adds the localhost inspector for
+ * `serve` (src/launcher/launch.ts).
+ *
+ * One from the Windows runtime installer runs, on Windows, through its
+ * `steptix.cmd`, which is how that installer means it to be run and where its
+ * "Node from STEPTIX_NODE, else PATH" rule lives. Elsewhere there is no such
+ * script, so the same rule is applied here and its launcher run by Node
+ * directly; that launcher adds the inspector too.
  */
 export function runtimeServeCommand(
   runtime: InstalledRuntime,
@@ -503,6 +503,13 @@ export function runtimeServeCommand(
   const platform = opts.platform ?? process.platform;
   const port = serverUrlPort(serverUrl);
   const args = `serve --port ${port} --idle-timeout ${AUTO_START_IDLE_TIMEOUT_MINUTES}`;
+  if (runtime.node) {
+    // Node's `shell: true` hands a Windows line to `cmd /d /s /c` inside a
+    // pair of quotes of its own, which `/s` strips, so each word is quoted
+    // and the line is not.
+    const quote = platform === 'win32' ? (v: string) => `"${v}"` : shellQuote;
+    return `${quote(runtime.node)} ${quote(path.join(runtime.dir, 'dist', 'index.js'))} ${args}`;
+  }
   if (platform === 'win32') return `"${path.join(runtime.dir, 'steptix.cmd')}" ${args}`;
   const node = (opts.env ?? process.env)['STEPTIX_NODE']?.trim() || 'node';
   return `${shellQuote(node)} ${shellQuote(path.join(runtime.dir, 'runtime-launcher.cjs'))} ${args}`;
@@ -593,7 +600,10 @@ export function decideServerAction(
         if (servePort !== null && (!servePort.ok || servePort.port !== serverUrlPort(serverUrl))) {
           return { kind: 'refuse-port', servePort };
         }
-        return { kind: 'spawn', config: { command: settings.command, cwd: settings.cwd, readyTimeoutSeconds } };
+        return {
+          kind: 'spawn',
+          config: { command: settings.command, cwd: settings.cwd, readyTimeoutSeconds, env: STARTED_BY_VSCODE },
+        };
       }
       if (!settings.useInstalledRuntime) {
         return {
@@ -614,7 +624,12 @@ export function decideServerAction(
       }
       return {
         kind: 'spawn',
-        config: { command: runtimeServeCommand(runtime, serverUrl), cwd: runtime.dir, readyTimeoutSeconds },
+        config: {
+          command: runtimeServeCommand(runtime, serverUrl),
+          cwd: runtime.dir,
+          readyTimeoutSeconds,
+          env: STARTED_BY_VSCODE,
+        },
         runtime,
       };
     }
@@ -770,7 +785,7 @@ export async function startServerAndWait(args: {
 
   log?.(`starting server: ${config.command} (cwd=${config.cwd}) → ${logPath}`);
   try {
-    spawn({ command: config.command, cwd: config.cwd, logPath });
+    spawn({ command: config.command, cwd: config.cwd, logPath, ...(config.env && { env: config.env }) });
   } catch (err) {
     return {
       kind: 'refused',
@@ -840,5 +855,47 @@ export function readLogTail(logPath: string): string | undefined {
         /* best effort */
       }
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stopping a server to replace it (SPEC-install.md §6.4)
+// ---------------------------------------------------------------------------
+
+/** Ask the server at `serverUrl` to shut down. True when it agreed or was
+ *  already shutting down; false when it refused, or nothing answered. */
+export async function requestServerShutdown(serverUrl: string, apiKey: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${normalizeBaseUrl(serverUrl)}/admin/shutdown`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+      body: JSON.stringify({ force: false }),
+      signal: AbortSignal.timeout(5_000),
+      redirect: 'error',
+    });
+    // 503: the shutdown gate is up already — an idle expiry got there first.
+    return res.ok || res.status === 503;
+  } catch {
+    return false;
+  }
+}
+
+/** Poll until nothing answers at `serverUrl`, or `timeoutMs` passes. True
+ *  when it went. */
+export async function waitUntilDown(args: {
+  serverUrl: string;
+  probe: HealthProbe;
+  sleep: (ms: number) => Promise<void>;
+  timeoutMs: number;
+  now?: () => number;
+  signal?: AbortSignal;
+}): Promise<boolean> {
+  const now = args.now ?? Date.now;
+  const deadline = now() + args.timeoutMs;
+  for (;;) {
+    const result = await args.probe(args.serverUrl, HEALTH_PROBE_TIMEOUT_MS, args.signal);
+    if (result.kind === 'down') return true;
+    if (args.signal?.aborted || now() >= deadline) return false;
+    await args.sleep(HEALTH_POLL_INTERVAL_MS);
   }
 }

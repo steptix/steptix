@@ -87,7 +87,7 @@ const os = require('node:os');
 const vscode = require('vscode');
 const { serverApiKey } = require('./credentials.cjs');
 
-const EXT_ID = 'pkent.steptix-vscode';
+const EXT_ID = 'steptix.steptix-vscode';
 const FIXTURE = 'calc-one-plus-one.md';
 
 /**

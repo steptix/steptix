@@ -37,7 +37,9 @@ export type ErrorCode =
   | 'STX030'
   | 'STX031'
   | 'STX032'
-  | 'STX033';
+  | 'STX033'
+  | 'STX034'
+  | 'STX035';
 
 /** A button shown beneath the inline banner — `command` is a VS Code command id. */
 export interface ErrorAction {
@@ -112,6 +114,20 @@ export interface ErrorContextMap {
    *  and `servePortSource` why (its own `-p`, the machine STEPTIX_SERVER_URL,
    *  or the default); `urlSource` is where `serverUrl` came from. */
   STX033: { serverUrl: string; urlSource: string; servePort: number; servePortSource: string };
+  /** No Steptix server could be had for the run (docs/specs/SPEC-install.md
+   *  §5.2, §8): the user declined the install, the install failed (`detail`
+   *  is why, in the user's terms), or this platform has no server yet
+   *  (`detail` is §8.4's sentence). */
+  STX034: { situation: 'declined' | 'failed' | 'unsupported'; detail?: string };
+  /** The running or chosen server does not match this extension's
+   *  major.minor, and the extension may not replace it (§6.4, §6.5): a
+   *  person started it, the user chose it, or it did not stop when asked. */
+  STX035: {
+    serverUrl: string;
+    serverVersion: string;
+    extensionVersion: string;
+    reason: 'person' | 'chosen' | 'not-stopped';
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +238,7 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
       `Could not auto-start the Steptix server for ${ctx.serverUrl} — ${ctx.reason}` +
       (ctx.logTail ? `. Last log lines: ${ctx.logTail}` : ''),
     fix: ctx.runtimeDir
-      ? `Check the server log at ${ctx.logPath ?? 'the server log'} (command "Steptix: Show Server Log"). Steptix started the runtime installed in ${ctx.runtimeDir}: make sure Node.js 22.21 or later is on PATH (or STEPTIX_NODE names it) and reinstall the runtime if its files are damaged, or set "steptix.serverAutoStart.command" and "steptix.serverAutoStart.cwd" in your USER settings to start something else — or start the server yourself.`
+      ? `Check the server log at ${ctx.logPath ?? 'the server log'} (command "Steptix: Show Server Log"). Steptix started the server installed in ${ctx.runtimeDir}: if its files are damaged, run "Steptix: Uninstall Server" and press Run to install it again, or set "steptix.serverAutoStart.command" and "steptix.serverAutoStart.cwd" in your USER settings to start something else — or start the server yourself.`
       : ctx.logPath
         ? `Check the server log at ${ctx.logPath} (command "Steptix: Show Server Log"), then fix "steptix.serverAutoStart.command" / "steptix.serverAutoStart.cwd" in your USER settings — or start the server yourself.`
         : 'Set "steptix.serverAutoStart.command" and "steptix.serverAutoStart.cwd" in your USER settings (they are machine-scoped and cannot be set per workspace) — or start the server yourself.',
@@ -256,7 +272,43 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
       `No Steptix server is running at ${ctx.serverUrl} (from ${ctx.urlSource}), and auto-start would start one on port ${ctx.servePort} (from ${ctx.servePortSource}) instead — so it did not start one`,
     fix: `Start the server for ${ctx.serverUrl} yourself with \`steptix serve -p ${portOf(ctx.serverUrl)}\`, add -p ${portOf(ctx.serverUrl)} after serve in "steptix.serverAutoStart.command", or point STEPTIX_SERVER_URL at port ${ctx.servePort}.`,
   }),
+  STX034: (ctx) =>
+    ctx.situation === 'declined'
+      ? {
+          diagnosis: 'The Steptix server is not installed, so this test could not run',
+          fix: 'Press Run again and choose Install, or run "Steptix: Install Server". From a terminal, npm i -g steptix installs it too.',
+        }
+      : ctx.situation === 'unsupported'
+        ? {
+            diagnosis: ctx.detail ?? 'Steptix does not run on this platform yet',
+            fix: 'Nothing was downloaded. Run your tests on a supported platform for now.',
+          }
+        : {
+            diagnosis: `Could not install the Steptix server${ctx.detail ? `: ${ctx.detail}` : ''}`,
+            fix: 'Press Run to try again. Without network access, install from the offline files on the Steptix release page instead.',
+          },
+  STX035: (ctx) =>
+    ctx.reason === 'not-stopped'
+      ? {
+          diagnosis: `The Steptix server at ${ctx.serverUrl} (${ctx.serverVersion}) does not match this extension (${ctx.extensionVersion}), and it did not stop when asked`,
+          fix: 'If a test is still running in it, let it finish. Then stop it with "Steptix: Stop Server" (or `steptix stop`) and press Run again.',
+        }
+      : ctx.reason === 'person'
+      ? {
+          diagnosis: `A Steptix server you started (${ctx.serverVersion}, at ${ctx.serverUrl}) does not match this extension (${ctx.extensionVersion})`,
+          fix: 'Stop it and press Run again, or start a matching one yourself with `steptix serve`.',
+        }
+      : {
+          diagnosis: `You chose Steptix server ${ctx.serverVersion}, but this extension is ${ctx.extensionVersion}`,
+          fix: `Install extension ${minorOf(ctx.serverVersion)} to match (Extensions view → Steptix → Install Another Version), or go back to the newest server with \`steptix server use newest\`.`,
+        },
 };
+
+/** `1.3` for `1.3.0`, for a sentence naming the extension to install. */
+function minorOf(version: string): string {
+  const m = /^(\d+)\.(\d+)\./.exec(version);
+  return m ? `${m[1]}.${m[2]}` : version;
+}
 
 /** `url`'s port as written, or its scheme's default — for a fix sentence, so
  *  never throws. */

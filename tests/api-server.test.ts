@@ -1054,6 +1054,26 @@ describe('server lifecycle', () => {
       expect(body.inspector).toBeNull();
     });
 
+    it('says who started it: VS Code, an MCP client, or a person (SPEC-install.md §6.4)', async () => {
+      // `person` unless the process that started it said otherwise, read once
+      // when the server is made.
+      expect((await call('GET', '/health')).body.startedBy).toBe('person');
+      const before = process.env['STEPTIX_STARTED_BY'];
+      process.env['STEPTIX_STARTED_BY'] = 'vscode';
+      let byVsCode: Awaited<ReturnType<typeof listenOnRandomPort>> | undefined;
+      try {
+        byVsCode = await listenOnRandomPort(createApiServer(testConfig).app);
+      } finally {
+        if (before === undefined) delete process.env['STEPTIX_STARTED_BY'];
+        else process.env['STEPTIX_STARTED_BY'] = before;
+      }
+      try {
+        expect((await (await fetch(`${byVsCode.baseUrl}/health`)).json()).startedBy).toBe('vscode');
+      } finally {
+        await closeServer(byVsCode.server);
+      }
+    });
+
     it('is not readable cross-origin, unlike the auth-gated routes', async () => {
       // /health is the only route that is both unauthenticated and readable,
       // and it publishes the inspector ws URL — whose UUID is all that stands

@@ -25,7 +25,7 @@ const path = require('node:path');
 const vscode = require('vscode');
 const { FakeApiClient } = require('../fakes/fake-api-client.cjs');
 
-const EXT_ID = 'pkent.steptix-vscode';
+const EXT_ID = 'steptix.steptix-vscode';
 const FIXTURES_DIR =
   process.env.STEPTIX_FIXTURES_DIR ||
   path.resolve(__dirname, '..', 'fixtures');

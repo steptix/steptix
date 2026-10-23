@@ -43,7 +43,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const vscode = require('vscode');
 
-const EXT_ID = 'pkent.steptix-vscode';
+const EXT_ID = 'steptix.steptix-vscode';
 const TEST_APP_URL = 'http://127.0.0.1:8787';
 
 /** The tool pairs either side of the switch, as 1-based step numbers. */

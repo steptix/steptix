@@ -63,7 +63,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const vscode = require('vscode');
 
-const EXT_ID = 'pkent.steptix-vscode';
+const EXT_ID = 'steptix.steptix-vscode';
 const TEST_APP_URL = 'http://localhost:8787';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

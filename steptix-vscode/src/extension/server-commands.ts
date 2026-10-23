@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { serverUrlPort } from 'steptix-runner-core';
+import * as path from 'node:path';
 import { getOutputChannel } from './output-channel.js';
+import type { RunServerSetup } from './server-setup.js';
 import { describeServerUrlOrigin } from './server-url.js';
 import { SERVER_MENU_COMMAND, type ServerStatusBar } from './server-status-bar.js';
 import {
@@ -9,11 +11,13 @@ import {
   defaultServerSpawner,
   describeHealth,
   describeServerVersion,
+  isLoopbackUrl,
   normalizeBaseUrl,
   readAutoStartSettings,
   startServerAndWait,
   HEALTH_PROBE_TIMEOUT_MS,
   type HealthProbe,
+  type RuntimeDiscovery,
   type ServerSpawner,
 } from './server-manager.js';
 
@@ -36,8 +40,10 @@ export function registerServerCommands(args: {
   /** Told when a manual start succeeds, so the run path's auto-start backoff
    *  doesn't refuse the next run on a stale failure. */
   onStarted?: (serverUrl: string) => void;
+  /** Installs a server first when none is installed (server-setup.ts). */
+  setup?: RunServerSetup;
 }): vscode.Disposable[] {
-  const { statusBar, logPath, onStarted } = args;
+  const { statusBar, logPath, onStarted, setup } = args;
   const probe = args.probe ?? defaultHealthProbe;
   const spawn = args.spawn ?? defaultServerSpawner;
   const log = (line: string): void =>
@@ -58,7 +64,19 @@ export function registerServerCommands(args: {
 
     const result = await probe(target.serverUrl, HEALTH_PROBE_TIMEOUT_MS);
     const config = readAutoStartSettings(vscode.workspace.getConfiguration('steptix'));
-    const action = decideServerAction(target.serverUrl, result, config);
+    // With nothing running, the server a Run would start, installed first if
+    // need be — the same as the run path (SPEC-install.md §5.2).
+    let discover: RuntimeDiscovery | undefined;
+    if (setup?.managed() && result.kind === 'down' && isLoopbackUrl(target.serverUrl)) {
+      const runtime = await setup.ensureRuntime({ signal: new AbortController().signal, log });
+      if (runtime.kind === 'fail') {
+        void vscode.window.showErrorMessage(`Steptix: ${runtime.payload.diagnosis}. ${runtime.payload.fix}`);
+        return;
+      }
+      if (runtime.kind === 'aborted') return;
+      discover = () => ({ runtimesDir: path.dirname(runtime.runtime.dir), runtime: runtime.runtime });
+    }
+    const action = decideServerAction(target.serverUrl, result, config, ...(discover ? [discover] : []));
 
     switch (action.kind) {
       case 'proceed':
