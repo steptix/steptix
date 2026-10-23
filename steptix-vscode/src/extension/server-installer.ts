@@ -38,12 +38,14 @@ import {
   nodeArchiveFrom,
   nodeExeIn,
   npmCliBeside,
+  npmScratchDir,
   npmSpecFor,
   partialName,
   pickServer,
   pidAlive,
   readServerChoice,
   releaseLock,
+  removeLeftoverDownloads,
   serverSatisfies,
   sha256Of,
   tryTakeLock,
@@ -404,6 +406,7 @@ export async function installServerVersion(
   });
 }
 
+/** Always called holding the download lock (installServer, installServerVersion). */
 async function downloadAndSetUp(deps: InstallerDeps, node: NodeChoice, spec: string): Promise<InstalledServer> {
   const run = deps.run ?? defaultRunner;
   const npmCli = npmCliBeside(node.exe, deps.platform);
@@ -414,7 +417,12 @@ async function downloadAndSetUp(deps: InstallerDeps, node: NodeChoice, spec: str
     );
   }
   const runtimesDir = path.join(deps.userRoot, 'runtimes');
-  const scratch = path.join(runtimesDir, partialName('npm'));
+  // In downloads/, not runtimes/: the launcher's `server install` removes
+  // every `.partial-*` in runtimes/ before it copies, this one included,
+  // while copying from it (§3.3). Holding the lock, anything left in
+  // downloads/ is a download that was cut off.
+  removeLeftoverDownloads(deps.userRoot);
+  const scratch = npmScratchDir(deps.userRoot);
   mkdirSync(scratch, { recursive: true });
   try {
     // `steptix@~1.4.0` and `steptix@1.4.2` read as "steptix 1.4.0" and "steptix 1.4.2".
@@ -473,7 +481,6 @@ function removeAbandonedPartials(dir: string): void {
   }
 }
 
-/** npm's reason, in a line: its first `npm error` line that says something. */
 /**
  * npm reached its registry, and the registry has no steptix release matching
  * what was asked (ETARGET), or no steptix package at all (a 404 for steptix
@@ -510,6 +517,7 @@ async function npmRegistry(
   }
 }
 
+/** npm's reason, in a line: its first `npm error` line that says something. */
 export function npmReason(stderr: string): string {
   const lines = stderr
     .split(/\r?\n/)

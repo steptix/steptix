@@ -21,7 +21,7 @@ import {
   npmNotPublished,
   npmReason,
 } from '../src/extension/server-installer.ts';
-import { downloadLockFile, globalPackageDir, listInstalledServers, pidAlive } from '../src/extension/install-core.ts';
+import { downloadLockFile, downloadsDir, globalPackageDir, listInstalledServers, pidAlive } from '../src/extension/install-core.ts';
 
 const made = [];
 function scratch() {
@@ -123,8 +123,31 @@ test('installs the newest matching server through npm, then sets it up as the ex
   assert.ok(install.includes('steptix@~1.4.0'), 'asks npm for the newest 1.4.x');
   assert.deepEqual(setUp.slice(1), ['server', 'install', '--json', '--source', 'extension']);
   // The scratch npm folder is gone, and nothing half-done is left.
+  assert.deepEqual(readdirSync(downloadsDir(root)).filter((n) => n.startsWith('.partial-')), []);
   assert.deepEqual(readdirSync(path.join(root, 'runtimes')).filter((n) => n.startsWith('.partial-')), []);
   assert.equal(existsSync(downloadLockFile(root)), false, 'the lock is released');
+});
+
+test('downloads into downloads/, after removing what a cut-off download left there, and leaves runtimes/ alone', async () => {
+  const root = scratch();
+  // A download a reload cut off, and an unfinished copy of the launcher's
+  // own in runtimes/, which is the launcher's to clean (§3.3, §8.3).
+  const leftover = path.join(downloadsDir(root), '.partial-npm-4242-dead');
+  mkdirSync(leftover, { recursive: true });
+  writeFileSync(path.join(leftover, 'half.tgz'), '');
+  const launcherPartial = path.join(root, 'runtimes', '.partial-1.4.2-4242-beef');
+  mkdirSync(launcherPartial, { recursive: true });
+  const npm = fakeRunner(root);
+
+  await installServer(deps(root, { run: npm.run }).deps, fakeNode(root), '1.4.0');
+
+  const install = npm.calls.find((args) => args[1] === 'install');
+  const prefix = install[install.indexOf('--prefix') + 1];
+  assert.equal(path.dirname(prefix), downloadsDir(root), `npm downloads into downloads/: ${prefix}`);
+  assert.match(path.basename(prefix), /^\.partial-npm-/);
+  assert.equal(existsSync(leftover), false, 'the cut-off download is removed');
+  assert.deepEqual(readdirSync(downloadsDir(root)), [], 'and this download once it is set up');
+  assert.equal(existsSync(launcherPartial), true, "the launcher's unfinished copy is left to the launcher");
 });
 
 test('installs nothing when a matching server is there already', async () => {
@@ -148,7 +171,7 @@ test("npm's failure is reported in its own words, and leaves nothing behind", as
     return true;
   });
   assert.deepEqual(listInstalledServers(path.join(root, 'runtimes')), []);
-  assert.deepEqual(readdirSync(path.join(root, 'runtimes')).filter((n) => n.startsWith('.partial-')), []);
+  assert.deepEqual(readdirSync(downloadsDir(root)).filter((n) => n.startsWith('.partial-')), []);
 });
 
 test('a registry that answers but has no matching release says so, and names the registry', async () => {
@@ -167,7 +190,7 @@ test('a registry that answers but has no matching release says so, and names the
     assert.match(err.details, /ETARGET/);
     return true;
   });
-  assert.deepEqual(readdirSync(path.join(root, 'runtimes')).filter((n) => n.startsWith('.partial-')), []);
+  assert.deepEqual(readdirSync(downloadsDir(root)).filter((n) => n.startsWith('.partial-')), []);
 });
 
 test("which npm failures mean the version is not published there", () => {
@@ -311,6 +334,7 @@ test('Cancel while npm downloads ends the install as cancelled, and leaves nothi
   };
   await assert.rejects(installServer(deps(root, { run, signal: cancel.signal }).deps, fakeNode(root), '1.4.0'), cancelled);
   assert.deepEqual(listInstalledServers(path.join(root, 'runtimes')), []);
+  assert.deepEqual(partials(downloadsDir(root)), [], 'the cancelled download is removed');
   assert.deepEqual(partials(path.join(root, 'runtimes')), []);
   assert.equal(existsSync(downloadLockFile(root)), false, 'the lock is released');
 });

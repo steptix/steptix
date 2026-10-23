@@ -821,7 +821,46 @@ export function releaseLock(file: string, pid: number = process.pid): void {
   }
 }
 
-/** A name for a scratch folder beside its final place, never picked up as one. */
+/** A name for a scratch folder, never picked up as a finished one. */
 export function partialName(base: string): string {
   return `.partial-${base}-${process.pid}-${randomBytes(4).toString('hex')}`;
+}
+
+/**
+ * Where the extension downloads a server with npm, before the launcher copies
+ * it into `runtimes/` (§3.3). Not in `runtimes/`: the launcher, before it
+ * copies, removes every `.partial-*` there as abandoned, which would take the
+ * package it is copying from with it. Only the holder of the download lock
+ * downloads, so anything left here is a download that was cut off.
+ */
+export function downloadsDir(userRoot: string): string {
+  return path.join(userRoot, 'downloads');
+}
+
+/** A new scratch folder for one npm download of the server. */
+export function npmScratchDir(userRoot: string): string {
+  return path.join(downloadsDir(userRoot), partialName('npm'));
+}
+
+/**
+ * Remove what a cut-off download left in `downloads/` (§8.3). Call it holding
+ * the download lock: then nothing else is downloading, and everything there
+ * is abandoned. A file still open is left for the next download.
+ */
+export function removeLeftoverDownloads(userRoot: string): void {
+  const dir = downloadsDir(userRoot);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith('.partial-')) continue;
+    try {
+      rmSync(path.join(dir, name), { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      // Still open: the next download tries again.
+    }
+  }
 }

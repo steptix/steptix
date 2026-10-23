@@ -35,7 +35,9 @@ sudo npx playwright install-deps chromium
 
 On any other distribution, `ldd` on the browser binary names what is missing.
 The VS Code that the integration suite downloads also loads libxkbfile and
-libsecret.
+libsecret. The extension's install test (`npm run test:install` in
+`steptix-vscode/`) unpacks the `.vsix` with `unzip`, which some
+distributions leave out (`sudo apt-get install unzip`).
 
 No keys or `.env` files are needed for the unit and integration suites.
 

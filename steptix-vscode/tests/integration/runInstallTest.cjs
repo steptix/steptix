@@ -240,6 +240,13 @@ async function makeMachine(name, scenario, shared) {
   const basePath = [prefixBin, ...(scenario.nodeOnPath ? [nodeDir] : []), pathWithoutNode(process.env.PATH ?? process.env.Path ?? '')].join(path.delimiter);
   const env = { ...process.env };
   for (const k of Object.keys(env)) if (/^(STEPTIX_|AI_|LIVE_STEPTIX_|Path$)/.test(k)) delete env[k];
+  // `npm run test:install` sets npm's own npm_config_* (the developer's
+  // userconfig, prefix, cache, …). Environment names ignore case on Windows,
+  // so the NPM_CONFIG_* below replaced them; on Linux and macOS both stay, and
+  // npm takes whichever comes last. Observed on Linux: npm_config_userconfig
+  // (~/.npmrc) won over the test registry's, so the install asked the public
+  // registry. A user's VS Code is not started by npm, so has none of these.
+  for (const k of Object.keys(env)) if (/^npm_config_/i.test(k)) delete env[k];
   Object.assign(env, {
     PATH: basePath,
     LOCALAPPDATA: home,

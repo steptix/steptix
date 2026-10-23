@@ -31,15 +31,16 @@ const RUN_SETTLE_MS = 5_000;
 
 /** What an install left half-done in the Steptix folder. */
 function partials() {
-  return ['runtimes', 'node'].flatMap((name) => {
+  return ['runtimes', 'node', 'downloads'].flatMap((name) => {
     const dir = path.join(ROOT(), name);
     return fs.existsSync(dir) ? fs.readdirSync(dir).filter((n) => n.startsWith('.partial-')).map((n) => `${name}/${n}`) : [];
   });
 }
 
-/** npm is downloading the server: its scratch folder has something in it. */
+/** npm is downloading the server: its scratch folder in downloads/ has
+ *  something in it (SPEC-install.md §3.3). */
 function npmDownloading() {
-  const dir = path.join(ROOT(), 'runtimes');
+  const dir = path.join(ROOT(), 'downloads');
   try {
     return fs.readdirSync(dir).some((n) => n.startsWith('.partial-npm-') && fs.readdirSync(path.join(dir, n)).length > 0);
   } catch {

@@ -4,16 +4,21 @@
  * cannot import the framework. Held to the launcher's (src/launcher/) here: if
  * the two drifted, a terminal and VS Code could see different servers, or the
  * extension start one the launcher would not (docs/specs/SPEC-install.md §4.2).
+ * The two also hand a download over: what the extension downloads, the
+ * launcher must be able to copy (§3.3).
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { listRuntimes, selectRuntime, writeChoice, readChoice, type Layout } from '../src/launcher/runtimes.js';
+import { installPackage, listRuntimes, selectRuntime, writeChoice, readChoice, type Layout } from '../src/launcher/runtimes.js';
 import { compareVersions } from '../src/launcher/versions.js';
 // The extension's source, as control-line-parity.test.ts imports runner-core's.
 import {
   compareVersions as extensionCompare,
+  globalPackageDir,
   listInstalledServers,
+  npmScratchDir,
+  partialName,
   pickServer,
   readServerChoice,
 } from '../steptix-vscode/src/extension/install-core.ts';
@@ -63,5 +68,26 @@ describe('the extension and the launcher', () => {
     const picked = pickServer(servers, '1.4.0', readServerChoice(layout.root));
     expect(picked).toMatchObject({ kind: 'run', chosen: true, server: { version: selectRuntime(runtimes, '1.4.0', readChoice(layout)).runtime?.version } });
     expect(fs.existsSync(layout.choiceFile)).toBe(true);
+  });
+
+  // The extension downloads a server with npm, then runs the package's own
+  // `server install`, which copies it into runtimes/ (§5.2 step 4). Before
+  // copying, the launcher removes every unfinished copy in runtimes/ as
+  // abandoned (§8.3), so the download must not be one of them (§3.3).
+  it('the launcher copies a server from the folder the extension downloads it into', async () => {
+    const scratchDir = npmScratchDir(layout.root);
+    const pkg = writeFakePackage(globalPackageDir(scratchDir, process.platform), { version: '1.4.2' });
+    const result = await installPackage(pkg, layout);
+    expect(result).toMatchObject({ installed: true, runtime: { version: '1.4.2' } });
+    expect(fs.existsSync(pkg), 'the launcher leaves the download to the extension').toBe(true);
+  });
+
+  it('a download kept in runtimes/ would be removed by the launcher while it copies from it', async () => {
+    // Why the download has its own folder: here the launcher's clean-up takes
+    // it. On Windows that once survived only because the launcher's working
+    // folder was inside it, which Windows will not remove.
+    const inRuntimes = path.join(layout.runtimesDir, partialName('npm'));
+    const pkg = writeFakePackage(globalPackageDir(inRuntimes, process.platform), { version: '1.4.2' });
+    await expect(installPackage(pkg, layout)).rejects.toThrow(/Could not copy Steptix 1\.4\.2/);
   });
 });

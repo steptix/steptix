@@ -11,6 +11,18 @@ carried a `-beta.N` suffix.
 
 ## Unreleased
 
+### Fixed — installing the server from VS Code on Linux and macOS
+
+- **The extension downloads the server into `<Steptix folder>/downloads/`,
+  not `runtimes/`.** The launcher, before it copies a package into
+  `runtimes/`, removes every unfinished copy there as abandoned, and that
+  included the extension's npm download it was copying from. Windows refused
+  to remove it (it was the launcher's working folder), so installs worked
+  there; on Linux and macOS the copy would have found nothing
+  ([#117](https://github.com/steptix/steptix/issues/117) finding 29). The
+  extension removes what a cut-off download left in `downloads/` at its next
+  download, and **Steptix: Uninstall Server** removes the folder.
+
 ### Added — the release test checks most of §10.1
 
 - **The extension's install test runs scenarios**, each on a machine of its
