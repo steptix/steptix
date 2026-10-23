@@ -362,6 +362,31 @@ When reviewing a diff, `/code-review` included, tag each finding that depends
 on what a model would send as observed, citing the run, or constructed. Rate
 a constructed one LOW unless the code is wrong whatever the model sends.
 
+## Review user journeys, not only code
+
+Unit tests and code review check each piece on one straight path. Users
+wander — they decline, cancel, reload, repeat, open a second window, come
+back later — and the bugs they hit sit between pieces. Run
+`/user-journey-review` ([the skill](.claude/skills/user-journey-review/SKILL.md)):
+
+- **After writing or changing a spec**, on the design.
+- **Before calling a feature done**, on what was built.
+
+It reports findings and fixes nothing until the user has chosen. When fixing:
+
+- **Show a user-facing change before building it.** Describe how a new
+  banner, dialog, button or piece of wording works, with a mockup for UI,
+  and build it once the user agrees.
+- **Write the agreed design into the spec first**, then build it.
+- **Give each fix a test on the journey that found it**, not only on the
+  straight path.
+
+When reviewing a diff, `/code-review` included, report as a finding any
+change that leaves a user waiting on an answer they may not see, offers a
+Cancel or Stop that does not stop the work, repeats a prompt or a download
+once per item of a batch, or shows a state in one place that another place
+contradicts.
+
 ## Seed gitignored files into a new worktree
 
 After creating a worktree (via `git worktree add` or the `EnterWorktree`
