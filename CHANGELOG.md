@@ -11,6 +11,37 @@ carried a `-beta.N` suffix.
 
 ## Unreleased
 
+### Added — releases, tested end to end; the Windows runtime installer is retired
+
+The last part of [SPEC-install.md](docs/specs/SPEC-install.md) (§10, §10.1).
+
+- **`node scripts/build-release.mjs`** builds what a release publishes into
+  `dist-release/`: the npm package, the offline file for the machine it runs
+  on (`steptix-<version>-<platform>-<arch>.tgz`, its dependencies inside it,
+  refused by npm on another platform), and the `.vsix`.
+- **`node scripts/release-test.mjs`** installs and runs exactly those files
+  the way a user would, from a private test registry, with no AI:
+  `npm i -g` and the first command's copy, the sample passing as code with
+  Node's network shut off, `steptix init` and **Create a sample project**
+  writing the same files, a project's own tool and compiled steps with and
+  without a local `steptix`, steps a newer version compiled, updating while a
+  server runs, which versions are kept, `server use`, `steptix uninstall`,
+  the offline file with no registry at all, and the extension's install test
+  on the `.vsix`. It ends by listing the §10.1 rows it does not check yet.
+- **`.github/workflows/release.yml`**, started by a `v<version>` tag, builds,
+  runs the release test and only then publishes: npm's `latest` tag with
+  provenance, the Marketplace, and a GitHub release with the `.vsix` and the
+  offline files. Windows x64 first (§3.2).
+- **Version numbers change only at release.** The bump-on-every-change rule
+  is gone from CLAUDE.md and CONTRIBUTING.md; an installed build is told
+  apart by the commit in the status bar. The package and the extension are
+  both `1.0.0`, the first release.
+- **Retired:** the Windows runtime installer (`packaging/runtime/`,
+  `scripts/build-runtime.mjs`, `scripts/verify-runtime.mjs`) and the
+  extension's support for the runtimes it laid out. Its beta has no installs
+  to support.
+- The extension has a PNG icon for the Marketplace.
+
 ### Added — files say which version wrote them
 
 The fourth part of [SPEC-install.md](docs/specs/SPEC-install.md) (§4.13).

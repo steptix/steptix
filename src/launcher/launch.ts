@@ -267,9 +267,9 @@ export async function prepareLaunch(args: string[], deps: LaunchDeps = {}): Prom
 
 /**
  * What an installed Steptix needs before it runs a command, that a checkout
- * run with `node dist/index.js` does without. Carried over from the Windows
- * runtime's launcher (packaging/runtime/runtime-launcher.cjs and
- * runtime-bootstrap.mjs), which this replaces:
+ * run with `node dist/index.js` does without. Carried over from the launcher
+ * of the retired Windows runtime installer (SPEC-install.md §10), which this
+ * replaces:
  *
  * - `steptix` and `steptix/*` imports that the project cannot resolve itself
  *   resolve to the runtime, so a test project's tools need no copy of

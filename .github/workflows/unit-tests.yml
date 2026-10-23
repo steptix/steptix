@@ -31,7 +31,6 @@ on:
       - 'steptix-vscode/docs/**'
       - 'steptix-vscode/stories/**'
       - 'flick-vscode/*.md'
-      - 'packaging/runtime/*.md'
   push:
     branches: [main]
     paths-ignore:
@@ -46,7 +45,6 @@ on:
       - 'steptix-vscode/docs/**'
       - 'steptix-vscode/stories/**'
       - 'flick-vscode/*.md'
-      - 'packaging/runtime/*.md'
   workflow_dispatch:
 
 permissions:

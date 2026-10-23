@@ -994,8 +994,8 @@ which is the expected result: the user still has Steptix installed.
   gains the launcher step: pick the version to run (§4.2), copy its own
   package into `runtimes/` on first use (§5.1), and hand the command to that
   folder. The package leaves out what only the Electron desktop app needs
-  (Electron, Vite, React, CodeMirror), as the runtime build already does
-  (`scripts/build-runtime.mjs`). The desktop app is not shipped at all.
+  (Electron, Vite, React, CodeMirror), as the retired Windows runtime build
+  did. The desktop app is not shipped at all.
 - **New:** the package ships its exact tested dependency versions
   (`npm-shrinkwrap.json`). npm ignores a package's lock file when someone
   installs it, so without this each user would get whatever versions are

@@ -20,18 +20,24 @@
 // It needs the network (npmjs.org through the registry, nodejs.org) and a
 // desktop session, and takes a few minutes. It leaves the folder for
 // diagnosis and prints where it is.
+//
+// The release test (scripts/release-test.mjs) runs it on the exact files a
+// release publishes: STEPTIX_INSTALL_TEST_TARBALL names the npm package to
+// publish in place of packing this checkout, and STEPTIX_INSTALL_TEST_VSIX
+// the extension to run in place of building this checkout's.
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { downloadAndUnzipVSCode } = require('@vscode/test-electron');
-// The registry and the server take their port as a flag, so they cannot
-// bind 0 and report back: the one case freeFetchablePort is for.
+// The server takes its port as a flag, so it cannot bind 0 and report back:
+// the one case freeFetchablePort is for.
 const { freeFetchablePort } = require('../../../tests/listen-fetchable.cjs');
+const { startTestRegistry } = require('../../../tests/npm-test-registry.cjs');
+const { packageVersionOf, unpackVsix } = require('../../../tests/release-files.cjs');
 
 /** Pinned with the other runners. */
 const VSCODE_VERSION = '1.95.0';
-const VERDACCIO = 'verdaccio@6.1.6';
 const LAUNCH_TIMEOUT_MS = 30 * 60_000;
 
 const repoRoot = path.resolve(__dirname, '..', '..', '..');
@@ -54,17 +60,23 @@ function pathWithoutNode(value) {
     .join(path.delimiter);
 }
 
-async function waitForRegistry(url) {
-  for (let i = 0; i < 240; i++) {
-    try {
-      const res = await fetch(`${url}-/ping`, { signal: AbortSignal.timeout(1_000) });
-      if (res.ok) return;
-    } catch {
-      // not up yet
-    }
-    await new Promise((r) => setTimeout(r, 500));
+/**
+ * The test harness, copied inside an unpacked extension so it runs as part of
+ * it. VS Code hands each extension its own `vscode` API object, chosen by
+ * where the calling file lives, so a test outside the extension's folder
+ * would stub the message boxes of an object the extension never sees.
+ *
+ * The harness's own packages (mocha, glob) come from this checkout through a
+ * `tests/node_modules` link. Nothing the extension loads resolves through
+ * `tests/`, so the extension still runs exactly as it was packed.
+ */
+function harnessInside(extensionPath) {
+  const target = path.join(extensionPath, 'tests', 'integration');
+  for (const dir of ['live', 'install']) {
+    fs.cpSync(path.join(__dirname, dir), path.join(target, dir), { recursive: true });
   }
-  throw new Error(`the registry did not start at ${url}`);
+  fs.symlinkSync(path.join(extensionRoot, 'node_modules'), path.join(extensionPath, 'tests', 'node_modules'), 'junction');
+  return path.join(target, 'live');
 }
 
 async function main() {
@@ -72,47 +84,19 @@ async function main() {
   console.log(`install test folder: ${scratch}`);
   const home = path.join(scratch, 'home');
   const ws = path.join(scratch, 'ws');
-  for (const dir of [home, ws, path.join(scratch, 'registry')]) fs.mkdirSync(dir, { recursive: true });
+  for (const dir of [home, ws]) fs.mkdirSync(dir, { recursive: true });
 
-  // The registry.
-  const registryPort = await freeFetchablePort();
-  const registry = `http://127.0.0.1:${registryPort}/`;
-  fs.writeFileSync(
-    path.join(scratch, 'registry', 'config.yaml'),
-    [
-      'storage: ./storage',
-      'uplinks:',
-      '  npmjs:',
-      '    url: https://registry.npmjs.org/',
-      'packages:',
-      "  'steptix':",
-      '    access: $all',
-      '    publish: $all',
-      "  '**':",
-      '    access: $all',
-      '    proxy: npmjs',
-      'log: { type: stdout, format: pretty, level: warn }',
-      '',
-    ].join('\n'),
-  );
-  const npmrc = path.join(scratch, 'npmrc');
-  fs.writeFileSync(npmrc, `registry=${registry}\n//127.0.0.1:${registryPort}/:_authToken=install-test-registry-token\n`);
-  const verdaccio = cp.spawn('npx', ['-y', VERDACCIO, '--config', './config.yaml', '--listen', `127.0.0.1:${registryPort}`], {
-    cwd: path.join(scratch, 'registry'),
-    shell: process.platform === 'win32',
-    stdio: ['ignore', fs.openSync(path.join(scratch, 'registry.log'), 'a'), fs.openSync(path.join(scratch, 'registry.log'), 'a')],
-  });
+  const testRegistry = await startTestRegistry(path.join(scratch, 'registry'));
+  const { url: registry, npmrc } = testRegistry;
   let status = 1;
   try {
-    await waitForRegistry(registry);
-
-    // This checkout's package, as npm would publish it (prepack builds dist/).
-    const tarball = run('npm', ['pack', repoRoot, '--pack-destination', scratch], { cwd: scratch }).trim().split(/\r?\n/).at(-1);
-    run('npm', ['publish', path.join(scratch, tarball), '--registry', registry], {
-      cwd: scratch,
-      env: { ...process.env, NPM_CONFIG_USERCONFIG: npmrc },
-    });
-    const version = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).version;
+    // The release's npm package, or this checkout's as npm would publish it
+    // (prepack builds dist/).
+    const tarball =
+      process.env.STEPTIX_INSTALL_TEST_TARBALL ??
+      path.join(scratch, run('npm', ['pack', repoRoot, '--pack-destination', scratch], { cwd: scratch }).trim().split(/\r?\n/).at(-1));
+    testRegistry.publish(tarball);
+    const version = packageVersionOf(tarball, path.join(scratch, 'tarball'));
     console.log(`published steptix ${version} to ${registry}`);
 
     // The Steptix folder and the project.
@@ -123,8 +107,15 @@ async function main() {
     fs.writeFileSync(path.join(ws, 'steptix.config.json'), JSON.stringify({ tests: { dir: './tests' } }, null, 2));
     fs.mkdirSync(path.join(ws, 'tests'));
 
-    // This checkout's extension, built.
-    run('npm', ['run', 'build'], { cwd: extensionRoot });
+    // The release's extension, unpacked, or this checkout's, built.
+    let extensionPath = extensionRoot;
+    let testsDir = path.join(__dirname, 'live');
+    if (process.env.STEPTIX_INSTALL_TEST_VSIX) {
+      extensionPath = unpackVsix(process.env.STEPTIX_INSTALL_TEST_VSIX, path.join(scratch, 'vsix'));
+      testsDir = harnessInside(extensionPath);
+    } else {
+      run('npm', ['run', 'build'], { cwd: extensionRoot });
+    }
 
     const codeExe = await downloadAndUnzipVSCode({ version: VSCODE_VERSION, cachePath: path.join(extensionRoot, '.vscode-test') });
     const cliJs = path.join(path.dirname(codeExe), 'resources', 'app', 'out', 'cli.js');
@@ -155,8 +146,8 @@ async function main() {
           cliJs,
           '--wait',
           ws,
-          `--extensionDevelopmentPath=${extensionRoot}`,
-          `--extensionTestsPath=${path.join(__dirname, 'live', 'index.cjs')}`,
+          `--extensionDevelopmentPath=${extensionPath}`,
+          `--extensionTestsPath=${path.join(testsDir, 'index.cjs')}`,
           `--user-data-dir=${path.join(scratch, 'vscode-data')}`,
           `--extensions-dir=${path.join(scratch, 'vscode-ext')}`,
           '--disable-workspace-trust',
@@ -219,11 +210,7 @@ async function main() {
       console.log(`npm downloaded ${count} package tarballs, ${Math.round(tarballs / 1e6)} MB`);
     }
   } finally {
-    if (process.platform === 'win32') {
-      cp.spawnSync('taskkill.exe', ['/PID', String(verdaccio.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-    } else {
-      verdaccio.kill();
-    }
+    testRegistry.stop();
   }
   console.log(`install test folder: ${scratch}`);
   process.exit(status);

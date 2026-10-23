@@ -210,7 +210,8 @@ class RunControllerRegistry implements vscode.Disposable {
    *  once per test in a Test Explorer batch. */
   private readonly autoStartGuard = new AutoStartGuard();
   /** Installing and updating servers (server-setup.ts), for every controller.
-   *  Unset under the test harness, which fakes the server. */
+   *  Unset under the test harness, which fakes the server, unless a test
+   *  hands one in through `setServerHooks`. */
   private serverSetup: RunServerSetup | undefined;
 
   setServerSetup(setup: RunServerSetup): void {
@@ -504,10 +505,12 @@ class RunControllerRegistry implements vscode.Disposable {
     healthProbe?: HealthProbe;
     spawnServer?: ServerSpawner;
     keepAliveIntervalMs?: number;
+    serverSetup?: RunServerSetup | null;
   }): void {
     if (hooks.keepAliveIntervalMs !== undefined) {
       this.keepAliveIntervalMs = hooks.keepAliveIntervalMs;
     }
+    if (hooks.serverSetup !== undefined) this.serverSetup = hooks.serverSetup ?? undefined;
     if (hooks.healthProbe) {
       this.healthProbe = hooks.healthProbe;
       // The status bar polls independently of any run, so it needs the fake
@@ -2065,11 +2068,14 @@ export interface SteptixTestHooks {
    *  breakpoint keep-alive cadence. A raw fetch in the run path would bypass
    *  the harness's fake server and hit a real socket, so the probe has to be
    *  injectable the same way the client is; the cadence is injectable so a
-   *  test can observe the ping rather than only the timer. */
+   *  test can observe the ping rather than only the timer. `serverSetup`
+   *  stands in for ServerSetup, which the harness leaves unset, so a test can
+   *  hand the run path an installed runtime; null unsets it again. */
   setServerHooks: (hooks: {
     healthProbe?: HealthProbe;
     spawnServer?: ServerSpawner;
     keepAliveIntervalMs?: number;
+    serverSetup?: RunServerSetup | null;
   }) => void;
   /** `inspector` the active controller recorded from its pre-run probe.
    *  `undefined` (no health data) and `null` (server has no inspector) are

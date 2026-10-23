@@ -57,13 +57,19 @@ It was removed in favour of the native variant — see
 If you still have `pkent.testbench` installed, uninstall it; it is no longer
 built from this repo.
 
-## Steptix: bump the patch version on every change
+## Steptix: version numbers change only at release
 
-Whenever you change code that ends up bundled into the Steptix VS Code
-extension (anything under `steptix-vscode/`, **and** anything under
-`runner-core/` since that's a `file:` dep bundled into the extension's
-`dist/`), bump the patch field in `steptix-vscode/package.json`
-(e.g. `0.1.1` → `0.1.2`) as part of the same change.
+Leave the `version` in `package.json` and `steptix-vscode/package.json`
+alone in ordinary changes. Each holds the version that will be released
+next, and is changed only when releasing (docs/specs/SPEC-install.md §3.1):
+a patch for fixes, a new minor for features (both pieces together, since the
+package and the extension share major.minor, §4.2), a new major for a
+breaking change. Parallel pull requests then never conflict on it.
+
+Builds between releases share a number, so tell them apart by the commit
+they were built from. The extension shows it in the status bar and the
+Output panel, for example *Steptix 1.0.0 · 3f9a1c2*, with *· modified* for a
+build with uncommitted changes; the server reports both at `/health`.
 
 The install/verify loop is then:
 
@@ -72,13 +78,12 @@ cd <main-checkout>\steptix-vscode
 npm run build
 npm run package
 & "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd" `
-    --install-extension steptix-vscode-<new-version>.vsix --force
+    --install-extension steptix-vscode-<version>.vsix --force
 ```
 
-Then reload the VS Code window. The Extensions panel will show the new
-version number, which is how the user confirms the install actually picked
-up the new code — without a bump, the installed copy and the stale one share
-a directory name and there's no visible signal that anything changed.
+Then reload the VS Code window and check that the status bar's commit is
+the one you built. The Extensions panel's number says nothing about which
+build is installed.
 
 Plain `code` from PowerShell on this machine resolves to the GUI exe, which
 rejects `--install-extension`. Always invoke the CLI shim at the full path
@@ -90,22 +95,19 @@ above.
 machine-global — run it from exactly one checkout, normally the main one.
 Installing from two (a worktree and main, or two worktrees) collides:
 
-- **Same version in both** — the likely case, since two branches off one
-  commit read the same version until someone bumps — and they extract into
-  the *same* `steptix.steptix-vscode-<version>/` directory. Last writer wins,
-  `--force` suppresses any prompt, and the Extensions panel shows that version
-  either way: no signal about whose code is live. Genuinely concurrent
-  installs are worse than last-write-wins, since two processes unzipping into
-  one directory can leave a mix of both builds. Both also rewrite the shared
-  `extensions.json`, so a race there can drop an entry.
+- **Same version in both** — the usual case, since the number changes only at
+  release — and they extract into the *same*
+  `steptix.steptix-vscode-<version>/` directory. Last writer wins, `--force`
+  suppresses any prompt, and the Extensions panel shows that version either
+  way. Genuinely concurrent installs are worse than last-write-wins, since two
+  processes unzipping into one directory can leave a mix of both builds. Both
+  also rewrite the shared `extensions.json`, so a race there can drop an entry.
 - **Different versions** — both directories survive, but VS Code activates
-  only the highest version of an extension ID, in *every* window. The worktree
-  on the lower patch number then silently runs the other checkout's build
-  while the Extensions panel truthfully reports the higher one.
+  only the highest version of an extension ID, in *every* window. The checkout
+  on the lower number then silently runs the other checkout's build.
 
-Note the second case defeats the bump rule rather than being saved by it: the
-version number is honest about what is loaded and still says nothing about
-which checkout it came from.
+In both cases the status bar's commit says which build is live, and the
+version number does not.
 
 To work on the extension in a worktree, don't install it — run an Extension
 Development Host from that worktree instead:
@@ -117,16 +119,15 @@ npm run build
     --extensionDevelopmentPath="$PWD" <folder-to-open>
 ```
 
-**The path must be absolute.** Measured 2026-09-23: with VS Code already
-running, `--extensionDevelopmentPath=.` opened a window titled
-`[Extension Development Host]` that scanned the root of the C: drive for the
+**The path must be absolute.** With VS Code already running, a relative
+`--extensionDevelopmentPath=.` opens a window titled
+`[Extension Development Host]` that scans the root of the drive for the
 extension (its renderer.log fills with `Unable to read file
 '\$Recycle.Bin\package.json'` from `scanExtensionsUnderDevelopment`) and then
-quietly ran the INSTALLED copy — Running Extensions showed 0.5.143 where the
-worktree was 0.5.145. The folder argument beside it resolved correctly; only
-the development path did not. `"$PWD"` expands to the absolute path before the
-shim sees it. Check Running Extensions for the worktree's version before
-trusting the window.
+quietly runs the INSTALLED copy. The folder argument beside it resolves
+correctly; only the development path does not. `"$PWD"` expands to the
+absolute path before the shim sees it. Check that the window's status bar
+shows the worktree's commit before trusting it.
 
 The dev host loads from `--extensionDevelopmentPath` in place of the installed
 copy, for that window only, so two worktrees can drive their own builds at the
@@ -152,18 +153,20 @@ The live integration tests were never affected: their harness passes its own
 `--extensions-dir` under the worktree's `.vscode-test/`, so the installed
 extension isn't on the path at all.
 
-## Runtime installer: every build is tested end to end
+## Releases: every release is tested end to end
 
-Build the Windows runtime installer only with `node scripts/build-runtime.mjs`.
-It runs `scripts/verify-runtime.mjs` on every installer it compiles: install,
-the CLI through `steptix.cmd`, a VS Code Run that auto-starts the installed
-server through `steptix.cmd`, refusals while that server runs, `steptix` on
-PATH, an upgrade to a newer version that removes it and a rollback, and
-uninstall through the Installed Apps entry.
-The installer only moves into `dist-runtime/` if all of that passes. Never
-compile `packaging/runtime/runtime.nsi` by hand, never add a way to skip the
-test, and never ship anything from `dist-runtime/unverified/`. See
-[packaging/runtime/README.md](packaging/runtime/README.md).
+Publish only through `.github/workflows/release.yml`, which a `v<version>`
+tag starts. It builds the files a release publishes with
+`node scripts/build-release.mjs` (the npm package, the offline file for its
+platform and the `.vsix`, into `dist-release/`), installs and runs exactly
+those files with `node scripts/release-test.mjs`, and publishes only when
+every check passes: npm with its provenance record, the Marketplace, and a
+GitHub release. Never publish a package or a `.vsix` by hand, never add a way
+to skip a check, and never publish files the release test did not run. See
+[SPEC-install.md §10](docs/specs/SPEC-install.md#10-what-changes-in-the-repo).
+
+The release test ends by listing the rows of §10.1 it does not check yet.
+When you add a check, take its row off that list.
 
 ## Unit tests pass on Windows, Linux and macOS
 
@@ -171,6 +174,13 @@ The four unit suites must pass on all three: root `npm test`, and `npm test` in
 `runner-core/`, `flick-vscode/` and `steptix-vscode/`. Product behaviour must
 be on par too: what works on one platform needs a counterpart on the others,
 not a platform-specific gap that a test works around.
+
+Releasing is the one deliberate exception
+([SPEC-install.md §3.2](docs/specs/SPEC-install.md#32-platforms-in-order)):
+Windows x64 is published first, and each other platform once its files pass
+the release test there. The exception covers publishing and release testing
+only. Write the code for all three, and do not mistake the release matrix
+for a gap to fix.
 
 - **Build fixture paths that are native to the platform.** Use
   `path.resolve(path.sep, 'proj')`, `os.tmpdir()`, or `path.join` from such a
