@@ -18,6 +18,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const vscode = require('vscode');
+const { reportError } = require('steptix-runner-core');
 const { FakeApiClient } = require('../fakes/fake-api-client.cjs');
 
 const EXT_ID = 'steptix.steptix-vscode';
@@ -522,6 +523,69 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
 
       fake.end();
       await waitFor('idle', () => !hooks.isRunning());
+    });
+
+    it('Stop while the install question is unanswered: the run is aborted at once', async () => {
+      // ensureRuntime waits on the install question, which VS Code shows
+      // until it is answered and no signal can withdraw. This one is never
+      // answered, and ignores the signal, as a real question does.
+      let asked = false;
+      hooks.setServerHooks({
+        serverSetup: {
+          managed: () => true,
+          ensureRuntime: () => {
+            asked = true;
+            return new Promise(() => {});
+          },
+          checkRunning: async () => ({ kind: 'use' }),
+        },
+      });
+      probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
+      await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 10, useInstalledRuntime: true });
+
+      void vscode.commands.executeCommand('steptix.runAll');
+      await waitFor('the install question asked', () => asked);
+      assert.equal(hooks.isRunning(), true);
+
+      await vscode.commands.executeCommand('steptix.stop');
+      await waitFor('idle', () => !hooks.isRunning());
+      assert.equal(hooks.lastDoneStatus(), 'aborted');
+      assert.equal(hooks.lastRunError(), null);
+      assert.deepEqual(spawns, []);
+      assert.equal(fake.streamCallCount, 0);
+    });
+
+    it('a Test Explorer batch with no server installed asks once and skips the rest', async () => {
+      // SPEC-install.md §5.2, "A batch asks once": the first test asks, and
+      // after Cancel (or an install that fails) no other test could run, so
+      // none of them asks again. Each test of a batch re-runs the pre-run
+      // phase, so without that every test would put up the question.
+      let asked = 0;
+      hooks.setServerHooks({
+        serverSetup: {
+          managed: () => true,
+          ensureRuntime: async () => {
+            asked += 1;
+            return { kind: 'fail', payload: reportError('STX034', { situation: 'declined' }) };
+          },
+          checkRunning: async () => ({ kind: 'use' }),
+        },
+      });
+      probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
+      await setAutoStart({ command: '', cwd: '', readyTimeoutSeconds: 10, useInstalledRuntime: true });
+
+      await hooks.discoveryReady();
+      const counts = await hooks.runBatchByUris(
+        ['test-with-steps.md', 'test-shared-a.md', 'test-shared-b.md'].map(fixtureUri),
+      );
+
+      assert.equal(asked, 1, 'only the first test asks about the server');
+      assert.deepEqual(counts, { passed: 0, failed: 1, skipped: 2 });
+      assert.match(hooks.batchFailureMessages()[0]?.text ?? '', /^STX034: /, 'the first test says why');
+      const skipLines = hooks.batchOutput().filter((l) => l === 'Skipped: the Steptix server is not installed.');
+      assert.equal(skipLines.length, 1, `one line for the skipped tests: ${JSON.stringify(hooks.batchOutput())}`);
+      assert.deepEqual(spawns, []);
+      assert.equal(fake.streamCallCount, 0);
     });
 
     it('a runtime that never comes up: STX028 names the runtime, not a setting nobody wrote', async () => {

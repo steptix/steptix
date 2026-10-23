@@ -21,7 +21,8 @@
     "Testing"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:steptix.welcome"
   ],
   "contributes": {
     "jsonValidation": [
@@ -448,7 +449,8 @@
       },
       {
         "command": "steptix.welcome",
-        "title": "Steptix: Welcome"
+        "title": "Steptix: Welcome",
+        "icon": "$(rocket)"
       },
       {
         "command": "steptix.chooseAi",
@@ -457,6 +459,11 @@
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "steptix.welcome",
+          "when": "view == steptix.runner",
+          "group": "navigation@0"
+        },
         {
           "command": "steptix.openLastReport",
           "when": "view == steptix.runner",

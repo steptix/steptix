@@ -45,4 +45,56 @@ function packageVersionOf(tarball, dir) {
   return JSON.parse(fs.readFileSync(path.join(dir, 'package', 'package.json'), 'utf8')).version;
 }
 
-module.exports = { packageVersionOf, unpackVsix, untar };
+/**
+ * A copy of a packed `steptix` tarball, repacked as `newVersion` in `dir`,
+ * for the tests that need another version to update to or fall behind.
+ * Repacked rather than rebuilt, so it is the same code under another number.
+ * Resolves to the new tarball's path.
+ */
+function repackAs(tarball, newVersion, dir) {
+  untar(tarball, dir);
+  const manifestPath = path.join(dir, 'package', 'package.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  manifest.version = newVersion;
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const out = run('npm', ['pack', '--ignore-scripts', '--pack-destination', dir], {
+    cwd: path.join(dir, 'package'),
+    shell: process.platform === 'win32',
+  });
+  return path.join(dir, out.trim().split(/\r?\n/).at(-1));
+}
+
+/**
+ * Remove a test's folder. Links inside it (the install test links
+ * `tests/node_modules` to this checkout's) are unlinked first, without
+ * following them, so what they point to is never touched. A test machine
+ * holds Node.js, npm caches and browsers, gigabytes in all, so a run that
+ * passed removes its own; one that failed is kept for diagnosis.
+ */
+function removeTree(dir) {
+  const unlinkLinks = (d) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const p = path.join(d, e.name);
+      if (fs.lstatSync(p).isSymbolicLink()) {
+        // A junction or a directory symlink is removed as a directory entry.
+        try {
+          fs.rmdirSync(p);
+        } catch {
+          fs.unlinkSync(p);
+        }
+      } else if (e.isDirectory()) {
+        unlinkLinks(p);
+      }
+    }
+  };
+  unlinkLinks(dir);
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+}
+
+module.exports = { packageVersionOf, removeTree, repackAs, unpackVsix, untar };

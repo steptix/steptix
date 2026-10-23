@@ -73,6 +73,7 @@ const HOST_MSG_TYPES = new Set([
   "running",
   "breakpointStop",
   "batchBanner",
+  "serverSetup",
   "skillRerunAvailable",
   "compileEvent",
   "compileProgress",
@@ -192,6 +193,55 @@ function BatchBanner({ state }) {
       >
         Open Test Results
       </a>
+    </div>
+  );
+}
+
+/**
+ * Banner shown at the top of the webview while no Steptix server is
+ * installed, or one is installing (docs/specs/SPEC-install.md §5.2). Its
+ * button opens the welcome page, which installs the server and sets up the
+ * AI, the browser and a first test; while the server installs, Cancel stops
+ * the install, as the progress notification's Cancel does. Renders nothing
+ * when `state` is null or says nothing is missing.
+ */
+function ServerBanner({ state }) {
+  if (!state || (state.state !== "not-installed" && state.state !== "installing")) return null;
+  const installing = state.state === "installing";
+  const openWelcome = () => hostBridge.postOpenWelcome();
+  const cancelInstall = () => hostBridge.postCancelInstall();
+  return (
+    <div
+      role="status"
+      style={{
+        padding: "8px 12px",
+        background: installing
+          ? "var(--vscode-inputValidation-infoBackground, #063b49)"
+          : "var(--vscode-inputValidation-warningBackground, #352a05)",
+        borderBottom: `1px solid ${installing
+          ? "var(--vscode-inputValidation-infoBorder, #007acc)"
+          : "var(--vscode-inputValidation-warningBorder, #b89500)"}`,
+        fontSize: "12px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+      }}
+    >
+      <span>
+        {installing
+          ? `Installing the Steptix server…${state.progress ? ` ${state.progress}` : ""}`
+          : "The Steptix server is not installed. Tests need it to run."}
+      </span>
+      <div style={{ display: "flex", gap: 6 }}>
+        <button className="tb-btn" onClick={openWelcome} title="Open the welcome page: the server, the AI, the browser and a first test">
+          Set up Steptix…
+        </button>
+        {installing && (
+          <button className="tb-btn" onClick={cancelInstall} title="Stop the install. Nothing half-installed is kept, and you can install again at any time">
+            Cancel
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -1154,6 +1204,8 @@ function SteptixRunner() {
    * banner doesn't need to linger.
    */
   const [batchBanner, setBatchBanner] = useState(null);
+  /** The server banner's state, as the host's `serverSetup` last said. */
+  const [serverSetup, setServerSetup] = useState(null);
   /**
    * The Recording block's state, as the host holds it, or null when nothing
    * is recording (stories/steptix-record-steps.md). Window-wide — one
@@ -1353,6 +1405,9 @@ function SteptixRunner() {
           break;
         case "batchBanner":
           setBatchBanner(msg.state);
+          break;
+        case "serverSetup":
+          setServerSetup({ state: msg.state, progress: msg.progress });
           break;
         case "skillRerunAvailable":
           setSkillRerun(msg.failure);
@@ -1902,6 +1957,7 @@ function SteptixRunner() {
     return (
       <div style={{ fontFamily: "var(--vscode-font-family)", fontSize: "var(--vscode-font-size, 13px)", color: "var(--vscode-foreground)" }}>
         <style>{PANEL_CSS}</style>
+        <ServerBanner state={serverSetup} />
         <BatchBanner state={batchBanner} />
         <RecordingPanel state={recording} />
         <div style={{ padding: 16 }}>
@@ -1927,6 +1983,7 @@ function SteptixRunner() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", fontFamily: "var(--vscode-font-family)", fontSize: "var(--vscode-font-size, 13px)", color: "var(--vscode-foreground)", background: "var(--vscode-sideBar-background)" }}>
+      <ServerBanner state={serverSetup} />
       <BatchBanner state={batchBanner} />
       <style>{PANEL_CSS}</style>
 

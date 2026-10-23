@@ -122,6 +122,26 @@ class FakeLm {
      *  first. Failing only the LAST call is what catches a try/catch narrowed
      *  to the prompt loop, leaving the response count outside it. */
     this.countTokensFailsAfter = 0;
+    /**
+     * What `context.languageModelAccessInformation.canSendRequest` answers for
+     * this seat's models, when the fake is also passed as the bridge's
+     * `access`: undefined until a request went through (VS Code has not asked
+     * yet), true after (the user chose Allow). Set it to say otherwise.
+     */
+    this.access = undefined;
+    this.modelsChangedEmitter = new vscode.EventEmitter();
+    /** `vscode.lm.onDidChangeChatModels`; {@link modelsChanged} fires it. */
+    this.onDidChangeChatModels = this.modelsChangedEmitter.event;
+  }
+
+  /** Say the models changed, as VS Code does when Copilot signs in or out. */
+  modelsChanged() {
+    this.modelsChangedEmitter.fire();
+  }
+
+  /** `LmAccess.canSendRequest`: see {@link access}. */
+  canSendRequest() {
+    return this.access;
   }
 
   /** Reject the next request the way a revoked consent does. */
@@ -204,6 +224,8 @@ class FakeLm {
         if (carriesImage && fake.rejectImages === 'send') {
           throw new Error(fake.imageRejectionMessage);
         }
+        // A request that went through was allowed.
+        fake.access = true;
         const fragments = fake.reply;
         const failMidStream = carriesImage && fake.rejectImages === 'stream';
         const text = (async function* () {

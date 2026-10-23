@@ -24,6 +24,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  writeFileSync,
   writeSync,
 } from 'node:fs';
 import * as path from 'node:path';
@@ -655,6 +656,90 @@ export function readPathChanges(userRoot: string): PathChange[] {
       : [];
   } catch {
     return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// An install the user said yes to (§8.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Written when an install the user said yes to starts, and removed when it
+ * finishes, fails or is cancelled. Only a window that goes away mid-install
+ * leaves it, so that install carries on at the next start without asking
+ * again. A file in the Steptix folder rather than VS Code's globalState: it
+ * is per user all the same, and VS Code keeps globalState in memory while it
+ * runs extension tests, so only a file can be checked across two launches.
+ *
+ * It names the extension host that wrote it. Another window starting while
+ * that host still installs must not take the install for one cut off.
+ */
+export function installWantedFile(userRoot: string): string {
+  return path.join(userRoot, 'install-wanted.json');
+}
+
+export interface InstallWanted {
+  /** The user also asked for `steptix` in every terminal (§5.5). */
+  addToPath: boolean;
+  /** The extension host installing, or null in a note written before the
+   *  note named one. */
+  pid: number | null;
+}
+
+/** The install the user said yes to and nothing has finished, or null. */
+export function readInstallWanted(userRoot: string): InstallWanted | null {
+  try {
+    const raw = JSON.parse(readFileSync(installWantedFile(userRoot), 'utf-8')) as unknown;
+    if (typeof raw !== 'object' || raw === null) return null;
+    const { addToPath, pid } = raw as { addToPath?: unknown; pid?: unknown };
+    return { addToPath: addToPath === true, pid: typeof pid === 'number' ? pid : null };
+  } catch {
+    return null;
+  }
+}
+
+/** Note an install this extension host starts. */
+export function writeInstallWanted(userRoot: string, wanted: { addToPath: boolean }, pid: number = process.pid): void {
+  mkdirSync(userRoot, { recursive: true });
+  writeFileSync(installWantedFile(userRoot), JSON.stringify({ addToPath: wanted.addToPath, pid }) + '\n');
+}
+
+/**
+ * Forget the note. With `pid`, only a note that host wrote, so an install
+ * that ends here never forgets another window's.
+ */
+export function clearInstallWanted(userRoot: string, pid?: number): void {
+  if (pid !== undefined && readInstallWanted(userRoot)?.pid !== pid) return;
+  rmSync(installWantedFile(userRoot), { force: true });
+}
+
+/**
+ * Whether a note is another window's install still running, rather than one a
+ * reload or a closed VS Code cut off: the host that wrote it is alive and is
+ * not this one. A reload starts the new extension host while the old one may
+ * still be exiting, so the caller asks again for a few seconds before it
+ * decides.
+ */
+export function installWantedByOther(
+  wanted: InstallWanted,
+  isAlive: (pid: number) => boolean = pidAlive,
+  self: number = process.pid,
+): boolean {
+  return wanted.pid !== null && wanted.pid !== self && isAlive(wanted.pid);
+}
+
+/** Whether another process holds `file`'s lock: one that is alive and not
+ *  this one (the download lock, when another window installs). */
+export function lockHeldByOther(
+  file: string,
+  isAlive: (pid: number) => boolean = pidAlive,
+  self: number = process.pid,
+): boolean {
+  try {
+    const owner = JSON.parse(readFileSync(file, 'utf-8')) as { pid?: unknown };
+    return typeof owner.pid === 'number' && owner.pid !== self && isAlive(owner.pid);
+  } catch {
+    return false;
   }
 }
 

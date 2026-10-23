@@ -244,6 +244,31 @@ type ServerReadiness =
   | { kind: 'aborted' }
   | { kind: 'fail'; payload: ErrorPayload };
 
+/**
+ * `work`'s answer, or `aborted` the moment the run is stopped. The install
+ * side waits on things that cannot be cancelled: a question VS Code shows
+ * until it is answered, an install another caller started. Stop ends the
+ * run without them; `work` carries on, so an install the user said yes to
+ * still finishes.
+ */
+function unlessAborted<T>(signal: AbortSignal, work: Promise<T>): Promise<T | { kind: 'aborted' }> {
+  if (signal.aborted) return Promise.resolve({ kind: 'aborted' });
+  return new Promise((resolve, reject) => {
+    const onAbort = () => resolve({ kind: 'aborted' });
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
 /** Outcome reported back to callers — used by tests + commands. */
 export interface RunOutcome {
   ok: boolean;
@@ -1574,23 +1599,24 @@ export class RunController {
    *
    * Runs after env resolution has produced STEPTIX_SERVER_URL and before any session
    * is created. The run's AbortController already exists, so Stop cancels a
-   * wedged health wait or spawn poll — and an abort during this phase is an
-   * `aborted` run, never an STX028.
+   * wedged health wait or spawn poll, and the install side's waits too: an
+   * unanswered install question, an install in progress. An abort during
+   * this phase is an `aborted` run, never an STX028.
    *
    * The full decision tree, in order:
-   *   2. healthy + service matches ⇒ proceed, remember `inspector`.
-   *   3. service mismatch          ⇒ STX027. Never spawn on a foreign port.
-   *   4. reachable, unidentifiable ⇒ proceed on the LEGACY path. An older
+   *   1. healthy + service matches ⇒ proceed, remember `inspector`.
+   *   2. service mismatch          ⇒ STX027. Never spawn on a foreign port.
+   *   3. reachable, unidentifiable ⇒ proceed on the LEGACY path. An older
    *      steptix server whose Express 404s /health is indistinguishable from a
    *      foreign one by this probe, so we neither spawn nor refuse; the
-   *      authenticated calls that follow sort it out via the TB01x mapping.
-   *   5. down, but remote / nothing to start ⇒ proceed and let the existing
+   *      authenticated calls that follow sort it out via the STX01x mapping.
+   *   4. down, but remote / nothing to start ⇒ proceed and let the existing
    *      STX010 path report it (with the new settings hint).
-   *   6. down + localhost + a command setting or an installed runtime
+   *   5. down + localhost + a command setting or an installed runtime
    *      ⇒ spawn, then poll until healthy.
    *
-   * Returns `null` to proceed, or an ErrorPayload the caller fails the run
-   * with. `aborted: true` means the user pressed Stop mid-phase.
+   * Returns `proceed`, `fail` with the ErrorPayload the caller fails the run
+   * with, or `aborted` when the user pressed Stop mid-phase.
    */
   private async ensureServerReady(args: {
     serverUrl: string;
@@ -1613,14 +1639,14 @@ export class RunController {
     // need be, and the installed runtime is what `decideServerAction` starts.
     const setup = this.server.setup?.managed() ? this.server.setup : undefined;
     if (setup && probe.kind === 'healthy') {
-      const verdict = await setup.checkRunning({
+      const verdict = await unlessAborted(signal, setup.checkRunning({
         serverUrl,
         health: probe.health,
         signal,
         log,
         probe: this.healthProbe,
         apiKey: args.apiKey,
-      });
+      }));
       if (verdict.kind === 'aborted' || signal.aborted) return { kind: 'aborted' };
       if (verdict.kind === 'fail') return { kind: 'fail', payload: verdict.payload };
       if (verdict.kind === 'replaced') {
@@ -1630,7 +1656,7 @@ export class RunController {
     }
     let discover: RuntimeDiscovery | undefined;
     if (setup && probe.kind === 'down' && isLoopbackUrl(serverUrl)) {
-      const runtime = await setup.ensureRuntime({ signal, log });
+      const runtime = await unlessAborted(signal, setup.ensureRuntime({ signal, log }));
       if (runtime.kind === 'aborted' || signal.aborted) return { kind: 'aborted' };
       if (runtime.kind === 'fail') {
         log(`${runtime.payload.code} ${runtime.payload.diagnosis}`);

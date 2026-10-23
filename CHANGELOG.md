@@ -11,6 +11,73 @@ carried a `-beta.N` suffix.
 
 ## Unreleased
 
+### Added — the release test checks most of §10.1
+
+- **The extension's install test runs scenarios**, each on a machine of its
+  own, with one or more VS Code launches:
+  - Node.js on PATH, where only the server is downloaded and runs on it;
+  - npm's copy set up with nothing downloaded;
+  - the offline file and the `.vsix` with no registry at all;
+  - the install question asked once and not again when the extension starts
+    again, and a Run asking again;
+  - `serverAutoStart.command` and `useInstalledRuntime` off;
+  - the §6.8 notice once, and not for a patch;
+  - a server patch and an extension minor update fetched without asking, and
+    which server each extension patch and minor runs;
+  - the welcome page's AI step with a stand-in Copilot and provider while the
+    server downloads.
+- **New terminal checks:** a test run in Firefox after `steptix browsers
+  install firefox`, two first commands at once, and a first command stopped
+  partway and run again.
+- **Fixed: Steptix could not run a test in Firefox.** Every browser context
+  was asked for clipboard permissions that only Chromium has, and Firefox
+  refused the context. Only Chromium is asked now.
+- **Fixed: Stop did nothing while a Run waited on the install question.**
+  The Run kept waiting for an answer, or for an install in progress, and
+  Stop did not end it. Stop now ends it at once; the question stays, and a
+  yes still installs. A Run pressed while the question is showing waits for
+  it instead of asking a second time.
+- **The Test Runner says when no server is installed.** A banner at the top
+  of the panel, *"The Steptix server is not installed. Tests need it to
+  run."*, with **Set up Steptix…** to open the welcome page, and the
+  install's progress while it installs. The panel's title bar has a Welcome
+  button. The panel looks again each time it comes into view.
+- **A Run that needs the server asks in a dialog**, which cannot slide out of
+  sight while the Run waits. The question when the extension first starts
+  stays a notification, and answering it late does nothing if a server is
+  installed or installing by then
+  ([#117](https://github.com/steptix/steptix/issues/117)).
+- **A Test Explorer run of several tests asks once.** After Cancel, or an
+  install that fails, the rest are skipped with one line in Test Results.
+- **An install can be cancelled** from its notification, the welcome page and
+  the Test Runner's banner. Nothing half-installed is left, and Install works
+  again at once. A step that stalls for 3 minutes says to check the company
+  proxy or npm registry.
+- **An install carries on after a reload.** Create a sample project and Open
+  a folder reopen the window, which used to stop an install in progress; the
+  install now carries on by itself, and the welcome page comes back on the
+  first undone step. Reload Window brings the page back too.
+- **The welcome page's AI step is one list:** GitHub Copilot, OpenAI,
+  Anthropic and OpenRouter, always in that order, each opening its own form
+  in its own box. Copilot is always listed; when this VS Code has none it is
+  greyed, saying whether Copilot is missing or installed but offering no
+  models, and the step notices it appearing without being reopened.
+- **The page says where every key is.** It saves keys only to the file for
+  all projects and names that file before Save. Settings already in a
+  `.env` show the file that holds the key, git's view of a project `.env`,
+  Open file and Remove key, and a working provider key's model can be
+  changed without pasting the key again.
+- **AI settings already in a `.env` are checked before they show as
+  working.** The step reads *Checking…*, then the AI's name in green once
+  the key passes, or *Set up AI* while nothing works. A gateway it cannot
+  check stays grey.
+- **A registry with no matching release says so.** An install that finds no
+  Steptix release of the version needed names the npm registry it asked and
+  says a company registry may not have the version yet, instead of advising
+  a network check.
+- The release test's not-yet list has eight rows, each saying why it is not
+  checked yet.
+
 ### Added — releases, tested end to end; the Windows runtime installer is retired
 
 The last part of [SPEC-install.md](docs/specs/SPEC-install.md) (§10, §10.1).

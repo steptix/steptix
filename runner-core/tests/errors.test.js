@@ -230,6 +230,18 @@ test('STX034 says how to get the server for each way a run went without one', ()
   });
   assert.ok(unsupported.diagnosis.startsWith('Steptix does not run on Linux on ARM yet'));
   assert.ok(unsupported.fix.includes('Nothing was downloaded'));
+  // A cancelled install, update included: the next Run may install without
+  // asking, so the fix names no question to answer.
+  const cancelled = reportError('STX034', { situation: 'cancelled' });
+  assert.ok(cancelled.diagnosis.includes('cancelled'));
+  assert.ok(cancelled.fix.includes('Steptix: Install Server'));
+  assert.ok(!cancelled.fix.includes('choose Install'));
+  // Installed, but nothing to run it on: a new Node.js is seen only by a
+  // VS Code started after it was installed.
+  const noNode = reportError('STX034', { situation: 'no-node', detail: 'nodejs.org could not be reached' });
+  assert.ok(noNode.diagnosis.startsWith('Steptix has no Node.js 22.21 or later'));
+  assert.ok(noNode.diagnosis.endsWith('nodejs.org could not be reached'));
+  assert.ok(noNode.fix.includes('quit every VS Code window'));
 });
 
 test('STX035 names both versions, and the way out for a server started by hand or a chosen one', () => {

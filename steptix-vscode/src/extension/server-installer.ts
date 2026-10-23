@@ -20,9 +20,13 @@
  *
  * One window downloads at a time: the others wait on `runtimes/.download.lock`
  * and then use what it installed (§6.7).
+ *
+ * `signal` is Cancel (§5.2): it stops the download, unpacking, npm and the
+ * setup, each program with every program it started, and the install ends
+ * with a `cancelled` failure once what it left half-done is removed.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, type ChildProcess, type ExecFileOptions } from 'node:child_process';
 import { mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -37,6 +41,7 @@ import {
   npmSpecFor,
   partialName,
   pickServer,
+  pidAlive,
   readServerChoice,
   releaseLock,
   serverSatisfies,
@@ -53,10 +58,15 @@ import {
 export type InstallFailureKind =
   /** npm could not fetch or install the server: no network, a blocked registry (§8.1). */
   | 'server-download'
+  /** npm's registry answered, but has no release of the version needed: a
+   *  company registry that does not have it yet, say (§8.1). */
+  | 'not-published'
   /** nodejs.org could not be reached, or sent a file that did not match its fingerprint (§8.2). */
   | 'node-download'
   /** Anything else: a full disk, a damaged download, a refused copy. */
-  | 'other';
+  | 'other'
+  /** The user pressed Cancel (§5.2), which is not a failure to report. */
+  | 'cancelled';
 
 export class InstallFailure extends Error {
   readonly kind: InstallFailureKind;
@@ -81,26 +91,58 @@ export type Runner = (
   opts: { cwd?: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal },
 ) => Promise<RunResult>;
 
-/** Run a program to completion, collecting its output. Never throws for a
- *  non-zero exit; a program that cannot start at all comes back as code null. */
+/**
+ * Run a program to completion, collecting its output. Never throws for a
+ * non-zero exit; a program that cannot start at all comes back as code null.
+ *
+ * `signal` stops the program and every program it started, and the answer
+ * comes once it has exited. npm runs packages' install scripts as programs of
+ * their own, and stopping npm alone would leave them writing into a folder
+ * the install is about to remove.
+ */
 export const defaultRunner: Runner = (exe, args, opts) =>
   new Promise((resolve) => {
-    execFile(
-      exe,
-      args,
-      {
-        cwd: opts.cwd,
-        env: opts.env,
-        signal: opts.signal,
-        windowsHide: true,
-        maxBuffer: 64 * 1024 * 1024,
-      },
-      (err, stdout, stderr) => {
-        const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : null) : 0;
-        resolve({ code, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') + (code === null && err ? err.message : '') });
-      },
-    );
+    const { signal } = opts;
+    if (signal?.aborted) {
+      resolve({ code: null, stdout: '', stderr: 'Cancelled before it started.' });
+      return;
+    }
+    const options: ExecFileOptions & { detached: boolean } = {
+      cwd: opts.cwd,
+      env: opts.env,
+      windowsHide: true,
+      maxBuffer: 64 * 1024 * 1024,
+      // Its own process group, so stopping it reaches what it started.
+      // Windows has no groups; taskkill walks the tree instead.
+      detached: process.platform !== 'win32',
+    };
+    const child = execFile(exe, args, options, (err, stdout, stderr) => {
+      signal?.removeEventListener('abort', stop);
+      const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : null) : 0;
+      resolve({ code, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') + (code === null && err ? err.message : '') });
+    });
+    const stop = () => stopTree(child);
+    signal?.addEventListener('abort', stop, { once: true });
   });
+
+/** Stop `child` and everything it started. */
+function stopTree(child: ChildProcess): void {
+  const pid = child.pid;
+  // It never started; execFile reports that itself.
+  if (pid === undefined) return;
+  if (process.platform === 'win32') {
+    const taskkill = path.join(process.env['SystemRoot'] ?? process.env['SYSTEMROOT'] ?? 'C:\\Windows', 'System32', 'taskkill.exe');
+    execFile(taskkill, ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, (err) => {
+      if (err) child.kill();
+    });
+    return;
+  }
+  try {
+    process.kill(-pid, 'SIGTERM');
+  } catch {
+    child.kill('SIGTERM');
+  }
+}
 
 export interface InstallerDeps {
   userRoot: string;
@@ -116,6 +158,7 @@ export interface InstallerDeps {
   onStep?: (text: string) => void;
   /** Called once when another window holds the download lock. */
   onWait?: () => void;
+  /** Cancel (§5.2): the install stops and ends with a `cancelled` failure. */
   signal?: AbortSignal;
   /** How a Node.js says what it is: {@link probeNode} unless a test fakes it. */
   probe?: NodeProbe;
@@ -130,13 +173,19 @@ function sleeper(deps: InstallerDeps): (ms: number) => Promise<void> {
   return deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 }
 
+/** End the install here when the user pressed Cancel. */
+function throwIfCancelled(deps: InstallerDeps): void {
+  if (deps.signal?.aborted) throw new InstallFailure('cancelled', 'The install was cancelled.');
+}
+
 /** Hold the download lock while `fn` runs, waiting for another window first. */
 async function withDownloadLock<T>(deps: InstallerDeps, fn: () => Promise<T>): Promise<T> {
   const file = downloadLockFile(deps.userRoot);
   const sleep = sleeper(deps);
   let waited = false;
-  while (!tryTakeLock(file)) {
-    if (deps.signal?.aborted) throw new InstallFailure('other', 'The install was cancelled.');
+  for (;;) {
+    throwIfCancelled(deps);
+    if (tryTakeLock(file)) break;
     if (!waited) {
       waited = true;
       deps.onWait?.();
@@ -197,6 +246,7 @@ export async function downloadNode(deps: InstallerDeps): Promise<NodeChoice> {
       if (!res.ok) throw new Error(`nodejs.org answered HTTP ${res.status}`);
       shasums = await res.text();
     } catch (err) {
+      throwIfCancelled(deps);
       throw new InstallFailure('node-download', `Could not reach nodejs.org: ${(err as Error).message}`);
     }
     const archive = nodeArchiveFrom(shasums, deps.platform, deps.arch);
@@ -210,8 +260,10 @@ export async function downloadNode(deps: InstallerDeps): Promise<NodeChoice> {
       if (!res.ok) throw new Error(`nodejs.org answered HTTP ${res.status}`);
       data = new Uint8Array(await res.arrayBuffer());
     } catch (err) {
+      throwIfCancelled(deps);
       throw new InstallFailure('node-download', `Could not download ${archive.file}: ${(err as Error).message}`);
     }
+    throwIfCancelled(deps);
     const actual = sha256Of(data);
     if (actual !== archive.sha256) {
       throw new InstallFailure(
@@ -257,6 +309,7 @@ async function extract(deps: InstallerDeps, archive: string, into: string): Prom
       : 'tar';
   const result = await run(tar, ['-xf', archive, '-C', into], { ...(deps.signal && { signal: deps.signal }) });
   if (result.code !== 0) {
+    throwIfCancelled(deps);
     throw new InstallFailure('other', `Could not unpack ${path.basename(archive)}.`, tail(result.stderr));
   }
 }
@@ -296,6 +349,7 @@ async function setUpPackage(
   const result = await run(node.exe, args, { cwd: pkgDir, env: withNodeOnPath(deps.env, node.exe, deps.platform), ...(deps.signal && { signal: deps.signal }) });
   const reported = lastJsonLine(result.stdout) as { version?: unknown; dir?: unknown } | undefined;
   if (result.code !== 0 || typeof reported?.version !== 'string') {
+    throwIfCancelled(deps);
     throw new InstallFailure(
       'other',
       `Could not set up the Steptix server from ${pkgDir}.`,
@@ -363,24 +417,99 @@ async function downloadAndSetUp(deps: InstallerDeps, node: NodeChoice, spec: str
   const scratch = path.join(runtimesDir, partialName('npm'));
   mkdirSync(scratch, { recursive: true });
   try {
-    deps.onStep?.(`Downloading ${spec.replace('@~', ' ')}`);
+    // `steptix@~1.4.0` and `steptix@1.4.2` read as "steptix 1.4.0" and "steptix 1.4.2".
+    deps.onStep?.(`Downloading ${spec.replace(/@~?/, ' ')}`);
     deps.log(`npm install -g --prefix ${scratch} ${spec}`);
     const result = await run(
       node.exe,
       [npmCli, 'install', '-g', '--prefix', scratch, spec, '--no-audit', '--no-fund', '--loglevel=error'],
       { cwd: scratch, env: withNodeOnPath(deps.env, node.exe, deps.platform), ...(deps.signal && { signal: deps.signal }) },
     );
+    throwIfCancelled(deps);
     if (result.code !== 0) {
-      throw new InstallFailure('server-download', npmReason(result.stderr), tail(`${result.stderr}\n${result.stdout}`, 30));
+      const details = tail(`${result.stderr}\n${result.stdout}`, 30);
+      if (npmNotPublished(result.stderr)) {
+        // The registry answered: nothing about the network or a company
+        // proxy to check, only which registry this is and what it lacks.
+        const registry = await npmRegistry(run, node.exe, npmCli, deps);
+        throw new InstallFailure(
+          'not-published',
+          `no ${describeSpec(spec)} release of steptix is published on ${registry ?? "this machine's npm registry"}`,
+          details,
+        );
+      }
+      throw new InstallFailure('server-download', npmReason(result.stderr), details);
     }
     deps.onStep?.('Setting up the Steptix server');
     return await setUpPackage(deps, node, globalPackageDir(scratch, deps.platform), 'extension');
   } finally {
     rmSync(scratch, { recursive: true, force: true, maxRetries: 3 });
+    // Cancel during the setup stops `server install` mid-copy, before it can
+    // remove its own partial copy.
+    if (deps.signal?.aborted) removeAbandonedPartials(runtimesDir);
+  }
+}
+
+/**
+ * Remove the `.partial-*` folders in `dir` whose process has gone (§4.1).
+ * One whose process still runs, say a terminal's own install, is left alone.
+ */
+function removeAbandonedPartials(dir: string): void {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    // `.partial-<what>-<pid>-<random hex>`, as partialName and the launcher name them.
+    const owner = /^\.partial-.+-(\d+)-[0-9a-f]+$/.exec(name);
+    if (!owner || pidAlive(Number(owner[1]))) continue;
+    try {
+      rmSync(path.join(dir, name), { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      // A file still open: the launcher's next install removes it (§8.3).
+    }
   }
 }
 
 /** npm's reason, in a line: its first `npm error` line that says something. */
+/**
+ * npm reached its registry, and the registry has no steptix release matching
+ * what was asked (ETARGET), or no steptix package at all (a 404 for steptix
+ * itself, not for one of its dependencies).
+ */
+export function npmNotPublished(stderr: string): boolean {
+  return (
+    /\bcode ETARGET\b/.test(stderr) ||
+    /No matching version found for steptix@/.test(stderr) ||
+    /404 Not Found - GET \S*\/steptix(?:[\s?]|$)/m.test(stderr)
+  );
+}
+
+/** `steptix@~1.4.0` as "1.4", `steptix@1.4.2` as "1.4.2": the version a
+ *  message says is missing. */
+export function describeSpec(spec: string): string {
+  const range = /^steptix@~(\d+\.\d+)\.\d+$/.exec(spec);
+  return range ? range[1]! : spec.replace(/^steptix@/, '');
+}
+
+/** The registry npm uses here, as `npm config get registry` says, or null. */
+async function npmRegistry(
+  run: NonNullable<InstallerDeps['run']>,
+  exe: string,
+  npmCli: string,
+  deps: InstallerDeps,
+): Promise<string | null> {
+  try {
+    const result = await run(exe, [npmCli, 'config', 'get', 'registry'], { env: withNodeOnPath(deps.env, exe, deps.platform) });
+    const registry = result.code === 0 ? result.stdout.trim() : '';
+    return registry || null;
+  } catch {
+    return null;
+  }
+}
+
 export function npmReason(stderr: string): string {
   const lines = stderr
     .split(/\r?\n/)

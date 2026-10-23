@@ -105,13 +105,26 @@ export class SteptixRunnerView implements vscode.WebviewViewProvider {
    */
   private replayRunning = false;
   private replayRunError: HostToWebviewMsg | null = null;
+  /** The server banner (SPEC-install.md §5.2), for a surface that opens
+   *  after the startup checks decided it. */
+  private replayServerSetup: HostToWebviewMsg | null = null;
+
+  /** Called when a runner surface comes into view, so the server banner can
+   *  be checked again. */
+  private shownHandler: (() => void) | null = null;
+
+  setShownHandler(handler: () => void): void {
+    this.shownHandler = handler;
+  }
 
   /** Test-only: what a surface attaching now would be handed. */
-  replayState(): { running: boolean; runError: string | null } {
+  replayState(): { running: boolean; runError: string | null; serverSetup: string | null } {
     const err = this.replayRunError;
+    const setup = this.replayServerSetup;
     return {
       running: this.replayRunning,
       runError: err && err.type === 'runError' ? err.payload.code : null,
+      serverSetup: setup && setup.type === 'serverSetup' ? setup.state : null,
     };
   }
 
@@ -129,6 +142,9 @@ export class SteptixRunnerView implements vscode.WebviewViewProvider {
         return;
       case 'dismissRunError':
         this.replayRunError = null;
+        return;
+      case 'serverSetup':
+        this.replayServerSetup = msg;
         return;
     }
   }
@@ -178,6 +194,9 @@ export class SteptixRunnerView implements vscode.WebviewViewProvider {
     this.sidebarView = view;
     view.onDidDispose(() => {
       if (this.sidebarView === view) this.sidebarView = null;
+    });
+    view.onDidChangeVisibility(() => {
+      if (view.visible) this.shownHandler?.();
     });
     await this.attach(view.webview, view.onDidDispose.bind(view), () => view.visible);
   }
@@ -306,6 +325,8 @@ export class SteptixRunnerView implements vscode.WebviewViewProvider {
           sync: true,
         });
         if (this.replayRunError) void attachment.webview.postMessage(this.replayRunError);
+        if (this.replayServerSetup) void attachment.webview.postMessage(this.replayServerSetup);
+        this.shownHandler?.();
       }
       void this.messageHandler?.(raw);
     });

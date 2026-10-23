@@ -11,6 +11,7 @@ import {
 } from 'steptix-runner-core';
 import { ServerSetup, type RunServerSetup } from './server-setup.js';
 import { Welcome } from './welcome.js';
+import { WELCOME_COMMAND } from './welcome-core.js';
 import { serverRequirement } from './install-core.js';
 import { ActiveFileTracker, markLineMovesFor } from './active-file-tracker.js';
 import { moveLineKeyed } from './mark-lines-core.js';
@@ -2170,7 +2171,8 @@ export interface SteptixTestHooks {
   /** Result counts of the most recent batch run, or null if none yet. */
   lastBatchRun: () => { passed: number; failed: number; skipped: number } | null;
   /** Lines streamed to the in-flight (or most recent) test's Test Results
-   *  output. Lets a test prove output is emitted DURING the run, not buffered. */
+   *  output, then any line the batch added for the whole run after it. Lets
+   *  a test prove output is emitted DURING the run, not buffered. */
   batchOutput: () => string[];
   /** Test-only readback of the most recent failed test's TestMessages and the
    *  file+line each was anchored at. WHERE a failure is anchored is not
@@ -2265,8 +2267,9 @@ export interface SteptixTestHooks {
   /** Settles when every reveal started so far has finished. */
   runnerRevealSettled: () => Promise<void>;
   /** What a runner surface attaching now would be handed: whether a run is
-   *  in flight, and the code of the banner the last run left, or null. */
-  runnerReplay: () => { running: boolean; runError: string | null };
+   *  in flight, the code of the banner the last run left, or null, and the
+   *  server banner's state (SPEC-install.md §5.2), or null for none. */
+  runnerReplay: () => { running: boolean; runError: string | null; serverSetup: string | null };
   /** Active controller's `lastReportPath` — the absolute HTML report
    *  path from the most recently completed run, or null if none.
    *  Backs the integration test that verifies the protocol's
@@ -2319,6 +2322,28 @@ export interface SteptixTestHooks {
   /** Re-read the bridge settings now, instead of waiting on the configuration
    *  event. Returns once the listen attempt has settled. */
   syncLmBridge: () => Promise<void>;
+  /** Run what the extension does when it starts (ServerSetup.startupChecks),
+   *  which the harness skips at activation: the release test calls it once
+   *  its message boxes are stubbed (docs/specs/SPEC-install.md §10.1). */
+  serverStartupChecks: () => Promise<void>;
+  /** The welcome page, driven as its webview would: `send` hands the host one
+   *  message from the page and resolves to what the host posted back while
+   *  handling it; `setFetch` replaces the fetch its key check uses, for a
+   *  stand-in provider. `start` runs what the extension does with the page
+   *  when it starts (Welcome.onStart, which the harness skips at activation)
+   *  and resolves to the step the page came back on, or null; `restore`
+   *  hands it a panel as VS Code does after a Reload Window; `shown` is the
+   *  state last posted to the open page, which is what it shows;
+   *  `setCopilotInstalled` says whether GitHub Copilot counts as installed
+   *  (null: as VS Code's extension list says). */
+  welcome: {
+    send: (message: unknown) => Promise<unknown[]>;
+    setFetch: (fetchFn: import('steptix-runner-core').ProviderFetch | null) => void;
+    setCopilotInstalled: (installed: boolean | null) => void;
+    start: () => Promise<import('./welcome-core.js').WelcomeStep | null>;
+    restore: (panel: vscode.WebviewPanel) => Promise<void>;
+    shown: () => import('./welcome-core.js').WelcomeState | undefined;
+  };
   /** Record Steps: the panel's Recording block as the host holds it, or null
    *  when nothing is recording (stories/steptix-record-steps.md). */
   recordingState: () => import('steptix-runner-core').RecordingPanelState | null;
@@ -2463,6 +2488,16 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
   const welcome = new Welcome(context, serverSetup, lmBridge);
   context.subscriptions.push(welcome);
   if (!underTest) void welcome.onStart();
+  // The Test Runner's server banner (SPEC-install.md §5.2): what the status
+  // bar says, looked at again whenever the panel comes into view.
+  const postServerSetup = () => view.post({ type: 'serverSetup', ...serverSetup.installStatus() });
+  context.subscriptions.push(serverSetup.onDidChange(postServerSetup));
+  postServerSetup();
+  view.setShownHandler(() => {
+    void serverSetup.recheck().catch((err: unknown) => {
+      out.appendLine(`[${ts()}] checking for a server again failed — ${err instanceof Error ? err.message : String(err)}`);
+    });
+  });
   // Record Steps keeps an in-flight recording's writes in the workspace's
   // state; one a reload cut off is offered for removal now
   // (SPEC-record-steps.md §7).
@@ -2485,7 +2520,7 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
   });
 
   // Wire webview → host messages.
-  view.setMessageHandler((msg) => handleWebviewMessage(msg, registry, tracker));
+  view.setMessageHandler((msg) => handleWebviewMessage(msg, registry, tracker, serverSetup));
 
   // Call Stack view — read-only tree showing the running controller's
   // frame stack. Bridged to the registry's union event so a single tree
@@ -2820,7 +2855,7 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
       setSkillSessionPicker: (fn) => {
         registry.pickSkillSessionForTest = fn;
       },
-      dispatchWebviewMessage: (msg) => handleWebviewMessage(msg, registry, tracker),
+      dispatchWebviewMessage: (msg) => handleWebviewMessage(msg, registry, tracker, serverSetup),
       discoveredTests: () =>
         discovery.eligibleTests().map((t) => ({
           uri: t.uri.toString(),
@@ -2934,6 +2969,15 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
       configureLmBridge: (opts) => lmBridge.configureForTests(opts),
       lmBridgeToken: () => lmBridge.ensureToken(),
       syncLmBridge: () => lmBridge.sync(),
+      serverStartupChecks: () => serverSetup.startupChecks(),
+      welcome: {
+        send: (message) => welcome.receiveForTests(message),
+        setFetch: (fetchFn) => welcome.setFetchForTests(fetchFn),
+        setCopilotInstalled: (installed) => welcome.setCopilotInstalledForTests(installed),
+        start: () => welcome.onStart(),
+        restore: (panel) => welcome.restoreForTests(panel),
+        shown: () => welcome.shownStateForTests(),
+      },
       recordingState: () => registry.recorder.state,
       recordingStatusText: () => registry.recorder.statusText,
       recordingReport: () => registry.recorder.lastReport,
@@ -2975,6 +3019,7 @@ async function handleWebviewMessage(
   msg: WebviewToHostMsg,
   registry: RunControllerRegistry,
   tracker: ActiveFileTracker,
+  serverSetup: Pick<ServerSetup, 'cancelInstall'>,
 ): Promise<void> {
   switch (msg.type) {
     case 'ready':
@@ -3189,6 +3234,14 @@ async function handleWebviewMessage(
       void vscode.commands.executeCommand('workbench.panel.testResults.focus');
       return;
     }
+    case 'openWelcome':
+      // The server banner's "Set up Steptix…".
+      await vscode.commands.executeCommand(WELCOME_COMMAND);
+      return;
+    case 'cancelInstall':
+      // The server banner's Cancel while the server installs (SPEC-install.md §5.2).
+      serverSetup.cancelInstall();
+      return;
     case 'copyVariable': {
       // The panel's Variables menu. It sends the row as it rendered it, raw
       // value included, and the host does the copying — the same clipboard

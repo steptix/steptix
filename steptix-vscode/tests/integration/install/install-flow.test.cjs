@@ -132,7 +132,8 @@ describe('installing the Steptix server from VS Code', function () {
     await vscode.commands.executeCommand('steptix.startServer');
     assert.equal(asked.length, 1, 'asked once');
     assert.match(asked[0].message, /^Steptix needs its local server to run this test\. About \d+ MB to download\.$/);
-    assert.deepEqual(asked[0].items, ['Install', 'Install and add steptix to PATH', 'Cancel']);
+    // A dialog: VS Code adds its Cancel itself (ask-once.test.cjs checks it is one).
+    assert.deepEqual(asked[0].items, ['Install', 'Install and add steptix to PATH']);
     await waitFor('the server to answer', async () => (await health(SERVER_URL())) !== null, 120_000);
     assert.equal((await health(SERVER_URL())).startedBy, 'vscode');
   });

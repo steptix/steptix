@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import type { ErrorPayload, FrameInfo, RunEvent } from 'steptix-runner-core';
-import { describeStepFailure, isSkippedPass, outputText } from 'steptix-runner-core';
+import { describeStepFailure, isSkippedPass, outputText, reportError } from 'steptix-runner-core';
 import { frameTargetUri } from './workspace.js';
 import type { TestDiscovery, DiscoveredTest, DiscoveryEvent } from './test-discovery.js';
 import type { RunController } from './run-controller.js';
@@ -23,6 +23,13 @@ export interface TestControllerRegistry {
   getBatchController(document: vscode.TextDocument): RunController | undefined;
 }
 
+/** The one line a batch adds to Test Results when it skips the rest of its
+ *  tests because the server is not installed (SPEC-install.md §5.2), or is
+ *  but has no Node.js to run on (§4.6). */
+const NO_SERVER_SKIP_LINE = 'Skipped: the Steptix server is not installed.';
+const NO_NODE_SKIP_LINE = 'Skipped: Steptix has no Node.js 22.21 or later to run its server on.';
+const NO_NODE_DIAGNOSIS = reportError('STX034', { situation: 'no-node' }).diagnosis;
+
 /** Hook so the test controller can drive the sidebar webview banner. */
 export interface BatchBannerSink {
   set(state: { running: number; total: number } | null): void;
@@ -41,7 +48,7 @@ export interface BatchBannerSink {
  * - Frontmatter `tags: [...]` surface as TestItem.tags so VS Code's
  *   built-in "Run with tag…" filter works.
  *
- * Run flow: see steptix/stories/specs/test-runner.md §5.
+ * Run flow: see steptix-vscode/stories/specs/test-runner.md §5.
  */
 export class SteptixTestController implements vscode.Disposable {
   private readonly controller: vscode.TestController;
@@ -68,7 +75,9 @@ export class SteptixTestController implements vscode.Disposable {
   /** Test-only mirror of the lines streamed to the active run's Test Results
    *  output via `run.appendOutput`. Reset at the start of each test's runOne and
    *  appended live as events arrive, so the integration suite can prove output
-   *  is emitted DURING the run rather than buffered until it finishes. */
+   *  is emitted DURING the run rather than buffered until it finishes. A line
+   *  the batch adds for the whole run after that test (`emitRunLine`) lands
+   *  here too. */
   private _liveOutput: string[] = [];
   /** Test-only mirror of the TestMessages handed to `run.failed`, with each
    *  message's location flattened to `{file, line}`. VS Code does not read
@@ -353,9 +362,27 @@ export class SteptixTestController implements vscode.Disposable {
         }
         this.banner.set({ running: i + 1, total: items.length });
         const outcome = await this.runOne(run, item, batchEnv, token);
-        counts[outcome] += 1;
+        counts[outcome.verdict] += 1;
         // Per-test session teardown (close + video finalise) is owned by
         // runLines' finally (see RunController). Nothing to do here.
+        if (outcome.error?.code === 'STX034') {
+          // A batch asks once (SPEC-install.md §5.2): this test found no
+          // server it could run — the install question was answered Cancel,
+          // the install was cancelled or failed, the platform is not
+          // supported, or the server is there but no Node.js could be found
+          // or downloaded for it. Each is a fact about the machine, not about
+          // one test, so no other test could run, and each would ask or try
+          // again.
+          const rest = items.slice(i + 1);
+          for (const later of rest) run.skipped(later);
+          counts.skipped += rest.length;
+          if (rest.length > 0) {
+            const why = outcome.error.diagnosis.startsWith(NO_NODE_DIAGNOSIS) ? NO_NODE_SKIP_LINE : NO_SERVER_SKIP_LINE;
+            this.emitRunLine(run, why);
+            log.appendLine(`[${ts()}] [batch] ${why} (${rest.length} test(s) not run)`);
+          }
+          break;
+        }
       }
     } finally {
       this.batchRunning = false;
@@ -401,15 +428,25 @@ export class SteptixTestController implements vscode.Disposable {
     return out;
   }
 
+  /** A line for the whole run's Test Results output rather than one test's,
+   *  mirrored into `_liveOutput` after the last test's lines. */
+  private emitRunLine(run: vscode.TestRun, line: string): void {
+    this._liveOutput.push(line);
+    run.appendOutput(`${line}\r\n`);
+  }
+
+  /** Runs one test and reports its verdict, with the error the run failed
+   *  with, if any, so the batch can tell a failure of the machine from a
+   *  failure of the test. */
   private async runOne(
     run: vscode.TestRun,
     item: vscode.TestItem,
     batchEnv: string | null,
     token: vscode.CancellationToken,
-  ): Promise<'passed' | 'failed' | 'skipped'> {
+  ): Promise<{ verdict: 'passed' | 'failed' | 'skipped'; error?: ErrorPayload }> {
     if (!item.uri) {
       run.errored(item, new vscode.TestMessage('TestItem has no associated file'));
-      return 'failed';
+      return { verdict: 'failed' };
     }
 
     run.started(item);
@@ -424,7 +461,7 @@ export class SteptixTestController implements vscode.Disposable {
           `Failed to read test file: ${err instanceof Error ? err.message : String(err)}`,
         ),
       );
-      return 'failed';
+      return { verdict: 'failed' };
     }
 
     // DETACHED, headless controller: a flask run must not drive the editor's
@@ -437,7 +474,7 @@ export class SteptixTestController implements vscode.Disposable {
         item,
         new vscode.TestMessage('Test file is not inside a workspace folder.'),
       );
-      return 'failed';
+      return { verdict: 'failed' };
     }
 
     // Frontmatter env override wins over the batch env.
@@ -597,7 +634,7 @@ export class SteptixTestController implements vscode.Disposable {
       // No explicit close here: runLines closes the batch run's own unique
       // session in its finally (which fires on the abort too), so the cancelled
       // test's session is already torn down.
-      return 'skipped';
+      return { verdict: 'skipped' };
     }
 
     if (!outcome.ok || failures.length > 0 || outcome.error) {
@@ -634,10 +671,10 @@ export class SteptixTestController implements vscode.Disposable {
         line: m.location ? m.location.range.start.line + 1 : null,
       }));
       run.failed(item, messages, duration);
-      return 'failed';
+      return { verdict: 'failed', ...(outcome.error && { error: outcome.error }) };
     }
 
     run.passed(item, duration);
-    return 'passed';
+    return { verdict: 'passed' };
   }
 }

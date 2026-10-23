@@ -118,7 +118,7 @@ export interface ErrorContextMap {
    *  §5.2, §8): the user declined the install, the install failed (`detail`
    *  is why, in the user's terms), or this platform has no server yet
    *  (`detail` is §8.4's sentence). */
-  STX034: { situation: 'declined' | 'failed' | 'unsupported'; detail?: string };
+  STX034: { situation: 'declined' | 'cancelled' | 'failed' | 'no-node' | 'unsupported'; detail?: string };
   /** The running or chosen server does not match this extension's
    *  major.minor, and the extension may not replace it (§6.4, §6.5): a
    *  person started it, the user chose it, or it did not stop when asked. */
@@ -278,15 +278,29 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
           diagnosis: 'The Steptix server is not installed, so this test could not run',
           fix: 'Press Run again and choose Install, or run "Steptix: Install Server". From a terminal, npm i -g steptix installs it too.',
         }
-      : ctx.situation === 'unsupported'
+      : ctx.situation === 'cancelled'
         ? {
-            diagnosis: ctx.detail ?? 'Steptix does not run on this platform yet',
-            fix: 'Nothing was downloaded. Run your tests on a supported platform for now.',
+            // Cancel on an install's progress; an update that comes without
+            // asking is cancelled the same way, so "choose Install" would
+            // name a question the next Run may not ask.
+            diagnosis: 'The Steptix server install was cancelled, so this test could not run',
+            fix: 'Press Run again to install it, or run "Steptix: Install Server".',
           }
-        : {
-            diagnosis: `Could not install the Steptix server${ctx.detail ? `: ${ctx.detail}` : ''}`,
-            fix: 'Press Run to try again. Without network access, install from the offline files on the Steptix release page instead.',
-          },
+        : ctx.situation === 'no-node'
+          ? {
+              // The server is installed; what it runs on is missing (§4.6).
+              diagnosis: `Steptix has no Node.js 22.21 or later to run its server on${ctx.detail ? `: ${ctx.detail}` : ''}`,
+              fix: 'Install Node.js 22.21 or later from nodejs.org, then quit every VS Code window and open VS Code again, so it sees the new Node.js.',
+            }
+          : ctx.situation === 'unsupported'
+            ? {
+                diagnosis: ctx.detail ?? 'Steptix does not run on this platform yet',
+                fix: 'Nothing was downloaded. Run your tests on a supported platform for now.',
+              }
+            : {
+                diagnosis: `Could not install the Steptix server${ctx.detail ? `: ${ctx.detail}` : ''}`,
+                fix: 'Press Run to try again. Without network access, install from the offline files on the Steptix release page instead.',
+              },
   STX035: (ctx) =>
     ctx.reason === 'not-stopped'
       ? {
