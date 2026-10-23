@@ -91,6 +91,9 @@ export const hostBridge = {
   postResume() { post({ type: 'resume' }); },
   postPause() { post({ type: 'pause' }); },
   postFocusTestResults() { post({ type: 'focusTestResults' }); },
+  postOpenWelcome() { post({ type: 'openWelcome' }); },
+  /** The server banner's Cancel while the server installs. */
+  postCancelInstall() { post({ type: 'cancelInstall' }); },
   postDismissRunError() { post({ type: 'dismissRunError' }); },
   postClearStatus(line) { post({ type: 'clearStatus', line }); },
   /**

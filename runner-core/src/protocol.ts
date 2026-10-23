@@ -1566,6 +1566,19 @@ export interface HostBatchBannerMsg {
 }
 
 /**
+ * Whether the Steptix server is installed (docs/specs/SPEC-install.md §5.2).
+ * The webview shows a banner with **Set up Steptix…** while `state` is
+ * `not-installed` or `installing`, and none on `null`: installed, or left to
+ * the user's own settings (§4.12). `progress` is what the install is doing,
+ * in a few words, while it installs.
+ */
+export interface HostServerSetupMsg {
+  type: 'serverSetup';
+  state: 'not-installed' | 'installing' | null;
+  progress: string | null;
+}
+
+/**
  * Offer (or withdraw) the "re-run this skill step with its variables" action
  * in the Variables panel. Sent with a non-null `failure` when a step inside a
  * top-level skill fails and its session is still live; the webview shows the
@@ -1700,6 +1713,7 @@ export type HostToWebviewMsg =
   | HostRunningMsg
   | HostBreakpointStopMsg
   | HostBatchBannerMsg
+  | HostServerSetupMsg
   | HostSkillRerunAvailableMsg
   | HostCompileEventMsg
   | HostCompileProgressMsg
@@ -1777,6 +1791,19 @@ export interface WebviewPauseMsg {
  */
 export interface WebviewFocusTestResultsMsg {
   type: 'focusTestResults';
+}
+
+/** The server banner's **Set up Steptix…**: the host opens the welcome page
+ *  (docs/specs/SPEC-install.md §7.1). */
+export interface WebviewOpenWelcomeMsg {
+  type: 'openWelcome';
+}
+
+/** The server banner's **Cancel** while the server installs: the host stops
+ *  the install, as the progress notification's Cancel does
+ *  (docs/specs/SPEC-install.md §5.2). */
+export interface WebviewCancelInstallMsg {
+  type: 'cancelInstall';
 }
 
 /**
@@ -2000,6 +2027,8 @@ export type WebviewToHostMsg =
   | WebviewResumeMsg
   | WebviewPauseMsg
   | WebviewFocusTestResultsMsg
+  | WebviewOpenWelcomeMsg
+  | WebviewCancelInstallMsg
   | WebviewDismissRunErrorMsg
   | WebviewClearStatusMsg
   | WebviewCopyVariableMsg
@@ -2029,6 +2058,8 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'resume' ||
     t === 'pause' ||
     t === 'focusTestResults' ||
+    t === 'openWelcome' ||
+    t === 'cancelInstall' ||
     t === 'dismissRunError' ||
     t === 'clearStatus' ||
     t === 'copyVariable' ||

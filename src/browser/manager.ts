@@ -1561,8 +1561,11 @@ export async function launchBrowser(
     // render two different layouts. An explicit viewport makes Playwright pin
     // the page at that size whatever the window does.
     viewport: config.fixedViewport ?? (headed ? null : config.viewport),
-    // Accept all permissions by default
-    permissions: ['clipboard-read', 'clipboard-write'],
+    // Clipboard access without a prompt, on Chromium. Firefox knows neither
+    // permission and refuses the whole context over them ("Unknown
+    // permission: clipboard-read"), which failed every Firefox run; the
+    // release test's Firefox check is what found it.
+    ...(browserType === 'chromium' && { permissions: ['clipboard-read', 'clipboard-write'] }),
     // Do not override userAgent — on the `chrome` channel, the real Chrome UA
     // is already realistic, and hardcoding a mismatched version trips
     // user-agent sniffing on some banking sites (Polymer/browserDetection.js).

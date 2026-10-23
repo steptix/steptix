@@ -118,6 +118,10 @@ and release testing only, not the code:
     steptix         a small script the extension sets up (§5.5), only if needed:
                     it starts the launcher in the newest runtimes/ folder
   .env              the machine key and server address, as today
+  install-wanted.json    while an install the user said yes to is under way,
+                         so one a reload or a restart cut off carries on (§8.3)
+  welcome-reopen.json    for a moment, while the welcome page reopens the
+                         window on a folder, so it comes back there (§7.1)
 ```
 
 `runtimes/` is the folder the extension already looks in today, so it keeps
@@ -226,7 +230,8 @@ the machine: first in `runtimes/`, then in npm's own install of `steptix`
   server. The extension asks first, and says how big the download is. It asks
   **once**, right after the extension is installed (§5.2). After Not now it
   never asks again on its own, not after a restart and not in another window.
-  It asks again only when a Run needs the server.
+  It asks again only when a Run needs the server, and then in a dialog,
+  because the user is waiting for that Run (§5.2).
 - **Updates do not ask.** Once a server is on the machine, by any route, the
   user has said yes to having one. When the extension updates and needs a
   newer server, it fetches that server by itself (§6.2). The only question
@@ -416,8 +421,20 @@ Steptix folder, so it is theirs. Nothing later needs `sudo`.
      `steptix` work in every terminal (§5.5).
    - **Not now** does nothing. VS Code remembers the answer for the user, not
      for the window or the folder, so the question does not come back after a
-     restart or in another window. The next time a Run needs the server, the
-     same three answers appear again, with **Cancel** in place of Not now.
+     restart or in another window. The next time a Run needs the server, it
+     asks again in a dialog (see *When a Run needs the server* below).
+   - **Answered late.** VS Code moves an unanswered notification into its
+     notification centre after a while, so the user may answer it long after
+     it appeared. **Install** then does nothing if a server is installed or
+     installing by then; **Not now** does nothing either way. Nothing ever
+     waits on this notification: a Run asks its own question.
+   - Until a server is installed, the status bar says *server not
+     installed*, and the Test Runner panel shows a banner: *"The Steptix
+     server is not installed. Tests need it to run."* with **Set up
+     Steptix…**, which opens the welcome page. While it installs, the banner
+     shows the install's progress. The panel's title bar has a Welcome
+     button at all times. The panel looks for a server again each time it
+     comes into view, so one installed from a terminal clears the banner.
    - The welcome page's server step offers the same choice: an **Install
      server** button and an *Also add steptix to PATH, for every terminal*
      checkbox.
@@ -427,17 +444,59 @@ Steptix folder, so it is theirs. Nothing later needs `sudo`.
    Asking right after the install, rather than on the first Run, means the
    server is usually ready by the time the user has a test to run.
 4. **On Install**, with progress shown in the notification, on the welcome
-   page and in the Output panel:
+   page, on the Test Runner's banner and in the Output panel:
    1. If no suitable Node.js is available (§4.6), it downloads its own copy
       into `<Steptix folder>/node/`.
    2. With that Node.js's npm, it installs the newest `steptix` package
       matching the extension (§4.2) into `runtimes/<version>/`.
    3. The welcome page says *"You can carry on with the steps below while
-      this finishes"*, so the user chooses the AI meanwhile (§7.2).
+      this finishes"*, so the user chooses the AI meanwhile (§7.2). Its
+      **Create a sample project** and **Open a folder** reopen the window;
+      the install carries on afterwards (§8.3).
 5. **The server starts** on the first Run, as it does today.
 
 If they press Run while the download is still going, the Run waits for it
-rather than failing.
+rather than failing. **Stop** ends that wait at once; the install carries on.
+
+**When a Run needs the server.** A Run, Run All or a Test Explorer run that
+finds no server asks in a dialog, not a notification:
+
+> *Steptix needs its local server to run this test. About N MB to download.*
+> **[Install]** **[Install and add steptix to PATH]** **[Cancel]**
+
+- **A dialog, because the user is waiting.** They just pressed Run, and the
+  Run cannot go on without an answer. A notification can slide out of sight
+  and leave the Run waiting on a question nobody can see; a dialog cannot.
+  The question when the extension first starts stays a notification,
+  because nobody asked for it.
+- **Install** installs as in step 4, and the Run waits for it, then runs.
+  **Cancel** ends the Run: the server is not installed (STX034).
+- **A batch asks once.** In a Test Explorer run of several tests, the first
+  test that finds no server asks. After **Install**, the batch waits for the
+  install and runs every test. After **Cancel**, or an install that fails,
+  the rest of the batch is skipped, with one line in Test Results:
+  *"Skipped: the Steptix server is not installed."* No server is a fact about
+  the machine, not about one test, so no other test could have run. The same
+  holds for a server that is installed but has no Node.js to run on (§4.6):
+  *"Skipped: Steptix has no Node.js 22.21 or later to run its server on."*
+
+**Cancelling an install.** Wherever the install's progress shows (the
+notification, the welcome page's server step and the Test Runner's banner)
+there is a **Cancel** button, and all three do the same:
+
+- the download stops, and the half-finished copy is removed (§4.1);
+- the status bar, the banner and the welcome page go back to *Not
+  installed*, and a short message says *"Install cancelled."*;
+- a Run waiting for the install ends with STX034, saying the install was
+  cancelled and that Run or **Steptix: Install Server** installs it;
+- **Install** works again straight away.
+
+**An install that is slow.** There is no time limit: a slow company
+connection that works must still finish. But when one step (*"Downloading
+Node.js"*, *"Downloading steptix 1.4.2"*) has not moved on for 3 minutes, the
+progress adds: *"This is taking longer than usual. If your company uses a
+proxy or its own npm registry, check that npm works in a terminal (`npm view
+steptix`)."* The user can then wait or press Cancel.
 
 ### 5.3 Scenario 3: installed from a terminal, never run, then the Marketplace
 
@@ -714,8 +773,9 @@ so once for that version:
 ### 7.1 The welcome page
 
 The extension opens it the first time it starts (§5.2), and **Steptix:
-Welcome** opens it again at any time. It holds four steps, each showing its
-state, and they can be done in any order:
+Welcome** opens it again at any time. Under its title, *"Set up Steptix and
+run your first test."*, it holds four steps, each showing its state, and
+they can be done in any order:
 
 1. **Steptix server:** *Not installed*, *Installing* (with progress, and
    which Node.js it uses), or *Ready* (the version, and whether `steptix` is
@@ -730,27 +790,61 @@ downloads. The AI step checks keys and lists models from the extension
 itself, Copilot's dialog and models come from VS Code, and saving the choice
 is a file write.
 
+**The page comes back after a reload.** **Create a sample project** and
+**Open a folder** open the folder in this window, which reloads it. If any
+step is still undone, the page opens again in the reloaded window, on the
+first undone step, so the user carries on where they were. A plain **Reload
+Window** brings it back as it was. Once every step is done, it opens only
+when asked (**Steptix: Welcome**, or the Test Runner's Welcome button).
+
 The machine key is created the first time the server starts, as today. The
 user never sees it.
 
 ### 7.2 Choosing the AI
 
-There are two kinds of AI, and the step offers both:
+The step lists four ways to get an AI, as one list, always in this order:
 
-- **GitHub Copilot**, through VS Code. No API key.
-- **An AI provider:** OpenAI, Anthropic or OpenRouter, with the user's own
-  API key and a choice of model.
+1. **GitHub Copilot**, through VS Code. No API key.
+2. **OpenAI**, with the user's own API key.
+3. **Anthropic**, with the user's own API key.
+4. **OpenRouter**, one key for many providers' models.
 
-**Which one is chosen to begin with.** Steptix recommends **GPT 6 Luna**,
+Each entry is a box with its name and one line. Choosing one opens its form
+inside its own box, and closes the one that was open: there is no second
+level of choice, and no provider buttons outside the boxes. A provider's
+form holds its key, **Check key**, the **Model** list, *"The key will be
+saved in"* with the file's path, and **Save**. Copilot's holds the Copilot
+model list, the line *"GitHub Copilot can be used only within VS Code."*, *"Saved in"* with the path, and **Use Copilot**.
+The order never changes, so nothing moves when Copilot appears or goes.
+
+**Which one is open to begin with.** Steptix recommends **GPT 6 Luna**,
 `openai/gpt-6-luna`, which is already its default model.
 
-- **Copilot offers GPT 6 Luna:** Copilot is chosen to begin with, marked
+- **Copilot offers GPT 6 Luna:** Copilot is open to begin with, marked
   *Offers GPT 6 Luna*, and the button says **Use Copilot**.
-- **Copilot is there but does not offer GPT 6 Luna:** the provider form is
-  chosen to begin with. Copilot is still offered, saying *"Your Copilot does
-  not offer GPT 6 Luna, the model Steptix recommends. You can still use it
-  with one of the models it does offer."*
-- **No Copilot:** the provider form on its own.
+- **Copilot is there but does not offer GPT 6 Luna:** OpenAI is open to
+  begin with. Copilot can still be opened, saying *"Your Copilot does not
+  offer GPT 6 Luna, the model Steptix recommends. You can still use it with
+  one of the models it does offer."*
+- **No Copilot:** OpenAI is open to begin with, and Copilot stays first in
+  the list, greyed, so the user knows Steptix supports it, but it cannot be
+  opened. Its box says why, depending on what VS Code can tell:
+  - **Not installed:** *"Not found in this VS Code. Install GitHub Copilot
+    and sign in to use it with no API key."*, with **Install GitHub Copilot**
+    (the Extensions view, on Copilot) and **Check again**.
+  - **Installed, but offering no models:** *"GitHub Copilot is installed but
+    offers no models. Sign in to GitHub Copilot, or check that your Copilot
+    plan includes chat."*, with **Check again**. This covers not signed in,
+    a plan or company policy without chat, and Copilot not started yet.
+
+  Steptix does not ask VS Code whether the user is signed in to GitHub: it
+  can answer that only by asking the user to let Steptix use their GitHub
+  account, a prompt Steptix has no other need for.
+
+The step looks for Copilot again by itself when VS Code says its models or
+its extensions changed, and when the window comes back into focus, so
+signing in or installing it in another tab updates the step without
+reopening it.
 
 The model is the test because VS Code does not tell an extension which
 Copilot plan the user has: an extension sees only each model's name, id,
@@ -769,19 +863,21 @@ Use Copilot for AI**:
    **Cancel**. This is VS Code's own dialog.
 2. Steptix picks GPT 6 Luna. The model list holds only the models Copilot
    offers.
-3. The step explains the cost in one line: *"Uses Copilot requests when
-   Steptix works out or repairs a step. A test that has been compiled runs
-   without any."*
+3. The step says, in one line, where Copilot works: *"GitHub Copilot can
+   be used only within VS Code."* A terminal command that needs the AI says
+   the same and names `steptix ai` (below).
 
 **Using a provider.**
 
-1. **Choose the provider:** OpenAI, Anthropic or OpenRouter. A link beside
-   the key field goes to that provider's page for making a key.
+1. **Open the provider's entry:** OpenAI, Anthropic or OpenRouter. A link
+   beside the key field goes to that provider's page for making a key.
 2. **Paste the key and press Check key.** The extension asks the provider
    for the models the key can use. A refusal says so before anything is
    saved: *"Anthropic did not accept this key. Check that you copied all of
    it, or make a new one."* A provider it cannot reach gives the network's
-   reason and says a company may need its proxy set for VS Code.
+   reason and says a company may need its proxy set for VS Code. The result
+   (*"Key works."* or the refusal) belongs to the key in the field: it goes
+   when the field is emptied or changed, or another entry is opened.
 3. **Choose the model.** The list puts Steptix's recommended model first:
    - OpenAI: GPT 6 Luna (`openai/gpt-6-luna`),
    - Anthropic: Claude Sonnet 5.5 (`anthropic/claude-sonnet-5-5`),
@@ -795,19 +891,78 @@ Use Copilot for AI**:
 provider's prefix (`openai/…`, `anthropic/…`, `openrouter/…`), and
 `AI_API_KEY`. Copilot writes the three lines its setup already writes
 (`AI_MODEL=gateway/copilot/…`, `AI_GATEWAY_URL` and the bridge's
-`AI_API_KEY`). Beside the Save button it says *"For all your projects.
-Change"*:
+`AI_API_KEY`, a local token for VS Code's Copilot bridge, not a provider
+key).
 
-- **All my projects** (the default) writes `<Steptix folder>/.env`, which
-  already gives AI settings to any project that sets none of its own. This
-  also works before any folder is open.
-- **Only this project** writes the project's `.env`, which wins over the
-  all-projects one. It needs an open folder.
-- If the project is a git repository and its `.env` is not ignored, Steptix
-  says so and offers to add it to `.gitignore` before writing a key there.
-- A project `.env` with an empty `AI_API_KEY=` line blocks the all-projects
-  key. When the open project has one, the step says so instead of saving a
-  choice that would not reach it.
+- **The page saves only to `<Steptix folder>/.env`**, the file for all
+  projects, which gives AI settings to any project that sets none of its
+  own. It works before any folder is open. A key for one project only goes
+  in that project's `.env`, by hand or with `steptix ai`.
+- **It names the file before anything is saved.** Above Save: *"The key will
+  be saved in"* and the file's full path, for example
+  `C:\Users\Ada\AppData\Local\steptix\.env`. A key is a secret on disk, so
+  the user is told where it goes.
+- **A project's own settings win**, so when the open project's `.env` sets
+  `AI_MODEL` or `AI_API_KEY`, the form says so beside Save: *"This project's
+  .env has its own AI settings, which win over these in this project."* An
+  empty `AI_API_KEY=` line there blocks the all-projects key the same way,
+  and the step says so instead of saving a choice that would not reach it.
+
+**Settings already there.** A `.env`, the project's or the one for all
+projects, may already name an AI, written by hand, by `steptix ai` or by an
+earlier setup. The step shows it, but never as done until it is shown to
+work. When the page opens, it checks it:
+
+- **A provider's key** gets the same check as **Check key**. While it runs
+  the step's state reads *Checking…*, in grey.
+- **Copilot** counts as working once Copilot lists that model and VS Code
+  has let Steptix use it (the **Allow** above).
+- **Any other gateway** cannot be checked from the page. It stays grey:
+  *"Not checked: runs will show whether it works."*
+
+**The step's state**, in the card's header, is one of:
+
+- the AI's name in green, for example *OpenAI · GPT 6 Luna*, once its check
+  passes, and only then;
+- *Checking…*, in grey, while it is checked;
+- *Set up AI*, in grey, while nothing works yet: no AI chosen, or settings
+  whose key did not pass. It asks for the step to be done rather than
+  blaming a setup the user may not know they had;
+- the AI's name in grey, with why, when it cannot be checked.
+
+**The settings block** shows the settings found, whichever file holds them:
+
+- headed *In use* once they work, else *Found in your settings*;
+- the AI and the key's last four characters. For Copilot, in place of a
+  key: *"Steptix will use GitHub Copilot through VS Code's Copilot bridge
+  only while authoring, compiling or running tests in VS Code."* Working
+  Copilot settings need no line saying so: the header is green;
+- for a provider key that passed its check, a **Model** list, filled from
+  the models that check found and ordered as in the provider's entry; choosing
+  another and pressing Save writes only `AI_MODEL` into the same file, so
+  the model changes without the key being pasted again;
+- what the check found: *"OpenAI accepted the key."*; *"OpenAI didn't accept
+  this key."*; or *"Couldn't check it."* with the reason; with **Check
+  again** when it did not pass;
+- *Key saved in* and the file's full path (*Settings saved in* for Copilot,
+  whose file holds the bridge's address and a local token rather than a key
+  of the user's). For a project's `.env` it adds *"This project only."*;
+- when git does not ignore that project `.env`: *"Git does not ignore this
+  file, so the key would go into a commit."* with **Add .env to
+  .gitignore**; when the file is already committed: *"This file is in git:
+  the key is in its history. Rotate the key, and run git rm --cached .env."*;
+- **Open file**, which opens that `.env` in the editor;
+- **Remove key**, which asks first (*"Remove the AI settings from <path>?
+  The key and model are deleted from that file."*), then deletes the
+  `AI_MODEL`, `AI_API_KEY` and `AI_GATEWAY_URL` lines from it.
+
+Below it, the choices: folded under *Choose a different AI provider* while the settings
+work, open while nothing works.
+
+Hiding settings that are already there would show *Set up AI* while runs
+work, and invite the user to save over a working setup; showing them as
+done before they are checked would claim what nobody knows. Naming the file
+tells the user where a secret is kept.
 
 **Changing it later.** A status-bar item shows what is in use, for example
 *AI: Copilot · GPT 6 Luna*. Clicking it, or **Steptix: Choose AI**, opens the
@@ -838,7 +993,9 @@ terminal, run steptix ai."* instead of failing to connect.
 - `steptix.config.json`,
 - the test's steps already compiled.
 
-It then opens the folder and the test. Because the steps are compiled, the
+It then opens the folder and the test, in this window. An install still
+going carries on after the window reloads (§8.3), and the welcome page comes
+back if any step is undone (§7.1). Because the steps are compiled, the
 first Run makes no AI calls at all: it passes before an AI is chosen, and
 costs a Copilot user nothing. The sample is built and compiled for each
 release and checked by the release test (§10.1).
@@ -921,6 +1078,14 @@ steptix`). Without network access, install from the offline files instead.
 [Retry] [Offline install] [Show details]"*. Offline install opens the release
 page (§5.6). Nothing half-installed is left behind (§4.1).
 
+When npm reaches its registry but the registry has no release of the
+version needed, the network is fine and that advice would mislead. The
+message names the registry and what it lacks instead: *"Could not download
+the Steptix server: no 1.4 release of steptix is published on
+https://npm.example.com/. If your company uses its own npm registry, it may
+not have this version yet: ask for it to be added there, or install from the
+offline files instead."*, with the same three buttons.
+
 ### 8.2 nodejs.org is blocked
 
 *"Could not download Node.js. Install Node.js 22.21 or later yourself and
@@ -929,9 +1094,21 @@ Retry uses it (§4.6).
 
 ### 8.3 Install stopped partway
 
-VS Code closed, the machine slept, the disk filled up. The incomplete copy
-was never renamed into place (§4.1), so it is ignored and cleaned up on the
-next attempt, which starts again.
+VS Code closed, the window reloaded, the machine slept, the disk filled up.
+The incomplete copy was never renamed into place (§4.1), so it is ignored and
+cleaned up on the next attempt, which starts again.
+
+**An install the user said yes to carries on by itself.** The extension
+remembers, for the user, that an install is under way until it finishes. If
+the window reloads partway (the welcome page's **Create a sample project**
+and **Open a folder** both reload it) or VS Code closes, the next start
+installs again without asking, showing *"Carrying on installing the Steptix
+server"* with the usual progress. A Node.js download that had finished is
+kept, and npm's own cache makes the server's second download quicker.
+**Cancel** (§5.2) and a failed install both forget it, so a failure is
+reported once and not retried at every start. The note names the window
+installing, so another window that starts meanwhile leaves that install
+alone instead of starting its own.
 
 ### 8.4 A platform that is not supported yet
 
@@ -1016,8 +1193,8 @@ which is the expected result: the user still has Steptix installed.
   remembered for the user (§5.2), and **Steptix: Add steptix to PATH** (§5.5).
 - **New:** the welcome page and **Steptix: Welcome** (§7.1).
 - **New:** the AI step (§7.2): the check for GPT 6 Luna among Copilot's
-  models, the provider form that asks OpenAI, Anthropic and OpenRouter for
-  their model lists, the list of recommended models shipped with each
+  models, the provider entries that ask OpenAI, Anthropic and OpenRouter
+  for their model lists, the list of recommended models shipped with each
   release, **Steptix: Choose AI** and the status-bar item. Copilot reuses the
   existing setup (`steptix-vscode/src/extension/lm-bridge-setup.ts`).
 - **New:** `steptix ai` for the terminal (§7.2).
@@ -1087,12 +1264,15 @@ copy of the npm registry:
 | Extension with no Node.js, or an older one, on PATH downloads Node.js and the server, a test runs | §5.2, §4.6 |
 | npm install never run, then the extension: no download, uses npm's copy | §5.3 |
 | The install question appears once: Not now, then a restart and a second window, and it does not come back; a Run asks again | §5.2, §4.5 |
+| A Run with no server asks in a dialog; Cancel ends it; a Test Explorer run of several tests asks once, runs them all after Install, and skips the rest after Cancel | §5.2 |
+| Cancel stops an install from the notification, the welcome page and the Test Runner: nothing half-installed is left, and Install works again | §5.2, §8.3 |
 | Install and add steptix to PATH: `steptix` runs in a new terminal outside VS Code | §5.2, §5.5 |
 | Extension-installed server, `steptix` works in VS Code's terminal | §5.5 |
 | The AI step works while the server downloads | §7.1 |
-| A stand-in Copilot that offers GPT 6 Luna is chosen to begin with; one that does not, or none, starts on the provider form | §7.2 |
+| The AI step lists Copilot, OpenAI, Anthropic and OpenRouter in that order; a stand-in Copilot that offers GPT 6 Luna is open to begin with; one that does not, or none, starts on OpenAI; with none, Copilot is greyed and cannot be opened, and becomes openable once a stand-in registers | §7.2 |
+| Settings already in a `.env` are checked when the page opens: grey while checking, green once a good key passes, red with the reason for a bad one | §7.2 |
 | A wrong key is refused before anything is saved; a good one lists models with the provider's recommended model first | §7.2 |
-| Saved for all projects reaches a project with no `.env`; only this project wins over it | §7.2 |
+| Saved on the welcome page, in the file for all projects it names before saving, reaches a project with no `.env`; a project's own `.env` settings win, and the page shows them with their file, Open file and Remove key | §7.2 |
 | `steptix ai` writes what the welcome page writes | §7.2 |
 | The sample project's first Run passes with no AI chosen and the network off | §7.3 |
 | `steptix init` and **Create a sample project** produce the same files; `steptix run tests/first-test.md` in the new folder passes with no AI and no network | §7.3 |
@@ -1114,6 +1294,7 @@ copy of the npm registry:
 | Only the newest of each needed major.minor, the previous and a chosen version are kept | §4.3 |
 | Two windows install at once: one download, both work | §6.7 |
 | Install interrupted, then retried | §8.3 |
+| Create a sample project during an install: the install carries on in the reloaded window, and the welcome page comes back on the first undone step | §8.3, §7.1 |
 | Each uninstall removes what §9 says, and nothing else | §9 |
 
 ## 11. Still to settle

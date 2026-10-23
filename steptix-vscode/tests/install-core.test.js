@@ -1,6 +1,6 @@
 /**
  * The rules the extension installs and picks servers by
- * (docs/specs/SPEC-install.md §4.2, §4.6, §5.3, §5.5, §6.5, §6.8, §8.4).
+ * (docs/specs/SPEC-install.md §4.2, §4.6, §5.3, §5.5, §6.5, §6.8, §8.3, §8.4).
  */
 import { after, test } from 'node:test';
 import { strict as assert } from 'node:assert';
@@ -13,9 +13,13 @@ import {
   addToWindowsPath,
   binScripts,
   chooseNode,
+  clearInstallWanted,
   findOnPath,
   globalPackageDir,
+  installWantedByOther,
+  installWantedFile,
   listInstalledServers,
+  lockHeldByOther,
   majorMinorOf,
   nodeArchiveFrom,
   nodeIsNewEnough,
@@ -23,6 +27,7 @@ import {
   npmSpecFor,
   parseNodeVersion,
   pickServer,
+  readInstallWanted,
   readServerChoice,
   releaseLock,
   removeFromWindowsPath,
@@ -34,6 +39,7 @@ import {
   tryTakeLock,
   unsupportedPlatformMessage,
   withNodeOnPath,
+  writeInstallWanted,
 } from '../src/extension/install-core.ts';
 
 const made = [];
@@ -285,6 +291,57 @@ test('the download lock: one holder, taken over when its process has gone', () =
   assert.equal(tryTakeLock(file, { pid: 300, isAlive: () => true }), false);
   releaseLock(file, 200);
   assert.equal(tryTakeLock(file, { pid: 300, isAlive: () => true }), true);
+});
+
+test('an install the user said yes to is noted, with its PATH answer, until it is forgotten', () => {
+  const root = path.join(scratch(), 'steptix');
+  assert.equal(readInstallWanted(root), null, 'nothing noted yet');
+  writeInstallWanted(root, { addToPath: true }, 4242);
+  assert.equal(installWantedFile(root), path.join(root, 'install-wanted.json'));
+  assert.deepEqual(readInstallWanted(root), { addToPath: true, pid: 4242 });
+  writeInstallWanted(root, { addToPath: false });
+  assert.deepEqual(readInstallWanted(root), { addToPath: false, pid: process.pid }, 'this process by default');
+  clearInstallWanted(root);
+  assert.equal(readInstallWanted(root), null);
+  clearInstallWanted(root); // gone already: nothing to say
+
+  // A note cut off while it was written is no note, rather than a reason to
+  // install at every start.
+  writeFileSync(installWantedFile(root), '{"addTo');
+  assert.equal(readInstallWanted(root), null);
+  writeFileSync(installWantedFile(root), 'null');
+  assert.equal(readInstallWanted(root), null);
+  writeFileSync(installWantedFile(root), '{"addToPath":"yes"}');
+  assert.deepEqual(readInstallWanted(root), { addToPath: false, pid: null }, 'PATH only when it says true');
+});
+
+test("an install that ends forgets only its own note, never another window's", () => {
+  const root = path.join(scratch(), 'steptix');
+  writeInstallWanted(root, { addToPath: false }, 100);
+  clearInstallWanted(root, 200); // window 200's install ended
+  assert.deepEqual(readInstallWanted(root), { addToPath: false, pid: 100 }, "window 100's install is still going");
+  clearInstallWanted(root, 100);
+  assert.equal(readInstallWanted(root), null);
+});
+
+test("a note is another window's install while its extension host lives, and one cut off after", () => {
+  const note = { addToPath: false, pid: 100 };
+  // Another window, still installing: not carried on here.
+  assert.equal(installWantedByOther(note, (pid) => pid === 100, 200), true);
+  // That host is gone (a reload, or VS Code closed): carried on.
+  assert.equal(installWantedByOther(note, () => false, 200), false);
+  // This host's own note, and one that names no host.
+  assert.equal(installWantedByOther(note, () => true, 100), false);
+  assert.equal(installWantedByOther({ addToPath: false, pid: null }, () => true, 200), false);
+});
+
+test('the download lock is held by another window only while its process lives', () => {
+  const file = path.join(scratch(), 'runtimes', '.download.lock');
+  assert.equal(lockHeldByOther(file, () => true, 200), false, 'no lock');
+  assert.equal(tryTakeLock(file, { pid: 100, isAlive: () => true }), true);
+  assert.equal(lockHeldByOther(file, (pid) => pid === 100, 200), true);
+  assert.equal(lockHeldByOther(file, () => false, 200), false, 'its holder is gone');
+  assert.equal(lockHeldByOther(file, () => true, 100), false, 'held by this process');
 });
 
 test("a version manager's shim: the Node.js used is the real one behind it", async () => {

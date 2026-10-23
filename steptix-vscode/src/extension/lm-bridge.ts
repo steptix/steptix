@@ -109,6 +109,13 @@ export interface LmModelHandle {
    * the zeros it used to.
    */
   countTokens(input: BridgeMessage | string): Promise<number>;
+  /**
+   * Whether VS Code lets this extension send requests to the model: true once
+   * the user chose Allow, false when they did not, undefined when VS Code has
+   * not asked yet or cannot say. Left out when the facade was given no
+   * access to ask ({@link lmFacadeOver}).
+   */
+  canSendRequest?(): boolean | undefined;
 }
 
 /**
@@ -124,6 +131,9 @@ export interface LmFacade {
   /** What happens to an image block on this host — see {@link detectImagePartFactory}. */
   imageMode(): ImageMode;
   selectChatModels(selector?: LmSelector): Promise<LmModelHandle[]>;
+  /** Called when VS Code says the models on offer changed: Copilot installed,
+   *  signed in or out. A namespace without the event never calls it. */
+  onDidChangeChatModels(listener: () => void): vscode.Disposable;
 }
 
 /**
@@ -141,6 +151,16 @@ export interface LmNamespace {
   selectChatModels(
     selector?: vscode.LanguageModelChatSelector,
   ): Thenable<vscode.LanguageModelChat[]>;
+  onDidChangeChatModels?: vscode.Event<void>;
+}
+
+/**
+ * The slice of `context.languageModelAccessInformation` the welcome page
+ * reads: whether the user let this extension use a model. A seam for the same
+ * reason as {@link LmNamespace}: the real answer needs a real consent dialog.
+ */
+export interface LmAccess {
+  canSendRequest(chat: vscode.LanguageModelChat): boolean | undefined;
 }
 
 /** `vscode.LanguageModelDataPart.image`, bound. */
@@ -161,10 +181,12 @@ export function detectImagePartFactory(): ImagePartFactory | undefined {
   return (data, mime) => DataPart.image(data, mime);
 }
 
-/** A facade over any namespace; see {@link LmFacade}. */
+/** A facade over any namespace; see {@link LmFacade}. `access` answers each
+ *  model's `canSendRequest`; without it the models give no answer. */
 export function lmFacadeOver(source: {
   lm: () => LmNamespace | undefined;
   imagePart: () => ImagePartFactory | undefined;
+  access?: () => LmAccess | undefined;
 }): LmFacade {
   return {
     available(): boolean {
@@ -182,16 +204,24 @@ export function lmFacadeOver(source: {
       // Read once per listing, the same answer imageMode() gave: a message
       // built with one factory and advertised under another cannot happen.
       const imagePart = source.imagePart();
-      return models.map((m) => wrapModel(m, imagePart));
+      const access = source.access?.();
+      return models.map((m) => wrapModel(m, imagePart, access));
+    },
+    onDidChangeChatModels(listener: () => void): vscode.Disposable {
+      const event = source.lm()?.onDidChangeChatModels;
+      return typeof event === 'function' ? event(() => listener()) : new vscode.Disposable(() => undefined);
     },
   };
 }
 
-/** Adapter over the real namespace. */
-export const realLmFacade: LmFacade = lmFacadeOver({
-  lm: () => (vscode as Partial<typeof vscode>).lm,
-  imagePart: detectImagePartFactory,
-});
+/** Adapter over the real namespace, and the extension's own access to it. */
+export function realLmFacade(access?: () => LmAccess | undefined): LmFacade {
+  return lmFacadeOver({
+    lm: () => (vscode as Partial<typeof vscode>).lm,
+    imagePart: detectImagePartFactory,
+    ...(access && { access }),
+  });
+}
 
 /**
  * `BridgeMessage` in the shape `vscode.lm` takes.
@@ -249,6 +279,7 @@ function imageInputOf(model: vscode.LanguageModelChat): boolean | null {
 function wrapModel(
   model: vscode.LanguageModelChat,
   imagePart: ImagePartFactory | undefined,
+  access: LmAccess | undefined,
 ): LmModelHandle {
   return {
     id: model.id,
@@ -256,6 +287,7 @@ function wrapModel(
     family: model.family,
     name: model.name,
     imageInput: imageInputOf(model),
+    ...(access && { canSendRequest: () => access.canSendRequest(model) }),
     async countTokens(input) {
       return await model.countTokens(
         typeof input === 'string' ? input : toLmMessage(textProjection(input), imagePart),
@@ -301,6 +333,9 @@ export type BridgeState = 'off' | 'listening' | 'standby' | 'error';
 export interface LmBridgeTestOptions {
   lm?: LmNamespace;
   imagePart?: ImagePartFactory | null;
+  /** What the stand-in's models answer to `canSendRequest`, with `lm`; left
+   *  out, the extension's own access, which knows no stand-in model. */
+  access?: LmAccess;
   retryMs?: number;
 }
 
@@ -329,12 +364,19 @@ export class LmBridge implements vscode.Disposable {
   /** Serializes {@link sync}; see its comment. */
   private syncChain: Promise<void> = Promise.resolve();
   private readonly disposables: vscode.Disposable[] = [];
+  private readonly modelsChanged = new vscode.EventEmitter<void>();
+  /** Fires when the models on offer may have changed: VS Code said so, or a
+   *  test put a stand-in namespace in place. The welcome page looks again. */
+  readonly onDidChangeChatModels = this.modelsChanged.event;
+  /** The current facade's own models-changed subscription. */
+  private modelsListener: vscode.Disposable;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private facade: LmFacade = realLmFacade,
+    private facade: LmFacade = realLmFacade(() => context.languageModelAccessInformation),
     private retryMs: number = DEFAULT_RETRY_MS,
   ) {
+    this.modelsListener = this.facade.onDidChangeChatModels(() => this.modelsChanged.fire());
     // Two windows first-activating together can both find SecretStorage empty
     // and both mint; last writer wins on disk while the loser keeps serving the
     // token it made. Setup then writes the winner's token into `.env` and the
@@ -410,8 +452,9 @@ export class LmBridge implements vscode.Disposable {
   }
 
   /**
-   * Test seam: swap the `vscode.lm` namespace, the image-part factory, and the
-   * standby retry cadence.
+   * Test seam: swap the `vscode.lm` namespace, the image-part factory, the
+   * models' access answer, and the standby retry cadence. A new namespace
+   * fires {@link onDidChangeChatModels}, and its own event is followed.
    *
    * `imagePart` left out means "detect on this host", as production does;
    * `null` forces the `strip` path; a function forces `forward` with that
@@ -422,10 +465,16 @@ export class LmBridge implements vscode.Disposable {
     if (opts.lm) {
       const lm = opts.lm;
       const forced = opts.imagePart;
+      const access = opts.access;
       this.facade = lmFacadeOver({
         lm: () => lm,
         imagePart: forced === undefined ? detectImagePartFactory : () => forced ?? undefined,
+        access: () => access ?? this.context.languageModelAccessInformation,
       });
+      this.modelsListener.dispose();
+      this.modelsListener = this.facade.onDidChangeChatModels(() => this.modelsChanged.fire());
+      // Another namespace is other models, as Copilot being installed is.
+      this.modelsChanged.fire();
     }
     if (opts.retryMs !== undefined) this.retryMs = opts.retryMs;
   }
@@ -484,6 +533,8 @@ export class LmBridge implements vscode.Disposable {
     void this.stop('extension deactivated');
     for (const d of this.disposables) d.dispose();
     this.disposables.length = 0;
+    this.modelsListener.dispose();
+    this.modelsChanged.dispose();
     this.statusItem?.dispose();
     this.statusItem = undefined;
   }

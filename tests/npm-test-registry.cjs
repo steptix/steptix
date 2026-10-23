@@ -67,9 +67,11 @@ async function startTestRegistry(dir) {
           url,
           npmrc,
           stop,
-          /** Publish a packed `.tgz` to the registry. */
-          publish(tarball) {
-            const result = cp.spawnSync('npm', ['publish', tarball, '--registry', url], {
+          /** Publish a packed `.tgz` to the registry. `tag` is needed for a
+           *  version older than one already there, which npm will not make
+           *  `latest`; an install by exact version finds it either way. */
+          publish(tarball, tag) {
+            const result = cp.spawnSync('npm', ['publish', tarball, '--registry', url, ...(tag ? ['--tag', tag] : [])], {
               encoding: 'utf8',
               shell: process.platform === 'win32',
               env: { ...process.env, NPM_CONFIG_USERCONFIG: npmrc },

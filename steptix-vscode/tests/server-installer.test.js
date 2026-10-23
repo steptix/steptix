@@ -6,18 +6,22 @@
  */
 import { after, test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  defaultRunner,
+  describeSpec,
   downloadNode,
   installServer,
   InstallFailure,
   newestPublishedServer,
+  npmNotPublished,
   npmReason,
 } from '../src/extension/server-installer.ts';
-import { downloadLockFile, globalPackageDir, listInstalledServers } from '../src/extension/install-core.ts';
+import { downloadLockFile, globalPackageDir, listInstalledServers, pidAlive } from '../src/extension/install-core.ts';
 
 const made = [];
 function scratch() {
@@ -59,10 +63,11 @@ function placeRuntime(userRoot, version, source) {
  * npm, and the downloaded package's `server install`, as far as the
  * installer sees them. `publish` is the version `npm install` fetches.
  */
-function fakeRunner(userRoot, { publish = '1.4.2', npmFails } = {}) {
+function fakeRunner(userRoot, { publish = '1.4.2', npmFails, registry = 'https://registry.npmjs.org/' } = {}) {
   const calls = [];
   const run = async (exe, args) => {
     calls.push(args);
+    if (args[1] === 'config' && args[2] === 'get' && args[3] === 'registry') return { code: 0, stdout: `${registry}\n`, stderr: '' };
     if (args[1] === 'install') {
       if (npmFails) return { code: 1, stdout: '', stderr: npmFails };
       const prefix = args[args.indexOf('--prefix') + 1];
@@ -144,6 +149,35 @@ test("npm's failure is reported in its own words, and leaves nothing behind", as
   });
   assert.deepEqual(listInstalledServers(path.join(root, 'runtimes')), []);
   assert.deepEqual(readdirSync(path.join(root, 'runtimes')).filter((n) => n.startsWith('.partial-')), []);
+});
+
+test('a registry that answers but has no matching release says so, and names the registry', async () => {
+  const root = scratch();
+  const npm = fakeRunner(root, {
+    registry: 'https://npm.example.test/',
+    npmFails:
+      'npm error code ETARGET\nnpm error notarget No matching version found for steptix@~1.4.0.\n' +
+      'npm error notarget In most cases you or one of your dependencies are requesting\nnpm error A complete log of this run can be found in: x.log\n',
+  });
+  await assert.rejects(installServer(deps(root, { run: npm.run }).deps, fakeNode(root), '1.4.0'), (err) => {
+    assert.ok(err instanceof InstallFailure);
+    // Not a network problem, so not the network message.
+    assert.equal(err.kind, 'not-published');
+    assert.equal(err.message, 'no 1.4 release of steptix is published on https://npm.example.test/');
+    assert.match(err.details, /ETARGET/);
+    return true;
+  });
+  assert.deepEqual(readdirSync(path.join(root, 'runtimes')).filter((n) => n.startsWith('.partial-')), []);
+});
+
+test("which npm failures mean the version is not published there", () => {
+  assert.equal(npmNotPublished('npm error code ETARGET\nnpm error notarget No matching version found for steptix@~1.0.0.\n'), true);
+  assert.equal(npmNotPublished('npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/steptix - Not found\n'), true);
+  // A dependency missing is a broken registry, not a missing Steptix.
+  assert.equal(npmNotPublished('npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/steptix-helper - Not found\n'), false);
+  assert.equal(npmNotPublished('npm error code ENOTFOUND\nnpm error network request failed\n'), false);
+  assert.equal(describeSpec('steptix@~1.4.0'), '1.4');
+  assert.equal(describeSpec('steptix@1.4.2'), '1.4.2');
 });
 
 test('a second window waits for the first, then uses what it installed', async () => {
@@ -237,4 +271,138 @@ test('nodejs.org out of reach is a node-download failure', async () => {
     },
   });
   await assert.rejects(downloadNode(d), (err) => err.kind === 'node-download' && /ENOTFOUND nodejs\.org/.test(err.message));
+});
+
+// ---------------------------------------------------------------------------
+// Cancel (§5.2): the download stops and nothing half-done is left
+// ---------------------------------------------------------------------------
+
+const partials = (dir) => (existsSync(dir) ? readdirSync(dir).filter((n) => n.startsWith('.partial-')) : []);
+const cancelled = (err) => err instanceof InstallFailure && err.kind === 'cancelled';
+
+/** The pid of a process that has exited. */
+function goneProcessPid() {
+  const { pid } = spawnSync(process.execPath, ['-e', '']);
+  assert.equal(pidAlive(pid), false, `pid ${pid} was taken again at once; run the test again`);
+  return pid;
+}
+
+/** Poll until `predicate` holds, failing after a generous ceiling. */
+async function until(label, predicate) {
+  for (let polls = 0; !predicate(); polls++) {
+    if (polls > 1_500) throw new Error(`gave up waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+test('Cancel while npm downloads ends the install as cancelled, and leaves nothing behind', async () => {
+  const root = scratch();
+  const cancel = new AbortController();
+  const run = async (_exe, args, opts) => {
+    assert.equal(args[1], 'install', `unexpected run: ${args.join(' ')}`);
+    assert.equal(opts.signal, cancel.signal, 'npm is given Cancel');
+    // npm part way through: some of the package is in its folder.
+    const pkg = globalPackageDir(args[args.indexOf('--prefix') + 1], platform);
+    mkdirSync(path.join(pkg, 'dist'), { recursive: true });
+    writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'steptix', version: '1.4.2' }));
+    cancel.abort();
+    // Stopped, npm exits as a stopped program does, without saying why.
+    return { code: 1, stdout: '', stderr: '' };
+  };
+  await assert.rejects(installServer(deps(root, { run, signal: cancel.signal }).deps, fakeNode(root), '1.4.0'), cancelled);
+  assert.deepEqual(listInstalledServers(path.join(root, 'runtimes')), []);
+  assert.deepEqual(partials(path.join(root, 'runtimes')), []);
+  assert.equal(existsSync(downloadLockFile(root)), false, 'the lock is released');
+});
+
+test("Cancel during the setup removes the copy the stopped setup left, and no one else's", async () => {
+  const root = scratch();
+  const runtimes = path.join(root, 'runtimes');
+  const cancel = new AbortController();
+  // A terminal's own install, copying right now: its process is alive.
+  const theirs = `.partial-1.4.2-${process.ppid}-0badc0de`;
+  const ours = `.partial-1.4.2-${goneProcessPid()}-c0ffee00`;
+  const npm = fakeRunner(root);
+  const run = async (exe, args, opts) => {
+    if (args[1] !== 'server') return npm.run(exe, args, opts);
+    // `server install`, stopped mid-copy: its partial copy stays where it was.
+    mkdirSync(path.join(runtimes, ours, 'dist'), { recursive: true });
+    mkdirSync(path.join(runtimes, theirs), { recursive: true });
+    cancel.abort();
+    return { code: 1, stdout: '', stderr: '' };
+  };
+  await assert.rejects(installServer(deps(root, { run, signal: cancel.signal }).deps, fakeNode(root), '1.4.0'), cancelled);
+  assert.deepEqual(partials(runtimes), [theirs]);
+  assert.deepEqual(listInstalledServers(runtimes), []);
+});
+
+test('Cancel while Node.js downloads ends the install as cancelled, not as nodejs.org out of reach', async () => {
+  const root = scratch();
+  const cancel = new AbortController();
+  const { deps: d } = deps(root, {
+    signal: cancel.signal,
+    fetch: async (_url, init) => {
+      assert.equal(init.signal, cancel.signal, 'the download is given Cancel');
+      cancel.abort();
+      throw new DOMException('This operation was aborted', 'AbortError');
+    },
+  });
+  await assert.rejects(downloadNode(d), cancelled);
+  assert.deepEqual(existsSync(path.join(root, 'node')) ? readdirSync(path.join(root, 'node')) : [], []);
+});
+
+test('Cancel while Node.js unpacks removes the half-unpacked copy', async () => {
+  const root = scratch();
+  const cancel = new AbortController();
+  const bytes = new Uint8Array([1, 2, 3, 4]);
+  const { deps: d } = deps(root, {
+    signal: cancel.signal,
+    fetch: fakeNodejsOrg(bytes),
+    probe: async (exe) => ({ version: '22.22.1', exe }),
+    run: async (exe, args, opts) => {
+      assert.equal(opts.signal, cancel.signal, 'tar is given Cancel');
+      await fakeTar(exe, args);
+      cancel.abort();
+      return { code: 1, stdout: '', stderr: '' };
+    },
+  });
+  await assert.rejects(downloadNode(d), cancelled);
+  assert.deepEqual(readdirSync(path.join(root, 'node')), [], 'no partial folder, and no Node.js');
+});
+
+test('Cancel stops the program and every program it started, as npm starts install scripts through a shell', async () => {
+  const dir = scratch();
+  const pidFile = path.join(dir, 'script.pid');
+  // A package's install script, which says where it runs and keeps running.
+  const script = path.join(dir, 'install-script.cjs');
+  writeFileSync(script, `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
+  // npm, as far as this goes: it runs the script through the shell (cmd.exe
+  // on Windows, whose own children outlive it), then waits.
+  const npm = path.join(dir, 'npm-stand-in.cjs');
+  writeFileSync(
+    npm,
+    `require('node:child_process').spawn(${JSON.stringify(`"${process.execPath}" "${script}"`)}, { shell: true, stdio: 'ignore' });\n` +
+      'setInterval(() => {}, 1000);\n',
+  );
+  const cancel = new AbortController();
+  const running = defaultRunner(process.execPath, [npm], { signal: cancel.signal });
+  let scriptPid = 0;
+  try {
+    await until('the install script to start', () => existsSync(pidFile) && readFileSync(pidFile, 'utf8') !== '');
+    scriptPid = Number(readFileSync(pidFile, 'utf8'));
+    cancel.abort();
+    const result = await running;
+    assert.notEqual(result.code, 0);
+    await until('the install script to stop', () => !pidAlive(scriptPid));
+  } finally {
+    cancel.abort();
+    await running;
+    if (scriptPid && pidAlive(scriptPid)) process.kill(scriptPid);
+  }
+});
+
+test('a program Cancel came before does not start', async () => {
+  const result = await defaultRunner(process.execPath, ['-e', 'console.log("ran")'], { signal: AbortSignal.abort() });
+  assert.equal(result.code, null);
+  assert.equal(result.stdout, '');
 });

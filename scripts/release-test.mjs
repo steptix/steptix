@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const { startTestRegistry } = require('../tests/npm-test-registry.cjs');
 const { freeFetchablePort } = require('../tests/listen-fetchable.cjs');
-const { unpackVsix, untar } = require('../tests/release-files.cjs');
+const { removeTree, repackAs: repackTarball, unpackVsix, untar } = require('../tests/release-files.cjs');
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name) => {
@@ -123,17 +123,9 @@ function machine(name, registry) {
   };
 }
 
-/** A copy of `steptix-<version>.tgz` repacked as `newVersion`, for the
- *  update checks. Repacked rather than rebuilt, so it is the same code. */
+/** This release's npm package repacked as `newVersion` (tests/release-files.cjs). */
 function repackAs(newVersion) {
-  const dir = path.join(scratch, `repack-${newVersion}`);
-  untar(path.join(filesDir, npmName), dir);
-  const manifestPath = path.join(dir, 'package', 'package.json');
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  manifest.version = newVersion;
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  const out = mustRun('npm', ['pack', '--ignore-scripts', '--pack-destination', dir], { cwd: path.join(dir, 'package') });
-  return path.join(dir, out.trim().split(/\r?\n/).at(-1));
+  return repackTarball(path.join(filesDir, npmName), newVersion, path.join(scratch, `repack-${newVersion}`));
 }
 
 /** The server version `steptix` runs, from `--version`'s `Server:` line. Its
@@ -359,6 +351,72 @@ try {
     expect(fs.existsSync(path.join(a.userRoot, '.env')), 'the machine .env was removed with the servers');
   });
 
+  // §7.4 ---------------------------------------------------------------------
+  await check('steptix browsers install firefox, and a test runs in Firefox', '§7.4', () => {
+    const f = machine('firefox', registry);
+    const install = f.npm(['i', '-g', `steptix@${version}`]);
+    expect(install.status === 0, `npm i -g exited ${install.status}:\n${install.out}`);
+    const browsers = f.steptix(['browsers', 'install', 'firefox']);
+    expect(browsers.status === 0, `steptix browsers install firefox exited ${browsers.status}:\n${browsers.out}`);
+    const sample = initProject(f, 'sample');
+    const configPath = path.join(sample, 'steptix.config.json');
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    config.browser = { ...config.browser, browser: 'firefox' };
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    runSample(f, sample);
+  });
+
+  // §6.7, §8.3 -----------------------------------------------------------------
+  /** Folders in runtimes/ other than whole versions and the lock files. */
+  const leftovers = (m) =>
+    fs.existsSync(path.join(m.userRoot, 'runtimes'))
+      ? fs.readdirSync(path.join(m.userRoot, 'runtimes')).filter((n) => !/^\d/.test(n) && !['.lock', '.download.lock', '.in-use'].includes(n))
+      : [];
+
+  await check('two first commands at once: one copy, and both work', '§6.7', async () => {
+    const c = machine('concurrent', registry);
+    const install = c.npm(['i', '-g', `steptix@${version}`]);
+    expect(install.status === 0, `npm i -g exited ${install.status}:\n${install.out}`);
+    const both = await Promise.all(
+      [0, 1].map(
+        () =>
+          new Promise((resolve) => {
+            const child = spawn('steptix', ['--version'], { env: c.env, shell: win });
+            let out = '';
+            child.stdout.on('data', (d) => (out += d));
+            child.stderr.on('data', (d) => (out += d));
+            child.on('exit', (status) => resolve({ status, out }));
+          }),
+      ),
+    );
+    for (const r of both) expect(r.status === 0, `a first command exited ${r.status}:\n${r.out}`);
+    expect(JSON.stringify(c.runtimes()) === JSON.stringify([version]), `runtimes/ holds ${c.runtimes().join(', ')}`);
+    expect(leftovers(c).length === 0, `runtimes/ holds leftovers: ${leftovers(c).join(', ')}`);
+  });
+
+  await check('a first command stopped partway, then run again, sets Steptix up', '§8.3', async () => {
+    const s = machine('interrupted', registry);
+    const install = s.npm(['i', '-g', `steptix@${version}`]);
+    expect(install.status === 0, `npm i -g exited ${install.status}:\n${install.out}`);
+    const child = spawn('steptix', ['--version'], { env: s.env, shell: win, stdio: 'ignore' });
+    const runtimesDir = path.join(s.userRoot, 'runtimes');
+    // Stopped once its copy has begun, as a closed window or a sleep would.
+    for (let i = 0; i < 600 && !(fs.existsSync(runtimesDir) && fs.readdirSync(runtimesDir).some((n) => n.startsWith('.partial-'))); i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(fs.readdirSync(runtimesDir).some((n) => n.startsWith('.partial-')), 'the copy finished before it could be stopped');
+    if (win) spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    else child.kill('SIGKILL');
+    await exited(child, 30_000);
+    expect(!s.runtimes().includes(version), 'the stopped copy was renamed into place anyway');
+    const again = s.steptix(['--version']);
+    expect(again.status === 0, `the second first command exited ${again.status}:\n${again.out}`);
+    expect(s.runtimes().includes(version), `runtimes/ holds ${s.runtimes().join(', ')}`);
+    expect(leftovers(s).length === 0, `the unfinished copy was not cleaned up: ${leftovers(s).join(', ')}`);
+    const sample = initProject(s, 'sample');
+    runSample(s, sample);
+  });
+
   // §5.6 ---------------------------------------------------------------------
   await check('the offline file installs with no registry at all, and a test runs', '§5.6', () => {
     const o = machine('offline', { npmrcText: 'registry=http://127.0.0.1:9/\n' });
@@ -393,18 +451,22 @@ try {
   if (skipVsCode) {
     console.log('skipped: the extension install test (--skip-vscode)');
   } else {
-    await check('the extension installs Node.js and the server, starts it and removes it, from the .vsix and this package', '§5.2, §4.6, §5.5, §9.2', () => {
+    await check('the extension, from the .vsix: its install scenarios (steptix-vscode/tests/integration/runInstallTest.cjs)', '§4.2, §4.5, §4.6, §4.12, §5.2, §5.3, §5.6, §6.2, §6.8, §7.1, §7.2, §8.3, §9.2', () => {
       const r = sh('node', [path.join(root, 'steptix-vscode', 'tests', 'integration', 'runInstallTest.cjs')], {
         env: {
           ...process.env,
           STEPTIX_INSTALL_TEST_TARBALL: path.join(filesDir, npmName),
           STEPTIX_INSTALL_TEST_VSIX: path.join(filesDir, vsixName),
+          STEPTIX_INSTALL_TEST_OFFLINE_FILE: path.join(filesDir, offlineName),
         },
         cwd: path.join(root, 'steptix-vscode'),
         shell: false,
-        timeout: 40 * 60_000,
+        timeout: 180 * 60_000,
       });
-      expect(r.status === 0, `the extension install test exited ${r.status}:\n${r.out.slice(-4000)}`);
+      // Its own result lines, one per scenario test, pass or fail.
+      const lines = r.out.split(/\r?\n/).filter((l) => /^(ok {2}|FAIL|skip) \[/.test(l) || /^ {5}\S/.test(l));
+      for (const line of lines) console.log(`     ${line}`);
+      expect(r.status === 0, `the extension install test exited ${r.status}${lines.length === 0 ? `:\n${r.out.slice(-4000)}` : ''}`);
     });
   }
 } finally {
@@ -414,20 +476,30 @@ try {
 // --- What this run did not check ------------------------------------------
 
 const NOT_YET = [
-  'Extension with Node.js 22.21+ on PATH downloads only the server (§5.2, §4.6)',
-  'npm install never run, then the extension uses npm\'s copy (§5.3)',
-  'The install question appears once across a restart and a second window (§5.2, §4.5)',
+  // Writes the real user's PATH (the registry on Windows, a shell profile
+  // elsewhere), so it needs a disposable machine rather than a test folder.
   'Install and add steptix to PATH: steptix runs in a new terminal outside VS Code (§5.5)',
-  'The welcome page: the AI step while the server downloads, a stand-in Copilot, a wrong and a good key, where the choice is saved, and steptix ai writing the same files (§7.1, §7.2)',
-  'The .vsix installed with the network switched off (§5.6)',
+  // `steptix ai` asks in a terminal; what it writes is held to the welcome
+  // page's by tests/provider-setup-parity.test.ts.
+  'steptix ai writing what the welcome page writes, run in a terminal (§7.2)',
+  // Needs the machine's network itself cut, which a test folder cannot do.
   "The sample's first Run with the whole machine's network off, the browser's included (§7.3)",
-  'Extension updates to a new minor, and a new server patch with no new extension (§6.2)',
+  // Needs a Run from the editor against a real server, which the install
+  // scenarios do not drive yet.
   'Non-matching servers started by VS Code (idle and busy) and by hand (§6.4)',
-  'serverAutoStart.command and useInstalledRuntime off (§4.12)',
-  'A server patch with the oldest and the newest extension patch; no server of another major.minor (§4.2)',
-  'npm\'s steptix on an older major.minor than the extension (§6.8)',
-  'steptix browsers install firefox, and Firefox after an update that moves Playwright (§7.4)',
-  'Two windows installing at once (§6.7), and an interrupted install retried (§8.3)',
+  // A repacked package cannot move Playwright; it needs two real releases.
+  'Firefox after a server update that moves Playwright (§7.4)',
+  // Two VS Code windows on one machine at once.
+  'Two windows installing at once (§6.7)',
+  // The install scenarios never start a Test Explorer run of several tests.
+  // The fast suite checks that Cancel skips the rest, against a stand-in for
+  // the install (server-lifecycle.test.cjs); "runs them all after Install"
+  // is checked nowhere yet.
+  'A Test Explorer run of several tests asks once, runs them all after Install, and skips the rest after Cancel (§5.2)',
+  // VS Code keeps an extension's state in memory while it runs extension
+  // tests, so a remembered answer is checked within one launch, not across a
+  // real restart or a second window.
+  'The install question and the §6.8 notice remembered across a real restart and a second window (§4.5, §6.8)',
 ];
 
 const failed = results.filter((r) => !r.ok);
@@ -437,5 +509,8 @@ for (const r of failed) console.log(`  FAIL ${r.name} (${r.scenario})`);
 console.log('');
 console.log(`Not checked by this test yet (${NOT_YET.length} rows of §10.1):`);
 for (const row of NOT_YET) console.log(`  - ${row}`);
-console.log(`release test folder: ${scratch}`);
+// Gigabytes of machines: removed when everything passed, kept to look at
+// when something did not.
+if (failed.length === 0) removeTree(scratch);
+else console.log(`release test folder: ${scratch}`);
 process.exit(failed.length === 0 ? 0 : 1);

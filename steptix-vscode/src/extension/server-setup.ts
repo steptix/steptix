@@ -32,17 +32,23 @@ import {
   BIN_SCRIPT_MARK,
   binScripts,
   chooseNode,
+  clearInstallWanted,
   clearServerChoice,
   compareVersions,
+  downloadLockFile,
   findOnPath,
   globalPackageDir,
+  installWantedByOther,
+  installWantedFile,
   isSteptixPackage,
   listInstalledServers,
+  lockHeldByOther,
   NODE_DOWNLOAD_MB,
   npmCliBeside,
   npmPackageOfCommand,
   packageVersionAt,
   pathChangesFile,
+  readInstallWanted,
   readPathChanges,
   removeFromWindowsPath,
   removeShellRcLine,
@@ -52,7 +58,9 @@ import {
   shellRcFile,
   staleTerminalNotice,
   unsupportedPlatformMessage,
+  writeInstallWanted,
   type InstalledServer,
+  type InstallWanted,
   type NodeChoice,
   type PathChange,
   type ServerSource,
@@ -69,6 +77,7 @@ import {
   type InstallerDeps,
 } from './server-installer.js';
 import { describeExtensionBuild, extensionBuild } from './extension-build.js';
+import { SlowStepWatch } from './slow-step.js';
 import type { WelcomeState } from './welcome-core.js';
 import {
   readAutoStartSettings,
@@ -118,6 +127,10 @@ const STALE_DISMISSED_KEY = 'steptix.staleTerminal.dismissed';
 const STALE_SHOWN_FOR_KEY = 'steptix.staleTerminal.shownFor';
 
 const PATCH_CHECK_MS = 24 * 60 * 60 * 1000;
+/** How long a note of an install whose extension host is still alive is
+ *  asked about again before it counts as another window's (§8.3). */
+const CUT_OFF_WAIT_MS = 10_000;
+const CUT_OFF_POLL_MS = 500;
 const RELEASES_URL = 'https://github.com/steptix/steptix/releases';
 const NODEJS_URL = 'https://nodejs.org/';
 
@@ -156,6 +169,14 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
   private readonly arch = process.arch;
   /** The install in progress in this window, which a Run waits for (§5.2). */
   private pending: Promise<InstalledServer | null> | undefined;
+  /** Cancel for the install in progress (§5.2). */
+  private installAbort: AbortController | undefined;
+  /** Whether the last install ended on Cancel rather than failing, which a
+   *  Run that waited for it reports as not installed. */
+  private lastInstallCancelled = false;
+  /** The install dialog a Run is showing in this window, and the install its
+   *  yes starts. Never the start notification, which no Run waits on. */
+  private question: Promise<InstalledServer | 'declined' | null> | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly changed = new vscode.EventEmitter<void>();
@@ -163,11 +184,60 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
   readonly onDidChange = this.changed.event;
   /** What the install in progress is doing, in a few words. */
   private progressText: string | null = null;
+  /** What the status bar and the Test Runner's banner say: a server is
+   *  missing, one is installing, or neither (`null`). */
+  private installState: InstallState = null;
+  /** Whether the startup checks have looked for a server yet; until they
+   *  have, `installState`'s `null` means "not looked", not "installed". */
+  private checked = false;
+  /** The npm package and version {@link recheck} last tried. */
+  private npmRechecked: string | null = null;
+  /** The window is going away: an install that ends now was cut off, not
+   *  finished or given up, so its note stays for the next start (§8.3). */
+  private disposed = false;
 
   private setState(state: InstallState): void {
+    this.installState = state;
     this.status?.setInstallState(state);
     if (state !== 'installing') this.progressText = null;
     this.changed.fire();
+  }
+
+  /** For the Test Runner's banner (§5.2). A patch updating beside a server
+   *  that runs is nothing to set up, so it shows no banner. */
+  installStatus(): { state: InstallState; progress: string | null } {
+    if (this.installState === 'installing' && currentPick(this.userRoot, this.requires).kind === 'run') {
+      return { state: null, progress: null };
+    }
+    return { state: this.installState, progress: this.progressText };
+  }
+
+  /**
+   * Look again whether a server is missing, when the Test Runner comes into
+   * view. The startup checks decided it once; since then the user may have
+   * run `npm i -g steptix` or `steptix uninstall` in a terminal. Only cheap
+   * file and PATH checks: no download, no question.
+   */
+  async recheck(): Promise<void> {
+    if (!this.managed() || this.pending || !this.checked) return;
+    const pick = currentPick(this.userRoot, this.requires);
+    if (this.installState === 'not-installed') {
+      if (pick.kind === 'run') {
+        this.setState(null);
+        return;
+      }
+      // npm's copy, set up as the startup checks would (useNpmPackage clears
+      // the state). Tried once per package and version, so a copy that does
+      // not match is not set up again each time the panel is shown.
+      const pkg = this.npmPackageOnPath();
+      const seen = pkg && `${pkg}@${packageVersionAt(pkg) ?? ''}`;
+      if (seen && seen !== this.npmRechecked) {
+        this.npmRechecked = seen;
+        await this.useNpmPackage();
+      }
+      return;
+    }
+    if (this.installState === null && pick.kind === 'none' && !this.anythingInstalled()) this.setState('not-installed');
   }
 
   constructor(context: vscode.ExtensionContext, out: vscode.OutputChannel, status?: InstallStatusSink) {
@@ -180,6 +250,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.changed.dispose();
     if (this.timer) clearInterval(this.timer);
     for (const d of this.disposables) d.dispose();
@@ -286,9 +357,22 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
       vscode.commands.registerCommand(ADD_TO_PATH_COMMAND, () => this.addToPath()),
       vscode.commands.registerCommand(UNINSTALL_SERVER_COMMAND, () => this.uninstallServer()),
     );
-    if (!opts.checks) return;
+    if (opts.checks) await this.startupChecks();
+  }
+
+  /**
+   * What the extension does when it starts: find or fetch a matching server,
+   * ask once (§5.2), say when the terminal's steptix is on another
+   * major.minor (§6.8), and start the daily patch check (§6.2). Public so the
+   * release test can run it once its message boxes are stubbed; activation
+   * runs it in a real window.
+   */
+  async startupChecks(): Promise<void> {
     if (!this.managed()) {
       this.log('"steptix.serverAutoStart.command" is set or "useInstalledRuntime" is off: installing and updating servers is left to you');
+      // A yes from before the user's own settings took over is not carried on
+      // later, out of the blue, once they switch back.
+      await this.forgetInstall('abandoned');
       return;
     }
     try {
@@ -297,24 +381,40 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
       this.log(`checking for a server failed: ${(err as Error).message}`);
     }
     void this.staleTerminalCheck().catch((err: unknown) => this.log(`terminal version check failed: ${(err as Error).message}`));
+    if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => void this.patchCheck(), PATCH_CHECK_MS);
     this.timer.unref?.();
   }
 
   private async findOrFetchOnStart(): Promise<void> {
+    this.checked = true;
+    // An install the user said yes to that a reload or a closed VS Code cut
+    // off (§8.3). Not one another window is still running.
+    const wanted = await this.cutOffInstall();
     const pick = currentPick(this.userRoot, this.requires);
     if (pick.kind === 'run') {
       this.logUsing(pick.server, pick.chosen);
       await this.prepareTerminals(await this.nodeNow());
+      if (wanted) await this.wantedInstallFound(wanted);
       void this.patchCheck();
       return;
     }
     if (pick.kind === 'chosen-mismatch') {
       this.log(`you chose Steptix server ${pick.chosen} with steptix server use, which does not match this extension; a Run says what to do`);
+      // Installing would not help: the choice still wins (as Run says).
+      if (wanted) await this.forgetInstall('abandoned');
       return;
     }
     const found = await this.useNpmPackage();
-    if (found) return;
+    if (found) {
+      if (wanted) await this.forgetInstall('abandoned');
+      return;
+    }
+    if (wanted) {
+      this.log('carrying on the install of the Steptix server that a reload or a closed VS Code cut off');
+      void this.install({ mode: 'install', addToPath: wanted.addToPath, resumed: true });
+      return;
+    }
     if (this.anythingInstalled()) {
       // A server is on the machine by some route, so the user has said yes to
       // having one: the matching one comes without asking (§4.5, §6.2).
@@ -323,6 +423,62 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     }
     this.setState('not-installed');
     if (!this.context.globalState.get<boolean>(ASKED_KEY)) void this.askAndInstall('start');
+  }
+
+  /**
+   * The note of an install a reload or a closed VS Code cut off (§8.3), or
+   * null: none, or another window's install still running. A reload starts
+   * this extension host while the old one may still be exiting, so a note
+   * whose host is alive is asked about again for a few seconds first.
+   */
+  private async cutOffInstall(): Promise<InstallWanted | null> {
+    const wanted = readInstallWanted(this.userRoot);
+    if (!wanted) return null;
+    for (let waited = 0; installWantedByOther(wanted); waited += CUT_OFF_POLL_MS) {
+      if (waited >= CUT_OFF_WAIT_MS) {
+        this.log(`another window (process ${wanted.pid}) is installing the Steptix server: not carrying on its install here`);
+        return null;
+      }
+      await new Promise((resolve) => setTimeout(resolve, CUT_OFF_POLL_MS));
+    }
+    return wanted;
+  }
+
+  /** Note an install the user said yes to, for this extension host (§8.3).
+   *  A note that cannot be written costs only the carrying on after a
+   *  reload, so it never stops the install. */
+  private noteInstall(addToPath: boolean): void {
+    try {
+      writeInstallWanted(this.userRoot, { addToPath });
+    } catch (err) {
+      this.log(`could not write ${installWantedFile(this.userRoot)}: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Forget the note: `mine`, only one this extension host wrote, as an
+   * install of its own ends; `abandoned`, any note but another window's
+   * install still running.
+   */
+  private async forgetInstall(which: 'mine' | 'abandoned'): Promise<void> {
+    try {
+      if (which === 'mine') clearInstallWanted(this.userRoot, process.pid);
+      else if (await this.cutOffInstall()) clearInstallWanted(this.userRoot);
+    } catch (err) {
+      this.log(`could not remove ${installWantedFile(this.userRoot)}: ${(err as Error).message}`);
+    }
+  }
+
+  /** A matching server is there for an install the user said yes to: one
+   *  cut off after its copy, or finished by another window or a terminal.
+   *  Forget it, and add steptix to PATH if that was asked for and not done. */
+  private async wantedInstallFound(wanted: InstallWanted): Promise<void> {
+    try {
+      clearInstallWanted(this.userRoot);
+    } catch (err) {
+      this.log(`could not remove ${installWantedFile(this.userRoot)}: ${(err as Error).message}`);
+    }
+    if (wanted.addToPath && !this.steptixOnPath() && readPathChanges(this.userRoot).length === 0) await this.addToPath();
   }
 
   /** A server of another major.minor, or npm's own package, is on the machine. */
@@ -345,6 +501,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
       }
       this.logUsing(server, false);
       void vscode.window.showInformationMessage(`Using Steptix ${server.version} installed with npm.`);
+      if (this.installState === 'not-installed') this.setState(null);
       await this.prepareTerminals(node);
       return true;
     } catch (err) {
@@ -359,10 +516,25 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
 
   /**
    * Ask, then install on a yes. `start` is the one question right after the
-   * extension is installed, asked once for the user; `run` is the same
-   * question when a Run needs the server, with Cancel for Not now.
+   * extension is installed, asked once for the user, in a notification; `run`
+   * is the question when a Run needs the server, in a dialog, because the
+   * user is waiting for that Run (§5.2).
+   *
+   * Nothing waits on the start notification: VS Code may have moved it into
+   * its notification centre, out of sight, so a Run asks its own dialog
+   * rather than wait for an answer nobody can see. Runs share theirs: a Run
+   * while one is showing, say after Stop and Run again, waits for that answer
+   * instead of stacking a second dialog.
    */
-  private async askAndInstall(when: 'start' | 'run'): Promise<InstalledServer | 'declined' | null> {
+  private askAndInstall(when: 'start' | 'run'): Promise<InstalledServer | 'declined' | null> {
+    if (when === 'start') return this.ask('start');
+    this.question ??= this.ask('run').finally(() => {
+      this.question = undefined;
+    });
+    return this.question;
+  }
+
+  private async ask(when: 'start' | 'run'): Promise<InstalledServer | 'declined' | null> {
     const unsupported = unsupportedPlatformMessage(this.platform, this.arch);
     if (unsupported) {
       void vscode.window.showInformationMessage(unsupported);
@@ -372,18 +544,38 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     const mb = SERVER_DOWNLOAD_MB + (node ? 0 : NODE_DOWNLOAD_MB);
     const install = 'Install';
     const withPath = 'Install and add steptix to PATH';
-    const notNow = when === 'start' ? 'Not now' : 'Cancel';
-    const answers = [install, ...(this.steptixOnPath() ? [] : [withPath]), notNow];
-    if (when === 'start') await this.context.globalState.update(ASKED_KEY, true);
-    const answer = await vscode.window.showInformationMessage(
-      when === 'start'
-        ? `Steptix needs its local server to run tests. About ${mb} MB to download.`
-        : `Steptix needs its local server to run this test. About ${mb} MB to download.`,
-      ...answers,
-    );
+    const installs = [install, ...(this.steptixOnPath() ? [] : [withPath])];
+    let answer: string | undefined;
+    if (when === 'start') {
+      await this.context.globalState.update(ASKED_KEY, true);
+      answer = await vscode.window.showInformationMessage(
+        `Steptix needs its local server to run tests. About ${mb} MB to download.`,
+        ...installs,
+        'Not now',
+      );
+    } else {
+      // VS Code adds Cancel to a modal dialog itself, and answers undefined
+      // for it.
+      answer = await vscode.window.showInformationMessage(
+        `Steptix needs its local server to run this test. About ${mb} MB to download.`,
+        { modal: true },
+        ...installs,
+      );
+    }
     if (answer !== install && answer !== withPath) {
-      this.log(`install question answered "${answer ?? 'dismissed'}"`);
+      this.log(`install question answered "${answer ?? (when === 'start' ? 'dismissed' : 'Cancel')}"`);
       return 'declined';
+    }
+    if (when === 'start') {
+      // Answered late (§5.2): the notification may have sat in the
+      // notification centre while a Run's dialog, the welcome page or a
+      // terminal installed a server, or while one installs here or in
+      // another window. The user's yes is already met.
+      const installing = this.pending !== undefined || lockHeldByOther(downloadLockFile(this.userRoot));
+      if (installing || currentPick(this.userRoot, this.requires).kind === 'run') {
+        this.log(`install question answered "${answer}" after a server was ${installing ? 'already installing' : 'installed'}: nothing to do`);
+        return null; // nobody waits on the start notification's result
+      }
     }
     return this.install({ mode: 'install', addToPath: answer === withPath });
   }
@@ -409,8 +601,9 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
    * Install the newest matching server, or `version`, with progress. One at
    * a time in this window: a second call, a Run included, waits for the
    * first. `install` is the user's yes; `update` comes without asking.
+   * `resumed` is a yes from before a reload or a restart, carried on (§8.3).
    */
-  install(opts: { mode: 'install' | 'update'; addToPath?: boolean; version?: string }): Promise<InstalledServer | null> {
+  install(opts: { mode: 'install' | 'update'; addToPath?: boolean; version?: string; resumed?: boolean }): Promise<InstalledServer | null> {
     if (this.pending) {
       // One install at a time; a caller who also asked for PATH still gets it.
       if (!opts.addToPath) return this.pending;
@@ -430,42 +623,66 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     return this.pending;
   }
 
-  private async runInstall(opts: { mode: 'install' | 'update'; addToPath?: boolean; version?: string }): Promise<InstalledServer | null> {
+  private async runInstall(opts: { mode: 'install' | 'update'; addToPath?: boolean; version?: string; resumed?: boolean }): Promise<InstalledServer | null> {
+    // What Cancel aborts, wherever the progress shows it (§5.2).
+    const abort = new AbortController();
+    this.installAbort = abort;
+    this.lastInstallCancelled = false;
     this.setState('installing');
     this.nodeCache = undefined;
+    // The user's yes is remembered until the install finishes, fails or is
+    // cancelled; only a window going away mid-install leaves the note, so the
+    // next start carries it on (§8.3). Updates need no note, since they run
+    // at every start anyway.
+    const wanted = opts.mode === 'install';
+    if (wanted) this.noteInstall(opts.addToPath === true);
     try {
       const server = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: opts.mode === 'update' ? 'Updating the Steptix server' : 'Installing the Steptix server',
+          title:
+            opts.mode === 'update'
+              ? 'Updating the Steptix server'
+              : opts.resumed
+                ? 'Carrying on installing the Steptix server'
+                : 'Installing the Steptix server',
+          cancellable: true,
         },
-        async (progress) => {
-          const deps = this.deps({
-            onStep: (message) => {
-              progress.report({ message });
-              this.progressText = message;
-              this.changed.fire();
-              this.log(message);
-            },
-            onWait: () => {
-              const message = 'Waiting for Steptix to finish installing in another window';
-              progress.report({ message });
-              this.log(message);
-            },
+        async (progress, token) => {
+          const onCancel = token.onCancellationRequested(() => this.cancelInstall());
+          // Each step as it starts, and a hint when one is slow (§5.2).
+          const shown = new SlowStepWatch((message) => {
+            progress.report({ message });
+            this.progressText = message;
+            this.changed.fire();
           });
-          const node = await ensureNode(deps, true);
-          if (!node) throw new InstallFailure('node-download', 'No Node.js could be found or downloaded.');
-          this.log(`Node.js: ${node.origin === 'yours' ? 'using yours' : "using Steptix's own copy"}, ${node.version} (${node.exe})`);
-          const version = opts.version ?? (await newestPublishedServer(deps, node, this.requires));
-          progress.report({
-            message: version
-              ? `${opts.mode === 'update' ? 'Updating the Steptix server to' : 'Installing Steptix'} ${version}…`
-              : 'Downloading the Steptix server…',
-          });
-          const result = version
-            ? await installServerVersion(deps, node, version)
-            : await installServer(deps, node, this.requires);
-          return { server: result.server, node };
+          const step = (message: string) => {
+            shown.step(message);
+            this.log(message);
+          };
+          try {
+            const deps = this.deps({
+              signal: abort.signal,
+              onStep: step,
+              onWait: () => step('Waiting for Steptix to finish installing in another window'),
+            });
+            const node = await ensureNode(deps, true);
+            if (!node) throw new InstallFailure('node-download', 'No Node.js could be found or downloaded.');
+            this.log(`Node.js: ${node.origin === 'yours' ? 'using yours' : "using Steptix's own copy"}, ${node.version} (${node.exe})`);
+            const version = opts.version ?? (await newestPublishedServer(deps, node, this.requires));
+            step(
+              version
+                ? `${opts.mode === 'update' ? 'Updating the Steptix server to' : 'Installing Steptix'} ${version}…`
+                : 'Downloading the Steptix server…',
+            );
+            const result = version
+              ? await installServerVersion(deps, node, version)
+              : await installServer(deps, node, this.requires);
+            return { server: result.server, node };
+          } finally {
+            shown.dispose();
+            onCancel.dispose();
+          }
         },
       );
       this.setState(null);
@@ -475,10 +692,37 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
       if (opts.addToPath) await this.addToPath();
       return server.server;
     } catch (err) {
+      this.lastInstallCancelled = abort.signal.aborted;
       this.setState(currentPick(this.userRoot, this.requires).kind === 'run' ? null : 'not-installed');
-      this.reportFailure(err, () => void this.install(opts));
+      if (abort.signal.aborted) {
+        // Not a failure: no Retry or Offline install, and Install works again at once.
+        this.log('install cancelled');
+        void vscode.window.showInformationMessage(opts.mode === 'update' ? 'Update cancelled.' : 'Install cancelled.');
+        return null;
+      }
+      this.reportFailure(err, () => void this.install({ ...opts, resumed: false }));
       return null;
+    } finally {
+      if (this.installAbort === abort) this.installAbort = undefined;
+      if (wanted && !this.disposed) await this.forgetInstall('mine');
     }
+  }
+
+  /**
+   * Cancel the install in progress (§5.2), from its progress notification,
+   * the welcome page's server step or the Test Runner's banner. The download
+   * stops, what it left half-done is removed, and the install ends with
+   * "Install cancelled." ("Update cancelled." for an update), not as a
+   * failure. The state goes back to not installed, unless a matching server
+   * was there all along. Does nothing when no install is in progress.
+   */
+  cancelInstall(): void {
+    const abort = this.installAbort;
+    if (!abort || abort.signal.aborted) return;
+    this.log('cancelling the install');
+    abort.abort();
+    this.progressText = 'Cancelling…';
+    this.changed.fire();
   }
 
   /** §8's message for a failed install, with the buttons that fix it. */
@@ -502,7 +746,11 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
       failure.kind === 'server-download'
         ? `Could not download the Steptix server: ${failure.message}. If your company uses its own npm registry, ` +
           'check that npm works in a terminal (npm view steptix). Without network access, install from the offline files instead.'
-        : `Could not install the Steptix server: ${failure.message}`;
+        : failure.kind === 'not-published'
+          ? // npm reached its registry: the network is fine, the version is missing there.
+            `Could not download the Steptix server: ${failure.message}. If your company uses its own npm registry, ` +
+            'it may not have this version yet: ask for it to be added there, or install from the offline files instead.'
+          : `Could not install the Steptix server: ${failure.message}`;
     void vscode.window.showErrorMessage(message, 'Retry', 'Offline install', 'Show details').then((choice) => {
       if (choice === 'Retry') retry();
       if (choice === 'Offline install') void vscode.env.openExternal(vscode.Uri.parse(RELEASES_URL));
@@ -547,7 +795,9 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
     if (!this.managed()) {
       return { state: 'yours', detail: 'Steptix starts the server your settings name ("steptix.serverAutoStart").', progress: null, onPath };
     }
-    if (this.pending) {
+    // The install state, not `pending`: the change event that ends an install
+    // fires before `pending` clears, and the page would stay on Installing.
+    if (this.installState === 'installing') {
       return { state: 'installing', detail: 'Installing the Steptix server.', progress: this.progressText, onPath };
     }
     const pick = currentPick(this.userRoot, this.requires);
@@ -591,8 +841,11 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
   async ensureRuntime(args: { signal: AbortSignal; log: (line: string) => void }): Promise<EnsureRuntimeResult> {
     if (this.pending) {
       args.log('waiting for the Steptix server install to finish');
-      await this.pending;
+      const got = await this.pending;
       if (args.signal.aborted) return { kind: 'aborted' };
+      // That install was cancelled, or failed and said why: the Run ends
+      // there (§5.2) rather than asking for the install it waited on.
+      if (!got && currentPick(this.userRoot, this.requires).kind === 'none') return this.noServer();
     }
     let pick = currentPick(this.userRoot, this.requires);
     if (pick.kind === 'chosen-mismatch') {
@@ -633,9 +886,7 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
       const got = this.anythingInstalled() ? await this.install({ mode: 'update' }) : await this.askAndInstall('run');
       if (args.signal.aborted) return { kind: 'aborted' };
       if (got === 'declined') return { kind: 'fail', payload: reportError('STX034', { situation: 'declined' }) };
-      if (!got) {
-        return { kind: 'fail', payload: reportError('STX034', { situation: 'failed', detail: 'see the message and the Output panel for why' }) };
-      }
+      if (!got) return this.noServer();
       server = got;
     }
 
@@ -647,11 +898,23 @@ export class ServerSetup implements RunServerSetup, vscode.Disposable {
       node = (await this.nodeNow()) ?? (await ensureNode(this.deps(), true));
     } catch (err) {
       this.reportFailure(err, () => undefined);
-      return { kind: 'fail', payload: reportError('STX034', { situation: 'failed', detail: (err as Error).message }) };
+      return { kind: 'fail', payload: reportError('STX034', { situation: 'no-node', detail: (err as Error).message }) };
     }
-    if (!node) return { kind: 'fail', payload: reportError('STX034', { situation: 'failed', detail: 'no Node.js 22.21 or later was found' }) };
+    if (!node) return { kind: 'fail', payload: reportError('STX034', { situation: 'no-node' }) };
     args.log(`Steptix server ${server.version}, ${sourcePhrase(server.source)}, on Node.js ${node.version} (${node.origin === 'yours' ? 'yours' : "Steptix's own"})`);
     return { kind: 'ready', runtime: { version: server.version, dir: server.dir, node: node.exe } };
+  }
+
+  /** STX034 for a Run whose install gave no server: cancelled after Cancel
+   *  (§5.2); could not install after a failure, which its own message
+   *  explained. */
+  private noServer(): EnsureRuntimeResult {
+    return {
+      kind: 'fail',
+      payload: this.lastInstallCancelled
+        ? reportError('STX034', { situation: 'cancelled' })
+        : reportError('STX034', { situation: 'failed', detail: 'see the message and the Output panel for why' }),
+    };
   }
 
   async checkRunning(args: {

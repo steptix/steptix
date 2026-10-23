@@ -198,8 +198,6 @@ extra wiring — the API tracks last-run state per TestItem.
 
 When the user clicks Run:
 
-When the user clicks Run:
-
 1. VS Code calls `runHandler(request, token)`. `request.include` is the set
    of TestItems the user selected; `request.exclude` is any de-selected
    descendants of an included branch.
@@ -270,6 +268,15 @@ expectation that one batch run gives them the full picture.
 A `done` with `status: 'error'` (Steptix-level error like an `STX005`
 unparseable `.env`) still fails just that test, attaches the error payload as a
 TestMessage, and proceeds to the next one.
+
+The one exception is `STX034`, the Steptix server is not installed
+([SPEC-install.md §5.2](../../../docs/specs/SPEC-install.md#52-scenario-2-from-the-marketplace-only), *A batch asks
+once*). The first test that finds no server asks to install it; after Cancel,
+or an install that fails, that test fails with `STX034` and every remaining
+test is marked `skipped`, with one line in Test Results: *"Skipped: the
+Steptix server is not installed."* No server is a fact about the machine, not
+about one test, so no other test could have run. After Install, the first test
+waits for the install and the rest find the server.
 
 ### 5.4 Interactive steps in batch mode
 
