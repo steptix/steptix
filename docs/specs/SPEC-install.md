@@ -48,7 +48,7 @@ did the user have to do anything they would not have guessed?
 | What | Where | Notes |
 | --- | --- | --- |
 | `steptix` | npm | One package: the server, the `steptix` command with its launcher, and the `steptix/tools` and `steptix/codebehind` modules that test projects import (§3.4). |
-| Extension `steptix.steptix-vscode` | VS Code Marketplace, and as a `.vsix` file on GitHub Releases | Published by the `steptix` publisher. |
+| Extension `steptix.steptix` | VS Code Marketplace, and as a `.vsix` file on GitHub Releases | Published by the `steptix` publisher. |
 | Offline files `steptix-<version>-<platform>.tgz` | GitHub Releases | One per supported platform (§5.6). |
 
 The extension and the `steptix` package share the first two numbers of their
@@ -603,7 +603,7 @@ download it without a network.
 
 1. **Someone downloads two files from the release page on GitHub:** the
    offline file for the machine's platform
-   (`steptix-1.4.0-win32-x64.tgz`) and the extension (`steptix-vscode-1.4.0.vsix`).
+   (`steptix-1.4.0-win32-x64.tgz`) and the extension (`steptix-1.4.0.vsix`).
 2. **On the machine, they run `npm i -g ./steptix-1.4.0-win32-x64.tgz`.**
    Everything is inside the file, so npm fetches nothing. `steptix` is on PATH
    as in scenario 1.
@@ -1227,8 +1227,9 @@ which is the expected result: the user still has Steptix installed.
   automatically, or a person by hand (§6.4). It already reports the version,
   the process number and whether a test is running.
 - **Changed:** the extension is published to the Marketplace by a new
-  `steptix` publisher, so its ID becomes `steptix.steptix-vscode` instead of
-  `pkent.steptix-vscode`. VS Code treats that as a different extension: an
+  `steptix` publisher, so its ID becomes `steptix.steptix` instead of
+  `pkent.steptix-vscode` (its package `name` is `steptix`; the ID cannot change
+  after the first publish). VS Code treats that as a different extension: an
   existing `pkent.steptix-vscode` install has to be uninstalled once by hand,
   and the docs and CLAUDE.md that name the old ID change with it. Publishing
   also needs a PNG icon (the Marketplace does not accept SVG for it) and a

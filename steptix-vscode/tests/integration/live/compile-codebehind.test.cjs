@@ -26,7 +26,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vscode = require('vscode');
 
-const EXT_ID = 'steptix.steptix-vscode';
+const { EXT_ID } = require('../extension-id.cjs');
 const TEST_APP_PORT = 8787;
 /** The two step lines in `compile-codebehind.md`. */
 const STEP_LINES = [16, 17];

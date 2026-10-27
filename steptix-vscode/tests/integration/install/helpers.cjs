@@ -9,6 +9,7 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const vscode = require('vscode');
+const { EXT_ID } = require('../extension-id.cjs');
 
 function required(name) {
   const value = process.env[name];
@@ -23,7 +24,7 @@ const SERVER_URL = () => required('STEPTIX_INSTALL_TEST_SERVER_URL');
 /** The release's server version. */
 const VERSION = () => required('STEPTIX_INSTALL_TEST_VERSION');
 /** This launch's extension version, which a scenario may have changed. */
-const EXTENSION_VERSION = () => vscode.extensions.getExtension('steptix.steptix-vscode').packageJSON.version;
+const EXTENSION_VERSION = () => vscode.extensions.getExtension(EXT_ID).packageJSON.version;
 
 async function health(serverUrl = SERVER_URL()) {
   try {
@@ -61,7 +62,7 @@ function binVersion() {
 }
 
 async function hooks() {
-  const ext = vscode.extensions.getExtension('steptix.steptix-vscode');
+  const ext = vscode.extensions.getExtension(EXT_ID);
   const api = await ext.activate();
   assert.ok(api?.__testHooks, 'the extension exposes no test hooks: STEPTIX_TEST_REPORT is not set');
   return api.__testHooks;

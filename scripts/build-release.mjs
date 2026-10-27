@@ -4,7 +4,7 @@
 //
 //   steptix-<version>.tgz                    the npm package
 //   steptix-<version>-<platform>-<arch>.tgz  the offline file for THIS machine (§5.6)
-//   steptix-vscode-<version>.vsix            the VS Code extension
+//   steptix-<version>.vsix                   the VS Code extension
 //
 //   node scripts/build-release.mjs [--out <dir>]     (default: dist-release/)
 //
@@ -85,7 +85,7 @@ try {
 }
 
 // 3. The extension.
-const vsixName = `steptix-vscode-${extension.version}.vsix`;
+const vsixName = `steptix-${extension.version}.vsix`;
 const extensionDir = path.join(root, 'steptix-vscode');
 npm(['run', 'build'], extensionDir);
 npm(['run', 'package', '--', '--out', path.join(out, vsixName)], extensionDir);
