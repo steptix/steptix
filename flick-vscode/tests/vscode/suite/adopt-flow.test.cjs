@@ -15,7 +15,7 @@ const http = require('node:http');
 const vscode = require('vscode');
 const { listenFetchable } = require('../../../../tests/listen-fetchable.cjs');
 
-const EXT_ID = 'pkent.flick-vscode';
+const { EXT_ID } = require('../../extension-id.cjs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Tiny scriptable Sessions API stand-in. Each test starts its own. */

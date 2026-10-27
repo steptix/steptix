@@ -6,7 +6,7 @@
 const assert = require('node:assert/strict');
 const vscode = require('vscode');
 
-const EXT_ID = 'pkent.flick-vscode';
+const { EXT_ID } = require('../../extension-id.cjs');
 const EXPECTED_COMMANDS = [
   'flick.open',
   'flick.openSidebar',
