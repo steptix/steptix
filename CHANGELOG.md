@@ -11,6 +11,18 @@ carried a `-beta.N` suffix.
 
 ## Unreleased
 
+### Changed — the extension wears the Steptix brand
+
+- **The listing icon and the sidebar glyph are the approved Steptix identity**:
+  the green passed-step tick with the two-riser staircase, from the brand kit's
+  `vscode/` folder. `icons/steptix.png` (256×256, the Marketplace and Extensions
+  panel) replaces the blue play-button tile, and `icons/steptix.svg` (24×24,
+  `currentColor`, the Activity Bar and Test Runner view) replaces the outlined
+  play box. The manifest names them as before.
+- **The Marketplace page header is ink `#142331` with the dark theme**
+  (`galleryBanner`), the brand's ink, so the green tile sits on the colour the
+  brand board shows it on.
+
 ### Fixed — installing the server from VS Code on Linux and macOS
 
 - **The extension downloads the server into `<Steptix folder>/downloads/`,

@@ -3,6 +3,10 @@
   "displayName": "Steptix",
   "publisher": "steptix",
   "icon": "icons/steptix.png",
+  "galleryBanner": {
+    "color": "#142331",
+    "theme": "dark"
+  },
   "version": "1.0.0",
   "license": "Apache-2.0",
   "repository": {
