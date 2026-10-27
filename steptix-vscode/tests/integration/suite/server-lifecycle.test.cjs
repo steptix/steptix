@@ -21,7 +21,7 @@ const vscode = require('vscode');
 const { reportError } = require('steptix-runner-core');
 const { FakeApiClient } = require('../fakes/fake-api-client.cjs');
 
-const EXT_ID = 'steptix.steptix-vscode';
+const EXT_ID = 'steptix.steptix';
 const FIXTURES_DIR =
   process.env.STEPTIX_FIXTURES_DIR || path.resolve(__dirname, '..', 'fixtures');
 const fixtureUri = (name) => vscode.Uri.file(path.resolve(FIXTURES_DIR, name));

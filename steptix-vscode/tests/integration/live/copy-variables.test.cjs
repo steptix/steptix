@@ -45,7 +45,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const vscode = require('vscode');
 
-const EXT_ID = 'steptix.steptix-vscode';
+const EXT_ID = 'steptix.steptix';
 const FIXTURE = 'copy-variables.md';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

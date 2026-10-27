@@ -24,7 +24,7 @@ const vscode = require('vscode');
 const { freeFetchablePort } = require('../../../../tests/listen-fetchable.cjs');
 const { FakeLm, FakeDataPart } = require('../fakes/fake-lm.cjs');
 
-const EXT_ID = 'steptix.steptix-vscode';
+const EXT_ID = 'steptix.steptix';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

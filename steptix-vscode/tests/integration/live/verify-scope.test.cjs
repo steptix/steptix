@@ -36,7 +36,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const vscode = require('vscode');
 
-const EXT_ID = 'steptix.steptix-vscode';
+const EXT_ID = 'steptix.steptix';
 /** The re-check's note to its code AI, when it writes new code (`recheckNote`,
  *  src/ai/check-retry.ts). */
 const RECHECK_NOTE = 'Write the code for this check again';

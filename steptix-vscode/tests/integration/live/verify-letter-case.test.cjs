@@ -34,7 +34,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const vscode = require('vscode');
 
-const EXT_ID = 'steptix.steptix-vscode';
+const EXT_ID = 'steptix.steptix';
 /** How the report labels the turn that runs a failed check again
  *  (`recheckResponse`, src/ai/check-retry.ts). */
 const RECHECK_TURN = 'Checking again: ';

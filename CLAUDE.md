@@ -48,7 +48,7 @@ with a note marking which sections described the removed desktop shell.
 
 `steptix-vscode/` is the Steptix VS Code extension — it uses VS Code's
 native editor surface and hosts the multi-test runner. Extension ID
-`steptix.steptix-vscode`.
+`steptix.steptix`.
 
 There used to be a second variant, `testbench-monaco/` (extension ID
 `pkent.testbench`), which hosted the editor inside a webview using Monaco.
@@ -78,7 +78,7 @@ cd <main-checkout>\steptix-vscode
 npm run build
 npm run package
 & "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd" `
-    --install-extension steptix-vscode-<version>.vsix --force
+    --install-extension steptix-<version>.vsix --force
 ```
 
 Then reload the VS Code window and check that the status bar's commit is
@@ -97,7 +97,7 @@ Installing from two (a worktree and main, or two worktrees) collides:
 
 - **Same version in both** — the usual case, since the number changes only at
   release — and they extract into the *same*
-  `steptix.steptix-vscode-<version>/` directory. Last writer wins, `--force`
+  `steptix.steptix-<version>/` directory. Last writer wins, `--force`
   suppresses any prompt, and the Extensions panel shows that version either
   way. Genuinely concurrent installs are worse than last-write-wins, since two
   processes unzipping into one directory can leave a mix of both builds. Both

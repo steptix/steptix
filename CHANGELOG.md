@@ -23,6 +23,18 @@ carried a `-beta.N` suffix.
   (`galleryBanner`), the brand's ink, so the green tile sits on the colour the
   brand board shows it on.
 
+### Changed — the extension ID is `steptix.steptix`
+
+The extension's `name` in `steptix-vscode/package.json` is `steptix`
+instead of `steptix-vscode`, so with the `steptix` publisher its
+Marketplace ID is `steptix.steptix` (it was going to be
+`steptix.steptix-vscode`). Nothing is published yet, so no install has to
+move; the ID cannot change after the first publish. The `.vsix` is now
+`steptix-<version>.vsix`, and VS Code installs it in
+`steptix.steptix-<version>/`. Command and setting names (`steptix.*`) are
+unchanged, so settings and keybindings carry over. The folder is still
+`steptix-vscode/`.
+
 ### Fixed — installing the server from VS Code on Linux and macOS
 
 - **The extension downloads the server into `<Steptix folder>/downloads/`,
@@ -242,7 +254,7 @@ extension no longer needs a server installed some other way first.
   replace).
 - The status bar's tooltip and the Output panel show the build, for example
   *Steptix 1.0.1 · 3f9a1c2*.
-- The extension is published by `steptix` now, as `steptix.steptix-vscode`,
+- The extension is published by `steptix` now, as `steptix.steptix`,
   marked **Preview**, and packaged for the normal channel. VS Code treats it
   as a different extension from `pkent.steptix-vscode`: uninstall that one by
   hand once.

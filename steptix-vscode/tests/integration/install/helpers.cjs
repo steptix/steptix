@@ -23,7 +23,7 @@ const SERVER_URL = () => required('STEPTIX_INSTALL_TEST_SERVER_URL');
 /** The release's server version. */
 const VERSION = () => required('STEPTIX_INSTALL_TEST_VERSION');
 /** This launch's extension version, which a scenario may have changed. */
-const EXTENSION_VERSION = () => vscode.extensions.getExtension('steptix.steptix-vscode').packageJSON.version;
+const EXTENSION_VERSION = () => vscode.extensions.getExtension('steptix.steptix').packageJSON.version;
 
 async function health(serverUrl = SERVER_URL()) {
   try {
@@ -61,7 +61,7 @@ function binVersion() {
 }
 
 async function hooks() {
-  const ext = vscode.extensions.getExtension('steptix.steptix-vscode');
+  const ext = vscode.extensions.getExtension('steptix.steptix');
   const api = await ext.activate();
   assert.ok(api?.__testHooks, 'the extension exposes no test hooks: STEPTIX_TEST_REPORT is not set');
   return api.__testHooks;
