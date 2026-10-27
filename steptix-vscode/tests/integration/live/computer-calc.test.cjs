@@ -87,7 +87,7 @@ const os = require('node:os');
 const vscode = require('vscode');
 const { serverApiKey } = require('./credentials.cjs');
 
-const EXT_ID = 'steptix.steptix';
+const { EXT_ID } = require('../extension-id.cjs');
 const FIXTURE = 'calc-one-plus-one.md';
 
 /**

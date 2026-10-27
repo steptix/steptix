@@ -32,7 +32,7 @@ const fs = require('node:fs');
 const vscode = require('vscode');
 const { serverApiKey } = require('./credentials.cjs');
 
-const EXT_ID = 'steptix.steptix';
+const { EXT_ID } = require('../extension-id.cjs');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

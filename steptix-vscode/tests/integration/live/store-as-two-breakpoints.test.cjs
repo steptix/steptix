@@ -21,7 +21,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const vscode = require('vscode');
 
-const EXT_ID = 'steptix.steptix';
+const { EXT_ID } = require('../extension-id.cjs');
 
 /**
  * Resolve the 1-based line of each step by reading the fixture, rather than

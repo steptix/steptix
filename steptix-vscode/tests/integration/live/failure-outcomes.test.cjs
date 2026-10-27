@@ -18,7 +18,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vscode = require('vscode');
 
-const EXT_ID = 'steptix.steptix';
+const { EXT_ID } = require('../extension-id.cjs');
 const TEST_APP_PORT = 8787;
 
 // templates/init/tests/failure-outcomes-live.md. Line numbers are hardcoded —

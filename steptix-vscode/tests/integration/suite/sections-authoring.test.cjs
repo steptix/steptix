@@ -12,7 +12,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const vscode = require('vscode');
 
-const EXT_ID = 'steptix.steptix';
+const { EXT_ID } = require('../extension-id.cjs');
 const FIXTURES_DIR =
   process.env.STEPTIX_FIXTURES_DIR || path.resolve(__dirname, '..', 'fixtures');
 const fixtureUri = (name) => vscode.Uri.file(path.resolve(FIXTURES_DIR, name));

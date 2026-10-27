@@ -34,7 +34,7 @@ const vscode = require('vscode');
 const { FakeApiClient } = require('../fakes/fake-api-client.cjs');
 const { ApiClientError } = require('steptix-runner-core');
 
-const EXT_ID = 'steptix.steptix';
+const { EXT_ID } = require('../extension-id.cjs');
 const FIXTURES_DIR =
   process.env.STEPTIX_FIXTURES_DIR || path.resolve(__dirname, '..', 'fixtures');
 

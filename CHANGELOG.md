@@ -35,6 +35,10 @@ move; the ID cannot change after the first publish. The `.vsix` is now
 unchanged, so settings and keybindings carry over. The folder is still
 `steptix-vscode/`.
 
+The integration tests used to spell the ID out in 65 places. They now read it
+from `tests/integration/extension-id.cjs`, which builds it from the manifest's
+`publisher` and `name`, so a rename needs no change to the tests.
+
 ### Fixed — installing the server from VS Code on Linux and macOS
 
 - **The extension downloads the server into `<Steptix folder>/downloads/`,

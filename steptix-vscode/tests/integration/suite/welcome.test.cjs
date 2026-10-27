@@ -16,7 +16,7 @@ const os = require('node:os');
 const path = require('node:path');
 const vscode = require('vscode');
 
-const EXT_ID = 'steptix.steptix';
+const { EXT_ID } = require('../extension-id.cjs');
 const VIEW_TYPE = 'steptix.welcome';
 
 /** The welcome pages open in any tab group. VS Code prefixes a webview's
