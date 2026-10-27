@@ -18,7 +18,7 @@
 const assert = require('node:assert/strict');
 const vscode = require('vscode');
 
-const EXT_ID = 'pkent.flick-vscode';
+const { EXT_ID } = require('../../extension-id.cjs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function waitFor(label, predicate, timeoutMs = 180_000) {

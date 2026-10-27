@@ -31,7 +31,7 @@ const os = require('node:os');
 const path = require('node:path');
 const vscode = require('vscode');
 
-const EXT_ID = 'pkent.flick-vscode';
+const { EXT_ID } = require('../../extension-id.cjs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Re-implementation of runLiveTest.cjs's waitFor — kept inline so this file
