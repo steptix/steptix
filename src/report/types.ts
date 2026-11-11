@@ -649,6 +649,41 @@ export interface FailureDiagnosis {
   aiInteraction?: AiInteraction;
 }
 
+/**
+ * What the report says in place of a root-cause analysis when the run had no
+ * AI to produce one (stories/keyless-replay-and-gateway-env.md §Part B).
+ *
+ * One line, and no advice: a diagnosis that was never attempted has nothing
+ * to suggest, and the failed step already carries the "recompile where AI is
+ * available" instruction.
+ */
+export const KEYLESS_DIAGNOSIS_SKIPPED = 'Diagnosis skipped: AI is not configured.';
+
+/**
+ * The same slot, for a run that HAS AI and was told not to use it.
+ *
+ * The runner reaches the placeholder for either reason (no key, or policy
+ * off), but only one of them is about configuration. Telling an operator
+ * whose key is present and valid that "AI is not configured" sends them to
+ * add a key they already have, or (on Bedrock SigV4) one that would actively
+ * break the run by outranking the AWS credential chain.
+ */
+export const POLICY_DIAGNOSIS_SKIPPED =
+  'Diagnosis skipped: this run was asked to make no AI calls (ai.allowInRuns: false).';
+
+/**
+ * Is this the placeholder a run with no AI puts in the diagnosis slot, and
+ * not an analysis? The HTML report shows the placeholder where the analysis
+ * would be. `junit.xml` and `run.json` report a failure's cause, so they
+ * leave it out (docs/specs/SPEC-reporters.md §6.2).
+ */
+export function isSkippedDiagnosis(diagnosis: FailureDiagnosis): boolean {
+  return (
+    diagnosis.rootCause === KEYLESS_DIAGNOSIS_SKIPPED ||
+    diagnosis.rootCause === POLICY_DIAGNOSIS_SKIPPED
+  );
+}
+
 /** Complete test run report data */
 /** One row's line in a merged report's matrix table. */
 export interface RowSummaryLine {

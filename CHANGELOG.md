@@ -11,6 +11,32 @@ carried a `-beta.N` suffix.
 
 ## Unreleased
 
+### Added — `steptix run` writes `junit.xml` and `run.json` for CI
+
+- **`--reporter junit,json`** writes `junit.xml` (for a CI system's test
+  list) and `run.json` (for a script or a coding agent) to
+  `reports.outputDir`, beside the HTML reports they link to
+  ([SPEC-reporters.md](docs/specs/SPEC-reporters.md)). The names are `html`,
+  `junit` and `json`, comma-separated or repeated, in any case; HTML is
+  always written. `reports.reporters` in `steptix.config.json` names them
+  when the flag is not given, and the flag replaces it. An unknown name stops
+  the run before it starts, with exit code 1, and removes both files an
+  earlier run left. Only `steptix run` reads the
+  setting; runs from VS Code, MCP and the Runner UI write what they wrote.
+- **The files are kept true while the run goes on**: written before the
+  first test with every test not run, again after each test, and a last
+  time when the run ends. A run that is cancelled, or ends on a test file
+  that does not parse or a test that throws, leaves files that name what
+  happened and never read as a pass. A last write that fails turns exit 0
+  into 1. The previous run's files are removed as soon as a run starts.
+- **`--reporter` has no default any more**, so "not given" differs from
+  "given as `html`". A run without it, and without `reports.reporters`, does
+  exactly what it did before.
+- **`--reporter` refuses a value it does not know.** Any value used to be
+  accepted and ignored. Now a name other than `html`, `junit` or `json`, or
+  an empty value, ends the run with a usage error and exit code 1 before
+  anything runs.
+
 ### Changed — the extension wears the Steptix brand
 
 - **The listing icon and the sidebar glyph are the approved Steptix identity**:

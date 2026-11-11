@@ -628,7 +628,7 @@ npx steptix list --tag smoke
 | `--tag`           | string  | —                        | Filter by tag (comma-separated)    |
 | `--headless`      | boolean | `false`                  | Run browser in headless mode       |
 | `--timeout`       | number  | `60000`                  | Test timeout in ms                 |
-| `--reporter`      | string  | `html`                   | Reporter type                      |
+| `--reporter`      | string  | —                        | Results files besides the HTML reports: `junit`, `json` (`html` allowed, always written); comma-separated, repeatable; replaces `reports.reporters` ([SPEC-reporters.md](SPEC-reporters.md)) |
 | `--verbose`       | boolean | `false`                  | Verbose console output             |
 | `--bail`          | boolean | `false`                  | Stop on first failure              |
 | `--browser`       | string  | `chromium`               | Browser engine                     |

@@ -371,6 +371,13 @@ export interface ReportsConfig {
    *  the test .md file linking to generated HTML reports. Driven by the
    *  APPEND_RUN_HISTORY_TO_TEST_FILE env var. Default false. */
   appendRunHistoryToTestFile: boolean;
+  /** Results files `steptix run` writes besides the HTML reports, which are
+   *  always written: "junit" (junit.xml), "json" (run.json), and "html",
+   *  which changes nothing. A `--reporter` flag replaces this list. Only
+   *  `steptix run` reads it, and only `steptix run` checks the names, so runs
+   *  from VS Code, MCP or the Runner UI never fail over it
+   *  (docs/specs/SPEC-reporters.md §4). Default: none. */
+  reporters?: string[];
 }
 
 export interface ApiConfig {

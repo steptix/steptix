@@ -78,7 +78,64 @@ npx steptix run --browser firefox
 
 # Load environment variables from .env.staging
 npx steptix run --env staging
+
+# Also write junit.xml and run.json for CI (html is always written)
+npx steptix run --headless --reporter junit,json
 ```
+
+`--reporter` takes `html`, `junit` and `json`, comma-separated or repeated
+(`--reporter junit --reporter json`), in any letter case. The HTML reports
+are always written, so naming `html` changes nothing. Without the flag,
+`reports.reporters` in `steptix.config.json` decides
+(`{ "reports": { "reporters": ["junit", "json"] } }`); with it, the flag's
+list replaces the config's. An unknown name stops the run before it starts,
+with exit code 1, and removes any `junit.xml` or `run.json` an earlier run
+left in the reports folder.
+
+### Results for CI
+
+With `junit` or `json` on, a run writes two more files to `reports.outputDir`
+(default `./reports`), beside the HTML reports:
+
+| File | For |
+| --- | --- |
+| `junit.xml` | A CI system's test list: one testcase per test file, or per row of a data-driven test, each linking to its HTML report. |
+| `run.json` | The same results for a script or a coding agent: tests, steps, failures, tokens and the exit code. |
+
+Each run replaces the previous run's files, and removes them as soon as it
+starts. They are kept up to date while the run goes on: a run that is
+cancelled or times out leaves the tests it did not reach as errors, never
+as passes. Screenshots stay in the HTML reports, so upload the whole reports
+folder, and do it whether the run passed or failed. A failure's `Report:`
+line names a file in that folder.
+
+Two runs that share an output folder overwrite each other's files, so a job
+that calls `steptix run` more than once gives each call its own folder. Here
+the first call's folder is moved aside before the second call starts:
+
+```yaml
+# .github/workflows/ui-tests.yml (steps of a job on ubuntu-latest)
+- name: Smoke tests
+  run: npx steptix run tests/smoke --headless --reporter junit,json
+- name: Keep the smoke results
+  if: always()
+  run: if [ -d reports ]; then mv reports reports-smoke; fi
+- name: Checkout tests
+  if: always()
+  run: npx steptix run tests/checkout --headless --reporter junit,json
+- name: Upload results
+  if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: steptix-reports
+    path: |
+      reports-smoke/
+      reports/
+```
+
+Any action that reads JUnit XML can then publish `reports-smoke/junit.xml`
+and `reports/junit.xml` on the pull request. A job that calls `steptix run`
+once needs only the run and the upload, with `path: reports/`.
 
 ### Download a browser
 
