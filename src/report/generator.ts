@@ -4,7 +4,7 @@ import Handlebars from 'handlebars';
 import type { TestReport, StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData, FailureDiagnosis, AssertionResult } from './types.js';
 import type { AIAction } from '../ai/types.js';
 import { getAllAiInteractions, isHealedStep } from './types.js';
-import { stepAnchor } from './anchors.js';
+import { canonicalStepAnchor, INTERACTIVE_PROMPT, stepCardIds } from './anchors.js';
 import { getReportTemplate } from './template.js';
 import { toDataUri } from '../browser/screenshot.js';
 import { uncheckedListRead } from '../runner/list-read-review.js';
@@ -510,38 +510,12 @@ ${body}
 </div>`;
 }
 
-/**
- * The anchor a step card is rendered with (docs/specs/SPEC-scoreboard.md
- * §8.3), from the fields a scoreboard line records about the same step: its
- * number, its data row and its hook scope.
- */
-function canonicalStepAnchor(step: StepResult): string {
-  return stepAnchor({
-    step: step.index,
-    row: step.dataRow ?? (step.loop?.kind === 'row' ? step.loop.index : undefined),
-    hook: step.hookScope,
-    hookIndex: step.hookIndex,
-  });
-}
-
-/**
- * Unique ids for one report's step cards: the first card to claim an id keeps
- * it, a later one takes `-2`, `-3`… — a loop body runs a step once per pass,
- * and a `beforeEach` runs beside every pass of it.
- */
-function stepAnchorIds(): (step: StepResult) => string {
-  const used = new Map<string, number>();
-  return (step) => {
-    const id = canonicalStepAnchor(step);
-    const seen = used.get(id) ?? 0;
-    used.set(id, seen + 1);
-    return seen === 0 ? id : `${id}-${seen + 1}`;
-  };
-}
-
 function renderSteps(steps: StepResult[]): string {
   const out: string[] = [];
-  const anchorFor = stepAnchorIds();
+  // Unique ids for the cards (docs/specs/SPEC-scoreboard.md §8.3), assigned
+  // where the `junit.xml` / `run.json` writers read them too.
+  const ids = stepCardIds(steps);
+  const anchorFor = (step: StepResult): string => ids.get(step) ?? canonicalStepAnchor(step);
   let previousLoop: StepResult['loop'] = undefined;
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]!;
@@ -552,7 +526,7 @@ function renderSteps(steps: StepResult[]): string {
       previousLoop = step.loop;
     }
 
-    const interactiveMatch = step.instruction.match(/^\[interactive\]\s*(.*)$/i);
+    const interactiveMatch = step.instruction.match(INTERACTIVE_PROMPT);
     if (interactiveMatch) {
       const hint = interactiveMatch[1]!.trim();
       out.push(renderInteractiveBanner(step.index, hint, anchorFor(step)));

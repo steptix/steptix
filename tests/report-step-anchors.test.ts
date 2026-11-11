@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { renderReport } from '../src/report/generator.js';
 import { mergeRowReports } from '../src/report/merge-rows.js';
-import { stepAnchor } from '../src/report/anchors.js';
+import { stepAnchor, stepCardIds } from '../src/report/anchors.js';
 import type { StepResult, TestReport } from '../src/report/types.js';
 
 function step(over: Partial<StepResult> & { index: number }): StepResult {
@@ -67,6 +67,36 @@ describe('the report\'s step cards', () => {
       'step-2-2',
       'step-3',
     ]);
+  });
+
+  it('carry the ids stepCardIds assigns, which the junit.xml and run.json writers link to', () => {
+    const steps = [
+      step({ index: 0, hookScope: 'beforeEach', hookIndex: 1, loop: { kind: 'iteration', label: 'Each item', index: 1, count: 2, values: {} } }),
+      step({ index: 2, loop: { kind: 'iteration', label: 'Each item', index: 1, count: 2, values: {} } }),
+      step({ index: 0, hookScope: 'beforeEach', hookIndex: 1, loop: { kind: 'iteration', label: 'Each item', index: 2, count: 2, values: {} } }),
+      step({ index: 2, loop: { kind: 'iteration', label: 'Each item', index: 2, count: 2, values: {} } }),
+      step({ index: 3, instruction: '[interactive] look around' }),
+      step({ index: 3, instruction: '(interactive 1) Click #item', interactiveChild: true }),
+      step({ index: 3, instruction: '(interactive 2) Click #host', interactiveChild: true }),
+      // A typed command with no prompt above it has no card, and takes no id.
+      step({ index: 4 }),
+      step({ index: 4, instruction: '(interactive 1) Click #grid_row_7', interactiveChild: true }),
+      step({ index: 3 }),
+    ];
+    const assigned = stepCardIds(steps);
+    const expected = steps.flatMap((s) => (assigned.has(s) ? [assigned.get(s)!] : []));
+    expect(expected).toEqual([
+      'hook-beforeEach-1-step-0',
+      'step-2',
+      'hook-beforeEach-1-step-0-2',
+      'step-2-2',
+      'step-3',
+      'step-3-2',
+      'step-3-3',
+      'step-4',
+      'step-3-4',
+    ]);
+    expect(ids(renderReport(report(steps)))).toEqual(expected);
   });
 
   it('in a data-row report, every step names its row — a step banded by an inner loop too', () => {

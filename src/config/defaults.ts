@@ -74,6 +74,7 @@ export const DEFAULT_CONFIG: Config = {
     embedScreenshots: true,
     openInBrowserAfterRun: false,
     appendRunHistoryToTestFile: false,
+    reporters: [],
   },
   server: {
     host: '127.0.0.1',

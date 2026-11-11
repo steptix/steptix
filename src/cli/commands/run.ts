@@ -11,6 +11,17 @@ import { countStepOrigins, formatTokenCount } from '../../report/generator.js';
 import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 import { nonNegativeInt } from '../parse-args.js';
 import { COPILOT_IN_TERMINAL, copilotOutOfReach } from '../../ai/copilot-terminal.js';
+import { chooseReporters, ReporterNameError } from '../../report/reporters/names.js';
+import {
+  removeAllResultFiles,
+  RunReporters,
+  suiteNameFor,
+  wantsResultFiles,
+  type ParseOutcome,
+  type RunReportersOptions,
+} from '../../report/reporters/run-reporters.js';
+import type { ReporterName } from '../../report/reporters/types.js';
+import type { ParsedTest } from '../../parser/types.js';
 
 export interface RunOptions {
   config?: string;
@@ -20,7 +31,8 @@ export interface RunOptions {
   verbose?: boolean;
   bail?: boolean;
   browser?: 'chromium' | 'firefox' | 'webkit';
-  reporter?: string;
+  /** Each `--reporter` given, in order; absent when the option was not given. */
+  reporter?: string[];
   env?: string;
   failOnHealed?: boolean;
   row?: number;
@@ -41,7 +53,14 @@ export function registerRunCommand(program: Command): void {
     .option('--verbose', 'Verbose console output', false)
     .option('--bail', 'Stop on first test failure', false)
     .option('--browser <engine>', 'Browser engine: chromium, firefox, webkit')
-    .option('--reporter <type>', 'Reporter type (html)', 'html')
+    // Repeatable, and with no default: "not given" has to differ from "given
+    // as html", because a given flag replaces `reports.reporters`
+    // (docs/specs/SPEC-reporters.md §4).
+    .option(
+      '--reporter <names>',
+      'Results files to write as well as the HTML reports: junit, json (comma-separated, repeatable; html is always written)',
+      collectReporter,
+    )
     .option('--env <name>', 'Environment name — loads .env.<name> from project root')
     // 1-based, matching the row numbers the report shows. Narrows a
     // data-driven test to one row for a debugging loop; the surviving instance
@@ -52,15 +71,34 @@ export function registerRunCommand(program: Command): void {
     // healed under AI" as a build failure
     // (stories/codebehind-selector-ambiguity.md).
     .option('--fail-on-healed', 'Exit non-zero when a step healed under AI after its code-behind failed', false)
-    .action(async (target: string | undefined, opts: RunOptions) => {
-      await runCommand(target, opts);
+    .action(async (target: string | undefined, opts: RunOptions, cmd: Command) => {
+      await runCommand(target, opts, { usageError: (message) => cmd.error(message) });
     });
 }
 
-async function runCommand(
+/** Commander's collector for the repeatable `--reporter`. */
+function collectReporter(value: string, previous: string[] | undefined): string[] {
+  return [...(previous ?? []), value];
+}
+
+/** What {@link runCommand} takes besides its options; the optional ones are seams for a test. */
+export interface RunCommandDeps {
+  /** Print a usage error as commander does and exit 1. Does not return. */
+  usageError: (message: string) => never;
+  /** Ends the process; `process.exit` unless a test stands in. */
+  exit?: (code: number) => never;
+  /** Stands in for the real runner, as `runTests` allows. */
+  runTestFn?: NonNullable<Parameters<typeof runTests>[2]>['runTestFn'];
+  /** Overrides for the reporter files' seams (render functions, clock, file operations). */
+  reporterOptions?: Partial<RunReportersOptions>;
+}
+
+export async function runCommand(
   target: string | undefined,
   opts: RunOptions,
+  deps: RunCommandDeps,
 ): Promise<void> {
+  const exit = deps.exit ?? ((code: number): never => process.exit(code));
   if (opts.verbose) {
     setVerbose(true);
   }
@@ -81,6 +119,45 @@ async function runCommand(
   });
 
   spinner.succeed('Configuration loaded');
+
+  // Where `junit.xml` and `run.json` go, resolved as `generateReport` resolves
+  // it, so the files sit beside the HTML reports they link to.
+  const resultsDir = path.resolve(config.reports.outputDir);
+  // Checked before anything runs, so a misspelt name does not cost a run to
+  // find out about (§4).
+  let reporterNames: ReporterName[];
+  try {
+    reporterNames = chooseReporters(
+      opts.reporter,
+      config.reports.reporters,
+      opts.config ?? 'steptix.config.json',
+    );
+  } catch (err) {
+    if (!(err instanceof ReporterNameError)) throw err;
+    // Which files were meant is unknown, so neither file an earlier run left
+    // is kept for CI to publish as this run's (§4, §5).
+    await removeAllResultFiles({
+      outputDir: resultsDir,
+      cwd: process.cwd(),
+      ...deps.reporterOptions,
+    });
+    return deps.usageError(err.message);
+  }
+  // Null with neither `junit` nor `json` on: the run is then exactly the run
+  // it was before these files existed.
+  const reporters = wantsResultFiles(reporterNames)
+    ? new RunReporters({
+        reporters: reporterNames,
+        outputDir: resultsDir,
+        failOnHealed: opts.failOnHealed === true,
+        suiteName: await suiteNameFor(process.cwd()),
+        cwd: process.cwd(),
+        ...deps.reporterOptions,
+      })
+    : null;
+  // Gone before anything else can stop the run, so CI never publishes the
+  // previous run's files as this one's (§5).
+  await reporters?.removeStale();
   // Compiled steps still run; the ones that need the AI would fail to connect.
   if (await copilotOutOfReach(config.ai)) console.warn(chalk.yellow(COPILOT_IN_TERMINAL));
 
@@ -98,7 +175,7 @@ async function runCommand(
     });
   } catch (err) {
     console.error(chalk.red(`Error: ${(err as Error).message}`));
-    process.exit(1);
+    return exit(1);
   }
 
   // Discover test files
@@ -106,7 +183,7 @@ async function runCommand(
 
   if (testFiles.length === 0) {
     console.log(chalk.yellow('No test files found.'));
-    process.exit(0);
+    return exit(await endReporters(reporters, 0));
   }
 
   // Parse test files (expanding any [skill: ...] references).
@@ -120,56 +197,65 @@ async function runCommand(
   const envDataCtx = cliEnvName
     ? { env: runBundle.env, data: runBundle.data, envName: runBundle.envName }
     : undefined;
-  const parsedAll = await Promise.all(
-    testFiles.map(async (f) => {
-      const initial = await parseTestFile(f, {
-        skillsDir,
-        ...(envDataCtx && { envData: envDataCtx }),
+  const parsing = testFiles.map(async (f) => {
+    const initial = await parseTestFile(f, {
+      skillsDir,
+      ...(envDataCtx && { envData: envDataCtx }),
+    });
+    // Honour frontmatter env: only when CLI/envvar didn't pin one already.
+    if (!cliEnvName && initial.frontmatter.env) {
+      const perTestBundle = await resolveEnvBundle({
+        envName: initial.frontmatter.env,
+        projectRoot: process.cwd(),
+        dataDir: config.tests.dataDir,
+        mutateProcessEnv: true,
       });
-      // Honour frontmatter env: only when CLI/envvar didn't pin one already.
-      if (!cliEnvName && initial.frontmatter.env) {
-        const perTestBundle = await resolveEnvBundle({
-          envName: initial.frontmatter.env,
-          projectRoot: process.cwd(),
-          dataDir: config.tests.dataDir,
-          mutateProcessEnv: true,
-        });
-        return parseTestFile(f, {
-          skillsDir,
-          envData: {
-            env: perTestBundle.env,
-            data: perTestBundle.data,
-            envName: perTestBundle.envName,
-          },
-        });
-      }
-      return initial;
-    }),
-  );
-  // Skip files marked as skills — they're library code, not runnable tests.
-  const parsedTests = parsedAll.filter((t) => t.frontmatter.type !== 'skill');
-
+      return parseTestFile(f, {
+        skillsDir,
+        envData: {
+          env: perTestBundle.env,
+          data: perTestBundle.data,
+          envName: perTestBundle.envName,
+        },
+      });
+    }
+    return initial;
+  });
   // Filter by tags
   const tags = opts.tag
     ? opts.tag.split(',').map((t) => t.trim()).filter(Boolean)
     : [];
+  let parsedAll: ParsedTest[];
+  try {
+    parsedAll = await Promise.all(parsing);
+  } catch (err) {
+    // The files say why nothing ran (§8.1). Then the error goes on exactly as
+    // it did before there were files to write.
+    if (reporters) await reportParseFailure(reporters, testFiles, parsing, tags);
+    throw err;
+  }
+  // Skip files marked as skills — they're library code, not runnable tests.
+  const parsedTests = parsedAll.filter((t) => t.frontmatter.type !== 'skill');
+
   const filteredTests = filterByTags(parsedTests, tags);
 
   if (filteredTests.length === 0) {
     const tagInfo = tags.length > 0 ? ` matching tags: ${tags.join(', ')}` : '';
     console.log(chalk.yellow(`No tests found${tagInfo}`));
-    process.exit(0);
+    return exit(await endReporters(reporters, 0));
   }
 
   // `--row` names a row of one test. Against a glob it would mean "row 3 of
   // whichever files happen to have three rows", and abort the rest at the
   // first file that has fewer — so it is refused rather than interpreted.
+  // With reporters on, the stale files were already removed above, and none
+  // are written for a run that never started.
   if (opts.row !== undefined && filteredTests.length > 1) {
     logger.error(
       `--row applies to a single test, but ${filteredTests.length} files matched. ` +
         `Name one test file.`,
     );
-    process.exit(1);
+    return exit(1);
   }
 
   console.log(chalk.bold(`\nRunning ${filteredTests.length} test(s)...\n`));
@@ -182,14 +268,18 @@ async function runCommand(
       ...(opts.bail !== undefined && { bail: opts.bail }),
       ...(opts.verbose !== undefined && { verbose: opts.verbose }),
       ...(opts.row !== undefined && { row: opts.row }),
+      ...(reporters && { observer: reporters.observer }),
+      ...(deps.runTestFn && { runTestFn: deps.runTestFn }),
     });
   } catch (err) {
     logger.error(`Fatal error during test run: ${String(err)}`);
-    process.exit(1);
+    return exit(await endReporters(reporters, 1));
   } finally {
-    // Reached when `runTests` returns. On a throw, `process.exit(1)` above has
-    // already ended the process — and an explicit exit never emits
-    // `beforeExit`, so the guard cannot fire on that path either.
+    // Reached when `runTests` returns. On a throw, the catch above writes the
+    // files (when reporters are on) and then `exit(1)` ends the process
+    // before this runs — and an explicit exit never emits `beforeExit`, so the
+    // guard cannot fire on that path either. A stand-in `exit` that throws
+    // reaches here after the catch.
     disarmUnfinishedRunGuard();
   }
 
@@ -209,7 +299,51 @@ async function runCommand(
     console.log();
   }
 
-  process.exit(exitCodeFor(summary, opts.failOnHealed === true));
+  return exit(await endReporters(reporters, exitCodeFor(summary, opts.failOnHealed === true)));
+}
+
+/**
+ * The reporters' last write (§8, step 3), then a line for each file it wrote
+ * (§9). Returns the exit code to end with: `exitCode`, or 1 where that was 0
+ * and a file could not be written (§8.2). With no reporters, `exitCode`.
+ */
+async function endReporters(reporters: RunReporters | null, exitCode: number): Promise<number> {
+  if (!reporters) return exitCode;
+  const code = await reporters.end(exitCode);
+  const lines = reporters.summaryLines();
+  for (const line of lines) console.log(line);
+  if (lines.length > 0) console.log();
+  return code;
+}
+
+/**
+ * A test file failed to parse, so nothing will run (§8.1): write the files
+ * with one parse error per file that failed and the tests that parsed listed
+ * as not run, and end them with exit code 1, the code the error ends the run
+ * with. Waits for every file's parse to settle first, so each failure is
+ * listed and not only the first.
+ */
+async function reportParseFailure(
+  reporters: RunReporters,
+  testFiles: readonly string[],
+  parsing: readonly Promise<ParsedTest>[],
+  tags: readonly string[],
+): Promise<void> {
+  const settled = await Promise.allSettled(parsing);
+  const outcomes: ParseOutcome[] = [];
+  settled.forEach((result, i) => {
+    const filePath = testFiles[i]!;
+    if (result.status === 'rejected') {
+      outcomes.push({ filePath, error: result.reason });
+    } else if (
+      result.value.frontmatter.type !== 'skill' &&
+      filterByTags([result.value], [...tags]).length > 0
+    ) {
+      outcomes.push({ filePath, test: result.value });
+    }
+  });
+  await reporters.parseFailed(outcomes);
+  await endReporters(reporters, 1);
 }
 
 /** What {@link guardUnfinishedRun} needs of `process` — a stand-in in a test. */

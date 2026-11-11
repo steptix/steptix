@@ -3348,6 +3348,42 @@ export async function expandTestInstances(
 }
 
 /**
+ * Told how a {@link runTests} run goes, as it goes. `steptix run` uses it to
+ * keep `junit.xml` and `run.json` true while the run is under way
+ * (docs/specs/SPEC-reporters.md §8). Every call is awaited, so the run does
+ * not move on until the observer is done, and a call that throws is logged
+ * and otherwise ignored: an observer never changes how a run goes.
+ */
+export interface RunObserver {
+  /** Before the first test, with every test about to run, in run order. */
+  onStart?(tests: readonly ParsedTest[]): void | Promise<void>;
+  /** After a test's merged report is written to `reportPath` (absolute). */
+  onTestDone?(test: ParsedTest, report: TestReport, reportPath: string): void | Promise<void>;
+  /**
+   * A test threw out of the runner, which ends the run. Called before the
+   * error goes on to `runTests`' caller, unchanged.
+   */
+  onTestError?(test: ParsedTest, error: unknown): void | Promise<void>;
+  /** `--bail` stopped the run at a failure; called once, after that test's `onTestDone`. */
+  onBail?(): void | Promise<void>;
+}
+
+/** Call one {@link RunObserver} method, logging what it throws. */
+async function tellObserver<K extends keyof RunObserver>(
+  observer: RunObserver | undefined,
+  method: K,
+  ...args: Parameters<NonNullable<RunObserver[K]>>
+): Promise<void> {
+  const fn = observer?.[method] as ((...a: unknown[]) => void | Promise<void>) | undefined;
+  if (!fn) return;
+  try {
+    await fn.apply(observer, args);
+  } catch (err) {
+    logger.warn(`Run observer failed in ${method}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
  * Run multiple tests and produce a summary.
  * Respects the --bail flag by stopping on the first failure.
  */
@@ -3365,10 +3401,13 @@ export async function runTests(
      * test. Precedent: the compile pipeline's `createTestFileRunner`.
      */
     runTestFn?: typeof runTest;
+    /** Told about the run as it goes; see {@link RunObserver}. */
+    observer?: RunObserver;
   } = {},
 ): Promise<RunSummary> {
-  // `steptix run` exits as soon as this returns — and calls `process.exit(1)` the
-  // moment it throws — so an append still queued would die with the process.
+  // `steptix run` exits as soon as this returns, and exits 1 once it throws
+  // (after writing `junit.xml` / `run.json` when those are on), so an append
+  // still queued would die with the process.
   // Flushed in a `finally`, bounded, so a run that throws keeps the lines of
   // the steps it did run and a stalled disk cannot hold the exit.
   try {
@@ -3385,6 +3424,9 @@ async function runTestsUnflushed(
   options: Parameters<typeof runTests>[2] = {},
 ): Promise<RunSummary> {
   const runOne = options.runTestFn ?? runTest;
+  // First, so a context directory that fails to load below still leaves the
+  // observer knowing which tests the run was about to run.
+  await tellObserver(options.observer, 'onStart', tests);
   const context = await loadContextFiles(config.tests.contextDir);
 
   if (context.files.length > 0) {
@@ -3398,102 +3440,112 @@ async function runTestsUnflushed(
   for (const test of tests) {
     if (bailed) break;
 
-    const instances = await expandTestInstances(test, config, {
-      ...(options.row !== undefined && { row: options.row }),
-    });
+    // Wrapped only so the observer hears which test threw (SPEC-reporters.md
+    // §8.1); the error itself goes on to the caller unchanged.
+    try {
+      const instances = await expandTestInstances(test, config, {
+        ...(options.row !== undefined && { row: options.row }),
+      });
 
-    // One test, one report — however many rows it has (decision 12). The rows
-    // still run as separate instances with their own browsers and their own
-    // redaction; only the writing is folded.
-    const rowReports: RowReport[] = [];
-    const unrun: Array<{ index: number; values: Record<string, string>; reason: string }> = [];
-    // …and one scoreboard run, for the same reason: every row's lines carry
-    // one run id, and the run line links the one report (SPEC-scoreboard.md
-    // §8.1). Each row runs under a copy that adds its row number and shares
-    // the tally the run line counts from.
-    //
-    // The switch is the TEST's project's, read from the root its lines are
-    // filed under — not `config`'s, which is whichever `steptix.config.json` the
-    // working directory holds (§6.4).
-    const projectRoot = await resolveProjectRoot(test.filePath);
-    const testStats = openRunStats({
-      projectRoot,
-      testFilePath: test.filePath,
-      projectEnabled: await projectStatsSwitch(projectRoot, config),
-    });
+      // One test, one report — however many rows it has (decision 12). The rows
+      // still run as separate instances with their own browsers and their own
+      // redaction; only the writing is folded.
+      const rowReports: RowReport[] = [];
+      const unrun: Array<{ index: number; values: Record<string, string>; reason: string }> = [];
+      // …and one scoreboard run, for the same reason: every row's lines carry
+      // one run id, and the run line links the one report (SPEC-scoreboard.md
+      // §8.1). Each row runs under a copy that adds its row number and shares
+      // the tally the run line counts from.
+      //
+      // The switch is the TEST's project's, read from the root its lines are
+      // filed under — not `config`'s, which is whichever `steptix.config.json` the
+      // working directory holds (§6.4).
+      const projectRoot = await resolveProjectRoot(test.filePath);
+      const testStats = openRunStats({
+        projectRoot,
+        testFilePath: test.filePath,
+        projectEnabled: await projectStatsSwitch(projectRoot, config),
+      });
 
-    for (const [position, instance] of instances.entries()) {
-      if (bailed) {
-        // A row the bail stopped us reaching still gets a line in the matrix
-        // table. A matrix that silently omits what it skipped reads as if
-        // those rows passed.
-        if (instance.dataRowIndex !== undefined) {
-          unrun.push({
-            index: instance.dataRowIndex + 1,
-            values: instance.dataRowValues ?? {},
-            reason: 'stopped',
-          });
+      for (const [position, instance] of instances.entries()) {
+        if (bailed) {
+          // A row the bail stopped us reaching still gets a line in the matrix
+          // table. A matrix that silently omits what it skipped reads as if
+          // those rows passed.
+          if (instance.dataRowIndex !== undefined) {
+            unrun.push({
+              index: instance.dataRowIndex + 1,
+              values: instance.dataRowValues ?? {},
+              reason: 'stopped',
+            });
+          }
+          continue;
         }
-        continue;
-      }
 
-      const report = await runOne(instance, config, context.combined, {
-        stats:
-          instance.dataRowIndex === undefined
-            ? testStats
-            : { ...testStats, row: instance.dataRowIndex + 1 },
-      });
-      rowReports.push({
-        report,
-        ...(instance.dataRowIndex !== undefined && {
-          dataRowIndex: instance.dataRowIndex,
-          dataRowCount: instance.dataRowCount ?? instances.length,
-          dataRowValues: instance.dataRowValues ?? {},
-          secrets: runSecrets({
-            parameters: instance.resolvedParameters,
-            ...(test.envData && { envData: test.envData }),
+        const report = await runOne(instance, config, context.combined, {
+          stats:
+            instance.dataRowIndex === undefined
+              ? testStats
+              : { ...testStats, row: instance.dataRowIndex + 1 },
+        });
+        rowReports.push({
+          report,
+          ...(instance.dataRowIndex !== undefined && {
+            dataRowIndex: instance.dataRowIndex,
+            dataRowCount: instance.dataRowCount ?? instances.length,
+            dataRowValues: instance.dataRowValues ?? {},
+            secrets: runSecrets({
+              parameters: instance.resolvedParameters,
+              ...(test.envData && { envData: test.envData }),
+            }),
           }),
-        }),
+        });
+
+        if (report.status === 'failed' && options.bail) {
+          logger.warn(
+            instances.length > 1
+              ? `Bailing on first failure (--bail flag set) — row ${position + 1} of ${instances.length}`
+              : 'Bailing on first failure (--bail flag set)',
+          );
+          bailed = true;
+        }
+      }
+
+      if (rowReports.length === 0) continue;
+
+      const merged = mergeRowReports(rowReports, unrun);
+      reports.push(merged);
+
+      const reportPath = await generateReport(merged, config.reports.outputDir);
+      lastReportPath = reportPath;
+      logger.info(`Report saved: ${path.relative(process.cwd(), reportPath)}`);
+      // The run line, beside the report it links (§8.2), with the merged
+      // report's own token counts — what the report shows is what it records.
+      recordRunEnd(testStats, {
+        status: merged.status,
+        aborted: merged.aborted,
+        tokensIn: merged.inputTokens,
+        tokensOut: merged.outputTokens,
+        report: path.resolve(reportPath),
       });
 
-      if (report.status === 'failed' && options.bail) {
-        logger.warn(
-          instances.length > 1
-            ? `Bailing on first failure (--bail flag set) — row ${position + 1} of ${instances.length}`
-            : 'Bailing on first failure (--bail flag set)',
+      // Once per test, not once per row: a five-row run used to spend five of
+      // the ten-entry history cap on one execution.
+      if (config.reports.appendRunHistoryToTestFile) {
+        await appendRunHistory(
+          test.filePath,
+          reportPath,
+          merged.status,
+          merged.date,
+          getPrimaryModel(merged),
         );
-        bailed = true;
       }
-    }
 
-    if (rowReports.length === 0) continue;
-
-    const merged = mergeRowReports(rowReports, unrun);
-    reports.push(merged);
-
-    const reportPath = await generateReport(merged, config.reports.outputDir);
-    lastReportPath = reportPath;
-    logger.info(`Report saved: ${path.relative(process.cwd(), reportPath)}`);
-    // The run line, beside the report it links (§8.2), with the merged
-    // report's own token counts — what the report shows is what it records.
-    recordRunEnd(testStats, {
-      status: merged.status,
-      aborted: merged.aborted,
-      tokensIn: merged.inputTokens,
-      tokensOut: merged.outputTokens,
-      report: path.resolve(reportPath),
-    });
-
-    // Once per test, not once per row: a five-row run used to spend five of
-    // the ten-entry history cap on one execution.
-    if (config.reports.appendRunHistoryToTestFile) {
-      await appendRunHistory(
-        test.filePath,
-        reportPath,
-        merged.status,
-        merged.date,
-        getPrimaryModel(merged),
-      );
+      await tellObserver(options.observer, 'onTestDone', test, merged, reportPath);
+      if (bailed) await tellObserver(options.observer, 'onBail');
+    } catch (err) {
+      await tellObserver(options.observer, 'onTestError', test, err);
+      throw err;
     }
   }
 
