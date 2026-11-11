@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { renderRunJson } from '../src/report/reporters/json.js';
 import type { RunJson } from '../src/report/reporters/json.js';
 import type { RunState, RunTestEntry } from '../src/report/reporters/types.js';
+import { KEYLESS_DIAGNOSIS_SKIPPED, POLICY_DIAGNOSIS_SKIPPED } from '../src/report/types.js';
 import type { StepResult, TestReport } from '../src/report/types.js';
 
 // Fixtures. Every name, step and value is invented.
@@ -121,6 +122,20 @@ describe('renderRunJson', () => {
       steps: [],
     });
     expect(json.totals).toMatchObject({ tests: 1, passed: 0, notRun: 1 });
+  });
+
+  it('leaves out the placeholder a run with no AI puts in the diagnosis slot', () => {
+    for (const rootCause of [KEYLESS_DIAGNOSIS_SKIPPED, POLICY_DIAGNOSIS_SKIPPED]) {
+      const r = report(
+        [step(1, 'Open the shop', { status: 'failed', error: 'The shop did not open.' })],
+        {
+          diagnosis: { rootCause, faultCategory: 'unknown', evidence: [], suggestedFix: '', confidence: 'low' },
+        },
+      );
+      const t = render(state([done('Place an order', r)], { exitCode: 1 })).tests[0]!;
+      expect(t.failure?.error).toBe('The shop did not open.');
+      expect(t).not.toHaveProperty('diagnosis');
+    }
   });
 
   it('names the failing step and the diagnosis', () => {

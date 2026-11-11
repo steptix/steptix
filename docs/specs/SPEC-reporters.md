@@ -227,6 +227,11 @@ diagnosis, two more lines follow: `Cause: <rootCause>` and
 to its rows, because the report holds one diagnosis and it does not say
 which row it is about.
 
+A run with no AI (no key, or `ai.allowInRuns: false`) makes no diagnosis,
+and the HTML report says "Diagnosis skipped" in its place. That note is not
+a cause, so neither file carries it: no `Cause:` and `Category:` lines, and
+no `diagnosis` in the JSON.
+
 A stopped testcase's message is `The run was stopped by the user.`; its
 body adds the step that was in flight and its `Report:` line. A
 `--fail-on-healed` failure's message counts and names the healed steps

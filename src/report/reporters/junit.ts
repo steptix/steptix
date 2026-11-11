@@ -12,6 +12,7 @@ import {
   videoPathFor,
 } from './results.js';
 import type { Outcome } from './results.js';
+import { isSkippedDiagnosis } from '../types.js';
 import type { RowSummaryLine, StepResult, TestReport } from '../types.js';
 import type { RunState, RunTestEntry } from './types.js';
 
@@ -222,7 +223,7 @@ function reportLine(reportFile: string | undefined, anchor: string | undefined):
 
 function diagnosisLines(report: TestReport | undefined): string[] {
   const d = report?.diagnosis;
-  if (!d) return [];
+  if (!d || isSkippedDiagnosis(d)) return [];
   return [`Cause: ${stripAnsi(d.rootCause)}`, `Category: ${d.faultCategory}`];
 }
 

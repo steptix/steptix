@@ -8,7 +8,7 @@ import {
   videoPathFor,
 } from './results.js';
 import type { Outcome } from './results.js';
-import { isHealedStep } from '../types.js';
+import { isHealedStep, isSkippedDiagnosis } from '../types.js';
 import type { StepResult, TestReport } from '../types.js';
 import type { RunState, RunTestEntry } from './types.js';
 
@@ -182,7 +182,8 @@ function ranTest(
     failure = failureOf(report, outcome, undefined);
   }
 
-  const d = report.diagnosis;
+  // A run with no AI leaves a placeholder in the slot; that is not a cause.
+  const d = report.diagnosis && !isSkippedDiagnosis(report.diagnosis) ? report.diagnosis : undefined;
   return {
     ...base,
     status,

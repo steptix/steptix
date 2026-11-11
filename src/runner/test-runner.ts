@@ -138,29 +138,12 @@ import type { StatsSuite } from '../stats/types.js';
 import { canAskUser, createLineReader, NoAnswerError } from '../utils/ask-user.js';
 import { TestDeadline, testTimeoutError, timedOutResult } from './test-deadline.js';
 import { newerCompiledNotice, terminalUpdateWords } from '../codebehind/stamp.js';
+import { KEYLESS_DIAGNOSIS_SKIPPED, POLICY_DIAGNOSIS_SKIPPED } from '../report/types.js';
 
-/**
- * What the report says in place of a root-cause analysis when the run had no
- * AI to produce one (stories/keyless-replay-and-gateway-env.md §Part B).
- *
- * One line, and no advice: a diagnosis that was never attempted has nothing
- * to suggest, and the failed step already carries the "recompile where AI is
- * available" instruction.
- */
-export const KEYLESS_DIAGNOSIS_SKIPPED = 'Diagnosis skipped: AI is not configured.';
-
-/**
- * The same slot, for a run that HAS AI and was told not to use it.
- *
- * Both reasons reach this branch — `keyless` is `no key OR policy off` — but
- * only one of them is about configuration. Telling an operator whose key is
- * present and valid that "AI is not configured" sends them to add a key they
- * already have, or (on Bedrock SigV4) one that would actively break the run by
- * outranking the AWS credential chain. This is the same distinction
- * `aiOffReason` and {@link AI_FORBIDDEN_BY_POLICY_MESSAGE} exist to keep.
- */
-export const POLICY_DIAGNOSIS_SKIPPED =
-  'Diagnosis skipped: this run was asked to make no AI calls (ai.allowInRuns: false).';
+// What the report says in place of a diagnosis the run had no AI to make.
+// The two messages live with the report's types, so the result-file writers
+// can recognise the placeholder without loading the runner.
+export { KEYLESS_DIAGNOSIS_SKIPPED, POLICY_DIAGNOSIS_SKIPPED };
 
 /** Pattern for [input: variable_name] steps that pause for user input */
 const INPUT_STEP_PATTERN = /^\[input:\s*(\w+)\]\s*(.*)/;

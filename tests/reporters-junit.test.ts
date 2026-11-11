@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderJUnit } from '../src/report/reporters/junit.js';
 import type { RunState, RunTestEntry } from '../src/report/reporters/types.js';
+import { KEYLESS_DIAGNOSIS_SKIPPED, POLICY_DIAGNOSIS_SKIPPED } from '../src/report/types.js';
 import type { RowSummaryLine, StepResult, TestReport } from '../src/report/types.js';
 
 // ---------------------------------------------------------------------------
@@ -219,6 +220,21 @@ describe('renderJUnit', () => {
       stepsFromCode: '1',
     });
     expect(child(tc!, 'system-out')!.text).toBe('[[ATTACHMENT|2026-01-02_03-04-05-place-an-order.html]]');
+  });
+
+  it('leaves out the placeholder a run with no AI puts in the diagnosis slot', () => {
+    for (const rootCause of [KEYLESS_DIAGNOSIS_SKIPPED, POLICY_DIAGNOSIS_SKIPPED]) {
+      const r = report(
+        [step(1, 'Open the shop', { status: 'failed', error: 'The shop did not open.' })],
+        {
+          diagnosis: { rootCause, faultCategory: 'unknown', evidence: [], suggestedFix: '', confidence: 'low' },
+        },
+      );
+      const [tc] = cases(render(state([done('Place an order', r)])));
+      expect(child(tc!, 'failure')!.text).toBe(
+        ['Step 1: Open the shop', 'The shop did not open.', 'Report: order.html#step-1'].join('\n'),
+      );
+    }
   });
 
   it('names the failing step, its error, the report anchor and the diagnosis', () => {
