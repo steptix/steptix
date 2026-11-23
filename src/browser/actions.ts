@@ -1945,7 +1945,7 @@ async function hiddenToggleInput(matches: Locator): Promise<Locator | null> {
         undefined,
         { timeout: MEASUREMENT_TIMEOUT_MS },
       );
-      return toggle ? input : null;
+      return toggle === true ? input : null;
     }
 
     // Playwright's `visible=true` ignores `opacity: 0` and `pointer-events: none`,
@@ -1971,7 +1971,7 @@ async function hiddenToggleInput(matches: Locator): Promise<Locator | null> {
         undefined,
         { timeout: MEASUREMENT_TIMEOUT_MS },
       );
-      return obscuredToggle ? candidate : null;
+      return obscuredToggle === true ? candidate : null;
     }
 
     const allObscuredToggles = await visibleMatches.evaluateAll(
@@ -1992,7 +1992,7 @@ async function hiddenToggleInput(matches: Locator): Promise<Locator | null> {
           return hiddenByCss || (cs !== null && cs.pointerEvents === 'none');
         }),
     );
-    return allObscuredToggles ? visibleMatches.first() : null;
+    return allObscuredToggles === true ? visibleMatches.first() : null;
   } catch {
     return null;
   }

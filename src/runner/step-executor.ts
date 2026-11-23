@@ -4545,11 +4545,14 @@ async function executeStepAttempt(
       };
       /** Set when a readTable's error quotes the model's structure answer. */
       let errorQuotesModel = false;
-      // Network-aware post-action settle (SPEC-aria-ref-snapshots.md §6.1):
-      // armed before every mutating browser action so static actions exit in
-      // <= 250 ms while network-triggering actions wait for their requests
-      // (and record observed requests on compile runs, SPEC-codebehind-robustness.md §6.9).
-      const watcher = preSignal !== undefined
+      // Post-action settle. In aria mode the watcher is armed before every
+      // mutating action so a static action exits in <= 250 ms and a
+      // network-triggering one waits for its requests
+      // (SPEC-aria-ref-snapshots.md §6.1). In dom mode the watcher is armed
+      // only on a compile run, after today's settle, and only for requests
+      // still in flight (SPEC-codebehind-robustness.md §6.9): an ordinary
+      // run keeps today's wait and records nothing.
+      const watcher = preSignal !== undefined && (isAriaMode || opts.captureStepContext === true)
         ? armAiActionWatcher(page, config, opts)
         : undefined;
       /** What the watcher saw this action start (§6.9). */
@@ -4642,11 +4645,6 @@ async function executeStepAttempt(
         }
         subDuration = Date.now() - subStartTime;
 
-        // Post-action settle: waits for requests and DOM mutations triggered by
-        // the action via `armActionWatcher` (250 ms quick-exit on static actions,
-        // quietMs 600 ms after requests; falls back to `waitForPostActionSettle`
-        // only for stub pages in unit tests that lack a browser context).
-        //
         // NOT inside a chain the model wrote to be immediate
         // (docs/specs/SPEC-web-survey-fixes.md §2.17): a trigger followed by
         // a `wait` (the wait IS the settle, on the condition the model named),
@@ -4658,7 +4656,9 @@ async function executeStepAttempt(
         const chainedImmediately = nextInTurn !== undefined
           && (nextInTurn.action === 'wait' || action.action === 'wait');
         if (preSignal !== undefined && result.success && !chainedImmediately) {
-          if (watcher !== undefined) {
+          if (isAriaMode && watcher !== undefined) {
+            // The watcher IS the settle: 250 ms when nothing was requested,
+            // quietMs after a request the action started.
             const report = await traceOp(`settle.post-action (${action.action})`, () =>
               watcher.settle(opts.signal),
             ).catch(() => undefined);
@@ -4671,6 +4671,12 @@ async function executeStepAttempt(
             ).catch(() => {
               /* settle errors are non-fatal — proceed to capture post-state */
             });
+            if (watcher !== undefined) {
+              const report = await watcher.settle(opts.signal, { onlyIfPending: true }).catch(() => undefined);
+              if (opts.captureStepContext === true && report && (report.requests ?? []).length > 0) {
+                observedRequests = report.requests;
+              }
+            }
           }
         }
       } finally {
