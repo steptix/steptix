@@ -100,10 +100,10 @@ describe('Phase 1 config & JSON schema (browser.snapshotMode)', () => {
     return configPath;
   }
 
-  it('defaults browser.snapshotMode to "dom"', async () => {
-    expect(DEFAULT_CONFIG.browser.snapshotMode).toBe('dom');
+  it('defaults browser.snapshotMode to "aria"', async () => {
+    expect(DEFAULT_CONFIG.browser.snapshotMode).toBe('aria');
     const loaded = await loadConfig(undefined, projectRoot);
-    expect(loaded.browser.snapshotMode).toBe('dom');
+    expect(loaded.browser.snapshotMode).toBe('aria');
   });
 
   it('reads browser.snapshotMode "aria" and "dom" from steptix.config.json', async () => {

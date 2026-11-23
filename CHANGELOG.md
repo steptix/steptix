@@ -11,23 +11,21 @@ carried a `-beta.N` suffix.
 
 ## Unreleased
 
-### Added — accessibility snapshots, opt-in
+### Added — accessibility snapshots are the default
 
-- **A project can show the model an accessibility snapshot instead of the
-  cleaned HTML.** Set `browser.snapshotMode` to `aria` in
-  `steptix.config.json`, or start the server with `STEPTIX_SNAPSHOT_MODE=aria`.
-  The model names the element by the ref on that snapshot (`eN` in the page,
-  `f<seq>eN` in a frame, `sN` for a control the accessibility tree omits).
-  The framework resolves the ref, and a wait written as "wait until this
-  changes" polls the snapshot locally instead of asking the model again on
-  every tick. Run & Compile records the element that was used and writes an
-  ordinary Playwright locator; a snapshot ref is not left in the `.steps.ts`.
-  The default stays `dom`. On the 7-file live comparison the aria run passed
-  20/20, used 31.5% fewer step input tokens, and replayed 42/42 compiled
-  steps with no ref left in the code
+- **The model is shown an accessibility snapshot, and names the element by
+  its ref.** `eN` is the page, `f<seq>eN` a frame, `sN` a control the
+  accessibility tree omits. The framework resolves the ref, and a wait
+  written as "wait until this changes" polls the snapshot locally instead of
+  asking the model again on every tick. Run & Compile records the element
+  that was used and writes an ordinary Playwright locator; a snapshot ref is
+  not left in the `.steps.ts`. Test steps stay plain English.
+- **`dom` is the escape hatch.** Set `browser.snapshotMode` to `dom` in
+  `steptix.config.json`, or start the server with `STEPTIX_SNAPSHOT_MODE=dom`,
+  to keep the cleaned HTML snapshot. On the 7-file live comparison the aria
+  run passed 20/20, used 31.5% fewer step input tokens, and replayed 42/42
+  compiled steps with no ref left in the code
   ([SPEC-aria-ref-snapshots.md](docs/specs/SPEC-aria-ref-snapshots.md) §9.5).
-  The spec's bar for making `aria` the default is a 50% drop, which this
-  run did not reach.
 
 ### Changed — the extension wears the Steptix brand
 

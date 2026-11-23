@@ -205,8 +205,8 @@ export interface BrowserConfig {
   cdp?: CdpBrowserConfig | undefined;
   /** Page snapshot format sent to the step AI
    *  (docs/specs/SPEC-aria-ref-snapshots.md §9.1):
-   *    - `'dom'` (default during Phases 1–3): sanitized HTML DOM snapshot.
-   *    - `'aria'`: compact accessibility snapshot with `[ref=...]` element handles.
+   *    - `'aria'` (default): compact accessibility snapshot with `[ref=...]` element handles.
+   *    - `'dom'`: sanitized HTML DOM snapshot, the escape hatch.
    *  Can also be set via `STEPTIX_SNAPSHOT_MODE`. */
   snapshotMode?: 'aria' | 'dom' | undefined;
   /** DOM snapshot noise-reduction toggles — the primary lever for keeping
