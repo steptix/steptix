@@ -172,6 +172,7 @@ function testConfig(): Config {
       browser: 'chromium',
       fullPageScreenshots: false,
       captureScreenshotsPerAction: false,
+      snapshotMode: 'dom',
     },
     tests: { dir: './tests', contextDir: './context', pattern: '**/*.md' },
     execution: {
@@ -217,7 +218,10 @@ beforeAll(async () => {
   projectRoot = mkdtempSync(path.join(tmpdir(), 'steptix-values-block-'));
   mkdirSync(path.join(projectRoot, 'data'), { recursive: true });
   mkdirSync(path.join(projectRoot, 'tests'), { recursive: true });
-  writeFileSync(path.join(projectRoot, 'steptix.config.json'), JSON.stringify({}));
+  writeFileSync(
+    path.join(projectRoot, 'steptix.config.json'),
+    JSON.stringify({ browser: { snapshotMode: 'dom' } }),
+  );
   writeFileSync(
     path.join(projectRoot, '.env.uat'),
     'BASE_URL=https://uat.app.test\nLOGIN_PASSWORD=hunter2-ENV-SECRET\n',

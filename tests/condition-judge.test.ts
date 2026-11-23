@@ -70,7 +70,7 @@ function makeConfig(): Config {
   return {
     ...DEFAULT_CONFIG,
     ai: { ...DEFAULT_CONFIG.ai, sendScreenshots: false },
-    browser: { ...DEFAULT_CONFIG.browser, headed: false },
+    browser: { ...DEFAULT_CONFIG.browser, headed: false, snapshotMode: 'dom' },
   };
 }
 
