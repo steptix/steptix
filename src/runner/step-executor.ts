@@ -46,14 +46,15 @@ import {
   unknownActionTypeError,
 } from '../ai/action-parser.js';
 import { describeWhereExpectedIs } from '../browser/locate-text.js';
-import { resolveFrame } from '../browser/actions.js';
+import { executeAction, resolveElementStableSelector, resolveFrame, preResolveRefForChain, clampWaitTimeout } from '../browser/actions.js';
 import { captureDomSnapshot, domCaptureFailure, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
+import { captureAriaPageSnapshot, expandAriaSubtree, resolveRefTarget, waitForSnapshotChange } from '../browser/aria-snapshot.js';
 import { captureScreenshot } from '../browser/screenshot.js';
-import { executeAction } from '../browser/actions.js';
 import { disarmDialog, markDialogsShown, type DialogRecord } from '../browser/dialogs.js';
 import type {
   ActionExecutionResult,
   ExecuteActionOptions,
+  PreResolvedRef,
   TableStructureSource,
 } from '../browser/actions.js';
 import { tableStructureOf } from '../config/table-structure.js';
@@ -67,7 +68,7 @@ import type { InteractiveDecision, InteractiveReader } from './interactive-repl.
 import { createLineReader, NoAnswerError } from '../utils/ask-user.js';
 import { logger, traceOp } from '../utils/logger.js';
 import { callApiStandalone, callApiBrowserContext } from '../api/client.js';
-import { extractCsrfToken } from '../api/csrf-handler.js';
+import { extractCsrfToken, type CsrfResult } from '../api/csrf-handler.js';
 import type { ApiResponseStore } from '../api/response-store.js';
 import type { StepValues } from '../ai/prompts.js';
 import {
@@ -819,11 +820,15 @@ export async function executeStep(
   // nothing that merges one result into another records twice. Not awaited,
   // and never throws.
   if (opts.stats?.enabled) {
+    const isAriaMode = opts.config.browser.snapshotMode === 'aria';
     recordExecutedStep(result, opts.stats, {
       // AS AUTHORED — the text the model was shown, placeholders intact (§5.7).
       stepText: authoredInstruction ?? instruction,
       // The options every prompt this step built was made with.
-      rules: { dismissalGuidance: opts.dismissalGuidance ?? false },
+      rules: {
+        dismissalGuidance: opts.dismissalGuidance ?? false,
+        ...(isAriaMode && { snapshotMode: 'aria' as const }),
+      },
       // Read now, so a secret this step captured is masked in its own lines.
       // The loop's own set on `stats.maskValues` is merged in beside it, and
       // that is the one that holds the values expansion wrote into the step
@@ -1477,30 +1482,49 @@ async function runCodeBehindStep(
 }
 
 /**
- * The most the wait after a compiled action waits — the flow-control gate's
- * own budget (§6.4): up to 10 s, capped by `execution.timeout`.
+ * Normalize `config.execution.timeout` to milliseconds. The canonical unit is
+ * milliseconds (`DEFAULT_CONFIG.execution.timeout = 3600_000`), while legacy
+ * unit tests occasionally pass small values (`< 1000`) in seconds.
  */
-function actionSettleBudgetMs(config: Config): number {
-  return Math.min(10_000, config.execution.timeout * 1000);
+function executionTimeoutMs(config: Config): number {
+  const rawTimeout = config.execution.timeout;
+  return Number.isFinite(rawTimeout) && rawTimeout > 0
+    ? (rawTimeout < 1_000 ? rawTimeout * 1_000 : rawTimeout)
+    : 10_000;
 }
 
 /**
- * The wait after an action, armed for an AI action on a compile run (§6.9) —
- * or undefined when the page has no context to listen on.
+ * The most the wait after a compiled action waits — the flow-control gate's
+ * own budget (§6.4): up to 10 s, capped by `execution.timeout` (ms).
  */
-function armCompileWatcher(page: Page, config: Config): (ActionWatcher & { ready: Promise<void> }) | undefined {
+function actionSettleBudgetMs(config: Config): number {
+  return Math.min(10_000, executionTimeoutMs(config));
+}
+
+/**
+ * Network-aware settle watcher armed before every mutating AI browser action
+ * (SPEC-aria-ref-snapshots.md §6.1) — up to 5 s on routine runs or 10 s on
+ * compile runs, capped by `execution.timeout` (ms), or undefined when the page
+ * has no context to listen on (unit-test doubles).
+ */
+function armAiActionWatcher(
+  page: Page,
+  config: Config,
+  opts: StepExecutorOptions,
+): (ActionWatcher & { ready: Promise<void> }) | undefined {
   let context: BrowserContext | undefined;
   try {
     context = page.context();
+    if (!context) return undefined;
+    return armActionWatcher(context, page, {
+      budgetMs: Math.min(opts.captureStepContext ? 10_000 : 5_000, executionTimeoutMs(config)),
+      quietMs: 600,
+      quickExitMs: 250,
+      activePage: () => activePageOf(opts) ?? page,
+    });
   } catch {
     return undefined;
   }
-  if (!context) return undefined;
-  return armActionWatcher(context, page, {
-    budgetMs: actionSettleBudgetMs(config),
-    quietMs: 600,
-    quickExitMs: 250,
-  });
 }
 
 /** The active page right now — after a switch the entry made — or undefined
@@ -2359,7 +2383,11 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
         result: {
           success: false,
           error: err instanceof Error ? err.message : String(err),
-          ...(candidate.selector !== undefined && { failedSelector: candidate.selector }),
+          ...(candidate.selector !== undefined
+            ? { failedSelector: candidate.selector }
+            : typeof candidate.ref === 'string' && candidate.ref.trim() !== ''
+              ? { failedSelector: `aria-ref=${candidate.ref.trim().replace(/^aria-ref=/, '')}` }
+              : {}),
         },
         thrown: err,
       };
@@ -2367,7 +2395,23 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
   };
 
   const { memo, stepIndex } = args;
-  const memoKey = structureMemoKey(action);
+  let memoAction = action;
+  if (typeof action.ref === 'string' && action.ref.trim() !== '' && !action.selector) {
+    const cleanRef = action.ref.trim().replace(/^aria-ref=/, '');
+    try {
+      const resolved = await resolveRefTarget(page, action.ref);
+      const stable = await resolveElementStableSelector(resolved.locator);
+      const resolvedFrame = resolved.frameSelector ?? action.frame;
+      memoAction = {
+        ...action,
+        ...(resolvedFrame !== undefined && { frame: resolvedFrame }),
+        selector: stable?.selector ?? `aria-ref=${cleanRef}`,
+      };
+    } catch {
+      memoAction = { ...action, selector: `aria-ref=${cleanRef}` };
+    }
+  }
+  const memoKey = structureMemoKey(memoAction);
   const first = await attempt(action);
   if (first.result.success) return { result: first.result };
 
@@ -2421,18 +2465,28 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
   // REDACTED before anything else touches it, with the same set and the same
   // function the DOM snapshot uses one message earlier (§7.6). The sketch's
   // own cell text is masked in the page, where it is built — but this snapshot
-  // comes out of `expandDomSubtree`, which knows nothing about the run's
-  // secrets, so a card list holding a password reached the model verbatim and
-  // then the `AiInteraction` and the report with it. Masked HERE rather than
-  // at either surface, because there are two of them and a third would be one
-  // more place to forget.
+  // comes out of `expandDomSubtree` / `expandAriaSubtree`, which know nothing
+  // about the run's secrets, so a card list holding a password reached the
+  // model verbatim and then the `AiInteraction` and the report with it. Masked
+  // HERE rather than at either surface, because there are two of them and a
+  // third would be one more place to forget.
   //
   // The cut comes after the mask, never before: a cut applied first can slice
   // a secret in two and leave the first half in the prompt.
   let regionSnapshot: string | undefined;
   if (refusal.sketch.candidates.length === 0) {
-    const subtree = await expandDomSubtree(page, action.selector ?? '').catch(() => '');
-    // Every failure `expandDomSubtree` reports in band starts "[expand] ". Sent
+    let subtree = '';
+    if (typeof action.ref === 'string' && action.ref.trim() !== '') {
+      const expanded = await expandAriaSubtree(page, {
+        ref: action.ref,
+        selector: action.selector,
+        frame: action.frame,
+      }).catch(() => null);
+      subtree = expanded?.content ?? '';
+    } else {
+      subtree = await expandDomSubtree(page, action.selector ?? '').catch(() => '');
+    }
+    // Every failure `expandDomSubtree` / `expandAriaSubtree` reports in band starts "[expand] ". Sent
     // on, the error text became the region's markup and cost the step its one
     // structure question (issue 062 review).
     if (subtree !== '' && !subtree.startsWith('[expand] ')) {
@@ -2448,7 +2502,7 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
       // The `Selector:` line, masked for the reason the snapshot is: a
       // selector is page-derived as often as a cell (`[data-token="…"]`), and
       // this one is printed as itself rather than inside the sketch.
-      selector: redact(action.selector ?? '', maskValues),
+      selector: redact(memoAction.selector ?? action.selector ?? '', maskValues),
       stepText: args.stepText,
     },
     refusal: refusal.message,
@@ -2622,6 +2676,8 @@ async function executeStepAttempt(
     // A page without a context (a test double) has no dialogs to disarm.
   }
   const maxTurns = config.execution.maxTurns;
+  const snapshotMode = config.browser.snapshotMode;
+  const isAriaMode = snapshotMode === 'aria';
   /**
    * The last turn this attempt may take. The turn that re-checks a failed
    * check asks the step AI for nothing — it sends the check again
@@ -2676,12 +2732,12 @@ async function executeStepAttempt(
    * may be unfinished — once per attempt, while a turn is left. Asked at the
    * end of a turn; not of the answer a check failed in (`FailedCheck.hadMore`).
    */
-  const reevalInferred = (response: AIResponse, turn: number): boolean =>
+  const reevalInferred = (response: AIResponse, turn: number, cap: number): boolean =>
     response.needs_reeval !== true
     && response.reevalUnstated === true
     && !inferredReevalUsed
     && response.actions.some((a) => REEVAL_WHEN_UNSTATED.has(a.action))
-    && turn < turnCap;
+    && turn < cap;
   // A list read that came back empty or mixed is shown to the model before
   // the step can end on it (src/runner/list-read-review.ts, issue #48).
   /** The latest read under review, per stored name, so a later read of the name replaces it. */
@@ -2699,6 +2755,19 @@ async function executeStepAttempt(
   let nextTurnReviewOnly = false;
   let stallCount = 0;
   const STALL_LIMIT = 2;
+  // Diff-polled `wait` (`waitType: "change"`, SPEC-aria-ref-snapshots.md §6.2):
+  // one deadline spans continuation checks until the wait resolves or expires,
+  // with backoff against noisy text-only ticks and its own turn allowance so
+  // intermediate poll checks do not starve `execution.maxTurns`.
+  const MAX_POLL_AI_CHECKS = 15;
+  const POLL_TEXT_BACKOFF_MS = [0, 1_000, 2_000, 4_000, 5_000] as const;
+  let pollDeadline: number | undefined;
+  let pollStartedAt: number | undefined;
+  let pollTotalBudgetMs: number | undefined;
+  let pollAiChecks = 0;
+  let pollTextBackoffStep = 0;
+  let extraPollTurns = 0;
+  let lastTurnWasDiffPoll = false;
 
   // Global sub-action counter (1-based, spans all turns)
   let globalSubActionIndex = 0;
@@ -2765,14 +2834,15 @@ async function executeStepAttempt(
   let deliberateFailure: { why: string } | undefined;
 
   try {
-  for (let currentTurn = 1; currentTurn <= turnCap; currentTurn++) {
+  for (let currentTurn = 1; currentTurn <= turnCap + extraPollTurns; currentTurn++) {
     completedTurns = currentTurn;
     /**
      * This turn was added only to show the model its list reads, after it had
      * said the step was done (9b). The step passed as far as the step goes, so
      * nothing here may fail it (steptix/steptix#48, decision 1): the model may
-     * keep a read (`noop`) or read again (a list read, `isReviewAnswer`), and
-     * anything else — another action, a question, a failed read, a call that
+     * keep a read (`noop`), inspect the page (`expand` / `find`) before
+     * answering on the next turn, or read again (a list read, `isReviewAnswer`),
+     * and anything else — another action, a question, a failed read, a call that
      * failed or did not parse — ends the step where it stood. The reads it was
      * shown then stay unanswered (`pending`): the report flags them and the
      * compile does not use them.
@@ -2844,13 +2914,22 @@ async function executeStepAttempt(
     // reply has arrived (step 6), and only the dialogs the note listed.
     let dialogsForModel: readonly DialogRecord[] = [];
     const turnTimestamp = new Date().toISOString();
-    const domSnapshot = await traceOp(`captureDomSnapshot (turn ${currentTurn})`, () =>
-      captureDomSnapshot(page, {
-        ...config.browser.domNoiseReduction,
-        maxIframeDepth: config.browser.maxIframeDepth,
-        domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-        onDialogNote: (listed) => { dialogsForModel = listed; },
-      }),
+    const domSnapshot = await traceOp(
+      `${isAriaMode ? 'captureAriaPageSnapshot' : 'captureDomSnapshot'} (turn ${currentTurn})`,
+      () =>
+        isAriaMode
+          ? captureAriaPageSnapshot(page, {
+              maxIframeDepth: config.browser.maxIframeDepth,
+              domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+              secrets: secretsNow(),
+              onDialogNote: (listed) => { dialogsForModel = listed; },
+            })
+          : captureDomSnapshot(page, {
+              ...config.browser.domNoiseReduction,
+              maxIframeDepth: config.browser.maxIframeDepth,
+              domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+              onDialogNote: (listed) => { dialogsForModel = listed; },
+            }),
     );
     const wantPreTurnShot =
       config.ai.sendScreenshots || config.browser.captureScreenshotsPerAction !== false;
@@ -2877,9 +2956,13 @@ async function executeStepAttempt(
     // Stall detection: if the prior turn's action was a "wait" and neither the
     // page (URL + DOM) nor the network moved since then, the preceding click
     // (or whatever triggered the wait) likely didn't register. Bail out instead
-    // of burning more turns.
+    // of burning more turns. Diff-polled waits (`lastTurnWasDiffPoll`) bypass
+    // this check because `waitForSnapshotChange` already blocked locally until
+    // a change occurred or threw on timeout (SPEC-aria-ref-snapshots.md §6.2).
     const pageFingerprint = `${currentUrl}\n${domSnapshot}`;
-    if (currentTurn > 1 && lastActionWasWait && !reviewOnly) {
+    if (lastTurnWasDiffPoll) {
+      stallCount = 0;
+    } else if (currentTurn > 1 && lastActionWasWait && !reviewOnly) {
       const unchanged = pageFingerprint === prevPageFingerprint;
       const networkIdle = tracker.isIdle();
       if (unchanged && networkIdle) {
@@ -2898,6 +2981,7 @@ async function executeStepAttempt(
         stallCount = 0;
       }
     }
+    lastTurnWasDiffPoll = false;
     prevPageFingerprint = pageFingerprint;
 
     // Per-turn accumulators
@@ -2925,6 +3009,7 @@ async function executeStepAttempt(
       : undefined;
     const systemPrompt = buildSystemPrompt(contextContent, apiContext, {
       dismissalGuidance: opts.dismissalGuidance ?? false,
+      ...(isAriaMode && { snapshotMode: 'aria' as const }),
     });
     const testInfo = formatTestInfo(
       testName,
@@ -2983,8 +3068,11 @@ async function executeStepAttempt(
         testInfo,
         scrollPosition,
         stepValues,
+        snapshotMode,
       );
     } else {
+      const activePollRemainingMs =
+        pollDeadline !== undefined ? Math.max(0, pollDeadline - Date.now()) : undefined;
       userMessage = buildContinuationMessage(
         promptInstruction,
         allCompletedActions,
@@ -3007,6 +3095,8 @@ async function executeStepAttempt(
         // The failed attempt's, at the start of the list: done before the
         // re-check, not in this attempt's turns.
         failedCheck?.check?.done.length ?? 0,
+        snapshotMode,
+        activePollRemainingMs,
       );
     }
     listReadLines = [];
@@ -3315,6 +3405,37 @@ async function executeStepAttempt(
         turnListConcerns.clear();
       }
     };
+    // Pre-resolve snapshot refs for actions at index >= 1 before action 0 runs
+    // (SPEC-aria-ref-snapshots.md §6.2), so a DOM re-render triggered by
+    // action 0 cannot invalidate eN pointers for later actions in the chain.
+    const chainPage = page;
+    const preResolvedChain = new Map<number, { ref?: PreResolvedRef; targetRef?: PreResolvedRef }>();
+    if (!turnRefused && aiResponse.actions.length > 1) {
+      const preSecrets = secretsNow();
+      for (let idx = 1; idx < aiResponse.actions.length; idx++) {
+        if (opts.signal?.aborted) break;
+        const substituted = substituteAction(aiResponse.actions[idx]!, placeholderValues);
+        const entry: { ref?: PreResolvedRef; targetRef?: PreResolvedRef } = {};
+        if (typeof substituted.ref === 'string' && substituted.ref.trim() !== '' && !substituted.selector) {
+          const resolved = await preResolveRefForChain(page, substituted.ref, preSecrets).catch((err: unknown) => {
+            if (opts.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) throw err;
+            return null;
+          });
+          if (resolved !== null) entry.ref = resolved;
+        }
+        if (opts.signal?.aborted) break;
+        if (typeof substituted.targetRef === 'string' && substituted.targetRef.trim() !== '' && !substituted.target) {
+          const resolved = await preResolveRefForChain(page, substituted.targetRef, preSecrets).catch((err: unknown) => {
+            if (opts.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) throw err;
+            return null;
+          });
+          if (resolved !== null) entry.targetRef = resolved;
+        }
+        if (entry.ref !== undefined || entry.targetRef !== undefined) {
+          preResolvedChain.set(idx, entry);
+        }
+      }
+    }
     for (const [emittedIndex, emitted] of (turnRefused ? [] : aiResponse.actions).entries()) {
       notePageChanges();
       // What the page gets: a COPY with `{{name}}` and `${…}` resolved. The
@@ -3325,19 +3446,32 @@ async function executeStepAttempt(
       const action = substituteAction(emitted, placeholderValues);
       /**
        * What the record sites write: `emitted` itself for every action ever
-       * emitted, and a COPY carrying `mapping` for a `readTable` whose
-       * structure the model had to name (SPEC-structured-table-reads.md
-       * §7.10).
+       * emitted, and a COPY carrying `mapping` (for a `readTable` whose
+       * structure the model had to name, SPEC-structured-table-reads.md §7.10),
+       * `frame` (resolved from an iframe snapshot `ref`, SPEC-aria-ref-snapshots.md
+       * §3.4 & §7.1), or `timeout` (the initial clamped poll budget on the first
+       * `waitType: "change"`, SPEC-aria-ref-snapshots.md §6.2).
        *
        * A copy, never a write through `emitted`: the model's object is what
        * the transcript quotes and what `rawResponse` says it emitted, and a
        * field appearing on it that the model never wrote would make the two
        * disagree. The replacement is pushed back into `aiResponse.actions`
-       * below, so the recording and the report both see the mapping without
+       * below, so the recording and the report both see the enrichment without
        * separate assignments that could drift apart.
        */
       let recordedEmitted = emitted;
       if (action.action === 'prompt') continue;
+      if (
+        currentTurn > 1
+        && pollDeadline !== undefined
+        && !(action.action === 'wait' && action.waitType === 'change')
+      ) {
+        pollDeadline = undefined;
+        pollStartedAt = undefined;
+        pollTotalBudgetMs = undefined;
+        pollAiChecks = 0;
+        pollTextBackoffStep = 0;
+      }
 
       const subStartTime = Date.now();
       const aiReasoningVal = config.reports.includeAiReasoning ? aiResponse.reasoning : undefined;
@@ -3971,14 +4105,50 @@ async function executeStepAttempt(
 
       // ── API action types ─────────────────────────────────────────────────────
       if (action.action === 'extract_csrf') {
-        const csrfResult = await extractCsrfToken(
-          page,
-          action.selector ?? action.source ?? '',
-          action.source,
-        ).catch((err) => {
-          logger.warn(`CSRF extraction failed: ${String(err)}`);
-          return undefined;
-        });
+        let csrfSelector = action.selector ?? action.source ?? '';
+        let csrfResult: CsrfResult | undefined;
+        let handledByRef = false;
+        if (!action.selector && typeof action.ref === 'string' && action.ref.trim() !== '') {
+          try {
+            const resolved = await resolveRefTarget(page, action.ref);
+            const stable = await resolveElementStableSelector(resolved.locator);
+            if (!resolved.frameSelector && stable !== null) {
+              csrfSelector = stable.selector;
+            } else {
+              // Target lives inside an iframe or lacks a main-frame CSS
+              // selector (e.g. open shadow root): read directly from the
+              // resolved locator instead of querying the main frame.
+              handledByRef = true;
+              const rawToken = await resolved.locator.first().evaluate(
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                (el: any) => String(el.value || el.getAttribute('value') || el.getAttribute('content') || ''),
+                undefined,
+                { timeout: 2_000 },
+              );
+              if (rawToken) {
+                const selectorKey = stable?.selector
+                  ? (resolved.frameSelector ? `${resolved.frameSelector} >> ${stable.selector}` : stable.selector)
+                  : resolved.selectorInRoot;
+                logger.debug(`CSRF token extracted via ref ${action.ref} (${selectorKey})`);
+                csrfResult = { token: rawToken, selector: selectorKey };
+              }
+            }
+          } catch (err) {
+            if (opts.signal?.aborted) throw err;
+            logger.warn(`CSRF extraction failed: ${String(err)}`);
+            handledByRef = true;
+          }
+        }
+        if (!handledByRef) {
+          csrfResult = await extractCsrfToken(
+            page,
+            csrfSelector,
+            action.source,
+          ).catch((err) => {
+            logger.warn(`CSRF extraction failed: ${String(err)}`);
+            return undefined;
+          });
+        }
 
         const subDuration = Date.now() - subStartTime;
         const subActionResult: SubActionResult = {
@@ -4071,13 +4241,50 @@ async function executeStepAttempt(
       // ── DOM exploration actions (find/expand) ──────────────────────────────────
       if (action.action === 'find') {
         const searchText = action.value ?? action.condition ?? '';
-        const scope = action.selector;
-        const result = await findInDom(page, searchText, scope);
-        const formatted = formatFindResults(result, searchText, scope);
-        explorationResults.push(formatted);
-        const scopeLog = scope ? ` in "${scope}"` : '';
-        const totalLabel = result.hitHardMax ? `${result.totalMatches}+` : `${result.totalMatches}`;
-        logger.info(`find "${searchText}"${scopeLog}: ${result.matches.length} shown / ${totalLabel} total`);
+        let scope = action.selector;
+        let findRefError: string | undefined;
+        let iframeExpanded = false;
+        if (!scope && typeof action.ref === 'string' && action.ref.trim() !== '') {
+          try {
+            const resolved = await resolveRefTarget(page, action.ref);
+            if (resolved.frameSelector) {
+              // findInDom searches only the main frame; expand the iframe
+              // target directly so the model inspects its stamped subtree
+              // rather than searching the wrong frame.
+              const expanded = await expandAriaSubtree(page, { ref: action.ref });
+              explorationResults.push(
+                `### find "${searchText}" (in ${action.ref}, frame ${resolved.frameSelector})\n` +
+                  `\`find\` searches the main document only; expanded "${expanded.label}" inside iframe \`${resolved.frameSelector}\` instead:\n\n` +
+                  formatExpandResult(expanded.content, expanded.label),
+              );
+              logger.info(
+                `find "${searchText}" in iframe ref "${action.ref}" (${resolved.frameSelector}): expanded subtree (${expanded.content.length} chars)`,
+              );
+              iframeExpanded = true;
+            } else {
+              const stable = resolved.selectorInRoot.startsWith('aria-ref=')
+                ? await resolveElementStableSelector(resolved.locator)
+                : null;
+              scope = stable?.selector ?? resolved.selectorInRoot;
+            }
+          } catch (err) {
+            if (opts.signal?.aborted) throw err;
+            findRefError = err instanceof Error ? err.message : String(err);
+          }
+        }
+        if (iframeExpanded) {
+          // Expanded iframe subtree was already pushed to explorationResults.
+        } else if (findRefError !== undefined) {
+          explorationResults.push(`### find "${searchText}" (in ${action.ref})\n[find] ${findRefError}`);
+          logger.warn(`find "${searchText}" ref "${action.ref}" failed: ${findRefError}`);
+        } else {
+          const result = await findInDom(page, searchText, scope);
+          const formatted = formatFindResults(result, searchText, scope);
+          explorationResults.push(formatted);
+          const scopeLog = scope ? ` in "${scope}"` : '';
+          const totalLabel = result.hitHardMax ? `${result.totalMatches}+` : `${result.totalMatches}`;
+          logger.info(`find "${searchText}"${scopeLog}: ${result.matches.length} shown / ${totalLabel} total`);
+        }
 
         turnSubActions.push({
           index: ++globalSubActionIndex,
@@ -4092,11 +4299,32 @@ async function executeStepAttempt(
       }
 
       if (action.action === 'expand') {
-        const expandSelector = action.selector ?? '';
-        const subtree = await expandDomSubtree(page, expandSelector);
-        const formatted = formatExpandResult(subtree, expandSelector);
+        let subtree: string;
+        let expandLabel: string;
+        if ((typeof action.ref === 'string' && action.ref.trim() !== '') || isAriaMode) {
+          const expanded = await expandAriaSubtree(page, {
+            ref: action.ref,
+            selector: action.selector,
+            frame: action.frame,
+          }).catch((err: unknown) => {
+            if (opts.signal?.aborted) throw err;
+            const msg = err instanceof Error ? err.message : String(err);
+            return {
+              content: `[expand] ${msg}`,
+              label: action.ref
+                ? `aria-ref=${action.ref.trim().replace(/^aria-ref=/, '')}`
+                : (action.selector ?? ''),
+            };
+          });
+          subtree = expanded.content;
+          expandLabel = expanded.label;
+        } else {
+          expandLabel = action.selector ?? '';
+          subtree = await expandDomSubtree(page, expandLabel);
+        }
+        const formatted = formatExpandResult(subtree, expandLabel);
         explorationResults.push(formatted);
-        logger.info(`expand "${expandSelector}": ${subtree.length} chars`);
+        logger.info(`expand "${expandLabel}": ${subtree.length} chars`);
 
         turnSubActions.push({
           index: ++globalSubActionIndex,
@@ -4110,11 +4338,191 @@ async function executeStepAttempt(
         continue;
       }
 
+      // ── Diff-polled wait (SPEC-aria-ref-snapshots.md §6.2) ───────────────────
+      if (action.action === 'wait' && action.waitType === 'change') {
+        const actionPageUrl = page.url();
+        const isFirstPollWait = pollDeadline === undefined;
+        if (isFirstPollWait) {
+          const budget = clampWaitTimeout(action.timeout);
+          pollStartedAt = Date.now();
+          pollTotalBudgetMs = budget;
+          pollDeadline = pollStartedAt + budget;
+          pollAiChecks = 0;
+          pollTextBackoffStep = 0;
+          if (recordedEmitted.timeout !== budget) {
+            recordedEmitted = { ...recordedEmitted, timeout: budget };
+            aiResponse.actions[emittedIndex] = recordedEmitted;
+          }
+        } else {
+          pollAiChecks++;
+          if (pollAiChecks > MAX_POLL_AI_CHECKS) {
+            const maxChecksMsg = `Timed out waiting for page change after ${pollAiChecks} intermediate updates ("${action.description}").`;
+            turnSubActions.push({
+              index: ++globalSubActionIndex,
+              action: recordedEmitted,
+              durationMs: Date.now() - subStartTime,
+              ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+              error: maxChecksMsg,
+              pageUrl: actionPageUrl,
+              timestamp: new Date().toISOString(),
+            });
+            if (inFlightTurn !== undefined) {
+              allTurns.push(inFlightTurn);
+              inFlightTurn = undefined;
+            }
+            const failureUrl = page.url();
+            const allSucceeded = [
+              ...allCompletedActions.map((a) => ({ action: a.action, description: a.description })),
+              ...turnSubActions
+                .filter((s) => !s.error)
+                .map((s) => ({ action: s.action.action, description: s.action.description })),
+            ];
+            collectedFailures.push({
+              selector: '',
+              error: maxChecksMsg,
+              actionType: action.action,
+              ...(allSucceeded.length > 0 && { completedActions: allSucceeded }),
+              startUrl: attemptStartUrl,
+              failureUrl,
+              navigated: failureUrl !== attemptStartUrl,
+            });
+            throw new StepFailureError(maxChecksMsg, collectedFailures, allTurns);
+          }
+          if (aiResponse.actions.length === 1) {
+            extraPollTurns++;
+          }
+        }
+
+        const remainingBudget = (pollDeadline ?? Date.now()) - Date.now();
+        const minTextChangeIntervalMs =
+          POLL_TEXT_BACKOFF_MS[Math.min(pollTextBackoffStep, POLL_TEXT_BACKOFF_MS.length - 1)]!;
+        const pollSecrets = secretsNow();
+        const pollBaseline = remainingBudget > 0 && !isAriaMode
+          ? await traceOp('captureAriaPageSnapshot (wait.change baseline)', () =>
+              captureAriaPageSnapshot(page, {
+                maxIframeDepth: config.browser.maxIframeDepth,
+                domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+                secrets: pollSecrets,
+                updateRegistry: false,
+              }),
+            )
+          : domSnapshot;
+        const pollRes = remainingBudget > 0
+          ? await traceOp(`wait.change (${action.description})`, () =>
+              waitForSnapshotChange(page, {
+                baselineSnapshot: pollBaseline,
+                baselineUrl: currentUrl,
+                budgetMs: remainingBudget,
+                totalBudgetMs: pollTotalBudgetMs,
+                alreadyElapsedMs: Date.now() - (pollStartedAt ?? Date.now()),
+                minTextChangeIntervalMs,
+                maxIframeDepth: config.browser.maxIframeDepth,
+                domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+                secrets: pollSecrets,
+                signal: opts.signal,
+              }),
+            )
+          : { changed: false, timedOut: true, urlChanged: false, newInteractiveControl: false, elapsedMs: 0 };
+
+        if (opts.signal?.aborted) {
+          throw new DOMException('Run aborted by client', 'AbortError');
+        }
+
+        const postUrl = page.url();
+        if (pollRes.timedOut || !pollRes.changed) {
+          const timeoutMsg = `Timed out after ${Math.round((pollTotalBudgetMs ?? 10_000) / 1000)}s waiting for page change ("${action.description}").`;
+          turnSubActions.push({
+            index: ++globalSubActionIndex,
+            action: recordedEmitted,
+            durationMs: Date.now() - subStartTime,
+            ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+            error: timeoutMsg,
+            pageUrl: postUrl,
+            ...(actionPageUrl !== postUrl && { actionPageUrl }),
+            timestamp: new Date().toISOString(),
+          });
+          if (inFlightTurn !== undefined) {
+            allTurns.push(inFlightTurn);
+            inFlightTurn = undefined;
+          }
+          const allSucceeded = [
+            ...allCompletedActions.map((a) => ({ action: a.action, description: a.description })),
+            ...turnSubActions
+              .filter((s) => !s.error)
+              .map((s) => ({ action: s.action.action, description: s.action.description })),
+          ];
+          collectedFailures.push({
+            selector: '',
+            error: timeoutMsg,
+            actionType: action.action,
+            ...(allSucceeded.length > 0 && { completedActions: allSucceeded }),
+            startUrl: attemptStartUrl,
+            failureUrl: postUrl,
+            navigated: postUrl !== attemptStartUrl,
+          });
+          throw new StepFailureError(timeoutMsg, collectedFailures, allTurns);
+        }
+
+        if (pollRes.urlChanged || pollRes.newInteractiveControl) {
+          pollTextBackoffStep = 0;
+        } else {
+          pollTextBackoffStep = Math.min(pollTextBackoffStep + 1, POLL_TEXT_BACKOFF_MS.length - 1);
+        }
+
+        turnSubActions.push({
+          index: ++globalSubActionIndex,
+          action: recordedEmitted,
+          durationMs: Date.now() - subStartTime,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          pageUrl: postUrl,
+          ...(actionPageUrl !== postUrl && { actionPageUrl }),
+          timestamp: new Date().toISOString(),
+        });
+        aiResponse.needs_reeval = true;
+        lastTurnWasDiffPoll = true;
+        continue;
+      }
+
       // ── Browser action types ─────────────────────────────────────────────────
+      const pre = emittedIndex >= 1 && page === chainPage ? preResolvedChain.get(emittedIndex) : undefined;
+      const crossFrameDrag =
+        action.action === 'drag'
+        && pre?.targetRef !== undefined
+        && (pre?.ref !== undefined || action.frame !== undefined)
+        && (pre?.ref !== undefined ? pre.ref.frameSelector : action.frame) !== pre.targetRef.frameSelector;
+      const usePreRef =
+        !crossFrameDrag
+        && pre?.ref !== undefined
+        && !action.selector
+        && !pre.ref.selector.startsWith('aria-ref=');
+      const usePreTargetRef =
+        !crossFrameDrag
+        && pre?.targetRef !== undefined
+        && !action.target
+        && !pre.targetRef.selector.startsWith('aria-ref=');
+      let actionToRun: AIAction = action;
+      if (usePreRef || usePreTargetRef) {
+        actionToRun = { ...action };
+        if (usePreRef) {
+          delete actionToRun.ref;
+          actionToRun.selector = pre!.ref!.selector;
+          if (pre!.ref!.frameSelector !== undefined && !actionToRun.frame) {
+            actionToRun.frame = pre!.ref!.frameSelector;
+          }
+        }
+        if (usePreTargetRef) {
+          delete actionToRun.targetRef;
+          actionToRun.target = pre!.targetRef!.selector;
+          if (pre!.targetRef!.frameSelector !== undefined && !actionToRun.frame) {
+            actionToRun.frame = pre!.targetRef!.frameSelector;
+          }
+        }
+      }
+
       // Capture a pre-action page signal (cheap URL + DOM fingerprint) so we can
       // detect "did anything actually change" after the action runs. Skip for
       // observational / control-flow actions that don't mutate the page.
-      const preSignal = isMutatingAction(action)
+      const preSignal = isMutatingAction(actionToRun)
         ? await capturePageSignal(page).catch(() => undefined)
         : undefined;
       // Where the action ran, for the scoreboard's `site`: `pageUrl` below is
@@ -4132,19 +4540,17 @@ async function executeStepAttempt(
       const execOptions: ExecuteActionOptions = {
         measure: opts.captureStepContext === true,
         ambiguousTarget: config.browser.ambiguousTarget,
+        maskValues: secretsNow(),
         ...(opts.uploadPaths !== undefined && { uploadPaths: opts.uploadPaths }),
       };
       /** Set when a readTable's error quotes the model's structure answer. */
       let errorQuotesModel = false;
-      // During a compile run, the wait after a compiled action is armed for an
-      // AI action that changes the page too (docs/specs/SPEC-codebehind-robustness.md
-      // §6.9) — on top of the post-action settle below, not instead of it, and
-      // waited on only for a request still in flight once that settle is done.
-      // So the page after the step shows what a slow request produced, and the
-      // generator is shown the requests each action started. An ordinary run
-      // keeps today's wait.
-      const watcher = opts.captureStepContext === true && preSignal !== undefined
-        ? armCompileWatcher(page, config)
+      // Network-aware post-action settle (SPEC-aria-ref-snapshots.md §6.1):
+      // armed before every mutating browser action so static actions exit in
+      // <= 250 ms while network-triggering actions wait for their requests
+      // (and record observed requests on compile runs, SPEC-codebehind-robustness.md §6.9).
+      const watcher = preSignal !== undefined
+        ? armAiActionWatcher(page, config, opts)
         : undefined;
       /** What the watcher saw this action start (§6.9). */
       let observedRequests: ObservedRequest[] | undefined;
@@ -4152,17 +4558,17 @@ async function executeStepAttempt(
       let subDuration = 0;
       try {
         await watcher?.ready;
-        result = await traceOp(`action.${action.action}: ${action.description}`, async () => {
-          if (action.action !== 'readTable') {
+        result = await traceOp(`action.${actionToRun.action}: ${actionToRun.description}`, async () => {
+          if (actionToRun.action !== 'readTable') {
             // In a review turn a read that throws — a frame that does not
             // parse throws rather than failing — is a read again that failed:
             // the step ends where it stood (`reviewOnly`). A Stop still stops.
             return reviewOnly
-              ? executeAction(page, action, baseUrl, opts.signal, execOptions).catch((err: unknown) => {
+              ? executeAction(page, actionToRun, baseUrl, opts.signal, execOptions).catch((err: unknown) => {
                 if (opts.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) throw err;
                 return { success: false, error: err instanceof Error ? err.message : String(err) };
               })
-              : executeAction(page, action, baseUrl, opts.signal, execOptions);
+              : executeAction(page, actionToRun, baseUrl, opts.signal, execOptions);
           }
           // Structured table reads carry a structure question of their own
           // (SPEC-structured-table-reads.md §7.10) — at most one model call,
@@ -4172,7 +4578,7 @@ async function executeStepAttempt(
           // shown one message earlier (§7.6).
           const outcome = await runReadTableAction({
             page,
-            action,
+            action: actionToRun,
             baseUrl,
             execOptions,
             config,
@@ -4196,12 +4602,50 @@ async function executeStepAttempt(
           if (outcome.quotesModel) errorQuotesModel = true;
           return outcome.result;
         });
+        const preFrame = usePreRef
+          ? pre?.ref?.frameSelector
+          : usePreTargetRef
+            ? pre?.targetRef?.frameSelector
+            : undefined;
+        const resolvedFrame = result.resolvedFrame ?? preFrame;
+        if (resolvedFrame !== undefined && recordedEmitted.frame === undefined) {
+          recordedEmitted = { ...recordedEmitted, frame: resolvedFrame };
+          aiResponse.actions[emittedIndex] = recordedEmitted;
+        }
+        const backfillPreRef =
+          opts.captureStepContext === true
+          && result.success
+          && usePreRef
+          && pre?.ref?.normalizedLocator !== undefined
+          && result.targeting?.normalizedLocator === undefined;
+        const backfillPreTargetRef =
+          opts.captureStepContext === true
+          && result.success
+          && usePreTargetRef
+          && pre?.targetRef?.normalizedLocator !== undefined
+          && result.targeting?.targetNormalizedLocator === undefined;
+        if (backfillPreRef || backfillPreTargetRef) {
+          const baseTargeting = result.targeting ?? {};
+          result = {
+            ...result,
+            targeting: {
+              ...baseTargeting,
+              ...(backfillPreRef && pre?.ref?.normalizedLocator !== undefined && {
+                normalizedLocator: pre.ref.normalizedLocator,
+                ...(pre.ref.normalizedBy !== undefined && { normalizedBy: pre.ref.normalizedBy }),
+              }),
+              ...(backfillPreTargetRef && pre?.targetRef?.normalizedLocator !== undefined && {
+                targetNormalizedLocator: pre.targetRef.normalizedLocator,
+              }),
+            },
+          };
+        }
         subDuration = Date.now() - subStartTime;
 
-        // Post-action settle: waits for the page to reflect the action's effect
-        // (SPA route swap, redirect chain, toast render, etc.) before we capture
-        // the next snapshot. Exits early on "no change at all" (no-op) or once
-        // the signal has been stable for settleMs. See waitForPostActionSettle.
+        // Post-action settle: waits for requests and DOM mutations triggered by
+        // the action via `armActionWatcher` (250 ms quick-exit on static actions,
+        // quietMs 600 ms after requests; falls back to `waitForPostActionSettle`
+        // only for stub pages in unit tests that lack a browser context).
         //
         // NOT inside a chain the model wrote to be immediate
         // (docs/specs/SPEC-web-survey-fixes.md §2.17): a trigger followed by
@@ -4213,18 +4657,21 @@ async function executeStepAttempt(
         const nextInTurn = aiResponse.actions[emittedIndex + 1];
         const chainedImmediately = nextInTurn !== undefined
           && (nextInTurn.action === 'wait' || action.action === 'wait');
-        if (preSignal && result.success && !chainedImmediately) {
-          await traceOp(`settle.post-action (${action.action})`, () =>
-            waitForPostActionSettle(page, { preSignal }),
-          ).catch(() => {
-            /* settle errors are non-fatal — proceed to capture post-state */
-          });
-        }
-        if (watcher && result.success) {
-          const report = await traceOp(`settle.compile-requests (${action.action})`, () =>
-            watcher.settle(opts.signal, { onlyIfPending: true }),
-          ).catch(() => undefined);
-          if (report && (report.requests ?? []).length > 0) observedRequests = report.requests;
+        if (preSignal !== undefined && result.success && !chainedImmediately) {
+          if (watcher !== undefined) {
+            const report = await traceOp(`settle.post-action (${action.action})`, () =>
+              watcher.settle(opts.signal),
+            ).catch(() => undefined);
+            if (opts.captureStepContext === true && report && (report.requests ?? []).length > 0) {
+              observedRequests = report.requests;
+            }
+          } else {
+            await traceOp(`settle.post-action (${action.action})`, () =>
+              waitForPostActionSettle(page, { preSignal, noChangeTimeoutMs: 250 }),
+            ).catch(() => {
+              /* settle errors are non-fatal — proceed to capture post-state */
+            });
+          }
         }
       } finally {
         watcher?.dispose();
@@ -4242,13 +4689,32 @@ async function executeStepAttempt(
       // Capture state after action (full-page for report visibility). It
       // names no dialog reader: the report shows any dialog note, and the
       // model's next pre-turn capture still gets it (issue 31).
-      const postDom = await traceOp(`captureDomSnapshot (post-${action.action})`, () =>
-        captureDomSnapshot(page, {
-          ...config.browser.domNoiseReduction,
-          maxIframeDepth: config.browser.maxIframeDepth,
-          domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-        }),
-      ).catch(() => '');
+      // In aria mode, skip intermediate captures inside a multi-action chain
+      // whose remaining actions still hold snapshot refs, because Playwright's
+      // `ariaSnapshot` overwrites `_lastAriaSnapshotForQuery` in the frame.
+      const laterActionUsesRef =
+        result.success &&
+        aiResponse.actions
+          .slice(emittedIndex + 1)
+          .some((a) => Boolean(a.ref || a.targetRef || a.containerRef || a.exampleRefs?.length || a.foundRef));
+      const postDom = !config.reports.includeDomSnapshots || (isAriaMode && laterActionUsesRef)
+        ? ''
+        : await traceOp(
+            `${isAriaMode ? 'captureAriaPageSnapshot' : 'captureDomSnapshot'} (post-${action.action})`,
+            () =>
+              isAriaMode
+                ? captureAriaPageSnapshot(page, {
+                    maxIframeDepth: config.browser.maxIframeDepth,
+                    domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+                    secrets: secretsNow(),
+                    updateRegistry: false,
+                  })
+                : captureDomSnapshot(page, {
+                    ...config.browser.domNoiseReduction,
+                    maxIframeDepth: config.browser.maxIframeDepth,
+                    domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+                  }),
+          ).catch(() => '');
       // The post-action shot is only consumed by the report filmstrip — the AI
       // sees the next pre-turn capture rather than this one — so it gates only
       // on captureScreenshotsPerAction, not on ai.sendScreenshots.
@@ -4263,8 +4729,8 @@ async function executeStepAttempt(
       turnSubActions.push({
         // Record sites 2 and 3: the transcript the report renders and the
         // recording `actionsOf` reads for generation. `recordedEmitted` is
-        // `emitted` itself unless a `readTable` above put a validated
-        // `mapping` on a copy of it (§7.10).
+        // `emitted` itself unless a `readTable` added a validated `mapping`
+        // (§7.10) or an iframe `ref` resolved `frame`.
         index: ++globalSubActionIndex,
         action: recordedEmitted,
         ...(postShotBase64 !== undefined && { screenshotBase64: postShotBase64 }),
@@ -4412,7 +4878,12 @@ async function executeStepAttempt(
         const currentUrl = page.url();
         if (result.retryable === false) turnNonRetryable = true;
         collectedFailures.push({
-          selector: result.failedSelector ?? action.selector ?? '',
+          selector:
+            result.failedSelector ??
+            action.selector ??
+            (typeof action.ref === 'string' && action.ref.trim() !== ''
+              ? `aria-ref=${action.ref.trim().replace(/^aria-ref=/, '')}`
+              : ''),
           // A type refusal never tried its selector. The failure line still
           // names it — "Action "check" with selector `#agree` failed" tells the
           // model its target was right — but `buildRetryContext` keeps it out
@@ -4444,7 +4915,11 @@ async function executeStepAttempt(
         .map((a) => ({
           action: a.action,
           description: a.description,
-          ...(a.selector ? { selector: a.selector } : {}),
+          ...(a.selector
+            ? { selector: a.selector }
+            : typeof a.ref === 'string' && a.ref.trim() !== ''
+              ? { selector: `aria-ref=${a.ref.trim().replace(/^aria-ref=/, '')}` }
+              : {}),
         })),
       // …and the checks that passed, as checks rather than as actions.
       ...passedChecks.splice(0),
@@ -4546,7 +5021,7 @@ async function executeStepAttempt(
     // (REEVAL_WHEN_UNSTATED), and the last turn ends as it always did rather
     // than failing a step on a re-evaluation the model never asked for
     // (`reevalInferred`).
-    const inferredReeval = !reviewOnly && reevalInferred(aiResponse, currentTurn);
+    const inferredReeval = !reviewOnly && reevalInferred(aiResponse, currentTurn, turnCap + extraPollTurns);
     if (inferredReeval) {
       inferredReevalUsed = true;
       logger.info(
@@ -4565,7 +5040,7 @@ async function executeStepAttempt(
       const concerns = [...turnListConcerns.values()];
       // A review turn's own `needs_reeval` asks for nothing: the step is done.
       const nextTurnAnyway = !reviewOnly && (aiResponse.needs_reeval === true || inferredReeval);
-      if (currentTurn < turnCap) {
+      if (currentTurn < turnCap + extraPollTurns) {
         if (!nextTurnAnyway) {
           nextTurnReviewOnly = true;
           const n = concerns.length + unanswered.length;
@@ -4595,7 +5070,7 @@ async function executeStepAttempt(
     }
 
     // needs_reeval is true — enforce the turn cap
-    if (currentTurn === turnCap) {
+    if (currentTurn >= turnCap + extraPollTurns) {
       const recheckTurnToo = turnCap > maxTurns ? ', after the turn that checked again' : '';
       throw new StepFailureError(
         `Step failed: multi-turn limit reached (${maxTurns} turns${recheckTurnToo}).\nLast URL: ${page.url()}`,
@@ -4747,7 +5222,7 @@ async function executeStepAttempt(
     ? {
         ...(firstTurnDomSnapshot && { domBefore: firstTurnDomSnapshot }),
         ...(firstTurnUrl && { urlBefore: firstTurnUrl }),
-        ...(await captureStepEndDom(page, config)),
+        ...(await captureStepEndDom(page, config, secretsFor(opts))),
         urlAfter: endPageUrl,
       }
     : undefined;
@@ -4774,19 +5249,27 @@ async function executeStepAttempt(
   };
 }
 
-/** Post-step DOM for `stepContext`. Non-fatal by the same policy as every
+/** Post-step snapshot for `stepContext`. Non-fatal by the same policy as every
  *  other capture: a page mid-navigation yields no `domAfter`, not a failed
  *  step that otherwise passed. */
 async function captureStepEndDom(
   page: Page,
   config: Config,
+  secrets?: string[],
 ): Promise<{ domAfter?: string }> {
   try {
-    const dom = await captureDomSnapshot(page, {
-      ...config.browser.domNoiseReduction,
-      maxIframeDepth: config.browser.maxIframeDepth,
-      domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-    });
+    const dom = config.browser.snapshotMode === 'aria'
+      ? await captureAriaPageSnapshot(page, {
+          maxIframeDepth: config.browser.maxIframeDepth,
+          domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+          ...(secrets !== undefined && { secrets }),
+          updateRegistry: false,
+        })
+      : await captureDomSnapshot(page, {
+          ...config.browser.domNoiseReduction,
+          maxIframeDepth: config.browser.maxIframeDepth,
+          domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+        });
     return dom ? { domAfter: dom } : {};
   } catch (err) {
     logger.debug(`Post-step DOM capture failed: ${String(err)}`);
@@ -5534,11 +6017,19 @@ export async function evaluateConditions(
         values,
       });
     } else {
-      const domSnapshot = await captureDomSnapshot(page!, {
-        ...config.browser.domNoiseReduction,
-        maxIframeDepth: config.browser.maxIframeDepth,
-        domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-      });
+      const snapshotMode = config.browser.snapshotMode;
+      const isAriaMode = snapshotMode === 'aria';
+      const domSnapshot = isAriaMode
+        ? await captureAriaPageSnapshot(page!, {
+            maxIframeDepth: config.browser.maxIframeDepth,
+            domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+            secrets: secretsFor(opts),
+          })
+        : await captureDomSnapshot(page!, {
+            ...config.browser.domNoiseReduction,
+            maxIframeDepth: config.browser.maxIframeDepth,
+            domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+          });
       const screenshot = config.ai.sendScreenshots
         ? await captureScreenshot(page!, config.browser.fullPageScreenshots)
         : null;
@@ -5579,12 +6070,14 @@ export async function evaluateConditions(
           buildActiveBrowserInfo(opts.browserTracker),
         ),
         values,
+        snapshotMode,
       );
       messages = [
         {
           role: 'system',
           content: buildSystemPrompt(contextContent, undefined, {
             dismissalGuidance: opts.dismissalGuidance ?? false,
+            ...(isAriaMode && { snapshotMode: 'aria' as const }),
           }),
         },
         userMessage,
@@ -5741,11 +6234,19 @@ export async function executeBranchedStep(
       throw new DOMException('Run aborted by client', 'AbortError');
     }
 
-    const domSnapshot = await captureDomSnapshot(page, {
-      ...config.browser.domNoiseReduction,
-      maxIframeDepth: config.browser.maxIframeDepth,
-      domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-    });
+    const snapshotMode = config.browser.snapshotMode;
+    const isAriaMode = snapshotMode === 'aria';
+    const domSnapshot = isAriaMode
+      ? await captureAriaPageSnapshot(page, {
+          maxIframeDepth: config.browser.maxIframeDepth,
+          domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+          secrets: secretsFor(opts),
+        })
+      : await captureDomSnapshot(page, {
+          ...config.browser.domNoiseReduction,
+          maxIframeDepth: config.browser.maxIframeDepth,
+          domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+        });
     // Capture if either consumer needs it: AI (sees this frame on this poll)
     // or report (per-action filmstrip via captureScreenshotsPerAction).
     const wantPollShot = config.ai.sendScreenshots || config.browser.captureScreenshotsPerAction !== false;
@@ -5777,10 +6278,12 @@ export async function executeBranchedStep(
       conversationHistory,
       openPages,
       branchedTestInfo,
+      snapshotMode,
     );
 
     const systemPrompt = buildSystemPrompt(contextContent, undefined, {
       dismissalGuidance: opts.dismissalGuidance ?? false,
+      ...(isAriaMode && { snapshotMode: 'aria' as const }),
     });
 
     const messages = [

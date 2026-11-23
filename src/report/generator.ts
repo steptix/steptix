@@ -752,7 +752,12 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
        </div>`;
 
   const domHtml = step.domSnapshot
-    ? `<details class="dom-snapshot">
+    ? isAriaSnapshot(step.domSnapshot)
+      ? `<details class="dom-snapshot">
+        <summary>Page Snapshot<button class="copy-btn" type="button" title="Copy snapshot"><span class="copy-btn-label">Copy</span></button></summary>
+        <pre>${escapeHtml(step.domSnapshot)}</pre>
+       </details>`
+      : `<details class="dom-snapshot">
         <summary>DOM Snapshot<button class="copy-btn" type="button" title="Copy DOM"><span class="copy-btn-label">Copy</span></button></summary>
         <pre>${escapeHtml(step.domSnapshot)}</pre>
        </details>`
@@ -1307,7 +1312,12 @@ function renderSubAction(
        </div>`;
 
   const domHtml = sub.domSnapshot
-    ? `<details class="dom-snapshot">
+    ? isAriaSnapshot(sub.domSnapshot)
+      ? `<details class="dom-snapshot">
+        <summary>Page snapshot after action<button class="copy-btn" type="button" title="Copy snapshot"><span class="copy-btn-label">Copy</span></button></summary>
+        <pre>${escapeHtml(sub.domSnapshot)}</pre>
+       </details>`
+      : `<details class="dom-snapshot">
         <summary>DOM after action<button class="copy-btn" type="button" title="Copy DOM"><span class="copy-btn-label">Copy</span></button></summary>
         <pre>${escapeHtml(sub.domSnapshot)}</pre>
        </details>`
@@ -1337,6 +1347,15 @@ function renderSubAction(
   </div>
   ${hasBody ? `<div class="sub-action-body">${uploadHtml}${dragHtml}${typedHtml}${mappingHtml}${listReviewHtml}${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
 </div>`;
+}
+
+/** Whether a stored snapshot string is an ARIA Page Snapshot (YAML/sections or
+ *  an aria capture error) rather than an HTML DOM snapshot. */
+function isAriaSnapshot(snapshot: string): boolean {
+  const trimmed = snapshot.trimStart();
+  if (trimmed.startsWith('<error>Page snapshot')) return true;
+  if (trimmed.startsWith('# ') || trimmed.startsWith('- ')) return true;
+  return !trimmed.startsWith('<');
 }
 
 /** The end of a drag row: which way the drag was driven. Empty when the

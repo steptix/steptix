@@ -137,11 +137,24 @@ export interface AIAction {
   action: ActionType;
   /** CSS selector for the target element */
   selector?: string;
+  /** Snapshot ref of the target element (e.g. "e15", "f1e4", "s1").
+   *  Preferred over `selector` in `snapshotMode: 'aria'` (SPEC-aria-ref-snapshots.md §5.1). */
+  ref?: string;
   /**
    * `drag` only: CSS selector of the element `selector` is dropped ON. Resolved
    * in the same frame as `selector`, with the same visible-first rule.
    */
   target?: string;
+  /** `drag` only: snapshot ref of the drop target element (replaces `target`). */
+  targetRef?: string;
+  /** Plural `read` and `count`: snapshot ref of the enclosing container,
+   *  paired with `exampleRefs`. */
+  containerRef?: string;
+  /** Plural `read` and `count`: 0–N snapshot refs of sample items inside `containerRef`. */
+  exampleRefs?: string[];
+  /** `noop` / completion after a `waitType: "change"` poll: snapshot ref of the
+   *  element whose appearance satisfied the step's wait condition. */
+  foundRef?: string;
   /**
    * `drag` only: which side of the target to let go on, for a list that
    * decides before/after by where the pointer is (SPEC-web-survey-fixes.md
@@ -216,7 +229,7 @@ export interface AIAction {
    */
   to?: 'top' | 'bottom';
   /** Type of wait to perform */
-  waitType?: 'selector' | 'hidden' | 'text' | 'url' | 'load' | 'duration' | 'count' | 'attribute' | 'navigation' | 'stable';
+  waitType?: 'selector' | 'hidden' | 'text' | 'url' | 'load' | 'duration' | 'count' | 'attribute' | 'navigation' | 'stable' | 'change';
   /** Timeout in milliseconds for wait actions */
   timeout?: number;
   /** Keyboard key or shortcut (e.g. "Enter", "Control+a") */

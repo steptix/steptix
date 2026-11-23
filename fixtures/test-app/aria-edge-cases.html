@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Security &amp; Preferences</title>
+  <!--
+    Fixture for docs/specs/SPEC-aria-ref-snapshots.md (§9.2).
+
+    Exercises every browser widget and snapshot blind spot needed to prove
+    accessibility-ref snapshots, supplementary [ref=sN] handles, pre-resolved
+    ref chains, password-autofill redaction, and Run & Compile replay:
+
+      1. An overlay appended directly to <html> outside <body> (?htmlNotice=0
+         disables it) whose button carries a CSS ::before glyph ("✓ ").
+      2. Open Shadow DOM (<hardware-key-nickname>) and Closed Shadow DOM
+         (<trusted-device-box>, no host tabindex so deep-focus keyboard typing
+         lands inside the closed root).
+      3. A styled checkbox whose <input type="checkbox"> is 1x1px / opacity: 0
+         inside a visible wrapper box, plus a pre-populated readonly
+         <input type="password"> for autofill-redaction verification.
+      4. A moving role="progressbar" (?stepMs=150) for [click Start,
+         wait attribute aria-valuenow>=75, click Stop] ref chains.
+      5. HTML5 sortable drag-and-drop list items that decide above/below by
+         which vertical half of the target received the drop.
+      6. A transient WAI-ARIA role="status" live notification removed after
+         ?toastMs=1500 so closed-notice capture (__steptixNotices) is exercised.
+      7. A bottom input (#travel-note) positioned so a fixed bottom help bar
+         initially covers its centre at scrollTop=0, with bottom scroll room so
+         scrolling the field to viewport centre uncovers it.
+
+    All state is client-side and resets on load, so parallel live-test shards
+    sharing port 8787 never interfere with one another.
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #f0f4f8;
+      color: #111827;
+      padding-bottom: 280px;
+    }
+
+    .topbar {
+      background: #1f2937;
+      color: #f9fafb;
+      padding: 16px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .topbar h1 { font-size: 18px; font-weight: 700; }
+    .topbar .meta { font-size: 13px; color: #9ca3af; }
+
+    /* Sibling of <body> mounted directly on <html> */
+    #html-security-notice {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #eff6ff;
+      border-bottom: 2px solid #93c5fd;
+      color: #1e3a8a;
+      padding: 12px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      font-size: 14px;
+    }
+
+    .glyph-btn {
+      padding: 7px 14px;
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .glyph-btn::before {
+      content: "✓ ";
+    }
+
+    .glyph-btn:hover { background: #1648c0; }
+
+    main {
+      max-width: 920px;
+      margin: 24px auto;
+      padding: 0 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .card {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 20px 24px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+    }
+
+    .card h2 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: #111827;
+    }
+
+    .card .hint {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 14px;
+    }
+
+    .status-line {
+      margin-top: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      color: #1f2937;
+    }
+
+    .row-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+
+    .field-label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: #374151;
+      margin-bottom: 6px;
+    }
+
+    input[type="text"],
+    input[type="password"] {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 14px;
+      color: #111827;
+    }
+
+    .btn {
+      padding: 8px 16px;
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .btn.secondary {
+      background: #f3f4f6;
+      color: #1f2937;
+      border: 1px solid #d1d5db;
+    }
+
+    .btn:hover { opacity: 0.94; }
+
+    /* Hidden native checkbox inside a visible styled box */
+    .styled-checkbox-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .sr-only-toggle {
+      position: absolute;
+      opacity: 0;
+      width: 1px;
+      height: 1px;
+      pointer-events: none;
+    }
+
+    .checkbox-indicator {
+      width: 20px;
+      height: 20px;
+      border: 2px solid #6b7280;
+      border-radius: 4px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 700;
+      color: transparent;
+      background: #fff;
+    }
+
+    .styled-checkbox-row.checked .checkbox-indicator {
+      background: #1a56db;
+      border-color: #1a56db;
+      color: #fff;
+    }
+
+    /* Progress bar */
+    .progress-controls {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 22px;
+      background: #e5e7eb;
+      border-radius: 999px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: #1a56db;
+      transition: width 0.08s linear;
+    }
+
+    /* Sortable list */
+    .sortable-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .sortable-item {
+      padding: 10px 14px;
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: grab;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .sortable-item.drop-above { border-top: 3px solid #1a56db; }
+    .sortable-item.drop-below { border-bottom: 3px solid #1a56db; }
+
+    /* Live toast */
+    #toast-region {
+      min-height: 36px;
+      margin-top: 10px;
+    }
+
+    .live-toast {
+      display: inline-block;
+      padding: 8px 14px;
+      background: #ecfdf5;
+      border: 1px solid #6ee7b7;
+      color: #065f46;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    /* Fixed bottom bar that initially overlaps #travel-note's centre until scrolled */
+    #sticky-help-bar {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 110px;
+      background: #111827;
+      color: #f9fafb;
+      padding: 18px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      z-index: 50;
+      box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.2);
+    }
+
+    #sticky-help-bar.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <h1>SecureBank — Security &amp; Preferences</h1>
+    <span id="notice-status" class="meta">Security notice: Pending</span>
+  </header>
+
+  <main>
+    <!-- 1. Open & Closed Shadow DOM -->
+    <section class="card" id="shadow-card" aria-labelledby="shadow-heading">
+      <h2 id="shadow-heading">Hardware keys &amp; trusted devices</h2>
+      <p class="hint">Configure your open-shadow card nickname and closed-shadow trusted device label.</p>
+      <div class="row-grid">
+        <div>
+          <hardware-key-nickname id="open-shadow-host"></hardware-key-nickname>
+          <p id="open-shadow-status" class="status-line">Card nickname: None</p>
+        </div>
+        <div>
+          <span class="field-label">Trusted device label</span>
+          <trusted-device-box id="closed-shadow-host" role="group" aria-label="Trusted device label"></trusted-device-box>
+          <p id="closed-shadow-status" class="status-line">Trusted device: None</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. Styled hidden checkbox + autofilled password redaction probe -->
+    <section class="card" id="controls-card" aria-labelledby="controls-heading">
+      <h2 id="controls-heading">Alert preferences &amp; saved vault</h2>
+      <p class="hint">Toggle SMS alerts and verify saved vault credentials remain masked in snapshots.</p>
+      <div class="row-grid">
+        <div>
+          <div id="instant-alerts-box" class="styled-checkbox-row">
+            <input type="checkbox" id="instant-alerts-checkbox" class="sr-only-toggle" aria-label="Instant SMS alerts">
+            <span class="checkbox-indicator" aria-hidden="true">✓</span>
+            <span>Instant SMS alerts</span>
+          </div>
+          <p id="instant-alerts-status" class="status-line">Instant SMS alerts: Off</p>
+        </div>
+        <div>
+          <label class="field-label" for="vault-passphrase">Saved vault passphrase</label>
+          <input
+            type="password"
+            id="vault-passphrase"
+            name="vault-passphrase"
+            autocomplete="current-password"
+            value="aria-edge-cases-fixture-password"
+            readonly
+          >
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. Progress bar for pre-resolved ref chains -->
+    <section class="card" id="export-card" aria-labelledby="export-heading">
+      <h2 id="export-heading">Audit export</h2>
+      <p class="hint">Start the export and stop it once progress reaches the target threshold.</p>
+      <div class="progress-controls">
+        <button type="button" class="btn" id="start-export-btn">Start export</button>
+        <button type="button" class="btn secondary" id="stop-export-btn">Stop export</button>
+      </div>
+      <div
+        id="export-progressbar"
+        class="progress-track"
+        role="progressbar"
+        aria-label="Audit export progress"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow="0"
+      >
+        <div id="export-progressbar-fill" class="progress-fill"></div>
+      </div>
+      <p id="export-status" class="status-line">Export status: Idle (0%)</p>
+    </section>
+
+    <!-- 4. Sortable payment routing rules -->
+    <section class="card" id="priority-card" aria-labelledby="priority-heading">
+      <h2 id="priority-heading">Payment routing priority</h2>
+      <p class="hint">Drag rules to reorder them (dropping on the upper half places above; lower half places below).</p>
+      <ul id="priority-list" class="sortable-list" aria-label="Payment routing priority">
+        <li class="sortable-item" draggable="true" data-rule="Card payments">Card payments</li>
+        <li class="sortable-item" draggable="true" data-rule="International wires">International wires</li>
+        <li class="sortable-item" draggable="true" data-rule="ATM withdrawals">ATM withdrawals</li>
+      </ul>
+      <p id="priority-status" class="status-line">Priority order: Card payments, International wires, ATM withdrawals</p>
+    </section>
+
+    <!-- 5. Transient WAI-ARIA live status notification -->
+    <section class="card" id="toast-card" aria-labelledby="toast-heading">
+      <h2 id="toast-heading">Device alert check</h2>
+      <p class="hint">Sends a transient WAI-ARIA status notification that disappears automatically.</p>
+      <button type="button" class="btn" id="send-test-alert-btn">Send test alert</button>
+      <div id="toast-region"></div>
+      <p id="alert-sent-status" class="status-line">Alerts sent: 0</p>
+    </section>
+
+    <!-- 6. Bottom input initially overlapped by #sticky-help-bar until scrolled -->
+    <section class="card" id="travel-card" aria-labelledby="travel-heading">
+      <h2 id="travel-heading">Travel notification</h2>
+      <p class="hint">Let us know where you are travelling so card payments are not declined.</p>
+      <label class="field-label" for="travel-note">Travel destination note</label>
+      <input type="text" id="travel-note" name="travel-note" placeholder="e.g. Tokyo, Japan">
+      <p id="travel-status" class="status-line">Travel note: Empty</p>
+    </section>
+  </main>
+
+  <aside id="sticky-help-bar" aria-label="SecureBank support bar">
+    <div>
+      <strong>Need assistance?</strong>
+      <span style="margin-left: 8px; font-size: 13px; color: #d1d5db;">24/7 fraud &amp; security support is available.</span>
+    </div>
+    <button type="button" class="btn secondary" id="dismiss-help-bar-btn">Dismiss help bar</button>
+  </aside>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const showHtmlNotice = params.get('htmlNotice') !== '0';
+    const stepMs = Math.max(20, parseInt(params.get('stepMs') ?? '150', 10));
+    const toastMs = Math.max(100, parseInt(params.get('toastMs') ?? '1500', 10));
+
+    // 1. Mount #html-security-notice directly onto <html> (outside <body>)
+    if (showHtmlNotice) {
+      const notice = document.createElement('aside');
+      notice.id = 'html-security-notice';
+      notice.setAttribute('role', 'region');
+      notice.setAttribute('aria-label', 'Session security notice');
+      notice.innerHTML =
+        '<span>Session security check: acknowledge this notice to confirm active session review.</span>' +
+        '<button type="button" id="ack-html-notice" class="glyph-btn">Acknowledge</button>';
+      document.documentElement.insertBefore(notice, document.body);
+      notice.querySelector('#ack-html-notice').addEventListener('click', () => {
+        notice.remove();
+        document.getElementById('notice-status').textContent = 'Security notice: Acknowledged';
+      });
+    } else {
+      document.getElementById('notice-status').textContent = 'Security notice: Acknowledged';
+    }
+
+    // 2a. Open Shadow DOM component
+    class HardwareKeyNickname extends HTMLElement {
+      connectedCallback() {
+        if (this.shadowRoot) return;
+        const root = this.attachShadow({ mode: 'open' });
+        root.innerHTML = `
+          <style>
+            :host { display: block; }
+            label { display: block; font-size: 13px; font-weight: 500; color: #374151; margin-bottom: 6px; }
+            .row { display: flex; gap: 8px; }
+            input { flex: 1; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; }
+            button { padding: 8px 12px; background: #1a56db; color: #fff; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }
+          </style>
+          <label for="key-nickname-input">Card nickname</label>
+          <div class="row">
+            <input id="key-nickname-input" type="text" placeholder="Everyday card">
+            <button id="save-nickname-btn" type="button">Save nickname</button>
+          </div>
+        `;
+        const input = root.getElementById('key-nickname-input');
+        root.getElementById('save-nickname-btn').addEventListener('click', () => {
+          const val = input.value.trim() || 'None';
+          document.getElementById('open-shadow-status').textContent = `Card nickname: ${val}`;
+        });
+      }
+    }
+    customElements.define('hardware-key-nickname', HardwareKeyNickname);
+
+    // 2b. Closed Shadow DOM component (no host tabindex — focus lives inside closed root)
+    class TrustedDeviceBox extends HTMLElement {
+      connectedCallback() {
+        if (this._initialized) return;
+        this._initialized = true;
+        const root = this.attachShadow({ mode: 'closed', delegatesFocus: true });
+        root.innerHTML = `
+          <style>
+            :host {
+              display: block;
+              border: 1px solid #d1d5db;
+              border-radius: 6px;
+              padding: 8px 12px;
+              background: #f9fafb;
+              cursor: text;
+            }
+            input {
+              width: 100%;
+              border: none;
+              outline: none;
+              background: transparent;
+              font-size: 14px;
+              color: #111827;
+            }
+          </style>
+          <input type="text" aria-label="Trusted device input" placeholder="Click here and type device label">
+        `;
+        const innerInput = root.querySelector('input');
+        this.addEventListener('click', () => innerInput.focus());
+        innerInput.addEventListener('input', () => {
+          const val = innerInput.value.trim() || 'None';
+          document.getElementById('closed-shadow-status').textContent = `Trusted device: ${val}`;
+        });
+      }
+    }
+    customElements.define('trusted-device-box', TrustedDeviceBox);
+
+    // 3. Styled hidden checkbox stand-in
+    const alertsBox = document.getElementById('instant-alerts-box');
+    const alertsCheckbox = document.getElementById('instant-alerts-checkbox');
+    const syncAlertsUi = () => {
+      alertsBox.classList.toggle('checked', alertsCheckbox.checked);
+      document.getElementById('instant-alerts-status').textContent =
+        `Instant SMS alerts: ${alertsCheckbox.checked ? 'On' : 'Off'}`;
+    };
+    alertsBox.addEventListener('click', (e) => {
+      if (e.target !== alertsCheckbox) {
+        alertsCheckbox.checked = !alertsCheckbox.checked;
+        alertsCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      syncAlertsUi();
+    });
+    alertsCheckbox.addEventListener('change', syncAlertsUi);
+
+    // 4. Progress bar
+    let progressTimer = null;
+    let progressValue = 0;
+    const progressEl = document.getElementById('export-progressbar');
+    const progressFill = document.getElementById('export-progressbar-fill');
+    const exportStatus = document.getElementById('export-status');
+
+    function renderProgress(val, stateLabel) {
+      progressValue = val;
+      progressEl.setAttribute('aria-valuenow', String(val));
+      progressFill.style.width = `${val}%`;
+      exportStatus.textContent = `Export status: ${stateLabel} (${val}%)`;
+    }
+
+    document.getElementById('start-export-btn').addEventListener('click', () => {
+      if (progressTimer !== null) clearInterval(progressTimer);
+      renderProgress(0, 'Running');
+      progressTimer = setInterval(() => {
+        const next = Math.min(100, progressValue + 5);
+        if (next >= 100) {
+          clearInterval(progressTimer);
+          progressTimer = null;
+          renderProgress(100, 'Completed');
+        } else {
+          renderProgress(next, 'Running');
+        }
+      }, stepMs);
+    });
+
+    document.getElementById('stop-export-btn').addEventListener('click', () => {
+      if (progressTimer !== null) {
+        clearInterval(progressTimer);
+        progressTimer = null;
+      }
+      renderProgress(progressValue, `Stopped at ${progressValue}%`);
+    });
+
+    // 5. Sortable drag-and-drop list
+    const priorityList = document.getElementById('priority-list');
+    let draggedItem = null;
+
+    function clearDropClasses() {
+      for (const li of priorityList.querySelectorAll('.sortable-item')) {
+        li.classList.remove('drop-above', 'drop-below');
+      }
+    }
+
+    function updatePriorityStatus() {
+      const names = Array.from(priorityList.querySelectorAll('.sortable-item'))
+        .map((li) => li.textContent.trim());
+      document.getElementById('priority-status').textContent = `Priority order: ${names.join(', ')}`;
+    }
+
+    priorityList.addEventListener('dragstart', (e) => {
+      const li = e.target.closest('.sortable-item');
+      if (!li) return;
+      draggedItem = li;
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', li.textContent.trim());
+      }
+    });
+
+    priorityList.addEventListener('dragover', (e) => {
+      const target = e.target.closest('.sortable-item');
+      if (!draggedItem || !target || target === draggedItem) return;
+      e.preventDefault();
+      clearDropClasses();
+      const rect = target.getBoundingClientRect();
+      const placeBelow = e.clientY >= rect.top + rect.height / 2;
+      target.classList.add(placeBelow ? 'drop-below' : 'drop-above');
+    });
+
+    priorityList.addEventListener('dragleave', () => {
+      clearDropClasses();
+    });
+
+    priorityList.addEventListener('drop', (e) => {
+      const target = e.target.closest('.sortable-item');
+      if (!draggedItem || !target || target === draggedItem) return;
+      e.preventDefault();
+      const rect = target.getBoundingClientRect();
+      const placeBelow = e.clientY >= rect.top + rect.height / 2;
+      if (placeBelow) {
+        target.after(draggedItem);
+      } else {
+        target.before(draggedItem);
+      }
+      clearDropClasses();
+      draggedItem = null;
+      updatePriorityStatus();
+    });
+
+    priorityList.addEventListener('dragend', () => {
+      clearDropClasses();
+      draggedItem = null;
+    });
+
+    // 6. Transient WAI-ARIA live status toast
+    let alertsSent = 0;
+    let toastTimer = null;
+    document.getElementById('send-test-alert-btn').addEventListener('click', () => {
+      alertsSent += 1;
+      document.getElementById('alert-sent-status').textContent = `Alerts sent: ${alertsSent}`;
+      const region = document.getElementById('toast-region');
+      region.innerHTML = '';
+      const toast = document.createElement('div');
+      toast.className = 'live-toast';
+      toast.setAttribute('role', 'status');
+      toast.setAttribute('aria-live', 'polite');
+      toast.textContent = 'Test alert delivered to primary device';
+      region.appendChild(toast);
+      if (toastTimer !== null) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        toast.remove();
+        toastTimer = null;
+      }, toastMs);
+    });
+
+    // 7. Sticky help bar & overlapped travel input check
+    const helpBar = document.getElementById('sticky-help-bar');
+    const travelInput = document.getElementById('travel-note');
+    const travelStatus = document.getElementById('travel-status');
+
+    document.getElementById('dismiss-help-bar-btn').addEventListener('click', () => {
+      helpBar.classList.add('hidden');
+    });
+
+    travelInput.addEventListener('input', () => {
+      const rect = travelInput.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const hit = document.elementFromPoint(cx, cy);
+      if (hit && hit !== travelInput && !travelInput.contains(hit)) {
+        // Mirrors UI Testing Playground overlapped-element behaviour (§2.20):
+        // typing while covered by the fixed bar does not stick.
+        travelInput.value = '';
+        travelStatus.textContent = 'Travel note: Blocked by support bar';
+        return;
+      }
+      const val = travelInput.value.trim();
+      travelStatus.textContent = val ? `Travel note: ${val}` : 'Travel note: Empty';
+    });
+  </script>
+</body>
+</html>

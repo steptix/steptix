@@ -60,6 +60,14 @@
  *                                spinbutton segments where End sets the
  *                                maximum. Scheduling reads every value back.
  *                                No login; client-side state, reset on load.
+ *
+ *   Aria snapshot & ref edge-cases page — docs/specs/SPEC-aria-ref-snapshots.md:
+ *     GET    /aria-edge-cases   → sibling-of-body <html> notice with ::before
+ *                                glyph button, open & closed Shadow DOM fields,
+ *                                styled hidden checkbox + autofilled password,
+ *                                threshold role="progressbar", sortable drag
+ *                                list, transient role="status" toast, and an
+ *                                input initially covered by a fixed bottom bar.
  */
 
 import http from 'node:http';
@@ -1519,6 +1527,9 @@ async function handleRequest(
       // An HTML5 drag and drop, and a page that moves its content mid-drag
       // (docs/specs/SPEC-web-survey-fixes.md §2.52).
       '/file-receipts': 'file-receipts.html',
+      // Accessibility-ref snapshot & compile edge cases
+      // (docs/specs/SPEC-aria-ref-snapshots.md §9.2).
+      '/aria-edge-cases': 'aria-edge-cases.html',
       // The one NON-html static asset (docs/specs/SPEC-use-computer.md §7).
       // It is in this map rather than reached by the `.html` fallback below
       // because that fallback is what keeps the static path from serving

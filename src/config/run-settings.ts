@@ -141,7 +141,8 @@ export interface ResolvedRunSettings {
    *
    * `serverConfig` spread with ONLY named values re-sourced: run-settings' own
    * four, plus `browser.ambiguousTarget`
-   * (stories/codebehind-selector-ambiguity.md). It has to be complete rather
+   * (stories/codebehind-selector-ambiguity.md) and `browser.snapshotMode`
+   * (docs/specs/SPEC-aria-ref-snapshots.md §9.1). It has to be complete rather
    * than partial — both executor call sites take the whole object — and it
    * deliberately leaves every other value exactly as the server startup config
    * has it. Re-basing the executor on the project bundle wholesale is the
@@ -247,6 +248,10 @@ export function resolveRunSettings(
     serverConfig.browser.ambiguousTarget,
     projectConfig.browser.ambiguousTarget,
   );
+  const snapshotModeBase = base(
+    serverConfig.browser.snapshotMode,
+    projectConfig.browser.snapshotMode,
+  );
 
   const sendBase = base(serverConfig.ai.sendScreenshots, projectConfig.ai.sendScreenshots);
   let sendScreenshots = sendBase.value;
@@ -310,6 +315,7 @@ export function resolveRunSettings(
         captureScreenshotsPerAction: perAction,
         fullPageScreenshots: fullPage,
         ambiguousTarget: ambiguousBase.value,
+        snapshotMode: snapshotModeBase.value,
       },
       execution: { ...serverConfig.execution, screenshotOnFailure: onFailure },
     },
