@@ -42,11 +42,18 @@ Every other line is sent to the executing model together with:
 - the step text **as you wrote it**, placeholders intact, plus a `## Values`
   block saying what each `{{name}}` and `${ref}` holds on this run (values with
   a secret-looking name show as `***`);
-- a cleaned DOM snapshot of the active tab: interactive elements, visible
-  text, roles, ids and test ids. Elements hidden with `display:none` or
-  `aria-hidden` collapse to an empty placeholder, and long repetitive runs
-  (table rows, list items) collapse to head and tail with an "N similar
-  elements omitted" marker;
+- a picture of the active tab. By default that is a cleaned DOM snapshot:
+  interactive elements, visible text, roles, ids and test ids. Elements
+  hidden with `display:none` or `aria-hidden` collapse to an empty
+  placeholder, and long repetitive runs (table rows, list items) collapse
+  to head and tail with an "N similar elements omitted" marker. When the
+  project sets `browser.snapshotMode` to `aria` (or the process is started
+  with `STEPTIX_SNAPSHOT_MODE=aria`), the picture is an accessibility
+  snapshot instead, and the model names the element by the ref printed on
+  that snapshot. You still write the step in the same English. A ref belongs
+  to one snapshot, so Run & Compile turns the element the run actually used
+  into an ordinary Playwright locator and does not leave the ref in the
+  code. The default is `dom`;
 - the current URL, the viewport size and device class, the open tabs and
   browsers, and the outcome of earlier steps;
 - every `context/**/*.md` file in the project, verbatim;

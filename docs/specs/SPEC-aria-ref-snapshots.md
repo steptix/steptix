@@ -357,7 +357,7 @@ Add three deterministic checks to `staticEntryComplaint` (enforced across genera
 
 Add `snapshotMode?: 'aria' | 'dom'` to `BrowserConfig`:
 - Phase 1–3 default: `'dom'` (opt-in `'aria'` via `steptix.config.json` or `STEPTIX_SNAPSHOT_MODE=aria` for side-by-side scoreboard benchmarking).
-- Phase 4: flip default to `'aria'` once live + Section C benchmarks pass, keeping `'dom'` as an escape hatch for one release cycle.
+- Phase 4: flip default to `'aria'` once live + Section C benchmarks pass, keeping `'dom'` as an escape hatch for one release cycle. The 7-file comparison in §9.5 cut step input tokens by 31.5%, short of the 50% bar in §9.3, so the default stays `'dom'` (see §9.6).
 
 ### 9.2 Fixture App (`fixtures/test-app`) & Live Test Scope
 
@@ -448,6 +448,15 @@ Measured in this worktree on `2026-11-24` (`02:20:45`–`02:27:27 AEDT`, `openai
     - **Step output tokens:** **`47,729` (`296`/step)** vs. `56,728` (`355`/step) — **`-8,999` tokens (`-15.9%` total, `-16.6%`/step)**
   - **Step duration (AI vs. compiled replay):** **`918.8s` across `161` AI steps (`5.71s`/step mean, `-5.0%`)** vs. **`19.90s` across `42` compiled `code` steps (`0.47s`/step mean, `42/42` passed, `0` `ephemeralRefInCodeComplaint` leaks)**
   - **Element-targeting actions by form:** **`ref` `86/86` (`100.0%` first-try `ok`)**, `id` `0/2` (`2` `no-match` on intentional `#never-appears-default` negative wait test), `(no selector)` `73/79`
+
+### 9.6 Phase 4 status — default stays `'dom'`
+
+The live fixtures for the edges in §9.2 are in place and run under `snapshotMode: 'aria'` by writing that value into the shard's `templates/init/steptix.config.json` for the file, then restoring it:
+
+- `steptix-vscode/tests/integration/live/aria-mfa-wait.test.cjs` drives `templates/init/tests/aria-mfa-wait.md` (`mfa.html?delay=15000&countdown=1`). It requires the countdown step to pass in at most 4 actions and at least 8s, the compiled wait to carry `timeout` ≥ 30_000, no snapshot ref in the `.steps.ts`, and a proving run that paints `</>` on at least one step.
+- `steptix-vscode/tests/integration/live/aria-edge-cases.test.cjs` drives `aria-edge-cases.md`, `aria-hidden-file.md` (the hidden file input on `documents.html`), and `aria-nested-frames.md` (`nested-iframes.html`). The edge-case recording must not contain the fixture vault passphrase. The nested-frame proposal must contain `frameLocator(`.
+
+`browser.snapshotMode` is not flipped. §9.3 requires three things before the default becomes `'aria'`: a first-try rate at least as high as the `'dom'` baseline (met, 156/156), compiled replay at 100% with no ephemeral ref (met, 42/42), and step input tokens down by at least 50% (not met, −31.5% in §9.5). Section C (`survey/web/tests/section-c/`) was not re-run for this; the token bar had already failed on the controlled suite, and those files drive third-party sites. `'dom'` remains the default and the escape hatch.
 
 ---
 
