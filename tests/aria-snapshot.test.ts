@@ -288,6 +288,32 @@ describe('mandatory secret & password-field masking (§3.2)', () => {
       expect(kwLine).not.toMatch(/:\s*"?e"?$/);
     });
   });
+
+  it('masks multiline and quoted run secrets whose whitespace ariaSnapshot collapses', async () => {
+    await withPage(async (page) => {
+      const multiLine = 'aria-snapshot fake secret\nsecond line\nthird line';
+      const quoted = 'aria-snapshot "quoted" secret';
+      await page.setContent(`<!doctype html>
+<html>
+  <body>
+    <table>
+      <tr><td>Signing key</td><td><pre>${multiLine}</pre></td></tr>
+      <tr><td>Quoted key</td><td><span>${quoted}</span></td></tr>
+    </table>
+  </body>
+</html>`);
+
+      const snapshot = await captureAriaPageSnapshot(page, {
+        secrets: [multiLine, quoted],
+      });
+
+      expect(snapshot).not.toContain('aria-snapshot fake secret');
+      expect(snapshot).not.toContain('second line');
+      expect(snapshot).not.toContain('quoted');
+      expect(snapshot).toContain('Signing key');
+      expect(snapshot).toContain('***');
+    });
+  });
 });
 
 describe('supplementary [ref=sN] targets (§3.3)', () => {

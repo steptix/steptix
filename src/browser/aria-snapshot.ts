@@ -957,7 +957,19 @@ function collectAriaSecrets(
   const shortSet = new Set<string>();
 
   for (const s of runSecrets ?? []) {
-    if (s.length > 0) longSet.add(s);
+    if (s.length === 0) continue;
+    longSet.add(s);
+    const escaped = JSON.stringify(s).slice(1, -1);
+    if (escaped.length > 0) longSet.add(escaped);
+    // Playwright's ariaSnapshot collapses whitespace (including newlines in
+    // `<pre>` or multiline nodes) into single spaces, so a multiline run secret
+    // appears collapsed in the YAML text.
+    const collapsed = s.replace(/\s+/g, ' ').trim();
+    if (collapsed.length >= RECORD_SECRET_MIN_LENGTH) {
+      longSet.add(collapsed);
+      const collapsedEscaped = JSON.stringify(collapsed).slice(1, -1);
+      if (collapsedEscaped.length > 0) longSet.add(collapsedEscaped);
+    }
   }
   for (const raw of secretFieldValues) {
     const trimmed = raw.trim();
@@ -970,7 +982,11 @@ function collectAriaSecrets(
     } else {
       longSet.add(raw);
       const collapsed = raw.replace(/\s+/g, ' ').trim();
-      if (collapsed.length > 0) longSet.add(collapsed);
+      if (collapsed.length > 0) {
+        longSet.add(collapsed);
+        const collapsedEscaped = JSON.stringify(collapsed).slice(1, -1);
+        if (collapsedEscaped.length > 0) longSet.add(collapsedEscaped);
+      }
       const escaped = JSON.stringify(raw).slice(1, -1);
       if (escaped.length > 0) longSet.add(escaped);
     }
