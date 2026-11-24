@@ -163,9 +163,10 @@ export interface SystemPromptOptions {
    *  Only enabled when the test has hooks configured — without hooks, the
    *  author has signalled no intent to dismiss UI, so we don't nudge the AI. */
   dismissalGuidance?: boolean;
-  /** Snapshot representation sent to the step AI. `'dom'` (default) uses
-   *  sanitized HTML with CSS/Playwright selectors; `'aria'` uses accessibility
-   *  YAML with snapshot refs (`eN`, `f1eN`, `sN`). */
+  /** Snapshot representation sent to the step AI. Omitted builds the DOM
+   *  rules. The shipped `browser.snapshotMode` default is `'aria'`; a caller
+   *  passes the run's mode. `'aria'` uses accessibility YAML with snapshot
+   *  refs (`eN`, `f1eN`, `sN`); `'dom'` uses sanitized HTML. */
   snapshotMode?: 'aria' | 'dom';
 }
 

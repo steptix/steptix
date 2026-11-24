@@ -117,7 +117,7 @@ function fakePage(): Page {
 const CONFIG: Config = {
   ...DEFAULT_CONFIG,
   ai: { ...DEFAULT_CONFIG.ai, sendScreenshots: false },
-  browser: { ...DEFAULT_CONFIG.browser, captureScreenshotsPerAction: false, headed: false },
+  browser: { ...DEFAULT_CONFIG.browser, captureScreenshotsPerAction: false, headed: false, snapshotMode: 'dom' },
   execution: { ...DEFAULT_CONFIG.execution, retries: 0, maxTurns: 3, promptOnAmbiguity: false },
 };
 

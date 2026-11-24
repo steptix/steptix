@@ -420,6 +420,16 @@ function textOf(messages: ChatMessage[]): string {
     .join('\n');
 }
 
+function listsSectionOf(prompt: string): string {
+  const start = prompt.indexOf('## Lists to check');
+  expect(start).toBeGreaterThanOrEqual(0);
+  const endPage = prompt.indexOf('## Page Snapshot', start);
+  const endDom = prompt.indexOf('## DOM Snapshot', start);
+  const end = endPage !== -1 ? endPage : endDom;
+  expect(end).toBeGreaterThan(start);
+  return prompt.slice(start, end);
+}
+
 function configWith(retries: number, maxTurns = 5, execution: Partial<Config['execution']> = {}): Config {
   return {
     ...DEFAULT_CONFIG,
@@ -880,7 +890,7 @@ describe('a turn added only to show the model its lists never fails the step', (
       'api_tokens holds 2 values from 2 kinds of element: `#keys li` matched 2 elements — li.key.live ×1; li.key.test ×1.',
     );
     const second = textOf(requests[1]!);
-    const lists = second.slice(second.indexOf('## Lists to check'), second.indexOf('## DOM Snapshot'));
+    const lists = listsSectionOf(second);
     expect(lists).toContain('li.key.live ×1');
     expect(lists).not.toContain('tok_live_one');
   });
@@ -895,7 +905,7 @@ describe('a turn added only to show the model its lists never fails the step', (
     expect(text).toContain('("Everyday", "***", "Travel")');
     expect(text).not.toContain('Savings');
     const second = textOf(requests[1]!);
-    const lists = second.slice(second.indexOf('## Lists to check'), second.indexOf('## DOM Snapshot'));
+    const lists = listsSectionOf(second);
     expect(lists).toContain('"***"');
     expect(lists).not.toContain('Savings');
   });
@@ -1039,7 +1049,7 @@ describe('a turn added only to show the model its lists never fails the step', (
       [plan(readOf('#account-list [data-account="{{panel}}"] .nickname')), NOOP],
       { instruction, params: { panel: 'Savings' } },
     );
-    const lists = textOf(requests[1]!).split('## Lists to check')[1]!.split('## DOM Snapshot')[0]!;
+    const lists = listsSectionOf(textOf(requests[1]!));
     expect(lists).toContain('accounts is empty: `#account-list [data-account="{{panel}}"] .nickname` matched nothing');
     expect(lists).not.toContain('data-account="Savings"');
   });
@@ -1237,9 +1247,10 @@ describe('a turn added only to show the model its lists never fails the step', (
       expect(readsOf(counted.result)[0]!.listReview!.text).toContain('— td.label ×2; td.value ×2.');
       for (const { requests } of [read, counted]) {
         const second = textOf(requests[1]!);
-        const lists = second.slice(second.indexOf('## Lists to check'), second.indexOf('## DOM Snapshot'));
+        const lists = listsSectionOf(second);
         expect(lists).not.toContain('list-read-review-long-secret');
         expect(lists).not.toContain('list-read-review fake secret');
+        expect(second).not.toContain('list-read-review fake secret');
       }
       const logged = lines.join('\n');
       expect(logged).toContain('td.label ×2; td.value ×2');
@@ -1389,7 +1400,7 @@ describe('a turn added only to show the model its lists never fails the step', (
     const { requests, params } = await runStep([plan([readOf(OVER_BROAD), secret]), NOOP]);
     expect(params.savings_password).toBe('Savings');
     const second = textOf(requests[1]!);
-    const lists = second.slice(second.indexOf('## Lists to check'), second.indexOf('## DOM Snapshot'));
+    const lists = listsSectionOf(second);
     expect(lists).toContain('accounts holds 6 values');
     expect(lists).not.toContain('Savings');
   });

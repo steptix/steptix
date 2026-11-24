@@ -550,7 +550,7 @@ function assertBlockAds(browser: unknown, configPath: string): void {
  * `browser.snapshotMode` selects whether the step AI sees accessibility
  * snapshots with `[ref=...]` handles or sanitized HTML DOM snapshots
  * (docs/specs/SPEC-aria-ref-snapshots.md §9.1), checked at LOAD so a typo
- * fails loudly instead of silently falling back to `'dom'`.
+ * fails loudly instead of silently becoming the default (`'aria'`).
  */
 function assertSnapshotMode(browser: unknown, configPath: string): void {
   if (!isPlainObject(browser)) return;

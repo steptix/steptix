@@ -25,7 +25,7 @@ export const DEFAULT_CONFIG: Config = {
     // Today's behaviour: a singular action takes the first visible match.
     // 'fail' is the author's opt-in (stories/codebehind-selector-ambiguity.md).
     ambiguousTarget: 'first',
-    snapshotMode: 'dom',
+    snapshotMode: 'aria',
     maxIframeDepth: 5,
     domSnapshotCharLimit: 300_000,
     captureScreenshotsPerAction: false,
