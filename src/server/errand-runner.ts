@@ -49,6 +49,7 @@ import {
   isBrowserClosed,
   isSkippableStep,
   parseOutputPrefixes,
+  serverConfigNow,
   UNATTENDED_SKIP_REASON,
 } from './run-helpers.js';
 import type {
@@ -320,7 +321,9 @@ export class ErrandRunner {
     try {
       const envName = request.envName?.trim() || null;
       const bundle = await this.projectBundles.resolve(request.testFilePath, envName);
-      const desiredAi = applyEnvToAiConfig(this.config.ai, request.env);
+      // The machine `.env` as it is now, as a session run reads it (issue #128).
+      const server = serverConfigNow(this.config).config;
+      const desiredAi = applyEnvToAiConfig(server.ai, request.env);
       // Server base → project bundle, and no third layer: an errand has no
       // session to hold overrides (stories/errands.md §Return), so `{}` here is
       // the whole story rather than an omission.
@@ -329,7 +332,7 @@ export class ErrandRunner {
       // an errand is a request FOR AI, and with no session to carry an
       // override the only thing that could gate it is a project's
       // `ai.allowInRuns: false`, which is a statement about RUNS.
-      const settings = resolveRunSettings(this.config, bundle.config, desiredAi.model, {}, {
+      const settings = resolveRunSettings(server, bundle.config, desiredAi.model, {}, {
         ai: desiredAi,
         bypassAiPolicy: true,
       });

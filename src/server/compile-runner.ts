@@ -22,7 +22,7 @@ import {
   type CompileStatus,
   type CompileSummary,
 } from '../codebehind/compile.js';
-import { applyEnvToAiConfig } from './run-helpers.js';
+import { applyEnvToAiConfig, serverConfigNow } from './run-helpers.js';
 import { compileLock } from './compile-lock.js';
 import type { ProjectBundle, ProjectBundleResolver } from './project-bundle.js';
 import type { RunEvent, SessionManager, StepRequest } from './session-manager.js';
@@ -242,7 +242,7 @@ export class CodeBehindCompiler {
     // a project pinning a placeholder gatewayUrl recorded fine through the
     // session and then failed at Generate with "Connection error".
     const aiClient = new AiClient(
-      applyEnvToAiConfig(this.config.ai, bundle.envBundle?.env),
+      applyEnvToAiConfig(serverConfigNow(this.config).config.ai, bundle.envBundle?.env),
       tokenTracker,
     );
 

@@ -139,6 +139,94 @@ function withEnvDefaults(config: Config): Config {
 }
 
 /**
+ * Which of the three AI values a loaded config left for the machine `.env` to
+ * fill, and what each one is when the machine file says nothing.
+ *
+ * Decided once, at load, because the two things it asks about — the process
+ * environment and the config file's RAW values — are fixed for the life of the
+ * config. What the machine file SAYS is not, so it is read again on every
+ * {@link aiConfigNow} (issue #128).
+ */
+interface MachineAiGaps {
+  apiKey: boolean;
+  model: boolean;
+  gatewayUrl: boolean;
+  /** The config's own model and gateway before the machine file filled them. A
+   *  key gap has nothing beneath it: it is a gap because no key was set. */
+  beneath: { model: string; gatewayUrl: string | undefined };
+}
+
+/**
+ * The gaps of every `ai` object {@link loadConfig} returned, keyed by that
+ * object.
+ *
+ * Kept here rather than as a field on `Config` because `Config` is also the
+ * shape of `steptix.config.json` (scripts/build-schema.mjs generates the
+ * schema from it), and this is not something a project can set. Keyed by the
+ * `ai` object, not the whole `Config`, so a caller that spreads the config to
+ * change another section (`{ ...config, server: … }`) keeps it. A config
+ * built by hand has no entry, and {@link aiConfigNow} then returns its `ai`
+ * unchanged.
+ */
+const machineAiGaps = new WeakMap<AiConfig, MachineAiGaps>();
+
+/**
+ * The machine `.env` as last read successfully, for {@link aiConfigNow} to
+ * fall back on when a later read fails.
+ */
+let lastMachineEnv: Record<string, string> | undefined;
+
+/** Read errors {@link aiConfigNow} has reported since the file was last
+ *  readable, so one outage is said once rather than once per run. */
+const warnedUnreadable = new Set<string>();
+
+/** Where a run's model came from before the project or session had a say. */
+export type BaseModelSource = 'server-settings' | 'machine-file' | 'built-in-default';
+
+/** {@link aiConfigNow}'s answer. */
+export interface AiConfigNow {
+  /** A fresh copy of the config's `ai`, with the machine file's values as they are now. */
+  ai: AiConfig;
+  /**
+   * Where `ai.model` came from: the server's own settings (its environment or
+   * its `steptix.config.json`), the machine `.env`, or the built-in default.
+   */
+  modelFrom: BaseModelSource;
+}
+
+function nonBlank(value: string | undefined): string | undefined {
+  return value !== undefined && value.trim() !== '' ? value.trim() : undefined;
+}
+
+/** Fill `ai`'s gaps from `machineEnv`, the parsed machine `.env`. */
+function fillMachineAiGaps(
+  ai: AiConfig,
+  gaps: MachineAiGaps,
+  machineEnv: Record<string, string>,
+): AiConfigNow {
+  const next: AiConfig = { ...ai };
+  let modelFrom: BaseModelSource = 'server-settings';
+  if (gaps.apiKey) {
+    // Whitespace is no key, here as in `aiConfigured`.
+    const machineApiKey = nonBlank(machineEnv['AI_API_KEY']);
+    if (machineApiKey !== undefined) next.apiKey = machineApiKey;
+    else delete next.apiKey;
+  }
+  if (gaps.model) {
+    const machineModel = nonBlank(machineEnv['AI_MODEL']);
+    next.model = machineModel ?? gaps.beneath.model;
+    modelFrom = machineModel !== undefined ? 'machine-file' : 'built-in-default';
+  }
+  if (gaps.gatewayUrl) {
+    const machineGatewayUrl = nonBlank(machineEnv['AI_GATEWAY_URL']);
+    if (machineGatewayUrl !== undefined) next.gatewayUrl = machineGatewayUrl;
+    else if (gaps.beneath.gatewayUrl === undefined) delete next.gatewayUrl;
+    else next.gatewayUrl = gaps.beneath.gatewayUrl;
+  }
+  return { ai: next, modelFrom };
+}
+
+/**
  * The machine floor for the AI settings (stories/machine-key.md): values from
  * the user root's `.env` apply only when neither the environment nor the
  * project's config file set one.
@@ -155,55 +243,85 @@ function withEnvDefaults(config: Config): Config {
  *
  * `fileAi` is the *raw* user config, pre-merge — after the merge a file model
  * (or gatewayUrl) and the built-in default are indistinguishable on the result.
+ *
+ * The gaps are recorded against the returned `ai`, so a long-lived holder of
+ * this config — the server — can refill them from the machine file as it is
+ * at each run ({@link aiConfigNow}) rather than as it was at load.
  */
 function withMachineAiFloor(config: Config, fileAi: UserConfig['ai'] | null): Config {
-  const userRoot = readUserRootEnv();
-  let result = config;
-
-  // `undefined` here means neither the config file nor the environment
-  // supplied one — `withEnvDefaults` only fills this key, never clears it.
-  const machineApiKey = userRoot['AI_API_KEY'];
-  if (
-    result.ai.apiKey === undefined &&
-    machineApiKey !== undefined &&
-    machineApiKey.trim() !== ''
-  ) {
-    result = { ...result, ai: { ...result.ai, apiKey: machineApiKey.trim() } };
-  }
-
-  const envModel = process.env['AI_MODEL'];
-  const envSetModel = envModel !== undefined && envModel.trim() !== '';
   const fileModel = fileAi?.model;
-  const fileSetModel = typeof fileModel === 'string' && fileModel.trim() !== '';
-  const machineModel = userRoot['AI_MODEL'];
-  if (
-    !envSetModel &&
-    !fileSetModel &&
-    machineModel !== undefined &&
-    machineModel.trim() !== ''
-  ) {
-    result = { ...result, ai: { ...result.ai, model: machineModel.trim() } };
-  }
-
-  // Same floor, same shape: the machine-wide gateway fills in only when neither
-  // the environment nor the project's config file set one. Asked of the RAW
-  // file config, like the model above, so a project that pinned a gateway keeps
-  // it.
-  const envGatewayUrl = process.env['AI_GATEWAY_URL'];
-  const envSetGatewayUrl = envGatewayUrl !== undefined && envGatewayUrl.trim() !== '';
   const fileGatewayUrl = fileAi?.gatewayUrl;
-  const fileSetGatewayUrl = typeof fileGatewayUrl === 'string' && fileGatewayUrl.trim() !== '';
-  const machineGatewayUrl = userRoot['AI_GATEWAY_URL'];
-  if (
-    !envSetGatewayUrl &&
-    !fileSetGatewayUrl &&
-    machineGatewayUrl !== undefined &&
-    machineGatewayUrl.trim() !== ''
-  ) {
-    result = { ...result, ai: { ...result.ai, gatewayUrl: machineGatewayUrl.trim() } };
-  }
+  const gaps: MachineAiGaps = {
+    // `undefined` here means neither the config file nor the environment
+    // supplied one — `withEnvDefaults` only fills this key, never clears it.
+    // An exported blank `AI_API_KEY=` is a value, so it is not a gap.
+    apiKey: config.ai.apiKey === undefined,
+    model:
+      nonBlank(process.env['AI_MODEL']) === undefined &&
+      !(typeof fileModel === 'string' && fileModel.trim() !== ''),
+    // Same floor, same shape: the machine-wide gateway fills in only when
+    // neither the environment nor the project's config file set one. Asked of
+    // the RAW file config, like the model above, so a project that pinned a
+    // gateway keeps it.
+    gatewayUrl:
+      nonBlank(process.env['AI_GATEWAY_URL']) === undefined &&
+      !(typeof fileGatewayUrl === 'string' && fileGatewayUrl.trim() !== ''),
+    beneath: {
+      model: config.ai.model,
+      gatewayUrl: config.ai.gatewayUrl,
+    },
+  };
+  // A read error here propagates: a machine file that cannot be read at load
+  // should fail loudly, as it always has.
+  const machineEnv = readUserRootEnv();
+  lastMachineEnv = machineEnv;
+  const { ai } = fillMachineAiGaps(config.ai, gaps, machineEnv);
+  machineAiGaps.set(ai, gaps);
+  return { ...config, ai };
+}
 
-  return result;
+/**
+ * `config.ai` with the machine `.env`'s AI values as the file says them NOW.
+ *
+ * For a holder that outlives one load — the server, which loads its config at
+ * startup and then runs for hours while the machine file changes under it:
+ * Copilot setup in VS Code writes `AI_MODEL` there while the server is
+ * running, and so does anyone editing the file by hand. Before this, every run
+ * used the startup copy until the server restarted (issue #128). Only the file
+ * is re-read; which values it may fill stays as {@link withMachineAiFloor}
+ * decided at load, so the order is unchanged and a value the server's own
+ * environment or config file set still beats the machine file.
+ *
+ * Pass the `ai` object {@link loadConfig} returned (the server's
+ * `this.config.ai`), not a copy of it: the gaps are keyed by that object. A
+ * config with no record — built by hand, as most tests do — comes back
+ * unchanged, with `'server-settings'` as its source.
+ *
+ * A machine file that exists but cannot be read falls back to the last read
+ * that worked, and says so once per outage. A run should not fail
+ * because the file was locked for a moment.
+ */
+export function aiConfigNow(ai: AiConfig): AiConfigNow {
+  const gaps = machineAiGaps.get(ai);
+  if (gaps === undefined) return { ai: { ...ai }, modelFrom: 'server-settings' };
+  let machineEnv: Record<string, string>;
+  try {
+    machineEnv = readUserRootEnv();
+    lastMachineEnv = machineEnv;
+    // Readable again: the next outage is a new one, and says so.
+    warnedUnreadable.clear();
+  } catch (err) {
+    const message = (err as Error).message;
+    if (!warnedUnreadable.has(message)) {
+      warnedUnreadable.add(message);
+      logger.warn(
+        'Could not read the machine settings file, so this run uses the AI settings ' +
+          `it held when it was last read: ${message}`,
+      );
+    }
+    machineEnv = lastMachineEnv ?? {};
+  }
+  return fillMachineAiGaps(ai, gaps, machineEnv);
 }
 
 /**

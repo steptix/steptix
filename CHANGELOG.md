@@ -11,6 +11,21 @@ carried a `-beta.N` suffix.
 
 ## Unreleased
 
+### Fixed — a change to the machine-wide AI settings takes effect on the next run
+
+- **The server reads the machine-wide settings file at every run.** That
+  file is `%LOCALAPPDATA%\steptix\.env` on Windows and `~/.steptix/.env`
+  elsewhere. Before, a change there to `AI_MODEL`, `AI_API_KEY` or
+  `AI_GATEWAY_URL` was ignored until the server restarted. That included the
+  change Copilot setup makes from the welcome page (#128). The server's
+  settings report (`GET /config`, and `get_run_settings` over MCP) shows the
+  new values too. A project or server that names its own model still uses
+  it, as before.
+- **Each run says which AI model it uses and where it came from**, in one
+  line in the run log and the Output panel. The source is the session, the
+  project's `.env`, the server's own settings, the machine-wide file (by
+  path), or Steptix's built-in default.
+
 ### Changed — the extension wears the Steptix brand
 
 - **The listing icon and the sidebar glyph are the approved Steptix identity**:
