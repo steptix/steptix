@@ -354,7 +354,36 @@ checkbox that reloads the page is ticked on the next page, nor one whose
 toggle cannot be read afterwards. Another frame navigating meanwhile, such as
 an ad, does not excuse it.
 
+**Covered by its own label.** Some pages draw an option as a card: a
+`<label>` holding the input together with a picture and text, laid over the
+input. The input is visible, so none of the above applies, but a click on it
+can never land: Playwright reports that the card's content "intercepts
+pointer events", retries, and times out after the click's whole budget. A
+person clicks the card. In an accessibility snapshot this is the likely
+choice, because the input carries the name and the card shows as an unnamed
+`generic`. It was seen in several runs of one test on a third-party sign-up
+form, where a card radio cost a 10 s timeout and a retry.
+
+So the toggle stands in as well when the browser, asked what is at the
+middle of the input (`elementFromPoint`, from the input's own root so a
+shadow root answers for itself, after scrolling the input into view if it is
+outside the viewport), answers with one of the input's own `<label>`s or
+something inside one. Only the click itself scrolls; explaining a failed
+click or measuring one does not move the page. The label is then clicked as above.
+Anything else on top, such as a cookie banner, a dialog or a loading overlay,
+leaves the click alone: it waits and fails as before, and the step's retry
+decides. Unlike a hidden toggle's label, this click must change the toggle:
+a checkbox must flip and a radio must end up checked within 2 s, as for an
+ancestor. A card's middle can hold its own link or button, and a click there
+does not reach the input. A radio that was already checked passes
+straight away, as a click on its card would.
+
 **Tests.** Real Chromium:
+- **Covered by its own label:** a card radio and a card checkbox, each under
+  its label's content, are set by one click with no retry. A radio covered by
+  something outside its label fails the click and stays unchecked. A card
+  whose middle holds a button that does not set the radio fails with the
+  "did not change" message. A measured run records `standIn: label`.
 - **The issue's markup** (a checkbox and its label in a `display: none` panel
   under a heading that opens it) fails the click with the message above, and
   classifies as `no-match`. A page-side listener records no click at all.
