@@ -194,12 +194,14 @@
      *   ?loginDelay=N   — ms to show "Verifying your account..." spinner before redirect (default: 5000)
      *   ?mfaDelay=N     — ms before MFA form appears on mfa.html (passed through, default: 3000)
      *   ?mfaCode=N      — valid MFA code (passed through, default: 123456)
+     *   ?mfaCountdown=1 — show live per-second countdown on mfa.html while waiting
      */
     const params = new URLSearchParams(window.location.search);
     const requireMfa = params.get('mfa') !== 'false';
     const loginDelay = parseInt(params.get('loginDelay') ?? '5000', 10);
     const mfaDelay = params.get('mfaDelay') ?? '3000';
     const mfaCode = params.get('mfaCode') ?? '123456';
+    const mfaCountdown = params.get('mfaCountdown') === '1' || params.get('mfaCountdown') === 'true';
 
     document.getElementById('login-form').addEventListener('submit', async function (e) {
       e.preventDefault();
@@ -223,7 +225,8 @@
         // actually going to MFA.
         setTimeout(() => {
           if (requireMfa) {
-            window.location.href = `mfa.html?delay=${mfaDelay}&code=${mfaCode}`;
+            const countdownSuffix = mfaCountdown ? '&countdown=1' : '';
+            window.location.href = `mfa.html?delay=${mfaDelay}&code=${mfaCode}${countdownSuffix}`;
           } else {
             window.location.href = 'dashboard.html';
           }

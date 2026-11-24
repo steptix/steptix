@@ -113,11 +113,11 @@ function isTimeoutError(err: unknown): boolean {
 function readContentQuery(req: Request, res: Response): PageContentOptions | null {
   const rawFormat = req.query['format'];
   const format = rawFormat === undefined ? 'text' : String(rawFormat);
-  if (format !== 'text' && format !== 'dom') {
+  if (format !== 'text' && format !== 'dom' && format !== 'aria') {
     // Deliberately not a fallback to 'text'. A caller that asked for
     // 'html' and silently received prose has no way to notice.
     res.status(400).json({
-      error: `Unknown format "${format}". Valid formats are "text" (visible text, default) and "dom" (cleaned DOM).`,
+      error: `Unknown format "${format}". Valid formats are "text" (visible text, default), "dom" (cleaned DOM) and "aria" (accessibility snapshot).`,
     });
     return null;
   }
@@ -178,7 +178,7 @@ function readScreenshotQuery(req: Request, res: Response): { fullPage: boolean }
       error:
         'selector does not apply to format "screenshot" — a picture is of the ' +
         'whole viewport or the whole page, never of one element. Drop it, or ' +
-        'read that element with format "text" or "dom".',
+        'read that element with format "text", "dom" or "aria".',
     });
     return null;
   }
@@ -207,7 +207,7 @@ function readScreenshotQuery(req: Request, res: Response): { fullPage: boolean }
   return null;
 }
 
-/** What one peek was asked for: the text/DOM read, or the picture. */
+/** What one peek was asked for: the text/DOM/aria read, or the picture. */
 type PeekPlan =
   | { kind: 'content'; opts: PageContentOptions }
   | { kind: 'screenshot'; fullPage: boolean };
@@ -1466,8 +1466,8 @@ export function createApiServer(
     }
   });
 
-  // GET /sessions/:id/content — the active page as text or cleaned DOM
-  // (stories/page-content.md).
+  // GET /sessions/:id/content — the active page as text, cleaned DOM, or
+  // accessibility snapshot (stories/page-content.md).
   //
   // Nothing here calls a model. The endpoint hands back the page and stops;
   // whoever asked does the understanding. That is what keeps a page read free

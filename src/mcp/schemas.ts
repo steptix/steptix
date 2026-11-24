@@ -437,12 +437,14 @@ export const peekTabInput = toolSchema({
         'refused with the candidates named — so a rough name is safe to try.',
     ),
   format: z
-    .enum(['text', 'dom', 'screenshot'])
+    .enum(['text', 'dom', 'aria', 'screenshot'])
     .optional()
     .describe(
       '`text` (default) — the page\'s visible text, for what it says. `dom` — ' +
-        'the cleaned DOM, for picking a selector to act on. `text` is far ' +
-        'smaller; reach for `dom` only when you need element structure. ' +
+        'the cleaned DOM, for picking a selector to act on. `aria` — the ' +
+        'accessibility snapshot YAML with roles, names and refs, compact and ' +
+        'structured. `text` is far smaller; reach for `dom` or `aria` when you ' +
+        'need element structure. ' +
         '`screenshot` — a PNG of the tab, for when the ask is to SEE the page ' +
         '("show me", "what does it look like", "take a screenshot"). The picture ' +
         'is taken where the tab sits: it is never brought forward, and works ' +
@@ -530,12 +532,12 @@ export const peekTabOutput = toolSchema({
   targetId: z.string().describe('The tab that was read, exactly as list_cdp_browsers reports it.'),
   url: z.string(),
   title: z.string(),
-  format: z.enum(['text', 'dom', 'screenshot']),
+  format: z.enum(['text', 'dom', 'aria', 'screenshot']),
   selector: z.string().nullable(),
   content: z
     .string()
     .describe(
-      'The page text or DOM, as it was at the moment of the read. An empty ' +
+      'The page text, DOM, or accessibility snapshot, as it was at the moment of the read. An empty ' +
         'value never means "the read failed": that is an error instead. Empty ' +
         'for `format: "screenshot"`, where the payload is the image block — ' +
         '`format` tells you which half of this result to read.',
@@ -552,13 +554,13 @@ export const peekTabOutput = toolSchema({
   width: z
     .number()
     .nullable()
-    .describe('Screenshot only: captured pixel width. Null for text and DOM reads.'),
+    .describe('Screenshot only: captured pixel width. Null for text, DOM, and aria reads.'),
   height: z
     .number()
     .nullable()
     .describe(
       'Screenshot only: captured pixel height — well beyond the viewport when ' +
-        '`full_page` was set. Null for text and DOM reads.',
+        '`full_page` was set. Null for text, DOM, and aria reads.',
     ),
   returnedChars: z
     .number()
@@ -567,7 +569,7 @@ export const peekTabOutput = toolSchema({
     .number()
     .describe(
       'Characters captured before truncation. A FLOOR, not the page\'s true ' +
-        'size: for format "dom" the capture is itself capped by the project\'s ' +
+        'size: for format "dom" or "aria" the capture is itself capped by the project\'s ' +
         'limit, so a large page reports the cap rather than its real length. ' +
         'Trust `truncated`, not the difference between these two numbers.',
     ),
@@ -778,12 +780,14 @@ export const getPageContentInput = toolSchema({
   session_id: z.string().describe('Session whose current page to read.'),
   project_root: projectRoot,
   format: z
-    .enum(['text', 'dom', 'screenshot'])
+    .enum(['text', 'dom', 'aria', 'screenshot'])
     .optional()
     .describe(
       '`text` (default) — the page\'s visible text, for what it says. `dom` — ' +
-        'the cleaned DOM, for picking a selector to act on. `text` is far ' +
-        'smaller; reach for `dom` only when you need element structure. ' +
+        'the cleaned DOM, for picking a selector to act on. `aria` — the ' +
+        'accessibility snapshot YAML with roles, names and refs, compact and ' +
+        'structured. `text` is far smaller; reach for `dom` or `aria` when you ' +
+        'need element structure. ' +
         '`screenshot` — a PNG of the viewport right now, returned as an image; ' +
         'use it when the question is about layout or what something looks like, ' +
         'and remember it costs far more context than text.',
@@ -817,12 +821,12 @@ export const getPageContentOutput = toolSchema({
   url: z.string(),
   title: z.string(),
   status: z.enum(['active', 'executing']),
-  format: z.enum(['text', 'dom', 'screenshot']),
+  format: z.enum(['text', 'dom', 'aria', 'screenshot']),
   selector: z.string().nullable(),
   content: z
     .string()
     .describe(
-      'The page text or DOM. EMPTY for `format: "screenshot"` — the picture is ' +
+      'The page text, DOM, or accessibility snapshot. EMPTY for `format: "screenshot"` — the picture is ' +
         'in the image block alongside this, not in here. An empty value never ' +
         'means "the read failed": that is an error instead.',
     ),
@@ -843,7 +847,7 @@ export const getPageContentOutput = toolSchema({
     .number()
     .describe(
       'Characters captured before truncation. A FLOOR, not the page\'s true ' +
-        'size: for format "dom" the capture is itself capped by the project\'s ' +
+        'size: for format "dom" or "aria" the capture is itself capped by the project\'s ' +
         'limit, so a large page reports the cap rather than its real length. ' +
         'Trust `truncated`, not the difference between these two numbers.',
     ),

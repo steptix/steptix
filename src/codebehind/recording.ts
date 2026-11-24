@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AIAction } from '../ai/types.js';
 import type { ActionTargeting, TypedRoute } from '../browser/actions.js';
+import { diffNewInteractiveRef } from '../browser/aria-snapshot.js';
 import type { ObservedRequest } from '../browser/page-state.js';
 import type { AssertionResult, StepResult, StepStatus, SubActionResult } from '../report/types.js';
 import { logger } from '../utils/logger.js';
@@ -71,6 +72,17 @@ export type RecordedAction = AIAction & {
    * entry must wait for by name.
    */
   requests?: ObservedRequest[];
+  /**
+   * For a diff-polled `wait` (`waitType: "change"`), the element whose
+   * appearance resolved the wait (SPEC-aria-ref-snapshots.md §7.2): folded
+   * from the resolving `noop` (`foundRef`) or the immediately following
+   * element-targeting action so generation emits native `locator.waitFor`.
+   */
+  resolvedWaitTarget?: {
+    normalizedLocator?: string;
+    resolvedSelector?: string;
+    frame?: string;
+  };
 };
 
 export interface RecordingManifest {
@@ -878,7 +890,7 @@ export function actionsOf(result: StepResult | undefined): RecordedAction[] {
   const subs = (result?.turns ?? []).flatMap((t) => t.subActions);
   // A list read a later action stored over was not this step's read (issue #48).
   const superseded = supersededListReads(subs);
-  return subs
+  const rawActions: RecordedAction[] = subs
     .filter((sa) => !sa.error || (keepFail && sa.action.action === 'fail'))
     // Nor was a read in an answer the step discarded (`discarded`).
     .filter((sa) => !superseded.has(sa) && sa.discarded !== true)
@@ -900,6 +912,139 @@ export function actionsOf(result: StepResult | undefined): RecordedAction[] {
         ...(requests !== undefined && { requests }),
       };
     });
+
+  if (!rawActions.some(isChangeWait)) {
+    return rawActions;
+  }
+  return foldChangeWaits(rawActions, result);
+}
+
+type ResolvedWaitTarget = NonNullable<RecordedAction['resolvedWaitTarget']>;
+
+function isChangeWait(action: RecordedAction): boolean {
+  return action.action === 'wait' && action.waitType === 'change';
+}
+
+function waitTargetFrom(action: RecordedAction): ResolvedWaitTarget | undefined {
+  const normalizedLocator = action.targeting?.normalizedLocator;
+  const resolvedSelector = action.targeting?.resolvedSelector;
+  const frame = action.frame;
+  if (normalizedLocator === undefined && resolvedSelector === undefined) {
+    return undefined;
+  }
+  return {
+    ...(normalizedLocator !== undefined && { normalizedLocator }),
+    ...(resolvedSelector !== undefined && { resolvedSelector }),
+    ...(frame !== undefined && { frame }),
+  };
+}
+
+const STANDARD_INTERACTIVE_ARIA_ROLES: ReadonlySet<string> = new Set([
+  'button',
+  'link',
+  'textbox',
+  'searchbox',
+  'combobox',
+  'listbox',
+  'option',
+  'checkbox',
+  'radio',
+  'switch',
+  'tab',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'slider',
+  'spinbutton',
+  'treeitem',
+]);
+
+function diffFallbackWaitTarget(result: StepResult | undefined): ResolvedWaitTarget | undefined {
+  const added = diffNewInteractiveRef(
+    result?.stepContext?.domBefore ?? '',
+    result?.stepContext?.domAfter ?? '',
+  );
+  if (!added) return undefined;
+  if (
+    added.ref.startsWith('s') ||
+    /^f\d+e\d+$/.test(added.ref) ||
+    !STANDARD_INTERACTIVE_ARIA_ROLES.has(added.role)
+  ) {
+    return undefined;
+  }
+  const normalizedLocator = added.name
+    ? `getByRole(${JSON.stringify(added.role)}, { name: ${JSON.stringify(added.name)} })`
+    : `getByRole(${JSON.stringify(added.role)})`;
+  return { normalizedLocator };
+}
+
+/**
+ * Collapse multi-turn `waitType: "change"` sequences into one `wait` carrying
+ * the full budget and `resolvedWaitTarget` (SPEC-aria-ref-snapshots.md §7.2).
+ * Runs inside `actionsOf` so `writeRecordedStep` redacts `resolvedWaitTarget`
+ * alongside every other transcript field.
+ */
+function foldChangeWaits(
+  rawActions: RecordedAction[],
+  result: StepResult | undefined,
+): RecordedAction[] {
+  const out: RecordedAction[] = [];
+  let i = 0;
+  while (i < rawActions.length) {
+    const current = rawActions[i]!;
+    if (!isChangeWait(current)) {
+      out.push(current);
+      i++;
+      continue;
+    }
+
+    let j = i + 1;
+    let maxTimeout: number | undefined =
+      typeof current.timeout === 'number' && Number.isFinite(current.timeout) && current.timeout > 0
+        ? current.timeout
+        : undefined;
+    while (j < rawActions.length && isChangeWait(rawActions[j]!)) {
+      const t = rawActions[j]!.timeout;
+      if (typeof t === 'number' && Number.isFinite(t) && t > 0) {
+        maxTimeout = maxTimeout === undefined ? t : Math.max(maxTimeout, t);
+      }
+      j++;
+    }
+    const timeout = maxTimeout ?? 10_000;
+    const next = rawActions[j];
+
+    let resolvedWaitTarget: ResolvedWaitTarget | undefined = current.resolvedWaitTarget;
+    let dropNext = false;
+
+    if (next !== undefined && next.action === 'noop') {
+      if (next.foundRef !== undefined || next.targeting !== undefined) {
+        resolvedWaitTarget =
+          waitTargetFrom(next) ?? resolvedWaitTarget ?? diffFallbackWaitTarget(result);
+        dropNext = true;
+      } else {
+        const diffTarget = resolvedWaitTarget ?? diffFallbackWaitTarget(result);
+        if (diffTarget !== undefined) {
+          resolvedWaitTarget = diffTarget;
+          dropNext = true;
+        }
+      }
+    } else if (next !== undefined) {
+      const nextTarget = waitTargetFrom(next);
+      if (nextTarget !== undefined) {
+        resolvedWaitTarget = nextTarget;
+      }
+    } else {
+      resolvedWaitTarget = resolvedWaitTarget ?? diffFallbackWaitTarget(result);
+    }
+
+    out.push({
+      ...current,
+      timeout,
+      ...(resolvedWaitTarget !== undefined && { resolvedWaitTarget }),
+    });
+    i = dropNext ? j + 1 : j;
+  }
+  return out;
 }
 
 /**
@@ -908,8 +1053,9 @@ export function actionsOf(result: StepResult | undefined): RecordedAction[] {
  * an action RAN on (`actionPageUrl`) only when it differs from the page's URL
  * after it (`pageUrl`), so the pair is the navigation.
  *
- * `pageUrl` is read after the post-action wait, which gives up at 3.5 s: a
- * navigation slower than that is not seen here.
+ * `pageUrl` is read after the post-action settle (`armAiActionWatcher`), which
+ * waits up to 5 s on routine runs and 10 s on compile runs (capped by
+ * `execution.timeout`): a navigation slower than that is not seen here.
  */
 function navigationOf(sa: SubActionResult): { from: string; to: string } | undefined {
   if (sa.actionPageUrl === undefined || sa.pageUrl === undefined) return undefined;

@@ -1760,8 +1760,9 @@ export class LiveCompiler {
     };
     // Held to what a generated entry is: the leak guard, then the static
     // checks with their one re-ask, and a read that does not keep the run's
-    // selector withheld (§6.2) — the stale entry then stays as it is on disk
-    // and the next compile tries again.
+    // selector (§6.2) or code that still uses an ephemeral snapshot ref
+    // (SPEC-aria-ref-snapshots.md §7.3) withheld — the stale entry then stays
+    // as it is on disk and the next compile tries again.
     return askCheckedRepair(
       this.options.aiClient,
       this.options.contextContent,

@@ -1221,7 +1221,7 @@ const SYNTHETIC_PEEK_BASENAME = '.steptix-peek.md';
 /** What `peek_tab` reads off its own call. */
 interface PeekArgs {
   tab: string;
-  format?: 'text' | 'dom' | 'screenshot' | undefined;
+  format?: 'text' | 'dom' | 'aria' | 'screenshot' | undefined;
   selector?: string | undefined;
   max_chars?: number | undefined;
   /** Screenshot only (stories/cdp-tab-screenshot.md). */
@@ -1358,8 +1358,8 @@ async function peekTab(
     selector: peeked.selector ?? null,
     content: peeked.content,
     truncated: peeked.truncated ?? false,
-    // A text or DOM read has no pixels to report, and null says that rather
-    // than 0 — which would read as a zero-sized picture.
+    // A text, ARIA, or DOM read has no pixels to report, and null says that
+    // rather than 0 — which would read as a zero-sized picture.
     width: null,
     height: null,
     returnedChars: peeked.returnedChars ?? 0,
@@ -1972,8 +1972,8 @@ ${ERRAND_STEP_SYNTAX}`.trim();
  * session it never created, and had no third door to fall back to.
  */
 const PEEK_DESCRIPTION = `
-Read a tab the user ALREADY has open — its visible text, its cleaned DOM, or a
-SCREENSHOT of it — without changing anything on it.
+Read a tab the user ALREADY has open — its visible text, its accessibility
+snapshot, its cleaned DOM, or a SCREENSHOT of it — without changing anything on it.
 
 Three doors, one question each:
   - Reading a tab you can name ("what's on my OpenRouter tab?", "show me my
@@ -2002,7 +2002,8 @@ the read: the content plus the url and title read alongside it.
 
 Returns the page as-is — nothing is summarised or interpreted for you, so
 budget for reading it yourself. format "text" (default) for what the page
-says; "dom" when you need element structure to pick a selector, and it is much
+says; "aria" for a compact accessibility tree with roles, names and refs;
+"dom" when you need element markup to pick a selector, and it is much
 larger. Narrow with selector rather than raising max_chars: a truncated result
 tells you it was truncated, and reading a bigger slice of the wrong part of
 the page costs context without answering anything.
@@ -2033,7 +2034,7 @@ REPLACES what is on it, including anything unsaved, with no undo.
 
 Four doors, one question each:
   - Opening a URL — this one.
-  - Reading a tab (text, DOM or a screenshot) — peek_tab.
+  - Reading a tab (text, ARIA, DOM or a screenshot) — peek_tab.
   - Acting in a tab: clicking, typing, choosing — run_errand.
   - Reading the page a run_steps SESSION is sitting on — get_page_content.
 
@@ -2546,19 +2547,21 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     {
       title: 'Read a session\'s current page',
       description:
-        'Read the current page of a session: its visible text, or its cleaned ' +
-        'DOM. Returns the page as-is — nothing is summarised or interpreted ' +
-        'for you, so budget for reading it yourself.\n\n' +
+        'Read the current page of a session: its visible text, its cleaned ' +
+        'DOM, or its accessibility snapshot. Returns the page as-is — nothing ' +
+        'is summarised or interpreted for you, so budget for reading it ' +
+        'yourself.\n\n' +
         '`format: "text"` (default) for what the page says. ' +
-        '`format: "dom"` when you need element structure to pick a selector — ' +
-        'it is much larger, so prefer text unless you are about to act on an ' +
-        'element.\n\n' +
+        '`format: "aria"` for a compact accessibility snapshot with roles, names ' +
+        'and refs. ' +
+        '`format: "dom"` when you need element markup to pick a selector — ' +
+        'it is much larger, so prefer text or aria unless you need raw HTML.\n\n' +
         'Narrow with `selector` rather than raising `max_chars`: a truncated ' +
         'result tells you it was truncated, and reading a bigger slice of the ' +
         'wrong part of the page costs context without answering anything.\n\n' +
-        'The two formats differ on `aria-hidden` content: `text` includes it ' +
-        '(it is on screen for a sighted user), and a whole-page `dom` read ' +
-        'drops it as noise.\n\n' +
+        'The formats differ on `aria-hidden` content: `text` includes it ' +
+        '(it is on screen for a sighted user), while `aria` and a whole-page ' +
+        '`dom` read omit it.\n\n' +
         'This reads whatever is on screen right now. It does not wait for the ' +
         'page to settle, and if a run is in flight `status` comes back ' +
         '`executing` — the page may move under you.\n\n' +
@@ -2594,18 +2597,19 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
 
           // A screenshot needs no new capture code: `GET /sessions/:id` has
           // always carried one, and the MCP simply did not expose it
-          // (stories/run-settings.md §7). Handled before the text path because
-          // it is a different endpoint, not a different query parameter.
+          // (stories/run-settings.md §7). Handled before the text/aria/dom path
+          // because it is a different endpoint, not a different query parameter.
           if (args.format === 'screenshot') {
             // Refused rather than ignored. A selector says "read this element",
             // and a viewport shot is the whole screen — silently widening the
-            // read is exactly what the text path 400s on for the same argument.
+            // read is exactly what the text/aria/dom path 400s on for the same
+            // argument.
             if (args.selector !== undefined) {
               return errorResult(
                 preflightError(
                   'selector does not apply to format: "screenshot" — a screenshot is ' +
                     'always of the whole viewport. Drop the selector, or use ' +
-                    'format: "text"/"dom" to read one element.',
+                    'format: "text"/"aria"/"dom" to read one element.',
                 ),
               );
             }

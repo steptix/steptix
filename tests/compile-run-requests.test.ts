@@ -95,7 +95,9 @@ function fakePage(): Page {
 const CONFIG: Config = {
   ...DEFAULT_CONFIG,
   ai: { ...DEFAULT_CONFIG.ai, sendScreenshots: false },
-  browser: { ...DEFAULT_CONFIG.browser, captureScreenshotsPerAction: false, headed: false },
+  // §6.9 is the dom-mode wait. Aria mode settles through the watcher
+  // instead; this file pins dom so the default does not move the timeline.
+  browser: { ...DEFAULT_CONFIG.browser, snapshotMode: 'dom', captureScreenshotsPerAction: false, headed: false },
   execution: { ...DEFAULT_CONFIG.execution, retries: 0, maxTurns: 2, promptOnAmbiguity: false },
 };
 

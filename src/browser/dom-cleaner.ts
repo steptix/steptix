@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Frame, Page } from 'playwright';
 import { describeDialogs, takeUnshownDialogs, unshownDialogs, type DialogReader, type DialogRecord } from './dialogs.js';
+import { splitFrameChain } from './aria-snapshot.js';
 
 /** Default maximum character length for DOM snapshots (prevents token blowup).
  *  Overridable per-call via CaptureDomOptions.domSnapshotCharLimit. */
@@ -352,12 +353,14 @@ function substitute(template: string, bindings: Record<string, string>): string 
  * regexes it reads — as source text to splice into a page script.
  *
  * One file, ./scripts/secret-field.js, for every script that decides whether a
- * field's value may leave the page: the whole-page snapshot (capture-dom.js),
- * the `expand` walk below, and the step recorder
- * (src/recorder/page-script.ts). They used to carry hand-kept copies; a third
- * copy for the recorder, where a miss sends a typed password over a binding,
- * is the one that would have drifted. Exported for that third consumer and for
- * tests/secret-field-parity.test.ts.
+ * field's value may leave the page: the whole-page DOM snapshot
+ * (capture-dom.js), the `expand` walk (`expandDomSubtree`) below, the
+ * accessibility-snapshot scan (`aria-snapshot.ts`), element-context and
+ * locator-normalization checks (`actions.ts`), and the step recorder
+ * (`record-steps.js` via `src/recorder/page-script.ts`). They used to carry
+ * hand-kept copies; separate copies — especially for the recorder, where a miss
+ * sends a typed password over a binding — would have drifted. Exported for
+ * those consumers and for tests/secret-field-parity.test.ts.
  */
 export function loadSecretFieldRule(): string {
   return SECRET_FIELD_RULE;
@@ -497,7 +500,7 @@ export async function captureDomSnapshot(page: Page, opts: CaptureDomOptions = {
  * marked, the report's capture after each action used up the note, and the
  * model's next turn — the capture it was written for — never carried it.
  */
-function dialogNote(
+export function dialogNote(
   page: Page,
   reader: DialogReader | undefined,
   onListed: ((listed: readonly DialogRecord[]) => void) | undefined,
@@ -920,6 +923,26 @@ interface StampedElement {
   release: () => Promise<void>;
 }
 
+async function resolveFrameInDomCleaner(page: Page, frameSelector: string): Promise<Frame | null> {
+  const segments = splitFrameChain(frameSelector);
+  if (segments.length === 0) return page.mainFrame();
+  let current: Frame = page.mainFrame();
+  for (const segment of segments) {
+    let handle: Awaited<ReturnType<ReturnType<Frame['locator']>['elementHandle']>> = null;
+    try {
+      handle = await current.locator(segment).first().elementHandle({ timeout: IFRAME_HANDLE_TIMEOUT_MS });
+      const next = handle ? await handle.contentFrame() : null;
+      if (!next) return null;
+      current = next;
+    } catch {
+      return null;
+    } finally {
+      if (handle) await handle.dispose().catch(() => {});
+    }
+  }
+  return current;
+}
+
 /**
  * Resolve `selector` through Playwright — exactly as every action does, so
  * `role=`, `text=` and " >> " chains work — and stamp the first match, so an
@@ -936,11 +959,11 @@ interface StampedElement {
  * the same budget as the evaluates it stands in front of, so a page with a
  * wedged JS thread cannot hold an HTTP caller of `expand` open forever.
  */
-async function stampFirstMatch(page: Page, selector: string): Promise<StampedElement | null> {
+async function stampFirstMatch(target: Page | Frame, selector: string): Promise<StampedElement | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      stampNow(page, selector),
+      stampNow(target, selector),
       new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => reject(new EvaluateTimeout(`resolving the selector timed out after ${PAGE_EVALUATE_TIMEOUT_MS}ms`)),
@@ -953,11 +976,11 @@ async function stampFirstMatch(page: Page, selector: string): Promise<StampedEle
   }
 }
 
-async function stampNow(page: Page, selector: string): Promise<StampedElement | null> {
-  const target = page.locator(selector);
-  if ((await target.count()) === 0) return null;
+async function stampNow(target: Page | Frame, selector: string): Promise<StampedElement | null> {
+  const loc = target.locator(selector);
+  if ((await loc.count()) === 0) return null;
   const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-  const stamped = await target
+  const stamped = await loc
     .first()
     .evaluate(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -970,16 +993,22 @@ async function stampNow(page: Page, selector: string): Promise<StampedElement | 
     )
     .catch(() => false);
   if (!stamped) return null;
+  const css = `[${TARGET_STAMP}="${token}"]`;
   return {
-    css: `[${TARGET_STAMP}="${token}"]`,
+    css,
     release: async () => {
-      await page
-        .evaluate(([name, value]: [string, string]) => {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const doc = (globalThis as any).document;
-          for (const el of doc.querySelectorAll(`[${name}="${value}"]`)) el.removeAttribute(name);
-        }, [TARGET_STAMP, token] as [string, string])
-        .catch(() => undefined);
+      const clearScript = `(() => {
+        function clearIn(root) {
+          var found = root.querySelectorAll(${JSON.stringify(css)});
+          for (var i = 0; i < found.length; i++) found[i].removeAttribute(${JSON.stringify(TARGET_STAMP)});
+          var all = root.querySelectorAll('*');
+          for (var j = 0; j < all.length; j++) {
+            if (all[j].shadowRoot) clearIn(all[j].shadowRoot);
+          }
+        }
+        clearIn(document);
+      })()`;
+      await target.evaluate(clearScript).catch(() => undefined);
     },
   };
 }
@@ -991,7 +1020,11 @@ async function stampNow(page: Page, selector: string): Promise<StampedElement | 
  * after the AI sees a "N similar elements omitted" marker and wants to
  * inspect a specific item's contents.
  */
-export async function expandDomSubtree(page: Page, selector: string): Promise<string> {
+export async function expandDomSubtree(
+  page: Page,
+  selector: string,
+  frameSelector?: string,
+): Promise<string> {
   // Bounded like every other capture in this file. It used to call
   // `page.evaluate` bare, which was survivable while the only caller was a step
   // with a deadline around it — but it is now reachable from an HTTP GET, where
@@ -1008,9 +1041,16 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
   // it means in every action — `role=`, `text=`, " >> " included — and the
   // walk below finds the same element by its stamp (issue 062). The messages
   // still name the selector the caller wrote.
+  let target: Page | Frame = page;
+  if (frameSelector) {
+    const frame = await resolveFrameInDomCleaner(page, frameSelector);
+    if (!frame) return `${EXPAND_MISS_MARKER}${selector}`;
+    target = frame;
+  }
+
   let stamp: StampedElement | null;
   try {
-    stamp = await stampFirstMatch(page, selector);
+    stamp = await stampFirstMatch(target, selector);
   } catch (err) {
     return `${EXPAND_ERROR_MARKER}${String(err)}`;
   }
@@ -1018,7 +1058,7 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
 
   let result: string;
   try {
-    result = await evaluateWithTimeout<string>(page, `(() => {
+    result = await evaluateWithTimeout<string>(target, `(() => {
     const selector = ${JSON.stringify(stamp.css)};
     const label = ${JSON.stringify(selector)};
     const SKIP = new Set(['script', 'style', 'noscript', 'svg', 'meta', 'link', 'base', 'title']);
@@ -1041,8 +1081,9 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
     //
     // The secret-field rule — SECRET_NAME_RE, PASSWORD_FIELD_RE, hasPinToken
     // and isSecretField — is the ONE copy in scripts/secret-field.js, the text
-    // capture-dom.js and the step recorder splice in too. This string is
-    // evaluated in the page and can import nothing, so it is interpolated.
+    // capture-dom.js, aria-snapshot.ts, actions.ts and the step recorder splice
+    // in too. This string is evaluated in the page and can import nothing, so
+    // it is interpolated.
     ${SECRET_FIELD_RULE}
     const STATIC_VALUE_INPUT_TYPES = new Set([
       'password', 'file', 'hidden', 'submit', 'reset', 'button', 'image',
@@ -1141,7 +1182,9 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
           // (review 5, finding 4). The hook's NAME still prints, so the model
           // can see it exists, and the whole-page snapshot emits no data-*
           // at all — so this moves the two tools closer, not further apart.
-          attrs.push(a.name + '="' + (secret ? '***' : a.value) + '"');
+          // \`data-steptix-ref\` is exempt because it is a synthetic framework
+          // handle rather than page data.
+          attrs.push(a.name + '="' + (a.name === 'data-steptix-ref' ? a.value : (secret ? '***' : a.value)) + '"');
         }
       }
       return attrs.length > 0 ? ' ' + attrs.join(' ') : '';
@@ -1192,6 +1235,11 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
       const selectorComment = isInt ? ' <!-- ' + buildSelector(el) + ' -->' : '';
       const textPart = text ? ' ' + text : '';
       let output = indent + '<' + tag + attrs + '>' + textPart + selectorComment + '\\n';
+      if (el.shadowRoot) {
+        for (const child of el.shadowRoot.children) {
+          output += processEl(child, depth + 1);
+        }
+      }
       for (const child of el.children) {
         output += processEl(child, depth + 1);
       }
@@ -1201,8 +1249,21 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
       return output;
     }
 
+    function queryDeep(root, sel) {
+      const direct = root.querySelector(sel);
+      if (direct) return direct;
+      const all = root.querySelectorAll('*');
+      for (let i = 0; i < all.length; i++) {
+        if (all[i].shadowRoot) {
+          const found = queryDeep(all[i].shadowRoot, sel);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+
     try {
-      const el = document.querySelector(selector);
+      const el = queryDeep(document, selector);
       if (!el) return '[expand] No element found for selector: ' + label;
       // processEl filters invisible elements to '', which at the top level is
       // indistinguishable from "this element is empty" — the exact conflation

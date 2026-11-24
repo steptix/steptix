@@ -1,5 +1,6 @@
 /**
- * Read one Playwright page faithfully — visible text, or the cleaned DOM.
+ * Read one Playwright page faithfully — visible text, the cleaned DOM, or the
+ * accessibility snapshot.
  *
  * Extracted from `SessionManager.getPageContent`/`capturePage` by
  * stories/tab-peek.md so the sharing between a SESSION read and a TAB read is
@@ -9,8 +10,9 @@
  * verification item 2) quietly stops being true.
  *
  * Server-side on purpose: it takes a `Page` and reaches into
- * `src/browser/dom-cleaner.ts`, and the MCP process is deliberately
- * browser-free (`tests/mcp-entry-graph.test.ts` pins that import graph).
+ * `src/browser/dom-cleaner.ts` and `src/browser/aria-snapshot.ts`, and the MCP
+ * process is deliberately browser-free (`tests/mcp-entry-graph.test.ts` pins
+ * that import graph).
  */
 import type { Page } from 'playwright';
 import type { Config } from '../config/types.js';
@@ -23,8 +25,14 @@ import {
   toPageCaptureError,
   PageCaptureError,
 } from '../browser/dom-cleaner.js';
+import {
+  captureAriaPageSnapshot,
+  captureAriaSubtreeSnapshot,
+  ariaCaptureFailure,
+  ariaSnapshotWasClipped,
+} from '../browser/aria-snapshot.js';
 
-export type PageContentFormat = 'text' | 'dom';
+export type PageContentFormat = 'text' | 'dom' | 'aria';
 
 /** How to read the page — see stories/page-content.md §1. */
 export interface PageContentOptions {
@@ -53,12 +61,12 @@ export interface CapturedPageContent {
   /**
    * Characters the capture produced, before this layer's truncation.
    *
-   * A floor, not the page's true size: for `format: 'dom'` the capture is
-   * itself bounded by the project's `domSnapshotCharLimit`, so a very large
-   * page reports the limit rather than its real length. When that happened,
-   * `truncated` is true even if `availableChars <= maxChars` — which is the
-   * only signal distinguishing "you got everything" from "you got everything
-   * we were willing to capture".
+   * A floor, not the page's true size: for `format: 'dom'` or `'aria'` the
+   * capture is itself bounded by the project's `domSnapshotCharLimit`, so a
+   * very large page reports the limit rather than its real length. When that
+   * happened, `truncated` is true even if `availableChars <= maxChars` — which
+   * is the only signal distinguishing "you got everything" from "you got
+   * everything we were willing to capture".
    */
   availableChars: number;
 }
@@ -124,9 +132,10 @@ export async function capturePageContent(
   const raw = captured.text;
   const availableChars = raw.length;
   // Two independent clips, and BOTH have to reach the caller. `captureClipped`
-  // is the one that bites silently: captureDomSnapshot enforces the project's
-  // domSnapshotCharLimit before this layer ever sees the string, so a page
-  // clipped there arrives looking complete. An agent told `truncated: false`
+  // is the one that bites silently: captureDomSnapshot and
+  // captureAriaPageSnapshot enforce the project's domSnapshotCharLimit before
+  // this layer ever sees the string, so a page clipped there arrives looking
+  // complete. An agent told `truncated: false`
   // on a quarter of a page will report that the rest of it does not exist —
   // and raising `max_chars` past the project limit turns a correct warning
   // into a confident wrong answer.
@@ -231,6 +240,28 @@ async function capture(
   if (opts.format === 'text') {
     const text = await captureVisibleText(page, { selector: opts.selector });
     return { text, captureClipped: false };
+  }
+
+  if (opts.format === 'aria') {
+    if (opts.selector !== undefined) {
+      const snapshot = await captureAriaSubtreeSnapshot(page, opts.selector);
+      return { text: snapshot, captureClipped: false };
+    }
+
+    let snapshot: string;
+    try {
+      snapshot = await captureAriaPageSnapshot(page, {
+        maxIframeDepth: browserConfig.maxIframeDepth,
+        domSnapshotCharLimit: browserConfig.domSnapshotCharLimit,
+        dialogReader: 'api',
+        updateRegistry: false,
+      });
+    } catch (err) {
+      throw toPageCaptureError(err, 'Aria capture');
+    }
+    const failure = ariaCaptureFailure(snapshot);
+    if (failure) throw failure;
+    return { text: snapshot, captureClipped: ariaSnapshotWasClipped(snapshot) };
   }
 
   // Both DOM paths report failure in band — `expandDomSubtree` catches its

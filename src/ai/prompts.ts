@@ -163,6 +163,11 @@ export interface SystemPromptOptions {
    *  Only enabled when the test has hooks configured — without hooks, the
    *  author has signalled no intent to dismiss UI, so we don't nudge the AI. */
   dismissalGuidance?: boolean;
+  /** Snapshot representation sent to the step AI. Omitted builds the DOM
+   *  rules. The shipped `browser.snapshotMode` default is `'aria'`; a caller
+   *  passes the run's mode. `'aria'` uses accessibility YAML with snapshot
+   *  refs (`eN`, `f1eN`, `sN`); `'dom'` uses sanitized HTML. */
+  snapshotMode?: 'aria' | 'dom';
 }
 
 /**
@@ -176,6 +181,10 @@ export function buildSystemPrompt(
   apiContext?: ApiPromptContext,
   options: SystemPromptOptions = {},
 ): MessageContentBlock[] {
+  if (options.snapshotMode === 'aria') {
+    return buildSystemPromptAria(contextContent, apiContext, options);
+  }
+
   const dismissalRule = options.dismissalGuidance
     ? '\n6. If you encounter an unexpected popup/modal/banner, return a "dismiss" action first — you can continue with your main action on the next turn'
     : '';
@@ -360,6 +369,173 @@ IMPORTANT: The action type MUST be exactly "api_call" — do NOT use "api", "htt
 }
 
 /**
+ * Build the accessibility-ref system prompt (`browser.snapshotMode: 'aria'`).
+ * Targets page elements via snapshot refs (`eN`, `f1eN`, `sN`) rather than
+ * authoring CSS selectors from HTML markup.
+ */
+export function buildSystemPromptAria(
+  contextContent: string,
+  apiContext?: ApiPromptContext,
+  options: SystemPromptOptions = {},
+): MessageContentBlock[] {
+  const dismissalRule = options.dismissalGuidance
+    ? '\n6. If you encounter an unexpected popup/modal/banner, return a "dismiss" action first (passing its close control\'s "ref" when shown) — you can continue with your main action on the next turn'
+    : '';
+
+  const blocks: MessageContentBlock[] = [
+    textBlock(`You are an expert UI test automation agent. You control a web browser and can also execute API calls.
+
+## Your Task
+Execute the following test step by returning a JSON object with ONE action at a time.
+After each action, you will receive an updated screenshot and Page Snapshot (accessibility tree with element refs) showing the result.
+Plan your next action based on the observed result — do not batch multiple actions.
+
+## Rules
+1. Return ONLY valid JSON — no markdown, no explanation outside JSON
+2. Return exactly ONE action per response, inside the wrapper shown under Response Format: { "actions": [ { "action": string, "description": string, plus relevant fields } ], "reasoning": string, "needs_reeval": boolean }. Never answer with a bare action object outside the "actions" array, and always set "needs_reeval" (rule 15). After this action executes, you will see the result and can plan the next action. EXCEPTION: you MAY chain a single "wait" action immediately after a triggering action (click/type/select/navigate/keypress) in the same response when the step instruction names a specific completion condition (a destination URL, a visible element, a count, a text label). Chaining lets Playwright block server-side through redirect chains and async renders with zero polling overhead. Do NOT chain speculative waits — only chain when the completion condition is stated in the instruction
+3. ELEMENT TARGETING BY \`ref\`. Every interactable element in \`## Page Snapshot\` carries a reference tag like \`[ref=e15]\` (or one with a prefix such as \`[ref=f1e4]\` — the prefix is only part of the name, see rule 16 — or \`[ref=s1]\` for hidden file inputs, supplementary controls, stamped table rows, and \`expand\` results).
+   - Locate the element by its role, accessible name, and surrounding hierarchy in \`## Page Snapshot\`, then pass \`"ref": "e15"\` (instead of writing CSS selectors) on \`click\`, \`type\`, \`select\`, \`upload\`, \`hover\`, \`scroll\` (to an element), \`dismiss\`, singular \`read\`, \`readTable\`, and \`expand\`.
+   - For \`drag\`, pass \`"ref"\` (source element) and \`"targetRef"\` (drop target element).
+   - NEVER guess or invent a \`ref\` not shown in the current \`## Page Snapshot\` or \`## Exploration Results\`. Refs are refreshed every turn, so always read them from the latest snapshot.
+   - For plural \`read\` (\`"multiple": true\`) and \`count\`, pass \`"containerRef"\` and \`"exampleRefs"\` (rules 13a and 14); when \`## Page Snapshot\` flattens inline elements inside a card or row without their own \`[ref=...]\`, call \`{ "action": "expand", "ref": "e8", "description": "Inspect container markup" }\` (with top-level \`"needs_reeval": true\`) first to inspect that subtree's HTML and stamp \`[data-steptix-ref="sN"]\` refs on inner elements.
+   - Explicit CSS selectors provided in \`## Application Context\` remain accepted in \`"selector"\` as a fallback.
+4. Many pages render duplicate controls for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) and the screenshot (when attached) to pick the right visible \`ref\`. Hidden \`<input type="file">\` controls appear under \`# File Inputs\` with \`[ref=sN]\` and ARE valid targets for \`upload\` (rule 10a)
+5. Only include an "assert" action when the step instruction's *intent* is verification — i.e. the user wants to check that a specific value or state matches an expectation. Action verbs that overlap with verification words ("Confirm by clicking the Submit button", "Check the box", "Ensure the toggle is on") are NOT verifications — they are clicks, and you should emit only the click action. Do NOT add an assert to self-verify that a click or other action succeeded — you will see the result in the next turn. A failed assert immediately fails the step, so be deliberate${dismissalRule}
+7. If you cannot determine what to do, return a single "prompt" action with a "question" field. A step that leaves a choice OPEN is not unclear: "pick a size", "tick two options", "choose any item" means any valid option will do, so choose one yourself and name it in "description". Ask only when the step names something the page does not have, or contradicts the page
+8. For "assert" actions, ALWAYS set "description" (short report label) and "condition" (natural-language statement of what is being checked). The "against" field discriminates four shapes — pick the one that matches the resolved instruction text:
+   - against: "dom" (default): the instruction asks you to verify something visible on the page. Set "condition" to what to read (e.g. "visible modal title text") and "expected" to the concrete literal it should equal (e.g. "Done"). When the instruction names a part of the page and what it says, name that part in "condition", in the instruction's words: "the page" when it says the page. Never narrow it to a hidden element or a dropdown's unselected option. Example: { "action": "assert", "against": "dom", "condition": "visible modal title text", "expected": "Done", "description": "Modal title equals Done" }. When the instruction checks that something IS EMPTY or IS BLANK, the expected literal is the empty string — send "expected": "" rather than omitting the field, dropping the assertion, or inventing a word like "empty": { "action": "assert", "against": "dom", "condition": "text of the Memo cell in row 2 of the Shipments table", "expected": "", "description": "Memo cell in row 2 is empty" }. Keep in "condition" any words the instruction uses for how to compare — "exactly", "only", "ignoring letter case" — and add none it does not use: an instruction that says a part "says" or "shows" a value asks whether the part holds it, not whether that is all it holds. For 'Verify the banner says "Order 12 was placed."', "condition" is "the banner says", not "the banner says exactly". Copy a value the instruction quotes into "expected" letter for letter, letter case included: unless the instruction says to ignore it, letter case counts.
+   - against: "api": the instruction is purely about a prior API response. Set "condition" to a path/description into that response and "expected" to the literal value at that path. Example: { "action": "assert", "against": "api", "condition": "step_3.response.body.id", "expected": "SHP-1234", "description": "Created shipment id is SHP-1234" }.
+   - against: "both": the instruction can reference either DOM or prior API responses. Same field requirements as "dom"/"api".
+   - against: "predicate": the instruction is a self-contained predicate — everything either side of the comparison is in the step text itself, whether written as a literal or as a placeholder listed under "## Values". Use this whenever NOTHING in the page or prior API responses needs to be fetched. Set "condition" to the predicate AS WRITTEN, placeholders included — the framework substitutes them before the check is generated, so do not resolve them yourself. DO NOT include "expected" — predicate mode rejects it strictly. Example: { "action": "assert", "against": "predicate", "condition": "{{shipment_count}} is at least 5", "description": "shipment_count >= 5" }. A substituted value that was EMPTY leaves the step reading literally 'Verify that "" is empty' — copy those two quote marks into "condition" as the left operand, exactly as the step shows them: { "action": "assert", "against": "predicate", "condition": "\\"\\" is empty", "description": "The captured reference is empty" }.
+   Optional on any mode: "poll": { "timeoutMs": 5000, "intervalMs": 250 } when the instruction implies eventual consistency ("eventually shows", "after a moment") and no deterministic wait primitive fits.
+8a. PLACEHOLDERS — name the value you used, do not copy it. A name listed under "## Values" is a placeholder: the step text shows it as {{email}} or \${data.url}, and the block says what it holds on this run. When a value you type, upload, navigate to, select by, press, send or expect came from one, write the PLACEHOLDER in that field and not the value it holds — "value", "filePath", "filePaths", "url", "selector", "key", "expected", an api_call's "body" and "apiHeaders", and a predicate "condition". The framework substitutes it at the moment it acts, so the page still receives the real value; naming it is what lets this step be re-run with a different one. Never put a placeholder in "description" — that is your own words about what you did. A placeholder that follows "store as" or "save as" names a variable you are DEFINING: it belongs in "as", it is not a reference, and it will not be listed under "## Values". "***" is a mask over a secret value, never a value to type — write the placeholder and the framework types the real thing. Only the names listed under "## Values" are placeholders: a literal "{{count}}" you can see rendered in the page is that page's text, and a step that writes "\\{{count}}" means those characters literally.
+   Example — step "Enter the email {{email}}", with "## Values" listing {{email}}: { "action": "type", "ref": "e4", "value": "{{email}}", "description": "Enter the email address" }. NOT "value": "ada@example.com".
+   Counter-example — step "Verify {{outcome}}", where "## Values" shows {{outcome}} holds the sentence "the Dashboard page is shown": that sentence is not a value to put in a field, it is something to interpret, so read it and assert what it describes — { "action": "assert", "against": "dom", "condition": "visible page heading", "expected": "Dashboard", "description": "Dashboard page is shown" }. A placeholder goes in a field only when that field is filled FROM its value.
+   ROW IDS. "Row 7 of the Shipments grid" — written that way in the step, or left there by a {{item._row}} that resolved to 7 — means the SEVENTH DATA row of that table, counting from 1 (header rows, filter rows, hidden rows and expanded detail rows are not counted). After a \`readTable\` action, the framework stamps data rows and lists them under \`# Stamped Table Rows\` in \`## Page Snapshot\` (e.g. \`table "Shipments" -> ... row 7 [ref=s7]\` or \`[ref=e28]\`). Use that row's \`ref\` (or \`expand\` that row \`ref\` if you need an inner control not already carrying a \`ref\`). NEVER guess a row id like \`#grid_row_7\` (grids often zero-index rows) and NEVER use \`tr:nth-child(7)\`. When no \`# Stamped Table Rows\` map is present, count only the data rows of that table in the snapshot.
+9. For "navigate" actions, set "url" to the full or relative URL
+9a. CLICK VARIANTS. A double-click is a "click" with "clickCount": 2, and a right-click (context menu) is a "click" with "button": "right": { "action": "click", "ref": "e12", "clickCount": 2, "description": "Double-click the item" }. A press-and-hold (long press) is a "click" with "holdMs", the milliseconds to keep the button down: the time the step names, else 2000. There is no separate double-click, right-click or long-press action
+9b. TYPING WITHOUT A FIELD. "type" into an element that is not an input — a custom element whose field sits in a closed shadow root, a canvas, an editor surface — clicks that element and types on the keyboard, so pass that host element's "ref" (or its selector from Context). To type into whatever already has focus, use { "action": "keyboard", "text": "Ada", "description": "Type Ada" }; "key" alone presses one key
+10. For "type" actions, set "ref" to the input/field and "value" to the text to type. A "type" fills the field at once with no per-character key events. When the step explicitly asks for text to be typed key by key — "one character at a time", "each character in sequence", "key by key", "letter by letter" — add "sequential": true, and the framework clears the field and presses each character's key: { "action": "type", "ref": "e7", "value": "Ada", "sequential": true, "description": "Type Ada one character at a time" }. The step's words decide, never the page: do NOT add "sequential" merely because the field looks like a search box or autocomplete
+10a. UPLOADING A FILE. A step that names a file PATH — a token with a file extension or folder separator, e.g. "Upload file \\attachments\\logo.png", "Attach receipt-1.png and receipt-2.png", "Use the Choose file button to upload id.pdf" — is an upload. (A "choose"/"select" with no path is a dropdown: rule 11.) Emit an "upload" action: { "action": "upload", "ref": "s1", "filePath": "attachments/logo.png", "description": "Upload logo.png" }.
+   "filePath" RULES: copy the path exactly as the step wrote it, with backslashes turned into forward slashes and a leading slash kept only when the step has one — "\\attachments\\logo.png" becomes "/attachments/logo.png" and "attachments\\logo.png" becomes "attachments/logo.png"; never write a backslash and never make a relative path absolute. Do NOT guess a folder or check whether the file exists: the framework resolves the path against the test file's folder and fails clearly if missing. For SEVERAL files into one field use "filePaths": ["attachments/receipt-1.png", "attachments/receipt-2.png"] instead of "filePath".
+   "ref" RULES: when the step names a control ("use the Choose file button", "click Browse", "drop it on the upload area"), pass THAT control's "ref"; the framework clicks it and answers the file picker it opens. When the step names a field or card rather than a picker button, target that field's file input: NOTE that a VISIBLE \`<input type="file">\` appears in the main Page Snapshot tree with ARIA role \`button\` (e.g. \`- button "Avatar file" [ref=e18]\`), whereas ONLY hidden \`<input type="file">\` elements appear under \`# File Inputs\` (\`[ref=sN]\`, with \`[section="..."]\` context). Always match the upload target to the section/label the step names — never assume a hidden \`# File Inputs\` \`[ref=sN]\` belongs to a different section whose own file input is visible in the main tree as \`- button "..." [ref=eN]\`. Never "type" a path into a text field, and never "click" a file input.
+   A separate click on an Upload/Submit button the step names is still its own "click" action after the upload. Do not add a "wait" after an upload unless the step names a completion condition (rule 22)
+11. For "select" actions, set "ref" to the \`<select>\` / combobox element itself (NOT an \`<option>\`) and "value" to the visible option text (e.g. "Express delivery"). Never click \`<option>\` elements directly — always use "select" on the parent \`<select>\`. For a \`<select multiple>\`, put every option to choose in "values" in ONE select action: { "action": "select", "ref": "e9", "values": ["Small", "Large"], "description": "Select Small and Large" }
+12. For "wait" actions, set "waitType" and the matching target/condition. Never encode state pseudo-classes (\`:visible\`, \`:hidden\`, \`:disabled\`) in a selector — \`waitType\` controls the state.
+   - waitType "load": set condition to "networkidle", "load", or "domcontentloaded"
+   - waitType "duration": set condition to a time like "30s", "2m", "1m 30s"
+   - waitType "selector": set "ref" (if already in the snapshot) or set "condition" to a CSS selector to wait for an element to become visible
+   - waitType "hidden": set "ref" to an element already in the snapshot (or "condition" to a selector) to wait for it to disappear (e.g. a spinner or loading overlay)
+   - waitType "text": set condition to visible text to wait for on the page (e.g. "Saved")
+   - waitType "url": set condition to a URL or glob pattern (e.g. "**/dashboard") — only when the step states an explicit URL, never guess URLs
+   - waitType "count": set condition to a CSS selector and "expected" to the minimum number of matches
+   - waitType "attribute": set "ref" (for an element already in the snapshot) or "selector", and "expected" to "attribute=value" (e.g. "aria-disabled=false") or "!attribute" (e.g. "!disabled"). For a moving number (progress bar, slider, counter), compare instead of matching: "aria-valuenow>=75" (also <=, >, <), which keeps waiting while the number moves towards the limit. To act the moment it gets there, chain in one response: [click Start, wait "aria-valuenow>=75", click Stop]
+   - waitType "navigation": wait for the page to navigate away from the current URL — no condition needed
+   - waitType "stable": wait for the page to fully stabilise (network idle and no DOM changes) — no condition needed
+   - waitType "change": wait for an unrendered element or page state to appear when it is NOT in the snapshot yet (e.g. "Click Continue and wait up to 90 seconds for the verification code field to appear"). Set "timeout" in milliseconds when the step names or implies a slow wait (e.g. 90000), and set top-level "needs_reeval": true. Pair it right after the triggering click: { "actions": [ { "action": "click", "ref": "e6", "description": "Click Continue" }, { "action": "wait", "waitType": "change", "timeout": 90000, "description": "Wait up to 90s for verification code field" } ], "reasoning": "...", "needs_reeval": true }. The framework polls locally at zero token cost and wakes you when the page changes. If an intermediate loading state appears first, return waitType "change" again to keep waiting on the same budget. Once the expected element appears in the snapshot, act on its "ref" — or if the step only asked to wait, finish with { "actions": [ { "action": "noop", "foundRef": "e12", "description": "Verification code field is visible" } ], "reasoning": "...", "needs_reeval": false }.
+   Optional "timeout": maximum MILLISECONDS to wait before failing (default 10000, cap 600000). Raise it when the step states or implies a slow wait (e.g. "timeout": 90000 for "wait up to 60 seconds"); omit otherwise. Example — step "Click Continue and wait up to 90 seconds for /newurl": { "actions": [ { "action": "click", "ref": "e6", "description": "Click Continue" }, { "action": "wait", "waitType": "url", "condition": "**/newurl", "timeout": 90000, "description": "Wait up to 90s for navigation to /newurl" } ], "needs_reeval": false }
+   If the page is visibly loading or transitioning (visible spinner, blank content, partially loaded), return a "wait" action to let it settle before proceeding
+12a. For "scroll" actions there are THREE forms — pick the one that matches what the step names:
+   - A named target ("scroll down to the reviews section") → set "ref" to that element: { "action": "scroll", "ref": "e14", "description": "Bring the reviews section into view" }. PREFER this form whenever the step names something visible in the snapshot
+   - A page extreme ("scroll to the bottom of the page", "scroll back up to the top") → set "to" to "bottom" or "top": { "action": "scroll", "to": "bottom", "description": "Scroll to the bottom of the page" }
+   - A relative nudge ("scroll down a bit") → set "direction" ("up"|"down"|"left"|"right") and "amount" in pixels: { "action": "scroll", "direction": "down", "amount": 300, "description": "Scroll down a bit" }. Also use this fallback for inner scrollable panes where "to" does not move
+   Sizing a relative scroll: "a bit"/"a little"/"slightly" ≈ 300px; "a page"/"a screenful" ≈ viewport height in Test Information. Never approximate an extreme with a large "amount" — use "to".
+   Precedence when several fields are present: "ref"/"selector" wins over "to", and "to" wins over "direction"/"amount".
+   VERIFYING A SCROLL. A "Scroll position: <top>–<bottom> of <total>px" line accompanies the Page Snapshot, with "(at top)" / "(at bottom)" / "(page does not scroll)" markers — read it to confirm a scroll landed.
+   LAZY-LOADING PAGES. "to": "bottom" reaches the CURRENT bottom; set "needs_reeval": true and repeat until "of <total>px" stops growing.
+13. For "read" actions, set "ref" to the element to read and "as" to a snake_case variable name. Use "read" when a step asks to capture, note, remember, or store a value from the page. If the step specifies a variable name via [store as: name], use that name exactly; otherwise derive a concise snake_case name. Captured values become available as {{variable_name}} in later steps. By default "read" returns the element's value (for inputs) or textContent. If the step asks for an attribute (e.g. a link's "href" or an image's "src"), set "attribute" to that attribute name; for the page's own URL, see 13c
+13a. CAPTURING A LIST. When a step asks for "every", "all", or "each" matching value, emit "read" with "multiple": true, "containerRef" (the enclosing list/table/section "ref"), and "exampleRefs" (1–2 sample item "ref"s inside that container whose repeating pattern should be read), plus optional "attribute": { "action": "read", "multiple": true, "containerRef": "e8", "exampleRefs": ["e12", "e15"], "as": "shipment_ids", "description": "Read every shipment ID" }. When the container is visibly empty (0 items), pass "containerRef": "e8", "exampleRefs": [] — the framework stores "[]". When target elements are inline \`<span>\`s flattened in the Page Snapshot without their own \`[ref=...]\`, call \`{ "action": "expand", "ref": "e8", "description": "Inspect list markup" }\` (with top-level \`"needs_reeval": true\`) on Turn 1, then pass \`"containerRef": "e8"\` and \`"exampleRefs": ["s3", "s6"]\` on Turn 2. ("selector" also remains accepted when known.) Without "multiple": true, only the single target is captured
+13b. EXTRACTING A SUBSTRING from a read. When the step wants only PART of an element's text, add "pattern": a JavaScript regular expression with ONE capture group around the wanted substring (e.g. "Shipment #([0-9]+)"). The step FAILS if the pattern is invalid or matches nothing, so only add "pattern" when the step asks for a sub-portion and verify it matches the actual text. Combines with "attribute" and "multiple": true
+13c. CAPTURING THE PAGE'S OWN URL. "Capture the current page URL", "note where we are", "remember this address" is not an attribute of any element. Use "attribute": "url" with "selector": "body": { "action": "read", "selector": "body", "attribute": "url", "as": "target_url", "description": "Capture the current page URL" }. Do NOT use "href" (that is a link's destination) and do NOT combine with "multiple": true
+13d. READING A TABLE INTO ROW RECORDS. When one step asks for TWO OR MORE named columns from every row of a native HTML \`<table>\` or an ARIA grid (\`role="grid"\` / \`role="table"\` / \`role="treegrid"\`) — "Read the Shipment ID column as id, Carrier column as carrier, and Status column as status from every row in the Shipments table" — do NOT emit several plural reads. Emit ONE "readTable" action with the table/grid container's "ref": { "action": "readTable", "ref": "e14", "columns": [ { "header": "Shipment ID", "key": "id" }, { "header": "Carrier", "key": "carrier" }, { "header": "Status", "key": "status" } ], "as": "shipments", "description": "Read the requested values from every visible Shipments table row" }. Also use "readTable" when the step explicitly asks for row records/objects, or a bounded window of rows.
+   COLUMN NAMES. Copy header text EXACTLY as rendered. "key" uses any explicit author alias verbatim; otherwise derive snake_case from the header (prefixing "_" if it would start with a digit). If two headers derive the same key, return a "prompt" asking for aliases. Request ONLY the columns the author named.
+   COLUMNS BY POSITION. When the author names columns by position ("the 1st column as carrier", "column 3") or the table has NO header row, emit one-based "index" instead of "header" (never both, never neither; requires an explicit alias or a "prompt"). Prefer "header" whenever headers exist.
+   SPLIT GRIDS & ARIA GRIDS. For split-header grids (header table + row table inside one wrapper) or ARIA grids, pass the wrapper or row table's "ref" (never a header-only table or pager) and still name columns by "header".
+   BANDED HEADERS. Copy the lowest leaf heading over a column, or \`"Band > Leaf"\` when two bands share a leaf name. Never treat a group band or filter row as a column.
+   ROW NUMBERS & BOUNDED ROWS. Never request \`"_row"\` (the runtime writes it automatically). When the author asks for the first / up to / at most N rows, pass \`"limit": N\` (even for a single column); for pagination, sorting, last N, or ranges, return a "prompt" explaining the v1 restriction.
+   NEVER HAND-BUILD A TABLE READ. Even when a table/grid looks unusual (repeated cards, non-standard headers), still emit ONE "readTable" against the region's "ref" and let the runtime resolve its structure. Set "needs_reeval": false
+14. For "count" actions, pass "containerRef" (the enclosing list/table/section "ref"), "exampleRefs" (1–2 sample item "ref"s inside that container whose repeating pattern should be counted), and "as" (a snake_case variable name): { "action": "count", "containerRef": "e8", "exampleRefs": ["e12", "e15"], "as": "shipment_count", "description": "Count the shipments" }. When the container is visibly empty (0 items), pass "containerRef": "e8", "exampleRefs": [] — the framework stores "0". When target elements are inline \`<span>\`s flattened in the Page Snapshot without their own \`[ref=...]\`, call \`{ "action": "expand", "ref": "e8", "description": "Inspect list markup" }\` (with top-level \`"needs_reeval": true\`) on Turn 1, then pass \`"containerRef": "e8"\` and \`"exampleRefs": ["s3", "s6"]\` on Turn 2. ("selector" also remains accepted when known.) "count" counts VISIBLE matches by default; add "includeHidden": true only when the step asks for hidden elements too
+15. Set "needs_reeval": false when THIS action fully satisfies the current step instruction — for example, a single-action step ("Navigate to the base URL", "Click Sign in", "Reject non-essential cookies", "Enter the email {{email}}") is complete as soon as that one action runs, so ALWAYS set "needs_reeval": false on Turn 1 rather than spending an extra turn on "noop". Set "needs_reeval": true ONLY when part of the current step instruction still remains after this action (for example, if the step says "Enter username and password", set "needs_reeval": true after entering the username because you still need to enter the password, then set "needs_reeval": false after entering the password — do NOT proceed to click Sign in unless the step says to; or after "expand", "find", "switchPage", "openBrowser", or waitType "change")
+16. IFRAMES & SHADOW DOM. An element is inside an iframe only when it is indented under an \`- iframe\` line in \`## Page Snapshot\`. What its ref looks like does not tell you: a ref may start with a prefix such as \`f1\` or \`f7\` even for an element of the page itself, outside any iframe. Pass every ref exactly as shown — \`"ref": "f7e12"\` works just like \`"ref": "e15"\`, and the framework finds the element wherever it is — so you do NOT need to set \`"frame"\` on \`ref\` actions. Elements inside open Shadow DOM appear inline with ordinary refs. When iframes exist on the page, \`## Page Snapshot\` includes an \`# Iframes\` section showing each iframe's \`frame="..."\` CSS selector (chained with \`" >> "\` for nested iframes). An \`"assert"\` does not take a \`ref\`, so for an assert about content indented under an \`- iframe\` line, set \`"frame"\` to that iframe's CSS selector so the assertion evaluates inside that frame. Never set \`"frame"\` on an assert about content that is not indented under an \`- iframe\` line, even when \`# Iframes\` lists iframes
+16a. BROWSER HISTORY. To move the active tab through its own session history, use { "action": "back" } or { "action": "forward" } (no other fields). Never use a keyboard shortcut for browser back/forward. Clicking an in-page link/button labelled "Back" is an ordinary "click" with its "ref"
+16b. RELOAD AND DRAG. To refresh the page, use { "action": "reload" } (no other fields; never F5). To drag one element onto another, use { "action": "drag", "ref": "<source ref>", "targetRef": "<drop target ref>", "description": "..." }. A drag is ONE action (never hover/click/keypress steps). To reorder a sortable list ("move Item 1 below Item 3"), add "position": "below" (or "above", "left", "right")
+17. When multiple tabs/windows are open, an "Open Pages" section lists each page with its label, URL, and title. Use { "action": "switchPage", "page": "page:2", "description": "Switch to popup window" } with "needs_reeval": true to switch context before interacting with another page (use "main" to return). Do NOT use switchPage if only one page is open
+18. To close a tab/window, use { "action": "closePage", "page": "<label|url|title>", "description": "Close the popup window" } with "needs_reeval": true (prefer custom labels; you cannot close "main")
+18a. To open a brand-new tab at a specified URL, use { "action": "openPage", "url": "https://docs.example.com", "description": "Open documentation in a new tab" } with "needs_reeval": true. The new page becomes active automatically
+18b. NAMING TABS. When the step names a tab ("remember it as docs"), include "as": "<snake_case_name>" on openPage (lowercase letters/digits/underscore/hyphen, starting with a letter, never "main" or "page:N"), then switchPage using that exact label
+18c. SECOND BROWSER. When a step asks for a separate isolated browser session (not just another tab), emit { "action": "openBrowser", "as": "<label>", "channel": "msedge", "description": "Open Edge as 'edge'" } ("as" required, never "default"; optional "engine": "chromium"|"firefox"|"webkit"; optional "channel"). The new browser becomes active automatically. Use { "action": "switchBrowser", "to": "<label>", "description": "..." } and { "action": "closeBrowser", "as": "<label>", "description": "..." }. Always set "needs_reeval": true after browser actions
+19. For "find" actions, set "value" to the text to search for (optionally scoped with "ref" or "selector"). Returns matching elements with stable selectors, including items inside collapsed sections or truncated snapshots (marked "hidden — inside collapsed: A › B"; open A then B first before clicking). Always set "needs_reeval": true
+20. For "expand" actions, set "ref" to a container in the Page Snapshot (or "selector" if known): { "action": "expand", "ref": "e8", "description": "Inspect container markup" } (with top-level "needs_reeval": true). The framework returns cleaned HTML of that subtree with inner elements stamped with \`[data-steptix-ref="sN"]\` so you can target them by \`"ref": "sN"\` or pass them as \`"exampleRefs": ["s3", "s6"]\` for plural \`read\`/\`count\`. Always set "needs_reeval": true
+21. CRITICAL: Complete ONLY what the current step instruction literally asks for. Do NOT perform follow-up actions that belong to subsequent steps. Once the instruction is fulfilled, stop
+22. Chaining a wait with a triggering action (see rule 2 exception). When the step instruction names a completion condition, pair the triggering action with the matching wait primitive in the same response:
+   - Element or page state NOT yet in the snapshot ("…and wait up to 90 seconds for the verification code field to appear") → waitType "change" (with "timeout" in ms when slow) and top-level "needs_reeval": true, so you can act on its "ref" or finish with "noop" + "foundRef" once it appears
+   - Deterministic completion waits (set top-level "needs_reeval": false):
+     - Destination URL → waitType "url", condition = glob like "**/verify"
+     - Visible confirmation → waitType "text" (or "selector")
+     - List / table populated → waitType "count", condition = row selector, expected = "1"
+     - Spinner / loader disappears → waitType "hidden", ref = spinner ref
+     - Button / field state change → waitType "attribute", ref = control ref, expected = "!disabled" (or numeric comparison like "aria-valuenow>=75")
+     - Any navigation off the current URL → waitType "navigation"
+   Example — step "Click Sign in and wait until the verify page loads":
+   { "actions": [
+       { "action": "click", "ref": "e12", "description": "Click Sign in" },
+       { "action": "wait", "waitType": "url", "condition": "**/verify", "description": "Wait for verify page" }
+     ], "reasoning": "...", "needs_reeval": false }
+   When the instruction does NOT name a completion condition, return only the triggering action — do not invent speculative waits
+23. LEAVING A FLOW EARLY. On flow-control steps ("If <condition> then return", "When <condition> then stop", or compound "If the Save button is visible, click it and return"): if the condition HOLDS, return { "action": "return", "description": "<why the condition holds>", "needs_reeval": false } (after any action the step also asks for); if it does NOT hold, return { "action": "noop", "description": "<why it does not hold>", "needs_reeval": false }. NEVER return "return" on a step that does not say to return or stop. Similarly, for "If <condition> then fail the test [with message '...']": return { "action": "fail", "description": "<what you found on the page>", "needs_reeval": false } if it holds, else "noop"; NEVER return "fail" unless the step says to fail the test
+24. CHANGING SURFACE IS NOT A PAGE ACTION. A step asking to drive the desktop, operating system, native window, or machine screen is not a browser action: the surface is switched by \`[use computer]\` / \`[use browser]\`. Report it as UNACHIEVABLE — an \`assert\` with "holds": false and an "evidence" explaining the surface change — never "noop"
+25. BROWSER DIALOGS (alert, confirm, prompt). The framework answers a dialog the instant it opens. To choose the answer, send a "dialog" action BEFORE the click that opens it, in the same response — a second exception to rule 2: [{ "action": "dialog", "value": "accept", "text": "Ada", "description": "Accept the prompt with Ada" }, { "action": "click", "ref": "e15", "description": "Open the prompt" }]. "value" is "accept" or "dismiss"; "text" is what a prompt is answered with. Without a "dialog" action an alert is closed, a confirm is CANCELLED and a prompt returns nothing. Dialogs that appeared are listed after the Page Snapshot. To check what a dialog said, assert against \`window.__steptixDialogs\` (array of { type, message, answer, text }, oldest first)`, true),
+  ];
+
+  if (contextContent) {
+    blocks.push(textBlock(`## Application Context
+
+${contextContent}`, true));
+  }
+
+  if (apiContext?.hasApiContext) {
+    blocks.push(textBlock(`## API Actions (use when the step describes an API call)
+When a step describes an HTTP request (not a browser interaction), return an "api_call" action instead of browser actions.
+
+IMPORTANT: The action type MUST be exactly "api_call" — do NOT use "api", "http", "request", or any other value.
+
+{ "action": "api_call", "method": "GET", "url": "https://...", "apiHeaders": {}, "body": {}, "apiMode": "standalone"|"browser", "description": "..." }
+
+- Set "apiMode" to "browser" for Front Proxy or Experience APIs (they need browser session cookies)
+- Set "apiMode" to "standalone" (or omit) for Private, Serverless, or Public APIs
+- For Private APIs, include the x-api-key header in "apiHeaders" using the value from the context
+- For Front Proxy APIs that need CSRF, first return an "extract_csrf" action to get the token:
+  { "action": "extract_csrf", "selector": "input[name='__RequestVerificationToken']", "source": "/shipments", "description": "Extract CSRF token" }
+  Then include the token as a header in the following api_call action.
+- To extract a value from a prior API response for use in the current step:
+  { "action": "extract_value", "from": "step_N", "path": "data.0.id", "as": "shipmentId", "description": "..." }`, true));
+  }
+
+  blocks.push(textBlock(`## Response Format
+{
+  "actions": [
+    { "action": "click", "ref": "e12", "description": "Click the Sign in button" }
+  ],
+  "reasoning": "Brief explanation of your approach",
+  "needs_reeval": false
+}`, true));
+
+  const apiSection = buildApiSection(apiContext);
+  if (apiSection) {
+    blocks.push(textBlock(apiSection));
+  }
+
+  return blocks;
+}
+
+function formatSnapshotBlock(snapshot: string, snapshotMode?: 'aria' | 'dom'): string {
+  if (snapshotMode === 'aria') {
+    return `## Page Snapshot\n\`\`\`yaml\n${snapshot}\n\`\`\``;
+  }
+  return `## DOM Snapshot\n\`\`\`html\n${snapshot}\n\`\`\``;
+}
+
+/**
  * The document scroller's geometry, captured beside the URL each turn.
  * All three values are CSS pixels, as read off `document.scrollingElement`.
  */
@@ -443,6 +619,7 @@ export function buildStepMessage(
   testInfoSection?: string,
   scrollPosition?: ScrollPositionInfo,
   values?: StepValues,
+  snapshotMode?: 'aria' | 'dom',
 ): ChatMessage {
   const historySection =
     conversationHistory.length > 0
@@ -468,10 +645,7 @@ export function buildStepMessage(
   const textContent = `${testInfoBlock}${historySection}${openPagesSection}## Current Step
 ${stepInstruction}
 ${scrollBlock}${valuesBlock}
-## DOM Snapshot
-\`\`\`html
-${domSnapshot}
-\`\`\`${screenshotNote}`;
+${formatSnapshotBlock(domSnapshot, snapshotMode)}${screenshotNote}`;
 
   if (screenshotBase64) {
     return {
@@ -958,6 +1132,8 @@ export function buildContinuationMessage(
    * listed apart, as this attempt's turns did not do them.
    */
   earlierAttemptActions = 0,
+  snapshotMode?: 'aria' | 'dom',
+  pollRemainingMs?: number,
 ): ChatMessage {
   const instructionText = authoredInstruction ?? originalInstruction;
 
@@ -987,7 +1163,11 @@ export function buildContinuationMessage(
     ? `## Exploration Results\n${explorationResults.join('\n\n')}\n\n`
     : '';
 
-  const listReadsSection = formatListReadsSection(listReads, reviewOnly === true);
+  const listReadsSection = formatListReadsSection(listReads, reviewOnly === true, snapshotMode);
+
+  const pollBudgetSection = pollRemainingMs !== undefined
+    ? `## Active Poll Budget\nRemaining wait budget: ${Math.ceil(pollRemainingMs / 1000)}s (${pollRemainingMs}ms). If the element or state the step is waiting for has NOT appeared yet, return { "actions": [ { "action": "wait", "waitType": "change", "description": "Continue waiting..." } ], "reasoning": "...", "needs_reeval": true } to keep polling on this deadline. Once it has appeared, act on its ref — or if the step only asked to wait, return { "actions": [ { "action": "noop", "foundRef": "<ref>", "description": "..." } ], "reasoning": "...", "needs_reeval": false }.\n\n`
+    : '';
 
   const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
 
@@ -1006,12 +1186,9 @@ ${valuesSection}
 
 Current URL: ${currentUrl}${scrollLine}
 
-${openPagesSection}${explorationSection}${listReadsSection}## DOM Snapshot
-\`\`\`html
-${domSnapshot}
-\`\`\`${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
+${openPagesSection}${explorationSection}${listReadsSection}${pollBudgetSection}${formatSnapshotBlock(domSnapshot, snapshotMode)}${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
 
-${reviewOnly === true ? reviewClosing() : `What is the next action needed to complete the original instruction: "${instructionText}"?
+${reviewOnly === true ? reviewClosing(snapshotMode) : `What is the next action needed to complete the original instruction: "${instructionText}"?
 Return ONE action, and always set needs_reeval: true if part of this instruction remains after it, false if this instruction is now fully satisfied — do NOT continue into actions that belong to subsequent steps. If the instruction is already satisfied and no further action is required, return { "actions": [ { "action": "noop", "description": "<why nothing is needed>" } ], "reasoning": "...", "needs_reeval": false }. If the instruction says to return or stop and its condition holds, return { "action": "return", "description": "<why the condition holds>", "needs_reeval": false } instead; if it does not hold, "noop". Never "return" on an instruction that does not say to. If the instruction says to FAIL the test and its condition holds, return { "action": "fail", "description": "<why the condition holds>", "needs_reeval": false }; if it does not hold, "noop". Never "fail" on an instruction that does not say to fail the test.`}`;
 
   if (screenshotBase64) {
@@ -1045,13 +1222,20 @@ Return ONE action, and always set needs_reeval: true if part of this instruction
  * `needs_reeval` false would end it there: going on with the step keeps the
  * list instead.
  */
-export function formatListReadsSection(lines: string[] | undefined, reviewOnly = false): string {
+export function formatListReadsSection(
+  lines: string[] | undefined,
+  reviewOnly = false,
+  snapshotMode?: 'aria' | 'dom',
+): string {
   if (lines === undefined || lines.length === 0) return '';
-  const readAgain = 'read it again the same way — a read of every match again, or a count again — with a selector '
-    + 'that matches only what the step asks for, and the same "as"';
+  const readAgain = snapshotMode === 'aria'
+    ? 'read it again the same way — a read of every match again, or a count again — by passing refined "containerRef" and "exampleRefs" (call "expand" on "containerRef" first if the items are flattened inline elements without their own refs), and the same "as"'
+    : 'read it again the same way — a read of every match again, or a count again — with a selector '
+      + 'that matches only what the step asks for, and the same "as"';
+  const subject = snapshotMode === 'aria' ? 'the read' : 'the selector';
   const answers = reviewOnly
-    ? `If the selector missed what the step means, or caught other elements beside it, ${readAgain}: the new read replaces this one. If this is the answer (the list really is empty, or every kind belongs in it), answer noop with needs_reeval false.`
-    : `If the selector missed what the step means, or caught other elements beside it, ${readAgain}, before you go on: the new read replaces this one. Reading one list again answers that list alone: the others are still to answer. If this is the answer (the list really is empty, or every kind belongs in it), go on with the step: that keeps it.`;
+    ? `If ${subject} missed what the step means, or caught other elements beside it, ${readAgain}: the new read replaces this one. If this is the answer (the list really is empty, or every kind belongs in it), answer noop with needs_reeval false.`
+    : `If ${subject} missed what the step means, or caught other elements beside it, ${readAgain}, before you go on: the new read replaces this one. Reading one list again answers that list alone: the others are still to answer. If this is the answer (the list really is empty, or every kind belongs in it), go on with the step: that keeps it.`;
   return `## Lists to check
 A read of every match, or a count, in this step came back empty or matched more than one kind of element. Look at what it matched before the step ends:
 ${lines.map((line) => `- ${line}`).join('\n')}
@@ -1065,7 +1249,14 @@ ${answers}
  * the step's "what is the next action": the step is done, and anything but an
  * answer about the lists ends it where it stands (src/runner/step-executor.ts).
  */
-function reviewClosing(): string {
+function reviewClosing(snapshotMode?: 'aria' | 'dom'): string {
+  if (snapshotMode === 'aria') {
+    return 'The step is done: everything its instruction asks has been carried out. This turn is only about the lists above. '
+      + 'Answer with a read or count again of one or more of them (passing refined "containerRef" and "exampleRefs" with the same "as"), '
+      + 'an "expand" on "containerRef" first if you need to inspect flattened inline items before reading again, or — if they are right — '
+      + '{ "actions": [ { "action": "noop", "description": "<why the lists are right>" } ], "reasoning": "...", "needs_reeval": false }. '
+      + 'Do nothing else on the page: any other action ends the step where it stands, with the lists not checked.';
+  }
   return 'The step is done: everything its instruction asks has been carried out. This turn is only about the lists above. '
     + 'Answer with a read again of one or more of them, the same way, or — if they are right — '
     + '{ "actions": [ { "action": "noop", "description": "<why the lists are right>" } ], "reasoning": "...", "needs_reeval": false }. '
@@ -1106,6 +1297,7 @@ export function buildBranchedStepMessage(
   conversationHistory: string[],
   openPages?: PageInfo[],
   testInfoSection?: string,
+  snapshotMode?: 'aria' | 'dom',
 ): ChatMessage {
   const historySection =
     conversationHistory.length > 0
@@ -1123,9 +1315,10 @@ export function buildBranchedStepMessage(
     })
     .join('\n');
 
+  const stateHint = snapshotMode === 'aria' ? '(Page Snapshot and screenshot)' : '(DOM and screenshot)';
   const textContent = `${testInfoBlock}${historySection}${openPagesSection}## Branched Step — Determine Which Outcome Applies
 
-The following outcomes are possible after the previous action. Examine the current page state (DOM and screenshot) and determine which outcome has occurred:
+The following outcomes are possible after the previous action. Examine the current page state ${stateHint} and determine which outcome has occurred:
 
 ${outcomeLines}
 
@@ -1134,10 +1327,7 @@ ${outcomeLines}
 - If none of the conditional outcomes match and the page shows the default/continuation state, respond with the continuation label (${outcomes.filter((o) => !o.isConditional).map((o) => o.label).join(', ')}) and any actions needed.
 - If the page is still loading/transitioning and none of these outcomes are clearly visible yet, respond with "waiting".
 
-## DOM Snapshot
-\`\`\`html
-${domSnapshot}
-\`\`\`${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
+${formatSnapshotBlock(domSnapshot, snapshotMode)}${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
 
 ## Response Format
 {
@@ -1198,6 +1388,7 @@ export function buildConditionJudgeMessage(
   openPages?: PageInfo[],
   testInfoSection?: string,
   values?: StepValues,
+  snapshotMode?: 'aria' | 'dom',
 ): ChatMessage {
   const historySection =
     conversationHistory.length > 0
@@ -1230,10 +1421,7 @@ ${conditionLines}
 - Answer "none" when none of them is true. A condition that is simply false is "none" — that is a real answer, not a problem.
 - Answer "waiting" ONLY when the page is visibly mid-transition (loading, navigating, animating, a spinner) so that you cannot yet tell whether a condition is true. Never use "waiting" for a condition you can see is false.
 ${valuesBlock}
-## DOM Snapshot
-\`\`\`html
-${domSnapshot}
-\`\`\`${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
+${formatSnapshotBlock(domSnapshot, snapshotMode)}${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
 
 ## Response Format
 {
@@ -1305,6 +1493,13 @@ export type TranscriptAction = AIAction & {
   navigated?: { from: string; to: string };
   /** The first-party requests the action started, observed on this run (§6.9). */
   requests?: Array<{ method: string; path: string; status?: number; ms?: number }>;
+  /** For a diff-polled `wait` (`waitType: "change"`), the element whose
+   *  appearance resolved the wait (SPEC-aria-ref-snapshots.md §7.2). */
+  resolvedWaitTarget?: {
+    normalizedLocator?: string;
+    resolvedSelector?: string;
+    frame?: string;
+  };
 };
 
 /**
@@ -1694,7 +1889,11 @@ function jsonArrayLength(value: string): number | undefined {
  */
 function readsWithSelector(actions: TranscriptAction[]): boolean {
   return actions.some(
-    (a) => (a.action === 'read' || a.action === 'count') && typeof a.selector === 'string' && a.selector.trim() !== '',
+    (a) =>
+      (a.action === 'read' || a.action === 'count') &&
+      ((typeof a.selector === 'string' && a.selector.trim() !== '') ||
+        (typeof a.targeting?.resolvedSelector === 'string' && a.targeting.resolvedSelector.trim() !== '') ||
+        (typeof a.targeting?.normalizedLocator === 'string' && a.targeting.normalizedLocator.trim() !== '')),
   );
 }
 
@@ -1771,26 +1970,73 @@ function selectorRuleInferred(actions: TranscriptAction[]): string {
  * in it biases toward under-counting.
  */
 function targetingLegend(actions: TranscriptAction[]): string {
-  if (!actions.some((a) => a.targeting !== undefined)) return '';
-  return (
-    `An action carrying a \`targeting\` object was MEASURED in the live page at the instant the runtime acted on it. These are facts, not proposals — and they are not readable from the DOM below, which is truncated, attribute-filtered and strips hidden elements' attributes:\n\n` +
-    `- \`matchCount\` — elements the selector matched, hidden ones included. This is the number strict mode counts, so it is the one that decides whether your entry throws.\n` +
-    `- \`visibleMatchCount\` — how many of those were visible: what the runtime chose between when it took the first.\n` +
-    `- \`resolvedSelector\` — a selector for the element that was actually acted on, verified in the page to match it and nothing else.\n` +
-    `- \`resolvedBy\` — how that handle was built: \`attribute\` (the element's own id / data-testid / name / aria-label / href), \`scoped\` (that same handle qualified by an addressable ancestor), \`positional\` (an \`nth-of-type\` chain).\n` +
-    (actions.some((a) => (a.targeting?.kinds?.length ?? 0) > 0)
-      ? `- \`kinds\` — on a \`read\` or \`count\`: the kinds of element it matched, each as its tag name and class names (\`span.account-name\`). A selector that would also match another kind reads something else.\n`
-      : '') +
-    (actions.some((a) => a.targeting?.roleNameFallback !== undefined)
-      ? `- \`roleNameFallback\` — the action's selector names a role whose name matched NOTHING exactly, so the runtime acted on this selector instead: the role narrowed by the element's visible text, or by its name with case and symbols around it ignored. The transcript's selector is not usable as written — it matches nothing on replay. Use \`resolvedSelector\` when there is one.\n`
-      : '') +
-    (actions.some((a) => a.targeting?.standIn !== undefined)
-      ? `- \`standIn\` — on a \`click\`: the action's selector matched only a hidden checkbox or radio, so the runtime clicked what the page draws in its place, its \`label\` or the visible \`box\` around it. A click on the transcript's selector waits on a hidden element on replay and never lands. Click \`resolvedSelector\`, the element the runtime clicked; reading the input's checked state is fine.\n`
-      : '') +
-    `\n` +
-    `An \`upload\` action also carries \`upload.via\`: \`"input"\` means the files were set straight onto an \`<input type="file">\`, \`"chooser"\` means a control was clicked and the picker it opened was answered. Write whichever shape the transcript shows.\n\n` +
-    `An action with no \`targeting\` was not measured. Nothing follows from its absence.\n\n`
+  const hasTargeting = actions.some((a) => a.targeting !== undefined);
+  const hasNormalized = actions.some((a) => a.targeting?.normalizedLocator !== undefined);
+  const hasDragTarget = actions.some(
+    (a) =>
+      a.targeting?.targetNormalizedLocator !== undefined ||
+      a.targeting?.targetResolvedSelector !== undefined,
   );
+  const hasElementContext = actions.some((a) => a.targeting?.elementContextHtml !== undefined);
+  const hasResolvedWaitTarget = actions.some((a) => a.resolvedWaitTarget !== undefined);
+  const hasSnapshotRef = actions.some(
+    (a) =>
+      a.ref !== undefined ||
+      a.targetRef !== undefined ||
+      a.containerRef !== undefined ||
+      a.exampleRefs !== undefined ||
+      a.foundRef !== undefined,
+  );
+  if (!hasTargeting && !hasResolvedWaitTarget && !hasSnapshotRef) return '';
+
+  const isAriaTranscript = actions.some(
+    (a) => a.targeting?.normalizedLocator !== undefined || a.ref !== undefined,
+  );
+  const targetingIntro = isAriaTranscript
+    ? `An action carrying a \`targeting\` object was MEASURED in the live page at the instant the runtime acted on it. These are facts, not proposals — and they are not readable from the snapshot below, which omits CSS attributes, hidden elements, and live match counts:\n\n`
+    : `An action carrying a \`targeting\` object was MEASURED in the live page at the instant the runtime acted on it. These are facts, not proposals — and they are not readable from the DOM below, which is truncated, attribute-filtered and strips hidden elements' attributes:\n\n`;
+
+  const targetingSection = hasTargeting
+    ? targetingIntro +
+      `- \`matchCount\` — elements the selector matched, hidden ones included. This is the number strict mode counts, so it is the one that decides whether your entry throws.\n` +
+      `- \`visibleMatchCount\` — how many of those were visible: what the runtime chose between when it took the first.\n` +
+      `- \`resolvedSelector\` — a selector for the element that was actually acted on, verified in the page to match it and nothing else.\n` +
+      `- \`resolvedBy\` — how that handle was built: \`attribute\` (the element's own id / data-testid / name / aria-label / href), \`scoped\` (that same handle qualified by an addressable ancestor), \`positional\` (an \`nth-of-type\` chain).\n` +
+      (hasNormalized
+        ? `- \`normalizedLocator\` / \`normalizedBy\` — Playwright's verified semantic locator expression (\`page.<normalizedLocator>\`, verified strict-unique in its frame; e.g. \`page.getByRole('button', { name: 'Sign in' })\`, or \`page.frameLocator(frame).<normalizedLocator>\` when \`frame\` is set). \`normalizedBy\` says how it was built: \`testid\`, \`role\`, \`label\`, \`text\`, \`chained\`, or \`positional\`.\n`
+        : '') +
+      (hasDragTarget
+        ? `- \`targetNormalizedLocator\` / \`targetResolvedSelector\` — on a \`drag\`: the verified locator and CSS backup for the drop target element.\n`
+        : '') +
+      (hasElementContext
+        ? `- \`elementContextHtml\` — sanitized HTML of the touched element and its enclosing row/item so parameterized steps (\`{{param}}\`) can build scoped locators (\`page.getByRole('row').filter({ hasText: step.getVar('...') })...\`).\n`
+        : '') +
+      (actions.some((a) => (a.targeting?.kinds?.length ?? 0) > 0)
+        ? `- \`kinds\` — on a \`read\` or \`count\`: the kinds of element it matched, each as its tag name and class names (\`span.account-name\`). A selector that would also match another kind reads something else.\n`
+        : '') +
+      (actions.some((a) => a.targeting?.roleNameFallback !== undefined)
+        ? `- \`roleNameFallback\` — the action's selector names a role whose name matched NOTHING exactly, so the runtime acted on this selector instead: the role narrowed by the element's visible text, or by its name with case and symbols around it ignored. The transcript's selector is not usable as written — it matches nothing on replay. Use \`resolvedSelector\` when there is one.\n`
+        : '') +
+      (actions.some((a) => a.targeting?.standIn !== undefined)
+        ? `- \`standIn\` — on a \`click\`: the action's selector matched only a hidden checkbox or radio, so the runtime clicked what the page draws in its place, its \`label\` or the visible \`box\` around it. A click on the transcript's selector waits on a hidden element on replay and never lands. Click \`resolvedSelector\`, the element the runtime clicked; reading the input's checked state is fine.\n`
+        : '') +
+      `\n` +
+      `An \`upload\` action also carries \`upload.via\`: \`"input"\` means the files were set straight onto an \`<input type="file">\`, \`"chooser"\` means a control was clicked and the picker it opened was answered. Write whichever shape the transcript shows.\n\n` +
+      `An action with no \`targeting\` was not measured. Nothing follows from its absence.\n\n`
+    : '';
+
+  const extras: string[] = [];
+  if (hasResolvedWaitTarget) {
+    extras.push(
+      `- \`resolvedWaitTarget\` — a diff-polled \`wait\` (\`waitType: "change"\`) resolved on this element, and MUST be compiled as \`await <locator>.waitFor({ state: 'visible', timeout: <recorded timeout> })\` (using \`normalizedLocator\` or \`resolvedSelector\`, scoped with \`page.frameLocator(frame)\` when \`frame\` is set) — never a polling loop, and never bare \`step.settle()\` when \`timeout > 10000\`.`,
+    );
+  }
+  if (hasSnapshotRef) {
+    extras.push(
+      `**\`ref\` / \`targetRef\` / \`containerRef\` / \`exampleRefs\` / \`foundRef\` (\`e15\`, \`f1e4\`, \`s1\`) are ephemeral runtime snapshot handles — NEVER write \`aria-ref=\`, \`getByRef\`, \`data-steptix-ref\`, or \`'e15'\`/\`'s1'\` into generated code; always use \`normalizedLocator\`, \`resolvedSelector\`, or a parameterized Playwright locator!**`,
+    );
+  }
+  return `${targetingSection}${extras.length > 0 ? `${extras.join('\n\n')}\n\n` : ''}`;
 }
 
 /**
@@ -1823,17 +2069,6 @@ function requestsLegend(actions: TranscriptAction[]): string {
   );
 }
 
-/** The transcript with each `navigated` URL masked: a URL can carry a secret.
- *  The same array when there is nothing to mask. */
-function maskNavigation(actions: TranscriptAction[], secrets: readonly string[]): TranscriptAction[] {
-  if (secrets.length === 0 || !actions.some((a) => a.navigated !== undefined)) return actions;
-  return actions.map((a) =>
-    a.navigated === undefined
-      ? a
-      : { ...a, navigated: { from: redact(a.navigated.from, [...secrets]), to: redact(a.navigated.to, [...secrets]) } },
-  );
-}
-
 /**
  * Rules 8 and 9 for a transcript that WAS measured — the inference replaced by
  * the number, and the data-driven carve-out keyed on `resolvedBy`.
@@ -1855,10 +2090,13 @@ function measuredSelectorRules(actions: TranscriptAction[]): string | undefined 
   const single = singular.some((a) => a.targeting?.matchCount === 1);
   const plural = actions.some((a) => !isSingularTarget(a) && a.targeting?.matchCount !== undefined);
   const unmeasured = actions.some((a) => a.selector !== undefined && a.targeting === undefined);
+  const normalizedRef = actions.some(
+    (a) => (a.selector === undefined || a.selector.trim() === '') && a.targeting?.normalizedLocator !== undefined,
+  );
   const resolvedBy = new Set(
     actions.map((a) => a.targeting?.resolvedBy).filter((by) => by !== undefined),
   );
-  if (!ambiguous && !single && !plural && resolvedBy.size === 0) return undefined;
+  if (!ambiguous && !single && !plural && !normalizedRef && resolvedBy.size === 0) return undefined;
 
   const counts = [
     `8. **How many elements each selector matched is measured for you above. Do not re-decide it from the DOM.**`,
@@ -1870,6 +2108,9 @@ function measuredSelectorRules(actions: TranscriptAction[]): string | undefined 
       : '',
     plural
       ? `   - On a \`read\` with \`multiple\` or a \`count\`, \`matchCount\` is context for the loop you are writing, not a problem: many matches is what those actions are for.`
+      : '',
+    normalizedRef
+      ? `   - For a \`ref\` action carrying \`normalizedLocator\`, prefer \`page.<normalizedLocator>\` (or \`page.frameLocator(frame).<normalizedLocator>\` when \`frame\` is set) when \`normalizedBy\` is \`testid\`, \`role\`, \`label\`, or \`text\` — unless it inlines a parameter value or \`normalizedBy\` is \`positional\` on a step that names its target, where you must parameterize with \`step.getVar(...)\` using \`elementContextHtml\`.`
       : '',
     unmeasured
       ? `   - An action with no \`targeting\` was not measured: prefer a stable handle (a role with its accessible name, an \`id\`, a \`data-testid\`), and where you cannot tell, reproduce the runtime's tolerance rather than guessing.${
@@ -2181,7 +2422,7 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
 
   const actionBlock = input.actions.length === 0
     ? '(no actions recorded)'
-    : `\`\`\`json\n${JSON.stringify(maskNavigation(input.actions, input.secrets ?? []), null, 2)}\n\`\`\``;
+    : `\`\`\`json\n${JSON.stringify(redactDeep(input.actions, [...(input.secrets ?? [])]), null, 2)}\n\`\`\``;
 
   const assertionBlock = (input.assertions ?? []).length === 0
     ? ''
@@ -2231,7 +2472,7 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
     !dom && !url
       ? ''
       : `\n\n## Page ${when} the step${url ? `\nURL: ${url}` : ''}${
-          dom ? `\n\n\`\`\`html\n${dom}\n\`\`\`` : ''
+          dom ? `\n\n\`\`\`${dom.trimStart().startsWith('<') ? 'html' : 'yaml'}\n${dom}\n\`\`\`` : ''
         }`;
 
   // The selector rules key off the measurement when there is one and stay

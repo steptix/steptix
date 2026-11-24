@@ -42,17 +42,21 @@ Every other line is sent to the executing model together with:
 - the step text **as you wrote it**, placeholders intact, plus a `## Values`
   block saying what each `{{name}}` and `${ref}` holds on this run (values with
   a secret-looking name show as `***`);
-- a cleaned DOM snapshot of the active tab: interactive elements, visible
-  text, roles, ids and test ids. Elements hidden with `display:none` or
-  `aria-hidden` collapse to an empty placeholder, and long repetitive runs
-  (table rows, list items) collapse to head and tail with an "N similar
-  elements omitted" marker;
+- a picture of the active tab. By default that is an accessibility snapshot,
+  and the model names the element by the ref printed on it. You still write
+  the step in the same English. A ref belongs to one snapshot, so Run &
+  Compile turns the element the run actually used into an ordinary Playwright
+  locator and does not leave the ref in the code. Set `browser.snapshotMode`
+  to `dom` (or start the process with `STEPTIX_SNAPSHOT_MODE=dom`) for the
+  cleaned HTML snapshot instead: interactive elements, visible text, roles,
+  ids and test ids, with `display:none` and `aria-hidden` elements collapsed
+  and long repetitive runs (table rows, list items) cut to head and tail;
 - the current URL, the viewport size and device class, the open tabs and
   browsers, and the outcome of earlier steps;
 - every `context/**/*.md` file in the project, verbatim;
 - the test's own `## Context` section, verbatim, after the project's files;
 - a screenshot, only when `ai.sendScreenshots` is on in `steptix.config.json`
-  (it is off by default, so assume the model works from the DOM).
+  (it is off by default, so assume the model works from the page snapshot).
 
 The model returns **one action per turn**. The framework performs it with
 Playwright, takes a fresh snapshot, and asks again until the model reports the

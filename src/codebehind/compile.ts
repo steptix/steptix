@@ -17,6 +17,7 @@ import {
 import { buildCodeBehindRegistry, type CodeBehindBinding } from './loader.js';
 import { withTestContext } from '../context/test-context.js';
 import {
+  EPHEMERAL_REF_WITHHELD,
   aiEntryFor,
   anyActionCarriesPlaceholder,
   askCheckedRepair,
@@ -975,9 +976,11 @@ export async function compileTest(callerOptions: CompileOptions): Promise<Compil
    */
   const conditionsNotCompiled: Array<{ number: number; message: string }> = [];
   /**
-   * Steps whose generated (or repaired) code was WITHHELD: it still read with a
-   * different selector from the one the recording read with after its one
-   * re-ask (docs/specs/SPEC-codebehind-robustness.md §6.2). Modelled on
+   * Steps whose generated (or repaired) code was WITHHELD: after its one
+   * re-ask, it still read with a different selector from the one the recording
+   * read with (docs/specs/SPEC-codebehind-robustness.md §6.2) or still used an
+   * ephemeral snapshot ref that cannot replay
+   * (docs/specs/SPEC-aria-ref-snapshots.md §7.3). Modelled on
    * `conditionsNotCompiled`, for the same reasons: not fatal — the check fails
    * nothing, it leaves one step on AI — so the step leaves the selection, no
    * replay round expects code from it, the summary names it, and nothing is
@@ -1811,12 +1814,14 @@ export async function compileTest(callerOptions: CompileOptions): Promise<Compil
       continue;
     }
     if (applied.kind === 'error' && applied.withheld) {
-      // The repair still read with a different selector from the recording's
-      // (§6.2). The entry is known wrong — it failed this replay — and so is its
-      // replacement, so the step gets NO entry: the compile takes back what it
-      // proposed for it and the step leaves the selection, staying on AI until a
-      // later compile. Where taking it back is unsafe (a later identically
-      // worded entry would slide into its slot), it is written off as before.
+      // The repair was withheld: it still read with a different selector from
+      // the recording's (§6.2) or still used an ephemeral snapshot ref
+      // (SPEC-aria-ref-snapshots.md §7.3). The entry is known wrong — it failed
+      // this replay — and so is its replacement, so the step gets NO entry: the
+      // compile takes back what it proposed for it and the step leaves the
+      // selection, staying on AI until a later compile. Where taking it back is
+      // unsafe (a later identically worded entry would slide into its slot), it
+      // is written off as before.
       if (await candidate.retract(failed.step)) {
         await candidate.persist();
         stepsNotCompiled.push({ number: ownerOf(failed.step).number, message: applied.message });
@@ -1827,7 +1832,10 @@ export async function compileTest(callerOptions: CompileOptions): Promise<Compil
           `not compiled — ${applied.message}; the step stays AI, and the next compile tries again`,
         );
       } else {
-        await writeOff(failed.step, applied.message, 'because its repair still read with a different selector');
+        const writeOffWhy = applied.message.includes(EPHEMERAL_REF_WITHHELD)
+          ? 'because its repair still used an ephemeral snapshot ref'
+          : 'because its repair still read with a different selector';
+        await writeOff(failed.step, applied.message, writeOffWhy);
       }
       continue;
     }

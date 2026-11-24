@@ -203,6 +203,12 @@ export interface BrowserConfig {
   /** Launch settings for CDP browsers this framework starts. See
    *  CdpBrowserConfig. Nothing here applies to a browser attached to by port. */
   cdp?: CdpBrowserConfig | undefined;
+  /** Page snapshot format sent to the step AI
+   *  (docs/specs/SPEC-aria-ref-snapshots.md §9.1):
+   *    - `'aria'` (default): compact accessibility snapshot with `[ref=...]` element handles.
+   *    - `'dom'`: sanitized HTML DOM snapshot, the escape hatch.
+   *  Can also be set via `STEPTIX_SNAPSHOT_MODE`. */
+  snapshotMode?: 'aria' | 'dom' | undefined;
   /** DOM snapshot noise-reduction toggles — the primary lever for keeping
    *  AI input compact on framework-heavy pages. See DomNoiseReductionConfig. */
   domNoiseReduction?: DomNoiseReductionConfig | undefined;

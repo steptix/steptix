@@ -3,7 +3,7 @@
  * element (§5.3) and what became of the action (§5.4) — both taken from what
  * the run already has, and both "first rule that fits".
  */
-import { isKnownActionType } from '../ai/action-parser.js';
+import { isKnownActionType, normaliseSnapshotRef } from '../ai/action-parser.js';
 import type { AIAction } from '../ai/types.js';
 import type { StepResult, SubActionResult } from '../report/types.js';
 import type { SelectorForm, StatsOutcome } from './types.js';
@@ -16,11 +16,12 @@ import type { SelectorForm, StatsOutcome } from './types.js';
 const CONDITION_SELECTOR_WAITS: ReadonlySet<string> = new Set(['selector', 'hidden', 'count']);
 
 /**
- * The selector an action targets, as the model wrote it: `selector`, or for a
- * `wait` on an element, the field `executeWait` reads the selector from —
- * `condition` for a `selector`, `hidden` or `count` wait, and `selector` then
- * `condition` for an `attribute` one. `undefined` for an action that targets
- * no element (a `navigate`, a `wait` on a URL or a duration).
+ * The selector an action targets, as the model wrote it: `selector` (or an
+ * `aria-ref=` form synthesized from `ref` / `containerRef`), or for a `wait`
+ * on an element, the field `executeWait` reads the target from — `selector` /
+ * `ref` when present, else `condition` (or `value` for `selector`, `hidden`,
+ * or `count`). `undefined` for an action that targets no element (a
+ * `navigate`, a `wait` on a URL, duration, or `change`).
  *
  * A `wait` with no `waitType` is not guessed at: `executeWait` infers one from
  * the condition's shape, and a second copy of that heuristic here is a mirror
@@ -28,17 +29,41 @@ const CONDITION_SELECTOR_WAITS: ReadonlySet<string> = new Set(['selector', 'hidd
  */
 export function actionSelector(action: AIAction): string | undefined {
   const selector = nonBlank(action.selector);
-  if (action.action !== 'wait') return selector;
-  const waitType = action.waitType;
-  if (waitType === 'attribute') return selector ?? nonBlank(action.condition);
-  if (waitType !== undefined && CONDITION_SELECTOR_WAITS.has(waitType)) {
-    return nonBlank(action.condition) ?? nonBlank(action.value) ?? selector;
+  if (action.action !== 'wait') {
+    return selector ?? refSelector(action.ref) ?? refSelector(action.containerRef);
   }
-  return selector;
+  const waitType = action.waitType;
+  if (waitType === 'attribute') {
+    return selector ?? refSelector(action.ref) ?? asWaitConditionSelector(action.condition);
+  }
+  if (waitType !== undefined && CONDITION_SELECTOR_WAITS.has(waitType)) {
+    return (
+      selector ??
+      refSelector(action.ref) ??
+      asWaitConditionSelector(action.condition) ??
+      asWaitConditionSelector(action.value)
+    );
+  }
+  return selector ?? refSelector(action.ref);
 }
 
 function nonBlank(value: string | undefined): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
+
+function refSelector(ref: string | undefined): string | undefined {
+  const raw = nonBlank(ref);
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  const normalized = normaliseSnapshotRef(trimmed);
+  return `aria-ref=${normalized ?? trimmed}`;
+}
+
+function asWaitConditionSelector(value: string | undefined): string | undefined {
+  const raw = nonBlank(value);
+  if (raw === undefined) return undefined;
+  const normalized = normaliseSnapshotRef(raw);
+  return normalized !== undefined ? `aria-ref=${normalized}` : raw;
 }
 
 /**
@@ -191,12 +216,14 @@ export function classifyOutcome(sub: SubActionResult, surface?: StepResult['surf
   // "The selector matched nothing": the wait ran out and the call log never
   // once resolved an element. Only for an action that was looking for one —
   // `page.goto` running out of time is not a selector that matched nothing.
-  // The `selector` FIELD, not `actionSelector`: a `count` or `attribute`
+  // The `selector` / `ref` fields, not `actionSelector`: a `count` or `attribute`
   // wait's timeout is the framework's own poll, which writes no call log, so
   // "never resolved" cannot be read off it — two of three rows found is still
   // a timeout. A `selector` / `hidden` wait's call log says it waited on an
   // element, which is what the second half is for.
-  const hadSelector = typeof sub.action.selector === 'string' && sub.action.selector.trim() !== '';
+  const hadSelector =
+    (typeof sub.action.selector === 'string' && sub.action.selector.trim() !== '') ||
+    (typeof sub.action.ref === 'string' && sub.action.ref.trim() !== '');
   if (timedOut && !RESOLVED.test(text) && (hadSelector || WAITED_ON_ELEMENT.test(text))) {
     return 'no-match';
   }

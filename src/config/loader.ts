@@ -135,6 +135,20 @@ function withEnvDefaults(config: Config): Config {
     };
   }
 
+  const snapshotModeRaw = process.env['STEPTIX_SNAPSHOT_MODE'];
+  if (snapshotModeRaw !== undefined && snapshotModeRaw.trim().length > 0) {
+    const normalized = snapshotModeRaw.trim().toLowerCase();
+    if (normalized !== 'aria' && normalized !== 'dom') {
+      throw new Error(
+        `Invalid STEPTIX_SNAPSHOT_MODE "${snapshotModeRaw}": expected "aria" or "dom".`,
+      );
+    }
+    result = {
+      ...result,
+      browser: { ...result.browser, snapshotMode: normalized },
+    };
+  }
+
   return result;
 }
 
@@ -462,6 +476,7 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
   assertDesktopSection(userConfig['desktop'], resolvedPath);
   assertStatsSection(userConfig['stats'], resolvedPath);
   assertBlockAds(userConfig['browser'], resolvedPath);
+  assertSnapshotMode(userConfig['browser'], resolvedPath);
   const typed = userConfig as UserConfig;
   const merged = withMachineAiFloor(
     withEnvDefaults(mergeConfig(baseDefaults, typed)),
@@ -645,6 +660,23 @@ function assertBlockAds(browser: unknown, configPath: string): void {
       `Invalid browser.blockAds in ${configPath}: ${bad.map((h) => (typeof h === 'string' ? JSON.stringify(h) : describeValue(h))).join(', ')} ` +
         `${bad.length === 1 ? 'is not a domain' : 'are not domains'}. Write each as a bare host name, ` +
         'with no https://, path or wildcard: "doubleclick.net" blocks it and every subdomain.',
+    );
+  }
+}
+
+/**
+ * `browser.snapshotMode` selects whether the step AI sees accessibility
+ * snapshots with `[ref=...]` handles or sanitized HTML DOM snapshots
+ * (docs/specs/SPEC-aria-ref-snapshots.md §9.1), checked at LOAD so a typo
+ * fails loudly instead of silently becoming the default (`'aria'`).
+ */
+function assertSnapshotMode(browser: unknown, configPath: string): void {
+  if (!isPlainObject(browser)) return;
+  const value = browser['snapshotMode'];
+  if (value === undefined) return;
+  if (value !== 'aria' && value !== 'dom') {
+    throw new Error(
+      `Invalid browser.snapshotMode in ${configPath}: expected "aria" or "dom", got ${describeValue(value)}.`,
     );
   }
 }
