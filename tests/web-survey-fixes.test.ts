@@ -798,6 +798,112 @@ describe('§2.10 styled checkboxes and radios', () => {
       await page.close();
     }
   });
+
+  // A card option: the <label> holds the input and a picture/text block laid
+  // over it. The input is visible, so Playwright tries it, finds the card's
+  // content on top ("intercepts pointer events"), and times out.
+  const CARD_STYLE = `<style>
+    .card { position: relative; display: block; width: 260px; height: 90px; margin: 8px; border: 1px solid; }
+    .card input { position: absolute; left: 12px; top: 12px; margin: 0; }
+    .card .content { position: absolute; inset: 0; padding: 12px 40px; background: white; }
+  </style>`;
+
+  it('clicks the card around a radio its own label covers, in one click', async () => {
+    const page = await pageWith(`${CARD_STYLE}
+      <div role="radiogroup" aria-label="Plan">
+        <label class="card"><input type="radio" name="plan" id="monthly"><div class="content">Monthly plan</div></label>
+        <label class="card"><input type="radio" name="plan" id="yearly"><div class="content">Yearly plan</div></label>
+      </div>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: '#yearly' }));
+      expect(result.success).toBe(true);
+      expect(await page.isChecked('#yearly')).toBe(true);
+      expect(await page.isChecked('#monthly')).toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('ticks a card checkbox its own label covers, and records the label in a measured run', async () => {
+    const page = await pageWith(`${CARD_STYLE}
+      <label class="card" id="extras-card"><input type="checkbox" id="extras"><div class="content">Add extras</div></label>`);
+    try {
+      const result = await executeAction(
+        page, act({ action: 'click', selector: '#extras' }), undefined, undefined, { measure: true },
+      );
+      expect(result.success).toBe(true);
+      expect(await page.isChecked('#extras')).toBe(true);
+      expect(result.targeting?.standIn).toBe('label');
+      expect(await page.locator(result.targeting!.resolvedSelector!).getAttribute('id')).toBe('extras-card');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('clicks a covered card below the fold, and one inside a web component', async () => {
+    const page = await pageWith(`${CARD_STYLE}
+      <div style="height: 3000px">Spacer</div>
+      <label class="card"><input type="radio" name="speed" id="express"><div class="content">Express</div></label>
+      <x-option-card></x-option-card>
+      <script>
+        customElements.define('x-option-card', class extends HTMLElement {
+          constructor() {
+            super();
+            this.attachShadow({ mode: 'open' }).innerHTML = \`
+              <style>
+                label { position: relative; display: block; width: 260px; height: 90px; border: 1px solid; }
+                input { position: absolute; left: 12px; top: 12px; margin: 0; }
+                div { position: absolute; inset: 0; padding: 12px 40px; background: white; }
+              </style>
+              <label><input type="checkbox" id="insured"><div>Insured</div></label>\`;
+          }
+        });
+      </script>`);
+    try {
+      const below = await executeAction(page, act({ action: 'click', selector: '#express' }));
+      expect(below.success).toBe(true);
+      expect(await page.isChecked('#express')).toBe(true);
+
+      const shadowed = await executeAction(page, act({ action: 'click', selector: '#insured' }));
+      expect(shadowed.success).toBe(true);
+      expect(await page.isChecked('#insured')).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('leaves a radio covered by something outside its label alone, and fails the click', async () => {
+    // An overlay that is not the radio's own card (a banner, a dialog, a
+    // loading screen) must never be clicked through.
+    const page = await pageWith(`
+      <label><input type="radio" name="size" id="small"> Small</label>
+      <div id="overlay" style="position: fixed; inset: 0; background: rgba(0,0,0,.3)"></div>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: '#small' }));
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/intercepts pointer events/);
+      expect(await page.isChecked('#small')).toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails a card click whose middle is a button that does not set the radio', async () => {
+    // A click on interactive content inside a label does not reach the
+    // label's input, so the card's click must be seen to change the radio.
+    const page = await pageWith(`${CARD_STYLE}
+      <label class="card"><input type="radio" name="tier" id="gold">
+        <div class="content"><button type="button" style="position: absolute; inset: 0; width: 100%">Details</button></div>
+      </label>`);
+    try {
+      const result = await executeAction(page, act({ action: 'click', selector: '#gold' }));
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/radio "#gold", and the radio did not change/);
+      expect(await page.isChecked('#gold')).toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
 });
 
 describe('§2.11 text reads skip script source', () => {

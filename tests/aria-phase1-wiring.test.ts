@@ -418,6 +418,17 @@ describe('Phase 1 scoreboard classification & fingerprinting', () => {
 // ---------------------------------------------------------------------------
 
 describe('Phase 1 prompts & HTML report labels', () => {
+  it('places an element in an iframe by the snapshot\'s indentation, never by its ref\'s prefix', () => {
+    // Playwright prefixes the page's OWN refs (`f7e12`) once a cross-site
+    // navigation replaces the main frame. A rule reading the prefix as "inside
+    // an iframe" sent a heading check into an empty tracking iframe.
+    const ariaText = contentBlocksToText(buildSystemPrompt('', undefined, { snapshotMode: 'aria' }));
+    expect(ariaText).toContain('An element is inside an iframe only when it is indented under an `- iframe` line');
+    expect(ariaText).toContain('Never set `"frame"` on an assert about content that is not indented under an `- iframe` line');
+    expect(ariaText).not.toContain('Elements inside iframes carry frame-prefixed refs');
+    expect(ariaText).not.toContain('`[ref=f1e4]` inside an iframe');
+  });
+
   it('builds aria system prompt with ref targeting rules and keeps default identical to "dom"', () => {
     const ariaBlocks = buildSystemPrompt('', undefined, { snapshotMode: 'aria' });
     const ariaText = contentBlocksToText(ariaBlocks);
