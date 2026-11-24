@@ -274,12 +274,13 @@ export interface ExecutedStepMeta {
   stepText: string;
   /**
    * The step prompt's options, for a step answered from that prompt — the
-   * `dismissalGuidance` the run handed `executeStep`, which the rules
-   * fingerprint is taken under (§5.5). Absent for a step asked through a
-   * prompt of its own (a `[use ai]` step, the computer surface): its lines then
-   * carry no fingerprint rather than one for rules it was never shown.
+   * `dismissalGuidance` and `snapshotMode` the run handed `executeStep`, which
+   * the rules fingerprint is taken under (§5.5). Absent for a step asked
+   * through a prompt of its own (a `[use ai]` step, the computer surface): its
+   * lines then carry no fingerprint rather than one for rules it was never
+   * shown.
    */
-  rules?: { dismissalGuidance: boolean } | undefined;
+  rules?: { dismissalGuidance: boolean; snapshotMode?: 'aria' | 'dom' } | undefined;
   /** Values to mask beside the context's own, read when the step ended — a
    *  capture this step made is in them. */
   maskValues?: readonly string[] | undefined;
@@ -347,7 +348,10 @@ export function recordExecutedStep(
         stepText: stats.stepText ?? meta.stepText,
         exec,
         ...(meta.rules !== undefined && {
-          prompt: rulesFingerprint({ dismissalGuidance: meta.rules.dismissalGuidance }),
+          prompt: rulesFingerprint({
+            dismissalGuidance: meta.rules.dismissalGuidance,
+            ...(meta.rules.snapshotMode === 'aria' && { snapshotMode: 'aria' }),
+          }),
         }),
         fw: frameworkVersion(),
       },

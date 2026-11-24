@@ -592,9 +592,23 @@ export function validateTableRead(
 }
 
 /**
- * Validate and copy a `readTable` action's `selector`, `as`, `columns` and
- * `limit` (SPEC-structured-table-reads.md §6.2). Mutates `action` on success;
- * throws with a precise message on any rejection.
+ * Anchored snapshot-ref pattern (docs/specs/SPEC-aria-ref-snapshots.md §5.1).
+ * Anchoring keeps real CSS selectors and opaque IDs (e.g. `#e15`, `z2l9e43l3`)
+ * from ever being misclassified as snapshot refs.
+ */
+export const SNAPSHOT_REF_RE = /^(?:aria-ref=)?((?:f\d+)?e\d+|s\d+)$/;
+
+/** Extract a canonical snapshot ref (`e15`, `f1e4`, `s1`) from a raw value, or `undefined`. */
+export function normaliseSnapshotRef(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const match = SNAPSHOT_REF_RE.exec(raw.trim());
+  return match?.[1];
+}
+
+/**
+ * Validate and copy a `readTable` action's `selector`/`ref`, `as`, `columns`
+ * and `limit` (SPEC-structured-table-reads.md §6.2, SPEC-aria-ref-snapshots.md §5.1).
+ * Mutates `action` on success; throws with a precise message on any rejection.
  *
  * The parser's other fields are copied opportunistically — an unrecognised
  * `direction` is dropped and the action still runs. These are not: a column
@@ -603,8 +617,12 @@ export function validateTableRead(
 function applyTableReadFields(action: AIAction, obj: Record<string, unknown>, index: number): void {
   const where = `readTable action at index ${index}`;
 
-  if (typeof action.selector !== 'string' || !action.selector.trim()) {
-    throw new Error(`${where} missing required "selector" field (a CSS selector for one native <table>)`);
+  const hasSelector = typeof action.selector === 'string' && action.selector.trim() !== '';
+  const hasRef = typeof action.ref === 'string' && action.ref.trim() !== '';
+  if (!hasSelector && !hasRef) {
+    throw new Error(
+      `${where} missing required "selector" field (or "ref" for a snapshot target)`,
+    );
   }
   if (typeof action.as !== 'string' || !action.as.trim()) {
     throw new Error(`${where} missing required "as" field (the variable the row records are stored in)`);
@@ -985,6 +1003,8 @@ function parseAction(raw: unknown, index: number): AIAction {
   }
 
   // Optional fields — only add if present
+  const directRef = normaliseSnapshotRef(obj['ref']);
+  if (directRef !== undefined) action.ref = directRef;
   if (typeof obj['selector'] === 'string') action.selector = obj['selector'];
   // `drag`'s drop target. On the allow-list, because a field this copy does not
   // name never reaches the executor — which would then fail every drag for a
@@ -992,16 +1012,53 @@ function parseAction(raw: unknown, index: number): AIAction {
   // read too, for a drag only: `to` is a scroll's and a switchBrowser's field,
   // and `source` an extract_csrf's, everywhere else.
   if (actionType === 'drag') {
+    const targetRef = [obj['targetRef'], obj['dropTargetRef'], obj['toRef']]
+      .map(normaliseSnapshotRef)
+      .find((v): v is string => v !== undefined);
+    if (targetRef !== undefined) action.targetRef = targetRef;
     const target = [obj['target'], obj['targetSelector'], obj['dropTarget'], obj['dropSelector'], obj['to']]
       .find((v): v is string => typeof v === 'string' && v.trim() !== '' && v !== 'top' && v !== 'bottom');
     if (target !== undefined) action.target = target;
-    if (action.selector === undefined && typeof obj['source'] === 'string') action.selector = obj['source'];
+    if (action.target !== undefined) {
+      const normalizedTargetRef = normaliseSnapshotRef(action.target);
+      if (normalizedTargetRef !== undefined) {
+        action.targetRef = action.targetRef ?? normalizedTargetRef;
+        delete action.target;
+      }
+    }
+    if (action.ref === undefined && action.selector === undefined) {
+      const sourceRef = normaliseSnapshotRef(obj['sourceRef']) ?? normaliseSnapshotRef(obj['fromRef']);
+      if (sourceRef !== undefined) action.ref = sourceRef;
+      else if (typeof obj['source'] === 'string') action.selector = obj['source'];
+    }
     // §2.36: where on the target to let go — "below Item 3" in a sortable.
     const position = [obj['position'], obj['targetPosition'], obj['dropPosition']]
       .find((v): v is string => typeof v === 'string');
     const side = position?.trim().toLowerCase().replace(/^(after|bottom)$/, 'below').replace(/^(before|top)$/, 'above');
     if (side === 'above' || side === 'below' || side === 'left' || side === 'right') action.position = side;
   }
+  if (action.selector !== undefined) {
+    const normalizedSelectorRef = normaliseSnapshotRef(action.selector);
+    if (normalizedSelectorRef !== undefined) {
+      action.ref = action.ref ?? normalizedSelectorRef;
+      delete action.selector;
+    }
+  }
+  const containerRef = normaliseSnapshotRef(obj['containerRef']);
+  if (containerRef !== undefined) action.containerRef = containerRef;
+  if (Array.isArray(obj['exampleRefs'])) {
+    if (obj['exampleRefs'].length === 0) {
+      // Preserve explicit `[]` so 0-item plural reads / counts stay distinct from omitted refs (SPEC §5.2).
+      action.exampleRefs = [];
+    } else {
+      const validExampleRefs = obj['exampleRefs']
+        .map(normaliseSnapshotRef)
+        .filter((r): r is string => r !== undefined);
+      if (validExampleRefs.length > 0) action.exampleRefs = validExampleRefs;
+    }
+  }
+  const foundRef = normaliseSnapshotRef(obj['foundRef']);
+  if (foundRef !== undefined) action.foundRef = foundRef;
   if (typeof obj['value'] === 'string') action.value = obj['value'];
   if (typeof obj['url'] === 'string') action.url = obj['url'];
   // docs/specs/SPEC-web-survey-fixes.md §2.2, §2.4, §2.8, §2.1. Each is read
@@ -1073,7 +1130,8 @@ function parseAction(raw: unknown, index: number): AIAction {
     obj['waitType'] === 'text' || obj['waitType'] === 'url' ||
     obj['waitType'] === 'load' || obj['waitType'] === 'duration' ||
     obj['waitType'] === 'count' || obj['waitType'] === 'attribute' ||
-    obj['waitType'] === 'navigation' || obj['waitType'] === 'stable'
+    obj['waitType'] === 'navigation' || obj['waitType'] === 'stable' ||
+    obj['waitType'] === 'change'
   ) {
     action.waitType = obj['waitType'];
   }
@@ -1149,7 +1207,7 @@ function parseAction(raw: unknown, index: number): AIAction {
   }
 
   // Structured table reads. Validated as a unit AFTER the scalar fields are
-  // copied, because every rule reads `selector` / `as` off the canonical
+  // copied, because every rule reads `selector` / `ref` / `as` off the canonical
   // action rather than the raw object (SPEC-structured-table-reads.md §6.2).
   if (action.action === 'readTable') {
     applyTableReadFields(action, obj, index);

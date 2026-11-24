@@ -128,7 +128,9 @@ function textOf(messages: ChatMessage[]): string {
 const config: Config = {
   ...DEFAULT_CONFIG,
   ai: { ...DEFAULT_CONFIG.ai, sendScreenshots: false },
-  browser: { ...DEFAULT_CONFIG.browser, headed: false, captureScreenshotsPerAction: false },
+  // The settle this file hooks is the dom-mode wait. Aria mode settles
+  // through the action watcher, which does not call it.
+  browser: { ...DEFAULT_CONFIG.browser, snapshotMode: 'dom', headed: false, captureScreenshotsPerAction: false },
   reports: { ...DEFAULT_CONFIG.reports, includeDomSnapshots: true },
   execution: { ...DEFAULT_CONFIG.execution, retries: 0, maxTurns: 3, promptOnAmbiguity: false },
 };

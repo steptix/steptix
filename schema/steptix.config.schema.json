@@ -36,7 +36,7 @@
           "$ref": "#/definitions/DeepPartial%3CLoggingConfig%3E"
         },
         "tables": {
-          "$ref": "#/definitions/DeepPartial%3Cdef-interface-src_config_types.ts-21121-22239-src_config_types.ts-0-30440226896703235751837%3E"
+          "$ref": "#/definitions/DeepPartial%3Cdef-interface-src_config_types.ts-21480-22598-src_config_types.ts-0-30799226896703235751837%3E"
         },
         "mcp": {
           "$ref": "#/definitions/McpConfig",
@@ -104,10 +104,10 @@
           "description": "Show browser window (false = headless)"
         },
         "viewport": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6056-6090-src_config_types.ts-5998-6091-src_config_types.ts-5897-14369-src_config_types.ts-0-30440449752545%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6056-6090-src_config_types.ts-5998-6091-src_config_types.ts-5897-14728-src_config_types.ts-0-30799449752545%3E"
         },
         "windowSize": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6147-6181-src_config_types.ts-6091-6182-src_config_types.ts-5897-14369-src_config_types.ts-0-304401327565221%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6147-6181-src_config_types.ts-6091-6182-src_config_types.ts-5897-14728-src_config_types.ts-0-307991327565221%3E"
         },
         "fixedViewport": {
           "type": "object",
@@ -170,6 +170,14 @@
           "$ref": "#/definitions/CdpBrowserConfig",
           "description": "Launch settings for CDP browsers this framework starts. See CdpBrowserConfig. Nothing here applies to a browser attached to by port."
         },
+        "snapshotMode": {
+          "type": "string",
+          "enum": [
+            "aria",
+            "dom"
+          ],
+          "description": "Page snapshot format sent to the step AI (docs/specs/SPEC-aria-ref-snapshots.md §9.1):   - `'dom'` (default during Phases 1–3): sanitized HTML DOM snapshot.   - `'aria'`: compact accessibility snapshot with `[ref=...]` element handles. Can also be set via `STEPTIX_SNAPSHOT_MODE`."
+        },
         "domNoiseReduction": {
           "$ref": "#/definitions/DomNoiseReductionConfig",
           "description": "DOM snapshot noise-reduction toggles — the primary lever for keeping AI input compact on framework-heavy pages. See DomNoiseReductionConfig."
@@ -217,7 +225,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-6056-6090-src_config_types.ts-5998-6091-src_config_types.ts-5897-14369-src_config_types.ts-0-30440449752545>": {
+    "DeepPartial<structure-src_config_types.ts-6056-6090-src_config_types.ts-5998-6091-src_config_types.ts-5897-14728-src_config_types.ts-0-30799449752545>": {
       "type": "object",
       "properties": {
         "width": {
@@ -230,7 +238,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-6147-6181-src_config_types.ts-6091-6182-src_config_types.ts-5897-14369-src_config_types.ts-0-304401327565221>": {
+    "DeepPartial<structure-src_config_types.ts-6147-6181-src_config_types.ts-6091-6182-src_config_types.ts-5897-14728-src_config_types.ts-0-307991327565221>": {
       "type": "object",
       "properties": {
         "width": {
@@ -513,7 +521,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<def-interface-src_config_types.ts-21121-22239-src_config_types.ts-0-30440226896703235751837>": {
+    "DeepPartial<def-interface-src_config_types.ts-21480-22598-src_config_types.ts-0-30799226896703235751837>": {
       "type": "object",
       "properties": {
         "structure": {

@@ -1,22 +1,28 @@
 // ── "Is this a secret field?" — the ONE copy ─────────────────────────────
 //
 // A FRAGMENT, not a script: plain `var` and `function` declarations with no
-// wrapper, spliced into three page scripts before they are evaluated —
+// wrapper, spliced into five page scripts before they are evaluated —
 //
-//   capture-dom.js     the whole-page snapshot, where the placeholder
+//   capture-dom.js     the whole-page DOM snapshot, where the placeholder
 //                      __SECRET_FIELD_RULE__ stands
 //   dom-cleaner.ts     the `expand` walk (expandDomSubtree), interpolated into
 //                      its template literal
+//   aria-snapshot.ts   the accessibility-snapshot supplementary scan
+//                      (buildSupplementaryScanScript), interpolated into its
+//                      template literal
+//   actions.ts         element-context HTML capture and normalized-locator
+//                      secret checks (`captureElementContextHtml` /
+//                      `normalizeLocatorDetailed`), interpolated into their
+//                      page functions
 //   record-steps.js    the step recorder (stories/steptix-record-steps.md,
 //                      decision 7), same placeholder as capture-dom.js
 //
 // It used to be copied into the first two by hand, each copy with a comment
-// saying "keep the others in step". A third copy for the recorder would have
-// been the one that drifted — and the recorder is the copy where a miss sends
-// a typed password over a binding instead of printing `***` in a snapshot. So
-// the rule lives here, and `loadSecretFieldRule()` (dom-cleaner.ts) is how every
-// consumer gets it. tests/secret-field-parity.test.ts asks all three the same
-// questions.
+// saying "keep the others in step". Additional copies — especially for the
+// recorder, where a miss sends a typed password over a binding instead of
+// printing `***` in a snapshot — would have drifted. So the rule lives here,
+// and `loadSecretFieldRule()` (dom-cleaner.ts) is how every consumer gets it.
+// tests/secret-field-parity.test.ts checks parity against this rule.
 //
 // Nothing in here may reference a name the consumers do not all define, and no
 // `__TOKEN__` placeholder may appear in it: it is substituted INTO templates

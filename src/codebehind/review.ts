@@ -16,6 +16,7 @@ import {
   describeGuardedName,
   entryDefinesCondition,
   entryFaults,
+  ephemeralRefInCodeComplaint,
   type EntryFault,
 } from './generate.js';
 import type { RecordedAction } from './recording.js';
@@ -413,6 +414,13 @@ export async function reviewCandidate(
     if (newFault) {
       emit(`rejected: the revision ${newFault} — the generated file stands`);
       continue;
+    }
+    if (ephemeralRefInCodeComplaint(before) === undefined) {
+      const refFault = ephemeralRefInCodeComplaint(revised);
+      if (refFault !== undefined) {
+        emit(`rejected: the revision ${refFault} — the generated file stands`);
+        continue;
+      }
     }
     const invalid = await validateCodeBehindSource(file, revised);
     if (invalid) {

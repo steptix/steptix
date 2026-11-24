@@ -20,8 +20,9 @@
  * The model then reads again with a better selector, which replaces the read,
  * or keeps it. Neither outcome is a failure — an empty list and a row of cells
  * with different classes are both real answers — so this only ever asks, in
- * the turns the step has left. A turn added only to ask runs nothing but those
- * two answers (`isReviewAnswer`): anything else, or a read again that fails,
+ * the turns the step has left. A turn added only to ask runs only those two
+ * answers or a read-only look (`expand` / `find`) before answering on the next
+ * turn (`isReviewAnswer`): anything else, or a read again that fails,
  * ends the step where it stood. So does having no turn left to show the read
  * (its last turn, or a `return` in the same turn), or an action after it in
  * the same turn that changed the page it read. The step then ends on the
@@ -82,8 +83,9 @@ export function isListRead(action: AIAction): boolean {
  * The concern about a list read that succeeded, or undefined when there is
  * none — not a list read, a list of one kind, or a page that could not say
  * what it matched. `mask` hides the run's secrets in the line, which quotes
- * the selector and a few of the values the read STORED (`MatchGroup.samples`
- * — never text the run did not store; a count quotes none).
+ * the selector (or `containerRef` / `exampleRefs` target) and a few of the
+ * values the read STORED (`MatchGroup.samples` — never text the run did not
+ * store; a count quotes none).
  *
  * A value is quoted only whole: masked, and short enough to show as it is. A
  * longer one, or one with line breaks, is given as its length. Cut short, a
@@ -101,7 +103,13 @@ export function listReadConcern(
 ): ListReadConcern | undefined {
   if (!result.success || !isListRead(action)) return undefined;
   const name = action.as!;
-  const selector = `\`${action.selector ?? ''}\``;
+  const targetLabel =
+    action.selector !== undefined && action.selector !== ''
+      ? action.selector
+      : action.containerRef !== undefined && action.containerRef !== ''
+        ? `containerRef=${action.containerRef}${action.exampleRefs ? ` exampleRefs=[${action.exampleRefs.join(', ')}]` : ''}`
+        : '';
+  const selector = `\`${targetLabel}\``;
   const groups = result.listMatches?.groups;
   const counting = action.action === 'count';
   /** How a value is quoted: whole, or as its length — or not at all. */
@@ -178,6 +186,8 @@ function elements(n: number): string {
 export function sameListRead(a: AIAction, b: AIAction): boolean {
   return a.action === b.action
     && a.selector === b.selector
+    && a.containerRef === b.containerRef
+    && JSON.stringify(a.exampleRefs ?? null) === JSON.stringify(b.exampleRefs ?? null)
     && a.as === b.as
     && (a.multiple === true) === (b.multiple === true)
     && a.attribute === b.attribute
@@ -188,7 +198,8 @@ export function sameListRead(a: AIAction, b: AIAction): boolean {
 
 /**
  * What a turn added only to show the model its list reads may run: keeping
- * them (`noop`), or reading one of them again — the same name, read the same
+ * them (`noop`), looking closer (`expand` / `find`) before answering on the
+ * next turn, or reading one of them again — the same name, read the same
  * kind of way (a read of every match for one, a count for a count), as the
  * prompt asks. Anything else ends that turn, and the step, where it stood
  * (src/runner/step-executor.ts, `reviewOnly`): a read into another name
@@ -196,7 +207,7 @@ export function sameListRead(a: AIAction, b: AIAction): boolean {
  * hold, and a count into a list's name would store a number for a list.
  */
 export function isReviewAnswer(action: AIAction, shown: ReadonlyMap<string, SubActionResult>): boolean {
-  if (action.action === 'noop') return true;
+  if (action.action === 'noop' || action.action === 'expand' || action.action === 'find') return true;
   if (!isListRead(action)) return false;
   return shown.get(action.as!)?.action.action === action.action;
 }

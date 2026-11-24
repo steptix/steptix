@@ -122,7 +122,11 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   // upstream and is filled by `resolveUseAiText` (stories/use-ai-step.md,
   // decision 10).
   'src/runner/use-ai-step-runner.ts': { why: 'not-step-text', calls: 1 },
-  'src/runner/step-executor.ts': { why: 'not-step-text', calls: 2 },
+  // The third call substitutes a later action in the same turn, before the
+  // first one runs, so its ref can be resolved while the snapshot is still
+  // the one the model named. It is the model's action, as the call on the
+  // action about to run is. Not step text.
+  'src/runner/step-executor.ts': { why: 'not-step-text', calls: 3 },
   // The computer surface's turn loop (docs/specs/SPEC-use-computer.md §5.5).
   // One call, and it substitutes an ACTION the model emitted — an `api_call`'s
   // url, headers and body — on its way to the same `executeApiCallAction` the

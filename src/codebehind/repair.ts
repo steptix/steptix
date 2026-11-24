@@ -70,19 +70,31 @@ export interface RepairPromptInput {
   retry?: { previousEntry: string; complaint: string } | undefined;
 }
 
+function effectiveReadSelector(action: RecordedAction): string | undefined {
+  if (typeof action.selector === 'string' && action.selector.trim() !== '') return action.selector;
+  if (typeof action.targeting?.resolvedSelector === 'string' && action.targeting.resolvedSelector.trim() !== '') {
+    return action.targeting.resolvedSelector;
+  }
+  if (typeof action.targeting?.normalizedLocator === 'string' && action.targeting.normalizedLocator.trim() !== '') {
+    return action.targeting.normalizedLocator;
+  }
+  return undefined;
+}
+
 /**
  * The selectors the pass's reads and counts used, as the repair must keep
  * them — or '' when it made none, which leaves the prompt as it was.
  */
 function recordedReadsBlock(actions: readonly RecordedAction[] | undefined, secrets: readonly string[]): string {
-  const reads = (actions ?? []).filter(
-    (a) => (a.action === 'read' || a.action === 'count') && typeof a.selector === 'string' && a.selector.trim() !== '',
-  );
+  const reads = (actions ?? [])
+    .filter((a) => a.action === 'read' || a.action === 'count')
+    .map((a) => ({ action: a, selector: effectiveReadSelector(a) }))
+    .filter((r): r is { action: RecordedAction; selector: string } => r.selector !== undefined);
   if (reads.length === 0) return '';
-  const lines = reads.map((a) => {
+  const lines = reads.map(({ action: a, selector }) => {
     const kind = a.action === 'count' ? 'count' : a.multiple ? 'read (every match)' : 'read';
     const into = typeof a.as === 'string' ? ` → ${a.as}` : '';
-    return `- ${kind} \`${redact(a.selector!, [...secrets])}\`${into}`;
+    return `- ${kind} \`${redact(selector, [...secrets])}\`${into}`;
   });
   return (
     `\n\n## What the run read with\nThe run this entry is repaired from read the page with these ` +
@@ -179,7 +191,9 @@ ${input.entryCode}
 ${input.error}
 ${retryBlock}${roundLine}
 ## The page when it failed${input.url ? `\nURL: ${input.url}` : ''}${
-    input.dom ? `\n\n\`\`\`html\n${input.dom}\n\`\`\`` : ''
+    input.dom
+      ? `\n\n\`\`\`${input.dom.trimStart().startsWith('<') ? 'html' : 'yaml'}\n${input.dom}\n\`\`\``
+      : ''
   }${input.screenshotBase64 ? '\n\n[A screenshot of the page at the failure is attached.]' : ''}
 
 ## What to return

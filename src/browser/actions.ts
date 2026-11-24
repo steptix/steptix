@@ -14,9 +14,16 @@ import {
   unknownActionTypeError,
 } from '../ai/action-parser.js';
 import { logger } from '../utils/logger.js';
+import { RECORD_SECRET_MIN_LENGTH, redact } from '../utils/secrets.js';
 import { resolveUploadPaths, uploadPathsOf, type UploadPathContext } from './upload-paths.js';
 import { armDialog, describeDialogs, takeUnreportedDefaultAnswers } from './dialogs.js';
+import { loadSecretFieldRule } from './dom-cleaner.js';
 import { gotoWithDiagnosis } from './navigate-diagnosis.js';
+import { resolveRefTarget, splitFrameChain, type ResolvedRef } from './aria-snapshot.js';
+
+function isInternalRefSelector(selector: string): boolean {
+  return selector.startsWith('aria-ref=') || selector.startsWith('[data-steptix-ref=');
+}
 
 /**
  * Resolves the locator root for an action.
@@ -32,10 +39,7 @@ import { gotoWithDiagnosis } from './navigate-diagnosis.js';
 function resolveLocatorRoot(page: Page, frameSelector?: string): Page | FrameLocator {
   if (!frameSelector) return page;
 
-  // Split on ">>" if present, otherwise fall back to splitting on whitespace.
-  const segments = frameSelector.includes('>>')
-    ? frameSelector.split('>>').map((s) => s.trim()).filter(Boolean)
-    : frameSelector.trim().split(/\s+/);
+  const segments = splitFrameChain(frameSelector);
 
   let root: Page | FrameLocator = page;
   for (const segment of segments) {
@@ -526,9 +530,7 @@ async function describeRoleMiss(root: Page | FrameLocator, scope: string, parsed
  * FrameLocator will not do (SPEC-web-survey-fixes.md §2.31).
  */
 export async function resolveFrame(page: Page, frameSelector: string): Promise<Frame | null> {
-  const segments = frameSelector.includes('>>')
-    ? frameSelector.split('>>').map((s) => s.trim()).filter(Boolean)
-    : frameSelector.trim().split(/\s+/);
+  const segments = splitFrameChain(frameSelector);
   let current: Frame = page.mainFrame();
   for (const segment of segments) {
     try {
@@ -564,6 +566,7 @@ async function promoteIframeFromSelector(
   frame: string | undefined,
   selector: string,
 ): Promise<{ frame: string | undefined; selector: string }> {
+  if (selector.trimStart().startsWith('internal:')) return { frame, selector };
   const split = /^(\S+?)(?:\s*>>\s*|\s+)(\S[\s\S]*)$/.exec(selector.trim());
   if (!split) return { frame, selector };
 
@@ -586,6 +589,17 @@ async function promoteIframeFromSelector(
   return { frame, selector };
 }
 
+/** How Playwright's `locator.normalize()` classified the target locator. */
+export type NormalizedBy = 'testid' | 'role' | 'label' | 'text' | 'chained' | 'positional';
+
+/** A snapshot ref pre-resolved before running a multi-action chain. */
+export interface PreResolvedRef {
+  selector: string;
+  frameSelector?: string | undefined;
+  normalizedLocator?: string | undefined;
+  normalizedBy?: NormalizedBy | undefined;
+}
+
 /**
  * What the runtime found at the instant it acted
  * (stories/codebehind-selector-ambiguity.md §"Measurement 1").
@@ -594,7 +608,7 @@ async function promoteIframeFromSelector(
  * are filtered out, and of what remains the first is taken — so a transcript
  * has never been evidence that one match *exists*. Generated code-behind has
  * neither tolerance: Playwright's default is strict and throws on the second
- * match, visible or not. These three facts are what closes that gap.
+ * match, visible or not. These facts are what closes that gap.
  *
  * Every field is optional and absence is first-class. Measurement is strictly
  * additive telemetry, so anything that stops it — a detached element, a
@@ -630,6 +644,16 @@ export interface ActionTargeting {
    * Travels with `resolvedSelector`: both present, or neither.
    */
   resolvedBy?: ResolvedBy;
+  /** Playwright's idiomatic locator expression from `locator.normalize().toString()`,
+   *  e.g. `getByRole('button', { name: 'Sign in' })`. */
+  normalizedLocator?: string;
+  normalizedBy?: NormalizedBy;
+  /** For `drag`: idiomatic locator and CSS selector of the drop target. */
+  targetNormalizedLocator?: string;
+  targetResolvedSelector?: string;
+  /** Compact sanitized HTML of the target element + up to 3 ancestors (to nearest
+   *  row/listitem/section), captured during compile runs for `{{param}}` steps. */
+  elementContextHtml?: string;
   /**
    * The KINDS of element a `read` or `count` matched: each one's tag name and
    * its class names, leaving out generated-looking ones (any with a digit) —
@@ -850,6 +874,12 @@ export interface ActionExecutionResult {
    * different column.
    */
   sketch?: TableSketch;
+  /**
+   * Frame selector chain resolved from an iframe snapshot ref (e.g. `f1e4`),
+   * populated when `action.frame` was not already set so callers can record
+   * `frame` onto the sub-action for Run & Compile.
+   */
+  resolvedFrame?: string;
 }
 
 /** Which of the two upload routes ran. */
@@ -909,6 +939,12 @@ export async function executeAction(
   // retry prompt cannot claim "No elements matched this selector" about a file
   // that simply does not exist.
   let uploadFiles: string[] | undefined;
+  const cleanRef =
+    typeof action.ref === 'string' && action.ref.trim() !== ''
+      ? action.ref.trim().replace(/^aria-ref=/, '')
+      : undefined;
+  const hasRef = cleanRef !== undefined;
+
   if (action.action === 'upload') {
     const resolved = await resolveUploadPaths(uploadPathsOf(action), options?.uploadPaths ?? {});
     if (!resolved.ok) {
@@ -917,30 +953,110 @@ export async function executeAction(
         success: false,
         error: resolved.error,
         retryable: false,
-        ...(action.selector !== undefined && { failedSelector: action.selector }),
+        ...(action.selector !== undefined
+          ? { failedSelector: action.selector }
+          : hasRef
+            ? { failedSelector: `aria-ref=${cleanRef}` }
+            : {}),
       };
     }
     uploadFiles = resolved.absolute;
   }
 
-  // Auto-promote iframe selectors that the AI accidentally placed in the selector
-  // field instead of the frame field. If the first segment of the selector matches
-  // an iframe inside the current frame context, move it to the frame chain.
   let effectiveFrame = action.frame;
-  let effectiveSelector = action.selector ? sanitizeCssSelector(action.selector) : action.selector;
-  if (effectiveSelector) {
-    const promoted = await promoteIframeFromSelector(page, effectiveFrame, effectiveSelector);
-    effectiveFrame = promoted.frame;
-    effectiveSelector = promoted.selector;
+  let effectiveSelector: string | undefined;
+  let effectiveTarget = action.target;
+  let root: Page | FrameLocator;
+  let resolvedFromRefFrame: string | undefined;
+
+  if (hasRef) {
+    let resolvedRef: ResolvedRef;
+    try {
+      resolvedRef = await resolveRefTarget(page, action.ref!);
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error(`Action failed [${action.action}]: ${message}`);
+      return {
+        success: false,
+        error: message,
+        failedSelector: `aria-ref=${cleanRef}`,
+        matchCount: 0,
+        targeting: { matchCount: 0 },
+      };
+    }
+    effectiveFrame = resolvedRef.frameSelector ?? action.frame;
+    if (resolvedRef.frameSelector !== undefined && action.frame === undefined) {
+      resolvedFromRefFrame = resolvedRef.frameSelector;
+    }
+    effectiveSelector = resolvedRef.selectorInRoot;
+    root = resolvedRef.root;
+  } else {
+    // Auto-promote iframe selectors that the AI accidentally placed in the selector
+    // field instead of the frame field. If the first segment of the selector matches
+    // an iframe inside the current frame context, move it to the frame chain.
+    effectiveSelector = action.selector ? sanitizeCssSelector(action.selector) : action.selector;
+    if (effectiveSelector) {
+      const promoted = await promoteIframeFromSelector(page, effectiveFrame, effectiveSelector);
+      effectiveFrame = promoted.frame;
+      effectiveSelector = promoted.selector;
+    }
+    // Resolve frame context once — used by all locator-based actions and the error handler
+    root = resolveLocatorRoot(page, effectiveFrame);
   }
 
-  // Resolve frame context once — used by all locator-based actions and the error handler
-  const root = resolveLocatorRoot(page, effectiveFrame);
+  if (
+    action.action === 'drag' &&
+    typeof action.targetRef === 'string' &&
+    action.targetRef.trim() !== ''
+  ) {
+    const cleanTargetRef = action.targetRef.trim().replace(/^aria-ref=/, '');
+    let resolvedTargetRef: ResolvedRef;
+    try {
+      resolvedTargetRef = await resolveRefTarget(page, action.targetRef);
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error(`Action failed [${action.action}]: ${message}`);
+      return {
+        success: false,
+        error: message,
+        failedSelector: `aria-ref=${cleanTargetRef}`,
+        matchCount: 0,
+        targeting: { matchCount: 0 },
+      };
+    }
+    effectiveTarget = resolvedTargetRef.selectorInRoot;
+    const sourcePinnedToFrame = hasRef || effectiveFrame !== undefined;
+    if (sourcePinnedToFrame) {
+      const sourceFrame = effectiveFrame ?? undefined;
+      const targetFrame = resolvedTargetRef.frameSelector ?? undefined;
+      if (sourceFrame !== targetFrame) {
+        const message =
+          `drag action requires source and target to be in the same frame ` +
+          `(source is in ${sourceFrame ? `"${sourceFrame}"` : 'main page'}, ` +
+          `target "${cleanTargetRef}" is in ${targetFrame ? `"${targetFrame}"` : 'main page'})`;
+        logger.error(`Action refused [drag]: ${message}`);
+        return {
+          success: false,
+          error: message,
+          failedSelector: `aria-ref=${cleanTargetRef}`,
+        };
+      }
+    } else if (resolvedTargetRef.frameSelector !== undefined) {
+      effectiveFrame = resolvedTargetRef.frameSelector;
+      root = resolvedTargetRef.root;
+      if (action.frame === undefined) {
+        resolvedFromRefFrame = resolvedTargetRef.frameSelector;
+      }
+    }
+  }
+
   /** What the role-name fallback found the role to have, for a timeout (§2.34). */
   let describeRoleNameMiss: (() => Promise<string>) | undefined;
   /** The selector the role-name fallback acted on instead, when it did (§2.34). */
   let roleNameFallback: string | undefined;
-  if (effectiveSelector) {
+  if (effectiveSelector && !hasRef) {
     // A plural action takes every match, so several reading the name is its
     // answer rather than an ambiguity.
     const plural = action.action === 'count'
@@ -964,10 +1080,8 @@ export async function executeAction(
   }
   if (effectiveFrame) {
     // For nested frames ("A >> B" or "A B"), validate the outermost iframe exists on the page
-    const outerSelector = effectiveFrame.includes('>>')
-      ? effectiveFrame.split('>>')[0]!.trim()
-      : effectiveFrame.trim().split(/\s+/)[0]!;
-    const iframeCount = await page.locator(outerSelector).count();
+    const outerSelector = splitFrameChain(effectiveFrame)[0] ?? effectiveFrame.trim();
+    const iframeCount = await page.locator(outerSelector).count().catch(() => 0);
     if (iframeCount === 0) {
       logger.warn(`iframe not found on page: ${outerSelector}`);
     } else {
@@ -981,12 +1095,14 @@ export async function executeAction(
     }
   }
 
-  // Build an effective action with promoted frame/selector for use in execution
+  // Build an effective action with promoted frame/selector/target for use in execution
   const eff: AIAction = {
     ...action,
     ...(effectiveFrame !== undefined ? { frame: effectiveFrame } : {}),
     ...(effectiveSelector !== undefined ? { selector: effectiveSelector } : {}),
+    ...(effectiveTarget !== undefined ? { target: effectiveTarget } : {}),
   };
+  let reportedFailedSelector = hasRef ? `aria-ref=${cleanRef}` : eff.selector;
 
   // Whether the caller wants the full measurement, and whether it wants the
   // ambiguity gate. The gate needs `visibleMatchCount` on any run, so it turns
@@ -995,6 +1111,8 @@ export async function executeAction(
   const wantGate = options?.ambiguousTarget === 'fail';
   /** Collect what kinds of element a read or count matched (§6.6). */
   const wantKinds = wantMeasure || options?.kinds === true;
+  /** Derived repeating-item selector for plural `read`/`count` via `containerRef` + `exampleRefs`. */
+  let derivedPlural: { selector: string; by: ResolvedBy } | null = null;
   /** What the runtime found. Absent unless we measured and the numbers held. */
   let targeting: ActionTargeting | undefined;
   /** What is left of the action's own budget after the wait hoisted out of it. */
@@ -1007,6 +1125,118 @@ export async function executeAction(
   let typed: TypedRoute | undefined;
   /** The HTTP status a `navigate` landed on (§2.35). */
   let httpStatus: number | undefined;
+
+  if (
+    (action.action === 'count' || (action.action === 'read' && action.multiple === true)) &&
+    typeof action.containerRef === 'string' &&
+    action.containerRef.trim() !== '' &&
+    !action.selector
+  ) {
+    const cleanContainerRef = action.containerRef.trim().replace(/^aria-ref=/, '');
+    reportedFailedSelector = `aria-ref=${cleanContainerRef}`;
+
+    if (!Array.isArray(action.exampleRefs)) {
+      const message =
+        'Plural read/count with "containerRef" also requires "exampleRefs" (1–2 sample item refs inside the container, or [] when the list is empty). Call "expand" on containerRef first if inner items have no refs yet.';
+      logger.error(`Action refused [${action.action}]: ${message}`);
+      return {
+        success: false,
+        error: message,
+        failedSelector: `aria-ref=${cleanContainerRef}`,
+      };
+    }
+
+    let containerResolved: ResolvedRef;
+    try {
+      containerResolved = await resolveRefTarget(page, action.containerRef);
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error(`Action failed [${action.action}]: ${message}`);
+      return {
+        success: false,
+        error: message,
+        failedSelector: `aria-ref=${cleanContainerRef}`,
+        matchCount: 0,
+        targeting: { matchCount: 0 },
+      };
+    }
+
+    effectiveFrame = containerResolved.frameSelector ?? action.frame;
+    root = containerResolved.root;
+    if (containerResolved.frameSelector !== undefined && action.frame === undefined) {
+      resolvedFromRefFrame = containerResolved.frameSelector;
+    }
+    if (effectiveFrame !== undefined) {
+      eff.frame = effectiveFrame;
+    }
+
+    if (action.exampleRefs.length === 0) {
+      if (action.action === 'read') {
+        return {
+          success: true,
+          capturedValues: [],
+          listMatches: { groups: [] },
+          ...(wantMeasure && { targeting: { matchCount: 0 } }),
+          ...(resolvedFromRefFrame !== undefined && { resolvedFrame: resolvedFromRefFrame }),
+        };
+      }
+      return {
+        success: true,
+        capturedValue: '0',
+        listMatches: { groups: [] },
+        ...(wantMeasure && { targeting: { matchCount: 0 } }),
+        ...(resolvedFromRefFrame !== undefined && { resolvedFrame: resolvedFromRefFrame }),
+      };
+    }
+
+    const containerFrame = containerResolved.frameSelector ?? undefined;
+    const exampleResolvedList: ResolvedRef[] = [];
+    for (const exRef of action.exampleRefs) {
+      const cleanExRef = exRef.trim().replace(/^aria-ref=/, '');
+      let exResolved: ResolvedRef;
+      try {
+        exResolved = await resolveRefTarget(page, exRef);
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error(`Action failed [${action.action}]: ${message}`);
+        return {
+          success: false,
+          error: message,
+          failedSelector: `aria-ref=${cleanExRef}`,
+          matchCount: 0,
+          targeting: { matchCount: 0 },
+        };
+      }
+      const exFrame = exResolved.frameSelector ?? undefined;
+      if (exFrame !== containerFrame) {
+        const message =
+          `Plural ${action.action} requires every exampleRefs element to be in the same frame as containerRef ` +
+          `(containerRef "${cleanContainerRef}" is in ${containerFrame ? `"${containerFrame}"` : 'main page'}, ` +
+          `exampleRef "${cleanExRef}" is in ${exFrame ? `"${exFrame}"` : 'main page'})`;
+        logger.error(`Action refused [${action.action}]: ${message}`);
+        return {
+          success: false,
+          error: message,
+          failedSelector: `aria-ref=${cleanExRef}`,
+        };
+      }
+      exampleResolvedList.push(exResolved);
+    }
+
+    const derived = await deriveRepeatingSelectorForRefs(containerResolved, exampleResolvedList);
+    if (!derived.ok) {
+      logger.error(`Action failed [${action.action}]: ${derived.error}`);
+      return {
+        success: false,
+        error: derived.error,
+        failedSelector: `aria-ref=${cleanContainerRef}`,
+      };
+    }
+    derivedPlural = { selector: derived.selector, by: derived.by };
+    eff.selector = derived.selector;
+  }
 
   try {
     // ── Measurement (stories/codebehind-selector-ambiguity.md) ──────────────
@@ -1034,13 +1264,25 @@ export async function executeAction(
           `${matchCount} hidden elements matched "${eff.selector}" — use a more specific selector `
           + `(browser.ambiguousTarget is "fail")`;
         logger.error(`Action refused [${eff.action}]: ${message}`);
-        return { success: false, error: message, failedSelector: eff.selector, matchCount };
+        return {
+          success: false,
+          error: message,
+          ...(reportedFailedSelector !== undefined && { failedSelector: reportedFailedSelector }),
+          matchCount,
+        };
       }
     }
     if (singular && eff.selector !== undefined && !hiddenToggle) {
       const startedAt = Date.now();
       await singular.target.waitFor({ state: singular.state, timeout: singular.budgetMs });
-      targeting = await measureTargeting(root, eff.selector, singular, wantMeasure);
+      targeting = await measureTargeting(
+        root,
+        eff.selector,
+        singular,
+        wantMeasure,
+        root !== page,
+        options?.maskValues,
+      );
       // The hoisted wait must not add a SECOND timeout budget: giving it a
       // fresh one would double how long a failing selector takes to report.
       // Time it, and pass the remainder to the action.
@@ -1095,7 +1337,7 @@ export async function executeAction(
           return {
             success: false,
             error: message,
-            failedSelector: eff.selector,
+            ...(reportedFailedSelector !== undefined && { failedSelector: reportedFailedSelector }),
             matchCount: candidates,
             ...(targeting !== undefined && { targeting }),
           };
@@ -1112,7 +1354,14 @@ export async function executeAction(
       case 'click': {
         // §2.10: the selector as written reaches only a hidden input on
         // replay, so a compile must see what the runtime clicked instead.
-        const standIn = await executeClick(page, root, eff, remainingMs, wantMeasure);
+        const standIn = await executeClick(
+          page,
+          root,
+          eff,
+          remainingMs,
+          wantMeasure,
+          options?.maskValues,
+        );
         if (standIn !== undefined) targeting = { ...(targeting ?? {}), ...standIn };
         break;
       }
@@ -1153,9 +1402,33 @@ export async function executeAction(
         await executeReload(page);
         break;
 
-      case 'drag':
-        dragRoute = await executeDrag(page, root, eff, remainingMs);
+      case 'drag': {
+        const dragged = await executeDrag(
+          page,
+          root,
+          eff,
+          remainingMs,
+          wantMeasure,
+          options?.maskValues,
+        );
+        dragRoute = dragged.via;
+        if (
+          wantMeasure &&
+          (dragged.targetNormalizedLocator !== undefined ||
+            dragged.targetResolvedSelector !== undefined)
+        ) {
+          targeting = {
+            ...(targeting ?? {}),
+            ...(dragged.targetNormalizedLocator !== undefined && {
+              targetNormalizedLocator: dragged.targetNormalizedLocator,
+            }),
+            ...(dragged.targetResolvedSelector !== undefined && {
+              targetResolvedSelector: dragged.targetResolvedSelector,
+            }),
+          };
+        }
         break;
+      }
 
       case 'upload':
         uploadRoute = await executeUpload(page, root, eff, uploadFiles ?? [], remainingMs);
@@ -1192,8 +1465,10 @@ export async function executeAction(
         if (eff.multiple) {
           // Plural actions are exempt by construction: `evaluateAll` runs
           // across every match, so many matches is the PURPOSE. The count is
-          // free here (the page already returned every element), and there is
-          // no `resolvedSelector` because there is no single element.
+          // free here (the page already returned every element); a direct
+          // selector has no single-element `resolvedSelector`, while a
+          // `containerRef` + `exampleRefs` read records the derived repeating
+          // selector.
           if (options?.settleMatches) await settleMatchCount(root, requireSelector(eff), options.settleMatches, signal);
           const list = await executeReadMultiple(root, eff);
           // The kinds come from the same page call as the values, so they are
@@ -1206,12 +1481,17 @@ export async function executeAction(
             ...(wantMeasure && {
               targeting: {
                 matchCount: list.matchCount,
+                ...(derivedPlural !== null && {
+                  resolvedSelector: derivedPlural.selector,
+                  resolvedBy: derivedPlural.by,
+                }),
                 ...(kinds !== undefined && { kinds }),
                 ...(roleNameFallback !== undefined && { roleNameFallback }),
               },
             }),
             ...(kinds !== undefined && { kinds }),
             listMatches: list.listMatches,
+            ...(resolvedFromRefFrame !== undefined && { resolvedFrame: resolvedFromRefFrame }),
           };
         }
         const captured = await executeRead(root, eff, remainingMs);
@@ -1225,6 +1505,7 @@ export async function executeAction(
           capturedValue: captured,
           ...(measured !== undefined && { targeting: measured }),
           ...(kinds !== undefined && { kinds }),
+          ...(resolvedFromRefFrame !== undefined && { resolvedFrame: resolvedFromRefFrame }),
         };
       }
 
@@ -1235,8 +1516,9 @@ export async function executeAction(
       // `readTable` is absent from MUTATING_ACTIONS in step-executor.ts.
       case 'readTable': {
         const columns = eff.columns ?? [];
+        const tableSelector = requireSelector(eff);
         const table = await readTableRecords(root, {
-          selector: requireSelector(eff),
+          selector: tableSelector,
           columns,
           ...(eff.limit !== undefined && { limit: eff.limit }),
           // §7.10: a validated structure the runtime owns, replayed here. The
@@ -1249,7 +1531,33 @@ export async function executeAction(
             && { structureSource: options.structureSource }),
         });
         logger.info(formatTableReadSummary(table, columns.length, eff.as, eff.limit));
-        return { success: true, capturedRecords: table.records };
+        const tableLoc = root.locator(tableSelector);
+        const [tableResolved, tableNorm] = wantMeasure
+          ? await Promise.all([
+              resolveElementStableSelector(tableLoc),
+              isInternalRefSelector(tableSelector)
+                ? normalizePlaywrightLocator(tableLoc.first(), root !== page, options?.maskValues)
+                : Promise.resolve(null),
+            ])
+          : ([null, null] as const);
+        return {
+          success: true,
+          capturedRecords: table.records,
+          ...(wantMeasure && {
+            targeting: {
+              matchCount: 1,
+              ...(tableResolved !== null && {
+                resolvedSelector: tableResolved.selector,
+                resolvedBy: tableResolved.by,
+              }),
+              ...(tableNorm !== null && {
+                normalizedLocator: tableNorm.normalizedLocator,
+                normalizedBy: tableNorm.normalizedBy,
+              }),
+            },
+          }),
+          ...(resolvedFromRefFrame !== undefined && { resolvedFrame: resolvedFromRefFrame }),
+        };
       }
 
       case 'count': {
@@ -1262,7 +1570,9 @@ export async function executeAction(
         // (src/runner/list-read-review.ts). Looked at only when it found
         // something: a count of 0 is empty whatever the elements are, and says
         // only how many were hidden, so it costs the page no further call.
-        const groups = total > 0 ? await describeMatches(counted.counted) : [];
+        const groups = total > 0
+          ? await describeMatches(counted.counted, READ_MULTIPLE_MAX, eff.selector?.startsWith('aria-ref='))
+          : [];
         // Every element the selector matches, for a compile's self-check: the
         // look just taken when the count counted all of them.
         const kinds = !wantKinds
@@ -1277,6 +1587,10 @@ export async function executeAction(
           ...(wantMeasure && Number.isFinite(total) && {
             targeting: {
               matchCount: total,
+              ...(derivedPlural !== null && {
+                resolvedSelector: derivedPlural.selector,
+                resolvedBy: derivedPlural.by,
+              }),
               ...(kinds !== undefined && { kinds }),
               ...(roleNameFallback !== undefined && { roleNameFallback }),
             },
@@ -1285,11 +1599,43 @@ export async function executeAction(
           ...(groups !== undefined && {
             listMatches: { groups, ...(Number.isFinite(hidden) && hidden > 0 && { hidden }) },
           }),
+          ...(resolvedFromRefFrame !== undefined && { resolvedFrame: resolvedFromRefFrame }),
         };
       }
 
       case 'noop':
         logger.debug(`noop action: ${eff.description}`);
+        if (wantMeasure && typeof eff.foundRef === 'string' && eff.foundRef.trim() !== '') {
+          try {
+            const found = await resolveRefTarget(page, eff.foundRef);
+            const [normInfo, stable] = await Promise.all([
+              normalizePlaywrightLocator(
+                found.locator.first(),
+                found.frameSelector !== undefined,
+                options?.maskValues,
+              ),
+              resolveElementStableSelector(found.locator),
+            ]);
+            targeting = {
+              matchCount: 1,
+              ...(stable !== null && {
+                resolvedSelector: stable.selector,
+                resolvedBy: stable.by,
+              }),
+              ...(normInfo !== null && {
+                normalizedLocator: normInfo.normalizedLocator,
+                normalizedBy: normInfo.normalizedBy,
+              }),
+            };
+            if (found.frameSelector !== undefined && action.frame === undefined) {
+              resolvedFromRefFrame = found.frameSelector;
+            }
+          } catch (err) {
+            logger.debug(
+              `noop foundRef "${eff.foundRef}" measurement failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
         break;
 
       // ── Types the step loop runs, never this function ─────────────────────
@@ -1341,6 +1687,7 @@ export async function executeAction(
       ...(dragRoute !== undefined && { drag: { via: dragRoute } }),
       ...(typed !== undefined && { typed }),
       ...(httpStatus !== undefined && { httpStatus }),
+      ...(resolvedFromRefFrame !== undefined && { resolvedFrame: resolvedFromRefFrame }),
     };
   } catch (err) {
     // A run abort (issue 022) must propagate as a throw, not be swallowed into a
@@ -1390,7 +1737,7 @@ export async function executeAction(
       ...((eff.action === 'back' || eff.action === 'forward' || eff.action === 'reload') && {
         retryable: false as const,
       }),
-      ...(eff.selector !== undefined && { failedSelector: eff.selector }),
+      ...(reportedFailedSelector !== undefined && { failedSelector: reportedFailedSelector }),
       ...(matchCount !== undefined && { matchCount }),
       ...(targeting !== undefined && { targeting }),
     };
@@ -1469,6 +1816,7 @@ async function executeClick(
   action: AIAction,
   timeoutMs?: number,
   measure = false,
+  maskValues?: readonly string[],
 ): Promise<ActionTargeting | undefined> {
   const selector = requireSelector(action);
   const hold = action.clickCount === 2 ? 0 : (action.holdMs ?? 0);
@@ -1506,7 +1854,9 @@ async function executeClick(
     const stand = toggle;
     // Before the click, as every targeting fact is measured: a click that
     // navigates or re-renders leaves another page to measure.
-    const recorded = measure ? await standInTargeting(stand) : undefined;
+    const recorded = measure
+      ? await standInTargeting(stand, root !== page, isInternalRefSelector(selector), maskValues)
+      : undefined;
     if (stand.label) {
       logger.info(`"${selector}" is a hidden ${stand.type} — clicking its label instead`);
       await press(stand.target);
@@ -1527,16 +1877,35 @@ async function executeClick(
 }
 
 /**
- * {@link ActionTargeting} for a click a stand-in took: which kind, and a
- * verified selector for the element clicked when one can be built.
+ * {@link ActionTargeting} for a click a stand-in took: which kind, a verified
+ * selector and normalized Playwright locator for the element clicked, and its
+ * enclosing HTML context when available.
  */
-async function standInTargeting(stand: ToggleStandIn): Promise<ActionTargeting> {
-  const resolved = await stand.target
-    .evaluate(resolvedSelectorInPage, undefined, { timeout: MEASUREMENT_TIMEOUT_MS })
-    .catch(() => null);
+async function standInTargeting(
+  stand: ToggleStandIn,
+  hasSeparateFrame: boolean,
+  includeRefExtras = false,
+  maskValues?: readonly string[],
+): Promise<ActionTargeting> {
+  const [resolved, normInfo, elementContextHtml] = await Promise.all([
+    stand.target
+      .evaluate(resolvedSelectorInPage, undefined, { timeout: MEASUREMENT_TIMEOUT_MS })
+      .catch(() => null),
+    includeRefExtras
+      ? normalizePlaywrightLocator(stand.target, hasSeparateFrame, maskValues)
+      : Promise.resolve(null),
+    includeRefExtras
+      ? captureElementContextHtml(stand.target, maskValues)
+      : Promise.resolve(undefined),
+  ]);
   return {
     standIn: stand.label ? 'label' : 'box',
     ...(resolved !== null && { resolvedSelector: resolved.selector, resolvedBy: resolved.by }),
+    ...(normInfo !== null && {
+      normalizedLocator: normInfo.normalizedLocator,
+      normalizedBy: normInfo.normalizedBy,
+    }),
+    ...(elementContextHtml !== undefined && { elementContextHtml }),
   };
 }
 
@@ -1556,21 +1925,74 @@ interface ToggleStandIn {
 }
 
 /**
- * The first match, when every match of `matches` is hidden and the first is a
- * checkbox or radio (§2.10); `null` otherwise, and while nothing matches yet.
+ * The first match, when every match of `matches` is hidden (or an `opacity: 0` /
+ * `pointer-events: none` styled checkbox/radio that Playwright's `visible=true`
+ * still counts as visible) and it is a checkbox or radio (§2.10); `null`
+ * otherwise, and while nothing matches yet.
  */
 async function hiddenToggleInput(matches: Locator): Promise<Locator | null> {
   try {
-    if ((await matches.count()) === 0) return null;
-    if ((await matches.locator('visible=true').count()) > 0) return null;
-    const input = matches.first();
-    const toggle = await input.evaluate(
+    const totalCount = await matches.count();
+    if (totalCount === 0) return null;
+    const visibleMatches = matches.locator('visible=true');
+    const visibleCount = await visibleMatches.count();
+
+    if (visibleCount === 0) {
+      const input = matches.first();
+      const toggle = await input.evaluate(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (el: any) => el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio'),
+        undefined,
+        { timeout: MEASUREMENT_TIMEOUT_MS },
+      );
+      return toggle === true ? input : null;
+    }
+
+    // Playwright's `visible=true` ignores `opacity: 0` and `pointer-events: none`,
+    // so a 1x1px styled checkbox overlay still appears visible to Playwright even
+    // though a person cannot see or click it directly.
+    if (visibleCount === 1) {
+      const candidate = totalCount === 1 ? matches.first() : visibleMatches.first();
+      const obscuredToggle = await candidate.evaluate(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (el: any) => {
+          if (el.tagName !== 'INPUT' || (el.type !== 'checkbox' && el.type !== 'radio')) {
+            return false;
+          }
+          const hiddenByCss = typeof el.checkVisibility === 'function'
+            ? !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+            : false;
+          const view = el.ownerDocument ? el.ownerDocument.defaultView : null;
+          const cs = view && typeof view.getComputedStyle === 'function'
+            ? view.getComputedStyle(el)
+            : null;
+          return hiddenByCss || (cs !== null && cs.pointerEvents === 'none');
+        },
+        undefined,
+        { timeout: MEASUREMENT_TIMEOUT_MS },
+      );
+      return obscuredToggle === true ? candidate : null;
+    }
+
+    const allObscuredToggles = await visibleMatches.evaluateAll(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (el: any) => el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio'),
-      undefined,
-      { timeout: MEASUREMENT_TIMEOUT_MS },
+      (els: any[]) =>
+        els.length > 0 &&
+        els.every((el) => {
+          if (el.tagName !== 'INPUT' || (el.type !== 'checkbox' && el.type !== 'radio')) {
+            return false;
+          }
+          const hiddenByCss = typeof el.checkVisibility === 'function'
+            ? !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+            : false;
+          const view = el.ownerDocument ? el.ownerDocument.defaultView : null;
+          const cs = view && typeof view.getComputedStyle === 'function'
+            ? view.getComputedStyle(el)
+            : null;
+          return hiddenByCss || (cs !== null && cs.pointerEvents === 'none');
+        }),
     );
-    return toggle ? input : null;
+    return allObscuredToggles === true ? visibleMatches.first() : null;
   } catch {
     return null;
   }
@@ -2367,31 +2789,62 @@ async function executeReload(page: Page): Promise<void> {
  * Returns the route that ran, which the run log names at debug level and the
  * report's drag row shows.
  */
+interface DragExecutionResult {
+  via: DragRoute;
+  targetNormalizedLocator?: string;
+  targetResolvedSelector?: string;
+}
+
 async function executeDrag(
   page: Page,
   root: Page | FrameLocator,
   action: AIAction,
   timeoutMs?: number,
-): Promise<DragRoute> {
+  measure = false,
+  maskValues?: readonly string[],
+): Promise<DragExecutionResult> {
   const selector = requireSelector(action);
-  const target = action.target !== undefined ? sanitizeCssSelector(action.target) : '';
+  const target = action.target !== undefined
+    ? (isInternalRefSelector(action.target) ? action.target : sanitizeCssSelector(action.target))
+    : '';
   if (!target) {
-    throw new Error('drag action requires a "target": the CSS selector of the element to drop onto');
+    throw new Error('drag action requires a "target" (or "targetRef"): the element to drop onto');
   }
   const timeout = timeoutMs ?? DRAG_TIMEOUT_MS;
   const source = root.locator(selector).locator('visible=true').first();
   const destination = root.locator(target).locator('visible=true').first();
+
+  let targetNormalizedLocator: string | undefined;
+  let targetResolvedSelector: string | undefined;
+  if (measure && isInternalRefSelector(target)) {
+    const [targetNorm, targetStable] = await Promise.all([
+      normalizePlaywrightLocator(destination, root !== page, maskValues),
+      resolveElementStableSelector(destination),
+    ]);
+    if (targetNorm !== null) targetNormalizedLocator = targetNorm.normalizedLocator;
+    if (targetStable !== null) targetResolvedSelector = targetStable.selector;
+  }
+
   const ends: DragEnds = { selector, target, source, destination };
   const deadline = Date.now() + timeout;
   const first = await dragOnce(page, root, action, ends, timeout, true);
-  if (typeof first === 'string') return first;
-  // §2.52: nothing was dropped, so a second drag cannot drop twice. It starts
-  // over from where the page has put the two now, scrolling them in if the
-  // move took them off screen.
-  logger.debug(`drag: the page moved ${first.moved} while the drag ran and nothing was dropped; dragging again from where they are now`);
-  // Within the action's one budget, not a second one of its own.
-  const left = Math.max(MIN_ACTION_TIMEOUT_MS, deadline - Date.now());
-  return await dragOnce(page, root, action, ends, left, false) as DragRoute;
+  let via: DragRoute;
+  if (typeof first === 'string') {
+    via = first;
+  } else {
+    // §2.52: nothing was dropped, so a second drag cannot drop twice. It starts
+    // over from where the page has put the two now, scrolling them in if the
+    // move took them off screen.
+    logger.debug(`drag: the page moved ${first.moved} while the drag ran and nothing was dropped; dragging again from where they are now`);
+    // Within the action's one budget, not a second one of its own.
+    const left = Math.max(MIN_ACTION_TIMEOUT_MS, deadline - Date.now());
+    via = (await dragOnce(page, root, action, ends, left, false)) as DragRoute;
+  }
+  return {
+    via,
+    ...(targetNormalizedLocator !== undefined && { targetNormalizedLocator }),
+    ...(targetResolvedSelector !== undefined && { targetResolvedSelector }),
+  };
 }
 
 /** The two ends of a drag, as the action named them and as located. */
@@ -3318,8 +3771,66 @@ async function measureTargeting(
   selector: string,
   singular: SingularTarget,
   full: boolean,
+  hasSeparateFrame = false,
+  maskValues?: readonly string[],
 ): Promise<ActionTargeting | undefined> {
   try {
+    if (full && isInternalRefSelector(selector)) {
+      const refCount = await root.locator(selector).count();
+      if (refCount === 0) return undefined;
+
+      const [resolved, normInfo, elementContextHtml] = await Promise.all([
+        singular.target
+          .evaluate(resolvedSelectorInPage, undefined, { timeout: MEASUREMENT_TIMEOUT_MS })
+          .catch(() => null),
+        normalizePlaywrightLocator(singular.target, hasSeparateFrame, maskValues),
+        captureElementContextHtml(singular.target, maskValues),
+      ]);
+
+      let matchCount: number;
+      let visibleMatchCount: number | undefined;
+      if (normInfo !== null && normInfo.normalizedBy !== 'positional') {
+        // Playwright's generateSelectorSimple verifies strict uniqueness across the frame.
+        matchCount = 1;
+        if (singular.state === 'visible') {
+          visibleMatchCount = 1;
+        } else {
+          const vis = await root.locator(selector).locator('visible=true').count().catch(() => 0);
+          if (vis > 0) visibleMatchCount = 1;
+        }
+      } else if (resolved !== null) {
+        matchCount = await root.locator(resolved.selector).count().catch(() => 1);
+        const vis = await root
+          .locator(resolved.selector)
+          .locator('visible=true')
+          .count()
+          .catch(() => (singular.state === 'visible' ? 1 : 0));
+        visibleMatchCount = vis > 0 ? vis : (singular.state === 'visible' ? 1 : undefined);
+      } else {
+        matchCount = refCount;
+        const vis = await root
+          .locator(selector)
+          .locator('visible=true')
+          .count()
+          .catch(() => (singular.state === 'visible' ? 1 : 0));
+        visibleMatchCount = vis > 0 ? vis : (singular.state === 'visible' ? 1 : undefined);
+      }
+
+      if (matchCount === 0) return undefined;
+
+      const out: ActionTargeting = {
+        matchCount,
+        ...(visibleMatchCount !== undefined && visibleMatchCount > 0 && { visibleMatchCount }),
+        ...(resolved !== null && { resolvedSelector: resolved.selector, resolvedBy: resolved.by }),
+        ...(normInfo !== null && {
+          normalizedLocator: normInfo.normalizedLocator,
+          normalizedBy: normInfo.normalizedBy,
+        }),
+        ...(elementContextHtml !== undefined && { elementContextHtml }),
+      };
+      return Object.keys(out).length > 0 ? out : undefined;
+    }
+
     const visibleMatchCount =
       full || singular.state === 'visible'
         ? await root.locator(selector).locator('visible=true').count()
@@ -3555,6 +4066,1297 @@ function resolvedSelectorInPage(el: any): ResolvedSelection | null {
 }
 
 /**
+ * Resolve a live-verified CSS selector and its tier for the first element of
+ * `locator`, or null when the element cannot be evaluated or verified.
+ */
+export async function resolveElementStableSelector(
+  locator: Locator,
+): Promise<{ selector: string; by: ResolvedBy } | null> {
+  return locator
+    .first()
+    .evaluate(resolvedSelectorInPage, undefined, { timeout: MEASUREMENT_TIMEOUT_MS })
+    .catch(() => null);
+}
+
+let cachedSecretFieldRule: string | undefined;
+function getSecretFieldRule(): string {
+  if (cachedSecretFieldRule === undefined) {
+    // Call lazily so unit tests that partially mock `./dom-cleaner.js` without
+    // exporting `loadSecretFieldRule` still load; fall back to reading the
+    // shared fragment directly only in that partial-mock case.
+    cachedSecretFieldRule =
+      typeof loadSecretFieldRule === 'function'
+        ? loadSecretFieldRule()
+        : readFileSync(
+            fileURLToPath(new URL('./scripts/secret-field.js', import.meta.url)),
+            'utf8',
+          );
+  }
+  return cachedSecretFieldRule;
+}
+
+const ENTER_FRAME_SEPARATOR = ' >> internal:control=enter-frame >> ';
+const ELEMENT_CONTEXT_HTML_MAX_CHARS = 1_200;
+
+/**
+ * Strip leading `.contentFrame().` prefixes from a Playwright locator string
+ * outside quoted literals so iframe locators stay frame-relative when
+ * `RecordedAction.frame` already carries the iframe chain.
+ */
+function stripContentFramePrefix(expr: string): string {
+  const marker = '.contentFrame().';
+  let quote: '"' | "'" | null = null;
+  let lastEnd = -1;
+  for (let i = 0; i < expr.length; i++) {
+    const ch = expr[i]!;
+    if (quote !== null) {
+      if (ch === '\\' && i + 1 < expr.length) {
+        i++;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (expr.startsWith(marker, i)) {
+      lastEnd = i + marker.length;
+      i = lastEnd - 1;
+    }
+  }
+  return lastEnd !== -1 ? expr.slice(lastEnd).trim() : expr;
+}
+
+function classifyNormalizedLocator(expr: string): NormalizedBy {
+  if (/\.(?:nth|first|last)\s*\(|nth=/.test(expr)) return 'positional';
+  if ((expr.match(/\.(?:getBy[A-Za-z]+|locator|filter)\s*\(/g)?.length ?? 0) >= 1) return 'chained';
+  if (expr.startsWith('getByTestId(')) return 'testid';
+  if (expr.startsWith('getByRole(')) return 'role';
+  if (expr.startsWith('getByLabel(') || expr.startsWith('getByPlaceholder(')) return 'label';
+  if (
+    expr.startsWith('getByText(') ||
+    expr.startsWith('getByAltText(') ||
+    expr.startsWith('getByTitle(')
+  ) {
+    return 'text';
+  }
+  return 'chained';
+}
+
+async function normalizeLocatorWithTimeout(target: Locator): Promise<Locator | null> {
+  if (typeof target.normalize !== 'function') return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const work = target.normalize();
+    work.catch(() => {});
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('timeout')), MEASUREMENT_TIMEOUT_MS);
+      }),
+    ]);
+  } catch {
+    return null;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+let cachedSecretFieldValuesInContextInPage: ((el: unknown) => string[]) | undefined;
+function getSecretFieldValuesInContextInPage(): (el: unknown) => string[] {
+  if (cachedSecretFieldValuesInContextInPage === undefined) {
+    cachedSecretFieldValuesInContextInPage = new Function(
+      'el',
+      `
+      ${getSecretFieldRule()}
+      var STOP_TAGS = new Set(['tr', 'li', 'article', 'section', 'form', 'body', 'html']);
+      var STOP_ROLES = new Set(['row', 'listitem']);
+      var STATIC_VALUE_INPUT_TYPES = new Set(['checkbox', 'radio', 'file', 'hidden', 'submit', 'reset', 'button', 'image']);
+
+      if (!el || el.nodeType !== 1) return [];
+
+      function parentOrHost(node) {
+        if (!node) return null;
+        if (node.parentElement) return node.parentElement;
+        var r = typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+        return r && r.host ? r.host : null;
+      }
+
+      function isSecret(node) {
+        if (isSecretField(node)) return true;
+        try {
+          var view = node.ownerDocument ? node.ownerDocument.defaultView : null;
+          var cs = view && typeof view.getComputedStyle === 'function' ? view.getComputedStyle(node) : null;
+          if (cs) {
+            var sec = cs.webkitTextSecurity || (typeof cs.getPropertyValue === 'function' ? cs.getPropertyValue('-webkit-text-security') : '');
+            if (sec && sec !== 'none') return true;
+          }
+        } catch (e) {}
+        return false;
+      }
+
+      var root = el;
+      for (var depth = 0; depth < 3; depth++) {
+        var curTag = String(root.tagName || '').toLowerCase();
+        var curRole = String(root.getAttribute ? (root.getAttribute('role') || '') : '').trim().toLowerCase();
+        if (STOP_TAGS.has(curTag) || STOP_ROLES.has(curRole)) break;
+        var parent = parentOrHost(root);
+        if (!parent) break;
+        var pTag = String(parent.tagName || '').toLowerCase();
+        if (pTag === 'body' || pTag === 'html') break;
+        root = parent;
+      }
+
+      var values = new Set();
+      var stack = [root];
+      while (stack.length > 0) {
+        var node = stack.pop();
+        if (!node || node.nodeType !== 1) continue;
+        var tag = String(node.tagName || '').toLowerCase();
+        var inputType = tag === 'input' ? String(node.getAttribute('type') || 'text').toLowerCase() : '';
+        if (
+          ((tag === 'input' && !STATIC_VALUE_INPUT_TYPES.has(inputType)) || tag === 'textarea')
+          && isSecret(node)
+        ) {
+          var liveVal = node.value == null ? '' : String(node.value);
+          if (liveVal.length >= 1) values.add(liveVal);
+          var attrVal = node.getAttribute('value');
+          if (attrVal != null && String(attrVal).length >= 1) values.add(String(attrVal));
+        }
+        if (node.children) {
+          for (var i = 0; i < node.children.length; i++) stack.push(node.children[i]);
+        }
+        if (node.shadowRoot && node.shadowRoot.children) {
+          for (var j = 0; j < node.shadowRoot.children.length; j++) stack.push(node.shadowRoot.children[j]);
+        }
+      }
+      return Array.from(values);
+      `,
+    ) as unknown as (el: unknown) => string[];
+  }
+  return cachedSecretFieldValuesInContextInPage;
+}
+
+function containsAnySecret(text: string, secrets: readonly string[]): boolean {
+  for (const secret of secrets) {
+    if (!secret) continue;
+    if (text.includes(secret)) return true;
+    const collapsed = secret.replace(/\s+/g, ' ').trim();
+    if (collapsed.length >= RECORD_SECRET_MIN_LENGTH && text.includes(collapsed)) return true;
+    const jsonEscaped = JSON.stringify(secret).slice(1, -1);
+    if (jsonEscaped !== secret && text.includes(jsonEscaped)) return true;
+    const singleEscaped = secret.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    if (singleEscaped !== secret && text.includes(singleEscaped)) return true;
+  }
+  return false;
+}
+
+function containsShortPageSecret(text: string, shortSecrets: readonly string[]): boolean {
+  for (const raw of shortSecrets) {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) continue;
+    const esc = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (
+      text.includes(`value="${raw}"`)
+      || text.includes(`value='${raw}'`)
+      || text.includes(`'${raw}'`)
+      || text.includes(`"${raw}"`)
+      || (/(?:getByRole\(['"](?:row|listitem)['"]|hasText\s*:)/.test(text)
+        && new RegExp(`(?:^|[^A-Za-z0-9_])${esc}(?:$|[^A-Za-z0-9_])`).test(text))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+interface NormalizedLocatorDetail {
+  normalizedLocator?: string;
+  normalizedBy?: NormalizedBy;
+  innerSelector?: string;
+}
+
+async function normalizeLocatorDetailed(
+  target: Locator,
+  hasSeparateFrame: boolean,
+  maskValues?: readonly string[],
+): Promise<NormalizedLocatorDetail | null> {
+  const [norm, contextSecretRaw] = await Promise.all([
+    normalizeLocatorWithTimeout(target),
+    target
+      .evaluate(getSecretFieldValuesInContextInPage(), undefined, { timeout: MEASUREMENT_TIMEOUT_MS })
+      .catch(() => [] as string[]),
+  ]);
+  if (!norm) return null;
+
+  const contextSecrets = Array.isArray(contextSecretRaw)
+    ? contextSecretRaw.filter((v): v is string => typeof v === 'string' && v.length >= 1)
+    : [];
+  const longPageSecrets = contextSecrets.filter((v) => v.trim().length >= RECORD_SECRET_MIN_LENGTH);
+  const shortPageSecrets = contextSecrets.filter((v) => {
+    const len = v.trim().length;
+    return len >= 1 && len < RECORD_SECRET_MIN_LENGTH;
+  });
+  const hasPageSecretIn = (text: string): boolean =>
+    containsAnySecret(text, longPageSecrets) || containsShortPageSecret(text, shortPageSecrets);
+  const hasAnySecretIn = (text: string): boolean =>
+    (maskValues !== undefined && maskValues.length > 0 && containsAnySecret(text, maskValues))
+    || hasPageSecretIn(text);
+
+  let normalizedLocator: string | undefined;
+  let normalizedBy: NormalizedBy | undefined;
+  let expr = norm.toString().trim();
+  if (hasSeparateFrame) {
+    expr = stripContentFramePrefix(expr);
+  }
+  if (
+    expr !== ''
+    && !expr.includes('aria-ref=')
+    && !expr.includes('data-steptix-ref')
+    && !hasAnySecretIn(expr)
+  ) {
+    normalizedLocator = expr;
+    normalizedBy = classifyNormalizedLocator(expr);
+  }
+
+  let innerSelector: string | undefined;
+  const rawSelector = (norm as unknown as { _selector?: unknown })._selector;
+  if (typeof rawSelector === 'string') {
+    let sel = rawSelector.trim();
+    if (hasSeparateFrame) {
+      const idx = sel.lastIndexOf(ENTER_FRAME_SEPARATOR);
+      if (idx !== -1) {
+        sel = sel.slice(idx + ENTER_FRAME_SEPARATOR.length).trim();
+      }
+    }
+    if (
+      sel !== ''
+      && !sel.includes('aria-ref=')
+      && !sel.includes('data-steptix-ref')
+      && !hasPageSecretIn(sel)
+    ) {
+      innerSelector = sel;
+    }
+  }
+
+  if (normalizedLocator === undefined && innerSelector === undefined) return null;
+  return {
+    ...(normalizedLocator !== undefined && { normalizedLocator }),
+    ...(normalizedBy !== undefined && { normalizedBy }),
+    ...(innerSelector !== undefined && { innerSelector }),
+  };
+}
+
+async function normalizePlaywrightLocator(
+  target: Locator,
+  hasSeparateFrame: boolean,
+  maskValues?: readonly string[],
+): Promise<{ normalizedLocator: string; normalizedBy: NormalizedBy } | null> {
+  const detail = await normalizeLocatorDetailed(target, hasSeparateFrame, maskValues);
+  if (!detail || detail.normalizedLocator === undefined || detail.normalizedBy === undefined) {
+    return null;
+  }
+  return {
+    normalizedLocator: detail.normalizedLocator,
+    normalizedBy: detail.normalizedBy,
+  };
+}
+
+function expandHtmlEscapedSecrets(maskValues: readonly string[]): string[] {
+  const out = new Set<string>();
+  for (const val of maskValues) {
+    if (!val) continue;
+    out.add(val);
+    const escText = val.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    if (escText !== val) out.add(escText);
+    const escAttr = escText.replace(/"/g, '&quot;');
+    if (escAttr !== escText) out.add(escAttr);
+  }
+  return [...out];
+}
+
+function sliceWholeCodePointsWithEllipsis(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  if (limit <= 1) return text.slice(0, Math.max(0, limit));
+  let end = limit - 1;
+  const lastCode = text.charCodeAt(end - 1);
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+    end -= 1;
+  }
+  return `${text.slice(0, end)}…`;
+}
+
+/**
+ * Browser-side ancestor HTML context extractor compiled lazily via `new Function`
+ * so esbuild's `keepNames` never injects `__name` helpers into the page context.
+ * Keeps a generous 8,000-char raw cap with no mid-attribute/mid-text slicing so
+ * Node-side `redact()` masks run secrets whole before slicing to 1,200 chars.
+ */
+let cachedCaptureElementContextHtmlInPage: ((el: unknown) => string) | undefined;
+function getCaptureElementContextHtmlInPage(): (el: unknown) => string {
+  if (cachedCaptureElementContextHtmlInPage === undefined) {
+    cachedCaptureElementContextHtmlInPage = new Function(
+      'el',
+      `
+  ${getSecretFieldRule()}
+  var MAX_CHARS = 8000;
+  var SKIP_TAGS = new Set(['script', 'style', 'svg', 'noscript', 'template']);
+  var STOP_TAGS = new Set(['tr', 'li', 'article', 'section', 'form', 'body', 'html']);
+  var STOP_ROLES = new Set(['row', 'listitem']);
+  var KEEP_ATTRS = ['id', 'data-testid', 'name', 'type', 'role', 'aria-label', 'href', 'class', 'for', 'placeholder', 'value'];
+  var STATIC_VALUE_INPUT_TYPES = new Set(['checkbox', 'radio', 'file', 'hidden', 'submit', 'reset', 'button', 'image']);
+  var VOID_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+
+  if (!el || el.nodeType !== 1) return '';
+
+  function parentOrHost(node) {
+    if (!node) return null;
+    if (node.parentElement) return node.parentElement;
+    var r = typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+    return r && r.host ? r.host : null;
+  }
+
+  function isSecret(node) {
+    if (isSecretField(node)) return true;
+    try {
+      var view = node.ownerDocument ? node.ownerDocument.defaultView : null;
+      var cs = view && typeof view.getComputedStyle === 'function' ? view.getComputedStyle(node) : null;
+      if (cs) {
+        var sec = cs.webkitTextSecurity || (typeof cs.getPropertyValue === 'function' ? cs.getPropertyValue('-webkit-text-security') : '');
+        if (sec && sec !== 'none') return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function escAttr(v) {
+    return String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function escText(v) {
+    return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  var root = el;
+  for (var depth = 0; depth < 3; depth++) {
+    var curTag = String(root.tagName || '').toLowerCase();
+    var curRole = String(root.getAttribute ? (root.getAttribute('role') || '') : '').trim().toLowerCase();
+    if (STOP_TAGS.has(curTag) || STOP_ROLES.has(curRole)) break;
+    var parent = parentOrHost(root);
+    if (!parent) break;
+    var pTag = String(parent.tagName || '').toLowerCase();
+    if (pTag === 'body' || pTag === 'html') break;
+    root = parent;
+  }
+
+  var out = '';
+  var truncated = false;
+  function append(str) {
+    if (truncated || !str) return;
+    if (out.length + str.length > MAX_CHARS) {
+      out += str.slice(0, Math.max(0, MAX_CHARS - out.length)) + '…';
+      truncated = true;
+      return;
+    }
+    out += str;
+  }
+
+  function serialize(node) {
+    if (truncated || !node) return;
+    if (node.nodeType === 3) {
+      var txt = String(node.nodeValue || '').replace(/\\s+/g, ' ');
+      if (txt.trim().length > 0) append(escText(txt));
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    var tag = String(node.tagName || '').toLowerCase();
+    if (SKIP_TAGS.has(tag)) return;
+    var isInput = tag === 'input';
+    var isTextarea = tag === 'textarea';
+    var inputType = isInput ? String(node.getAttribute('type') || 'text').toLowerCase() : '';
+    var secret = (isInput && !STATIC_VALUE_INPUT_TYPES.has(inputType) && isSecret(node)) || (isTextarea && isSecret(node));
+
+    var open = '<' + tag;
+    var emittedValue = false;
+    for (var i = 0; i < KEEP_ATTRS.length; i++) {
+      var attrName = KEEP_ATTRS[i];
+      if (!node.hasAttribute(attrName)) continue;
+      var rawAttr = node.getAttribute(attrName);
+      if (rawAttr === null) continue;
+      if (attrName === 'value') {
+        emittedValue = true;
+        if (secret) {
+          var liveSecret = node.value == null ? '' : String(node.value);
+          if (String(rawAttr).length > 0 || liveSecret.length > 0) open += ' value="***"';
+          continue;
+        }
+      }
+      var attrStr = String(rawAttr).replace(/\\s+/g, ' ').trim();
+      open += ' ' + attrName + '="' + escAttr(attrStr) + '"';
+    }
+    if (isInput && !emittedValue && !STATIC_VALUE_INPUT_TYPES.has(inputType)) {
+      var liveVal = node.value == null ? '' : String(node.value);
+      if (liveVal.length > 0) {
+        open += ' value="' + (secret ? '***' : escAttr(liveVal)) + '"';
+      }
+    }
+    open += '>';
+    append(open);
+    if (VOID_TAGS.has(tag)) return;
+    if (isTextarea) {
+      var taVal = node.value == null ? String(node.textContent || '') : String(node.value);
+      var taTrim = taVal.replace(/\\s+/g, ' ').trim();
+      if (taTrim.length > 0) {
+        append(secret ? '***' : escText(taTrim));
+      }
+    } else if (node.childNodes) {
+      for (var c = 0; c < node.childNodes.length; c++) {
+        serialize(node.childNodes[c]);
+        if (truncated) break;
+      }
+    }
+    append('</' + tag + '>');
+  }
+
+  serialize(root);
+  return out.trim();
+`,
+    ) as unknown as (el: unknown) => string;
+  }
+  return cachedCaptureElementContextHtmlInPage;
+}
+
+async function captureElementContextHtml(
+  target: Locator,
+  maskValues?: readonly string[],
+): Promise<string | undefined> {
+  try {
+    const html: unknown = await target.evaluate(getCaptureElementContextHtmlInPage(), undefined, {
+      timeout: MEASUREMENT_TIMEOUT_MS,
+    });
+    if (typeof html !== 'string' || html.length === 0) return undefined;
+    // Mask before cut: redact run secrets from the full raw HTML before
+    // slicing to the 1,200-char context budget so a cut cannot bisect a secret.
+    const secretsToMask =
+      maskValues !== undefined && maskValues.length > 0
+        ? expandHtmlEscapedSecrets(maskValues)
+        : [];
+    const redacted = secretsToMask.length > 0 ? redact(html, secretsToMask) : html;
+    return sliceWholeCodePointsWithEllipsis(redacted, ELEMENT_CONTEXT_HTML_MAX_CHARS);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Pre-resolve a snapshot `ref` to a durable Playwright/CSS selector before
+ * executing the first action of a multi-action chain (SPEC-aria-ref-snapshots
+ * §6.2), so DOM re-renders triggered by action 1 do not invalidate refs used
+ * by subsequent wait/click actions in the same turn.
+ */
+export async function preResolveRefForChain(
+  page: Page,
+  ref: string,
+  maskValues?: readonly string[],
+): Promise<PreResolvedRef | null> {
+  let resolved: ResolvedRef;
+  try {
+    resolved = await resolveRefTarget(page, ref);
+  } catch {
+    return null;
+  }
+
+  const target = resolved.locator.first();
+  const hasSeparateFrame = resolved.frameSelector !== undefined;
+  const [normDetail, stable] = await Promise.all([
+    normalizeLocatorDetailed(target, hasSeparateFrame, maskValues),
+    resolveElementStableSelector(resolved.locator),
+  ]);
+
+  const selector = normDetail?.innerSelector ?? stable?.selector ?? resolved.selectorInRoot;
+  return {
+    selector,
+    ...(resolved.frameSelector !== undefined && { frameSelector: resolved.frameSelector }),
+    ...(normDetail?.normalizedLocator !== undefined && {
+      normalizedLocator: normDetail.normalizedLocator,
+    }),
+    ...(normDetail?.normalizedBy !== undefined && {
+      normalizedBy: normDetail.normalizedBy,
+    }),
+  };
+}
+
+type DeriveRepeatingOutcome =
+  | { ok: true; selector: string; by: ResolvedBy }
+  | { ok: false; error: string };
+
+/**
+ * Browser-side repeating-item selector synthesizer for plural `read`/`count`
+ * via `containerRef` + `exampleRefs` (SPEC-aria-ref-snapshots §5.2). Compiled
+ * via `new Function` so esbuild's `keepNames` never injects `__name` into the
+ * browser context.
+ */
+const deriveRepeatingSelectorInPage = new Function(
+  'containerEl',
+  'args',
+  `
+  var rootNode = typeof containerEl.getRootNode === 'function' ? containerEl.getRootNode() : containerEl.ownerDocument;
+  var doc = containerEl.ownerDocument;
+  var hasShadowRoots = Boolean(rootNode && rootNode.host);
+  if (!hasShadowRoots && doc) {
+    var allDocEls = doc.querySelectorAll('*');
+    for (var sh = 0; sh < allDocEls.length; sh++) {
+      if (allDocEls[sh].shadowRoot) {
+        hasShadowRoots = true;
+        break;
+      }
+    }
+  }
+
+  function escAttr(v) {
+    return String(v).replace(/\\\\/g, '\\\\\\\\').replace(/"/g, '\\\\"');
+  }
+
+  function idSelector(id) {
+    if (/^[A-Za-z_][A-Za-z0-9_-]*$/.test(id)) return '#' + id;
+    return '[id="' + escAttr(id) + '"]';
+  }
+
+  function parentOrHost(el) {
+    if (!el) return null;
+    if (el.parentElement) return el.parentElement;
+    var r = typeof el.getRootNode === 'function' ? el.getRootNode() : null;
+    return r && r.host ? r.host : null;
+  }
+
+  function containsDeep(ancestor, node) {
+    var cur = node;
+    while (cur) {
+      if (cur === ancestor) return true;
+      cur = parentOrHost(cur);
+    }
+    return false;
+  }
+
+  function directChildren(el) {
+    var kids = [];
+    if (!el) return kids;
+    if (el.shadowRoot && el.shadowRoot.children) {
+      for (var s = 0; s < el.shadowRoot.children.length; s++) kids.push(el.shadowRoot.children[s]);
+    }
+    if (el.children) {
+      for (var c = 0; c < el.children.length; c++) kids.push(el.children[c]);
+    }
+    return kids;
+  }
+
+  function countDirectMatches(parent, simpleSel) {
+    if (!parent) return -1;
+    var kids = directChildren(parent);
+    var count = 0;
+    for (var i = 0; i < kids.length; i++) {
+      try {
+        if (kids[i].matches(simpleSel)) count++;
+      } catch (e) {
+        return -1;
+      }
+    }
+    return count;
+  }
+
+  function queryDeep(root, sel) {
+    var out = [];
+    var seen = new Set();
+    function scan(scopeRoot) {
+      if (!scopeRoot || typeof scopeRoot.querySelectorAll !== 'function') return;
+      try {
+        var hits = scopeRoot.querySelectorAll(sel);
+        for (var i = 0; i < hits.length; i++) {
+          if (!seen.has(hits[i])) {
+            seen.add(hits[i]);
+            out.push(hits[i]);
+          }
+        }
+      } catch (e) {}
+      var all = scopeRoot.querySelectorAll('*');
+      for (var j = 0; j < all.length; j++) {
+        if (all[j].shadowRoot) scan(all[j].shadowRoot);
+      }
+    }
+    if (root && root.shadowRoot) scan(root.shadowRoot);
+    scan(root);
+    return out;
+  }
+
+  function splitCombinators(sel) {
+    var s = String(sel || '').trim();
+    var tokens = [];
+    var i = 0;
+    var len = s.length;
+    var pendingComb = '';
+    while (i < len) {
+      var hadSpace = false;
+      while (i < len && /\\s/.test(s[i])) {
+        hadSpace = true;
+        i++;
+      }
+      if (i >= len) break;
+      if (s[i] === '>') {
+        pendingComb = '>';
+        i++;
+        while (i < len && /\\s/.test(s[i])) i++;
+        continue;
+      }
+      if (tokens.length > 0 && pendingComb === '' && hadSpace) {
+        pendingComb = ' ';
+      }
+      var start = i;
+      var quote = null;
+      var bracket = 0;
+      var paren = 0;
+      while (i < len) {
+        var ch = s[i];
+        if (quote) {
+          if (ch === '\\\\' && i + 1 < len) { i += 2; continue; }
+          if (ch === quote) quote = null;
+          i++;
+          continue;
+        }
+        if (ch === '"' || ch === "'") { quote = ch; i++; continue; }
+        if (ch === '[') { bracket++; i++; continue; }
+        if (ch === ']') { if (bracket > 0) bracket--; i++; continue; }
+        if (ch === '(') { paren++; i++; continue; }
+        if (ch === ')') { if (paren > 0) paren--; i++; continue; }
+        if (bracket === 0 && paren === 0 && (ch === '>' || /\\s/.test(ch))) break;
+        i++;
+      }
+      var simple = s.slice(start, i);
+      if (simple) {
+        tokens.push({ comb: pendingComb, simple: simple });
+        pendingComb = '';
+      }
+    }
+    return tokens;
+  }
+
+  function queryPiercing(startNode, sel, relativeToStart) {
+    if (!hasShadowRoots) {
+      try {
+        if (relativeToStart) {
+          var trimmed = String(sel || '').trim();
+          var scopedQuery = trimmed.indexOf('>') === 0 ? ':scope ' + trimmed : trimmed;
+          return Array.from(startNode.querySelectorAll(scopedQuery));
+        }
+        return Array.from(startNode.querySelectorAll(sel));
+      } catch (e) {
+        return [];
+      }
+    }
+    var tokens = splitCombinators(sel);
+    if (tokens.length === 0) return [];
+    var current;
+    var startIdx = 0;
+    if (relativeToStart) {
+      current = [startNode];
+    } else {
+      current = queryDeep(startNode, tokens[0].simple);
+      startIdx = 1;
+    }
+    for (var t = startIdx; t < tokens.length; t++) {
+      var comb = tokens[t].comb || ' ';
+      var simple = tokens[t].simple;
+      var next = [];
+      var seen = new Set();
+      for (var c = 0; c < current.length; c++) {
+        var cur = current[c];
+        if (comb === '>') {
+          var kids = directChildren(cur);
+          for (var k = 0; k < kids.length; k++) {
+            var kid = kids[k];
+            try {
+              if (!seen.has(kid) && kid.matches(simple)) {
+                seen.add(kid);
+                next.push(kid);
+              }
+            } catch (e) {}
+          }
+        } else {
+          var hits = queryDeep(cur, simple);
+          for (var h = 0; h < hits.length; h++) {
+            var hit = hits[h];
+            if (hit !== cur && !seen.has(hit)) {
+              seen.add(hit);
+              next.push(hit);
+            }
+          }
+        }
+      }
+      current = next;
+      if (current.length === 0) break;
+    }
+    return current;
+  }
+
+  function verifies(sel, el) {
+    try {
+      var found = queryPiercing(doc, sel, false);
+      return found.length === 1 && found[0] === el;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function safeClasses(el) {
+    var list = Array.from(el.classList || []);
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var c = String(list[i] || '');
+      if (/^[A-Za-z_-]+$/.test(c)) out.push(c);
+    }
+    out.sort();
+    return out;
+  }
+
+  function elementKind(el) {
+    var list = Array.from(el.classList || []).filter(function (c) { return !/\\d/.test(c); }).sort();
+    return [String(el.tagName || '').toLowerCase()].concat(list).join('.');
+  }
+
+  function strongSelector(el) {
+    var tag = String(el.tagName || '').toLowerCase();
+    var testId = el.getAttribute('data-testid');
+    if (testId) {
+      var testIdSel = '[data-testid="' + escAttr(testId) + '"]';
+      if (verifies(testIdSel, el)) return testIdSel;
+    }
+    var id = el.getAttribute('id');
+    if (id) {
+      var idSel = idSelector(id);
+      if (verifies(idSel, el)) return idSel;
+    }
+    var name = el.getAttribute('name');
+    if (name) {
+      var nameSel = tag + '[name="' + escAttr(name) + '"]';
+      if (verifies(nameSel, el)) return nameSel;
+    }
+    var ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel) {
+      var ariaSel = tag + '[aria-label="' + escAttr(ariaLabel) + '"]';
+      if (verifies(ariaSel, el)) return ariaSel;
+    }
+    return null;
+  }
+
+  function ownContainerCandidates(el) {
+    var tag = String(el.tagName || '').toLowerCase();
+    var out = [];
+    var testId = el.getAttribute('data-testid');
+    if (testId) out.push('[data-testid="' + escAttr(testId) + '"]');
+    var id = el.getAttribute('id');
+    if (id) out.push(idSelector(id));
+    var name = el.getAttribute('name');
+    if (name) out.push(tag + '[name="' + escAttr(name) + '"]');
+    var ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel) out.push(tag + '[aria-label="' + escAttr(ariaLabel) + '"]');
+    var role = el.getAttribute('role');
+    if (role) out.push(tag + '[role="' + escAttr(role) + '"]');
+    var classes = safeClasses(el);
+    if (classes.length > 0) out.push(tag + '.' + classes.join('.'));
+    return out;
+  }
+
+  function buildContainerSelector(el) {
+    var direct = strongSelector(el);
+    if (direct) return { selector: direct, by: 'attribute' };
+
+    var owns = ownContainerCandidates(el);
+    if (owns.length > 0) {
+      var anc = parentOrHost(el);
+      while (anc && anc !== doc.body && anc !== doc.documentElement) {
+        var anchor = strongSelector(anc);
+        if (anchor) {
+          for (var i = 0; i < owns.length; i++) {
+            var scoped = anchor + ' ' + owns[i];
+            if (verifies(scoped, el)) return { selector: scoped, by: 'scoped' };
+          }
+        }
+        anc = parentOrHost(anc);
+      }
+    }
+
+    var parts = [];
+    var cur = el;
+    while (cur && cur !== doc.body && cur !== doc.documentElement) {
+      var parent = parentOrHost(cur);
+      if (!parent) break;
+      var tag = String(cur.tagName || '').toLowerCase();
+      var n = 1;
+      var sib = cur.previousElementSibling;
+      while (sib) {
+        if (String(sib.tagName || '').toLowerCase() === tag) n++;
+        sib = sib.previousElementSibling;
+      }
+      parts.unshift(tag + ':nth-of-type(' + n + ')');
+      var parentSel = strongSelector(parent);
+      if (parentSel) {
+        var anchoredChain = parentSel + ' > ' + parts.join(' > ');
+        if (verifies(anchoredChain, el)) return { selector: anchoredChain, by: 'positional' };
+      }
+      cur = parent;
+    }
+    if (cur === doc.body) {
+      parts.unshift('body');
+    } else if (cur === doc.documentElement) {
+      parts.unshift('html');
+    }
+    var chain = parts.join(' > ');
+    if (chain && verifies(chain, el)) return { selector: chain, by: 'positional' };
+    return null;
+  }
+
+  function pathFrom(ancestor, desc) {
+    var path = [];
+    var cur = desc;
+    while (cur && cur !== ancestor) {
+      path.unshift(cur);
+      cur = parentOrHost(cur);
+    }
+    return cur === ancestor ? path : null;
+  }
+
+  function nthOfType(el) {
+    var tag = String(el.tagName || '').toLowerCase();
+    var n = 1;
+    var sib = el.previousElementSibling;
+    while (sib) {
+      if (String(sib.tagName || '').toLowerCase() === tag) n++;
+      sib = sib.previousElementSibling;
+    }
+    return n;
+  }
+
+  function childIndex(el) {
+    var parent = el.parentElement || el.parentNode;
+    if (!parent || !parent.children) return 1;
+    for (var i = 0; i < parent.children.length; i++) {
+      if (parent.children[i] === el) return i + 1;
+    }
+    return 1;
+  }
+
+  function pushUnique(arr, val) {
+    if (val && arr.indexOf(val) === -1) arr.push(val);
+  }
+
+  // 1. Collect stamped example elements inside containerEl (piercing open shadow roots).
+  var prefix = args.token + ':';
+  var stampedNodes = queryDeep(containerEl, '[data-steptix-derive-ex]');
+  var byIndex = new Array(args.expectedCount);
+  for (var si = 0; si < stampedNodes.length; si++) {
+    var sNode = stampedNodes[si];
+    if (sNode === containerEl) continue;
+    var rawAttr = String(sNode.getAttribute('data-steptix-derive-ex') || '');
+    var parts = rawAttr.split(',');
+    for (var ti = 0; ti < parts.length; ti++) {
+      if (parts[ti].indexOf(prefix) === 0) {
+        var idx = parseInt(parts[ti].slice(prefix.length), 10);
+        if (idx >= 0 && idx < args.expectedCount) {
+          byIndex[idx] = sNode;
+        }
+      }
+    }
+  }
+
+  for (var ei = 0; ei < args.expectedCount; ei++) {
+    if (!byIndex[ei] || byIndex[ei] === containerEl || !containsDeep(containerEl, byIndex[ei])) {
+      return {
+        ok: false,
+        error: 'Every exampleRefs element must sit inside containerRef — pick sample item refs inside the container, or expand the container first.',
+      };
+    }
+  }
+
+  // Deduplicate identical elements (if exampleEls[0] and exampleEls[1] are the same node, treat as 1 example).
+  var exampleEls = [];
+  for (var di = 0; di < byIndex.length; di++) {
+    if (exampleEls.indexOf(byIndex[di]) === -1) exampleEls.push(byIndex[di]);
+  }
+
+  // 2. Build unique container selector.
+  var containerInfo = buildContainerSelector(containerEl);
+  if (!containerInfo) {
+    return {
+      ok: false,
+      error: 'Could not derive a unique CSS selector for containerRef.',
+    };
+  }
+
+  // 3 & 4. Identify repeating item root(s) and any shared intermediate wrappers.
+  var sharedWrapperPath = [];
+  var itemRoots = [];
+
+  if (exampleEls.length >= 2) {
+    var paths = [];
+    for (var pi = 0; pi < exampleEls.length; pi++) {
+      var pt = pathFrom(containerEl, exampleEls[pi]);
+      if (!pt || pt.length === 0) {
+        return {
+          ok: false,
+          error: 'Every exampleRefs element must sit inside containerRef — pick sample item refs inside the container, or expand the container first.',
+        };
+      }
+      paths.push(pt);
+    }
+
+    var minLen = paths[0].length;
+    for (var mi = 1; mi < paths.length; mi++) {
+      if (paths[mi].length < minLen) minLen = paths[mi].length;
+    }
+
+    var divIdx = 0;
+    while (divIdx < minLen) {
+      var firstNode = paths[0][divIdx];
+      var allSame = true;
+      for (var ci = 1; ci < paths.length; ci++) {
+        if (paths[ci][divIdx] !== firstNode) {
+          allSame = false;
+          break;
+        }
+      }
+      if (!allSame) break;
+      divIdx++;
+    }
+
+    if (divIdx >= minLen) {
+      return {
+        ok: false,
+        error: 'exampleRefs must point to distinct sibling items inside containerRef, not an element and its descendant.',
+      };
+    }
+
+    sharedWrapperPath = paths[0].slice(0, divIdx);
+    for (var ri = 0; ri < paths.length; ri++) {
+      itemRoots.push(paths[ri][divIdx]);
+    }
+  } else {
+    var p0 = pathFrom(containerEl, exampleEls[0]);
+    if (!p0 || p0.length === 0) {
+      return {
+        ok: false,
+        error: 'Every exampleRefs element must sit inside containerRef — pick sample item refs inside the container, or expand the container first.',
+      };
+    }
+
+    var containerTag = String(containerEl.tagName || '').toLowerCase();
+    var itemIdx = 0;
+    if (containerTag === 'table') {
+      var firstTag = String(p0[0].tagName || '').toLowerCase();
+      if (p0.length >= 2 && (firstTag === 'tbody' || firstTag === 'thead' || firstTag === 'tfoot')) {
+        itemIdx = 1;
+      } else {
+        itemIdx = 0;
+      }
+    } else {
+      var foundSemanticIdx = -1;
+      for (var bi = p0.length - 1; bi >= 0; bi--) {
+        var bTag = String(p0[bi].tagName || '').toLowerCase();
+        var bRole = String(p0[bi].getAttribute('role') || '').trim().toLowerCase();
+        if (bTag === 'tr' || bTag === 'li' || bRole === 'row' || bRole === 'listitem') {
+          foundSemanticIdx = bi;
+          break;
+        }
+      }
+      itemIdx = foundSemanticIdx !== -1 ? foundSemanticIdx : 0;
+    }
+
+    sharedWrapperPath = p0.slice(0, itemIdx);
+    itemRoots = [p0[itemIdx]];
+  }
+
+  // 5a. Build shared wrapper path from containerEl down to parentOrHost(itemRoots[0]).
+  var wrapperRelPath = '';
+  for (var wi = 0; wi < sharedWrapperPath.length; wi++) {
+    var wEl = sharedWrapperPath[wi];
+    var wParent = parentOrHost(wEl);
+    var wTag = String(wEl.tagName || '').toLowerCase();
+    var wStep = '';
+    if (countDirectMatches(wParent, wTag) === 1) {
+      wStep = wTag;
+    }
+    if (!wStep) {
+      var wTestId = wEl.getAttribute('data-testid');
+      if (wTestId && !/\\d/.test(wTestId)) {
+        var wtCand = wTag + '[data-testid="' + escAttr(wTestId) + '"]';
+        if (countDirectMatches(wParent, wtCand) === 1) wStep = wtCand;
+      }
+    }
+    if (!wStep) {
+      var wRole = wEl.getAttribute('role');
+      if (wRole) {
+        var wrCand = wTag + '[role="' + escAttr(wRole) + '"]';
+        if (countDirectMatches(wParent, wrCand) === 1) wStep = wrCand;
+      }
+    }
+    if (!wStep) {
+      var wClasses = safeClasses(wEl);
+      for (var wci = 0; wci < wClasses.length; wci++) {
+        var wcCand = wTag + '.' + wClasses[wci];
+        if (countDirectMatches(wParent, wcCand) === 1) {
+          wStep = wcCand;
+          break;
+        }
+      }
+    }
+    if (!wStep) {
+      wStep = wTag + ':nth-of-type(' + nthOfType(wEl) + ')';
+    }
+    wrapperRelPath += ' > ' + wStep;
+  }
+
+  // 5b. Build candidate repeating-item selectors (never :nth-child / :nth-of-type on the repeating level).
+  // Prefer shared non-digit classes/roles over bare tag names (even for tr/li) so
+  // e.g. <tr class="data-row"> is not broadened to include <tr class="group-header">.
+  function sharedAttr(els, attr, rejectDigitsWhenSingle) {
+    var firstVal = els[0].getAttribute(attr);
+    if (!firstVal) return null;
+    if (rejectDigitsWhenSingle && els.length === 1 && /\\d/.test(firstVal)) return null;
+    for (var i = 1; i < els.length; i++) {
+      if (els[i].getAttribute(attr) !== firstVal) return null;
+    }
+    return firstVal;
+  }
+
+  function sharedSafeClasses(els) {
+    var common = safeClasses(els[0]);
+    for (var i = 1; i < els.length; i++) {
+      var next = safeClasses(els[i]);
+      common = common.filter(function (c) { return next.indexOf(c) !== -1; });
+    }
+    return common;
+  }
+
+  var firstItemTag = String(itemRoots[0].tagName || '').toLowerCase();
+  var allSameItemTag = true;
+  for (var it = 1; it < itemRoots.length; it++) {
+    if (String(itemRoots[it].tagName || '').toLowerCase() !== firstItemTag) {
+      allSameItemTag = false;
+      break;
+    }
+  }
+  var itemTagPrefix = allSameItemTag ? firstItemTag : '';
+  var itemTestId = sharedAttr(itemRoots, 'data-testid', true);
+  var itemRole = sharedAttr(itemRoots, 'role', false);
+  var itemClasses = sharedSafeClasses(itemRoots);
+
+  var itemStepCandidates = [];
+  if (itemTestId) pushUnique(itemStepCandidates, itemTagPrefix + '[data-testid="' + escAttr(itemTestId) + '"]');
+  if (itemRole) pushUnique(itemStepCandidates, itemTagPrefix + '[role="' + escAttr(itemRole) + '"]');
+  if (itemClasses.length > 0) {
+    pushUnique(itemStepCandidates, itemTagPrefix + '.' + itemClasses.join('.'));
+    for (var ic = 0; ic < itemClasses.length; ic++) {
+      pushUnique(itemStepCandidates, itemTagPrefix + '.' + itemClasses[ic]);
+    }
+  }
+  pushUnique(itemStepCandidates, allSameItemTag ? firstItemTag : '*');
+
+  // 5c. Build candidate leaf paths from itemRoot down to exampleEl.
+  var allLeafAreItemRoot = true;
+  for (var lr = 0; lr < itemRoots.length; lr++) {
+    if (itemRoots[lr] !== exampleEls[lr]) {
+      allLeafAreItemRoot = false;
+      break;
+    }
+  }
+
+  function leafMatchesAll(leafRel) {
+    if (leafRel === '') return allLeafAreItemRoot;
+    for (var k = 0; k < itemRoots.length; k++) {
+      var found = queryPiercing(itemRoots[k], leafRel, true);
+      if (found.length !== 1 || found[0] !== exampleEls[k]) return false;
+    }
+    return true;
+  }
+
+  var leafCandidates = [];
+  if (allLeafAreItemRoot) {
+    leafCandidates.push('');
+  } else {
+    var firstLeafTag = String(exampleEls[0].tagName || '').toLowerCase();
+    var allSameLeafTag = true;
+    for (var lt = 1; lt < exampleEls.length; lt++) {
+      if (String(exampleEls[lt].tagName || '').toLowerCase() !== firstLeafTag) {
+        allSameLeafTag = false;
+        break;
+      }
+    }
+    var leafTagPrefix = allSameLeafTag ? firstLeafTag : '';
+    var leafTestId = sharedAttr(exampleEls, 'data-testid', true);
+    var leafRole = sharedAttr(exampleEls, 'role', false);
+    var leafClasses = sharedSafeClasses(exampleEls);
+
+    var rawLeafCandidates = [];
+    if (leafTestId) {
+      pushUnique(rawLeafCandidates, ' ' + leafTagPrefix + '[data-testid="' + escAttr(leafTestId) + '"]');
+      pushUnique(rawLeafCandidates, ' [data-testid="' + escAttr(leafTestId) + '"]');
+    }
+    if (leafRole) {
+      pushUnique(rawLeafCandidates, ' ' + leafTagPrefix + '[role="' + escAttr(leafRole) + '"]');
+    }
+    if (leafClasses.length > 0) {
+      for (var lc = 0; lc < leafClasses.length; lc++) {
+        pushUnique(rawLeafCandidates, ' ' + leafTagPrefix + '.' + leafClasses[lc]);
+      }
+      pushUnique(rawLeafCandidates, ' ' + leafTagPrefix + '.' + leafClasses.join('.'));
+    }
+    if (allSameLeafTag) {
+      pushUnique(rawLeafCandidates, ' ' + firstLeafTag);
+    }
+
+    // Build direct-child path from itemRoots[0] down to exampleEls[0].
+    var leafPathNodes = pathFrom(itemRoots[0], exampleEls[0]);
+    if (leafPathNodes && leafPathNodes.length > 0) {
+      var childPartsNthChild = [];
+      var childPartsNthOfType = [];
+      for (var ni = 0; ni < leafPathNodes.length; ni++) {
+        var node = leafPathNodes[ni];
+        var nParent = parentOrHost(node);
+        var nTag = String(node.tagName || '').toLowerCase();
+        var uniqueTag = countDirectMatches(nParent, nTag) === 1;
+        if (uniqueTag) {
+          childPartsNthChild.push(nTag);
+          childPartsNthOfType.push(nTag);
+        } else {
+          var uniqueClassStep = '';
+          var nClasses = safeClasses(node);
+          for (var nci = 0; nci < nClasses.length; nci++) {
+            var nCand = nTag + '.' + nClasses[nci];
+            if (countDirectMatches(nParent, nCand) === 1) {
+              uniqueClassStep = nCand;
+              break;
+            }
+          }
+          if (uniqueClassStep) {
+            childPartsNthChild.push(uniqueClassStep);
+            childPartsNthOfType.push(uniqueClassStep);
+          } else {
+            childPartsNthChild.push(nTag + ':nth-child(' + childIndex(node) + ')');
+            childPartsNthOfType.push(nTag + ':nth-of-type(' + nthOfType(node) + ')');
+          }
+        }
+      }
+      pushUnique(rawLeafCandidates, ' > ' + childPartsNthChild.join(' > '));
+      pushUnique(rawLeafCandidates, ' > ' + childPartsNthOfType.join(' > '));
+    }
+
+    for (var rli = 0; rli < rawLeafCandidates.length; rli++) {
+      if (leafMatchesAll(rawLeafCandidates[rli])) {
+        leafCandidates.push(rawLeafCandidates[rli]);
+      }
+    }
+  }
+
+  // 6. Verify candidate full selectors in document/shadow scope.
+  var itemParent = parentOrHost(itemRoots[0]);
+  var fallbackMatch = null;
+  var resultBy = containerInfo.by === 'positional' ? 'positional' : 'scoped';
+
+  for (var ii = 0; ii < itemStepCandidates.length; ii++) {
+    var itemStep = itemStepCandidates[ii];
+    var siblingItemCount = -1;
+    if (exampleEls.length === 1 && itemParent) {
+      siblingItemCount = countDirectMatches(itemParent, itemStep);
+    }
+    for (var li = 0; li < leafCandidates.length; li++) {
+      var leafRel = leafCandidates[li];
+      var derived = containerInfo.selector + wrapperRelPath + ' > ' + itemStep + leafRel;
+      var matched = queryPiercing(doc, derived, false);
+      if (matched.length === 0) continue;
+      var allPresent = true;
+      for (var exi = 0; exi < exampleEls.length; exi++) {
+        if (matched.indexOf(exampleEls[exi]) === -1) {
+          allPresent = false;
+          break;
+        }
+      }
+      if (!allPresent) continue;
+      if (exampleEls.length === 1 && siblingItemCount === 1 && matched.length !== 1) continue;
+
+      var kindSet = new Set();
+      for (var ki = 0; ki < matched.length; ki++) {
+        kindSet.add(elementKind(matched[ki]));
+      }
+      if (kindSet.size === 1) {
+        return { ok: true, selector: derived, by: resultBy };
+      }
+      if (fallbackMatch === null) {
+        fallbackMatch = { ok: true, selector: derived, by: resultBy };
+      }
+    }
+  }
+
+  if (fallbackMatch !== null) return fallbackMatch;
+  return {
+    ok: false,
+    error: 'Could not derive a repeating CSS selector matching the provided exampleRefs inside containerRef.',
+  };
+`,
+) as unknown as (
+  containerEl: unknown,
+  args: { token: string; expectedCount: number },
+) => DeriveRepeatingOutcome;
+
+async function deriveRepeatingSelectorForRefs(
+  containerResolved: ResolvedRef,
+  exampleResolvedList: readonly ResolvedRef[],
+): Promise<DeriveRepeatingOutcome> {
+  const token = `d${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const containerLoc = containerResolved.locator.first();
+
+  try {
+    for (let i = 0; i < exampleResolvedList.length; i++) {
+      const exLoc = exampleResolvedList[i]!.locator.first();
+      const stampVal = `${token}:${i}`;
+      await exLoc.evaluate(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (el: any, val: string) => {
+          const prev = el.getAttribute('data-steptix-derive-ex');
+          el.setAttribute('data-steptix-derive-ex', prev ? prev + ',' + val : val);
+        },
+        stampVal,
+        { timeout: MEASUREMENT_TIMEOUT_MS },
+      );
+    }
+
+    return await containerLoc.evaluate(
+      deriveRepeatingSelectorInPage,
+      { token, expectedCount: exampleResolvedList.length },
+      { timeout: MEASUREMENT_TIMEOUT_MS },
+    );
+  } catch (err) {
+    return {
+      ok: false,
+      error: `Failed to derive repeating selector: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  } finally {
+    for (const ex of exampleResolvedList) {
+      await ex.locator
+        .first()
+        .evaluate(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (el: any) => {
+            el.removeAttribute('data-steptix-derive-ex');
+          },
+          undefined,
+          { timeout: MEASUREMENT_TIMEOUT_MS },
+        )
+        .catch(() => {});
+    }
+  }
+}
+
+/**
  * Parse a duration string into milliseconds.
  * Supports simple ("30s", "2 minutes", "500ms") and compound ("1m 30s", "1 min 10 sec") formats.
  */
@@ -3581,6 +5383,13 @@ function parseDuration(value: string): number | null {
  * Exported for tests only.
  */
 export function sanitizeCssSelector(selector: string): string {
+  // Playwright internal selector engines (produced by `locator.normalize()`,
+  // e.g. `internal:role=button[name="v1.2: Go"i]`) are already valid Playwright
+  // selectors; Tailwind CSS escaping would corrupt punctuation inside names.
+  if (selector.startsWith('internal:') || selector.includes('>> internal:')) {
+    return selector;
+  }
+
   // Escape `!` when used inside class names (Tailwind important modifier)
   // e.g.  .!fixed  →  .\!fixed
   let sanitized = selector.replace(/\.!/g, '.\\!');
@@ -3798,7 +5607,11 @@ export async function executeWait(
 ): Promise<void> {
   const condition = action.condition ?? action.value ?? '';
   const timeout = clampWaitTimeout(action.timeout);
-  const waitType = action.waitType ?? inferWaitType(condition);
+  const waitType =
+    action.waitType ??
+    (action.selector && (isInternalRefSelector(action.selector) || condition === '')
+      ? 'selector'
+      : inferWaitType(condition));
 
   // Run the wait, but race it against the run's abort signal so a STOP ends an
   // in-flight wait immediately rather than waiting out its (possibly long)
@@ -3814,14 +5627,21 @@ export async function executeWait(
     }
 
     case 'selector': {
+      if (action.selector && (isInternalRefSelector(action.selector) || condition === '')) {
+        const sel = isInternalRefSelector(action.selector)
+          ? action.selector
+          : sanitizeCssSelector(action.selector);
+        await root.locator(sel).first().waitFor({ state: 'visible', timeout });
+        break;
+      }
       // Strip a trailing ":visible" — visibility is already enforced via
       // state:'visible' below, so encoding it in the selector is redundant
       // and was a common AI failure mode (the sanitizer mangled the colon).
       const rawSel = condition.replace(/:visible$/, '');
       // Sanitize Tailwind-style class names that contain invalid CSS characters
-      const sel = sanitizeCssSelector(rawSel);
+      const sel = isInternalRefSelector(rawSel) ? rawSel : sanitizeCssSelector(rawSel);
       // When inside a frame, use locator.waitFor() so the wait is scoped to that frame.
-      if (root !== page) {
+      if (root !== page || isInternalRefSelector(sel) || sel.startsWith('internal:') || sel.includes('>> internal:')) {
         await root.locator(sel).first().waitFor({ state: 'visible', timeout });
       } else {
         await page.waitForSelector(sel, { state: 'visible', timeout });
@@ -3830,14 +5650,21 @@ export async function executeWait(
     }
 
     case 'hidden': {
+      if (action.selector && (isInternalRefSelector(action.selector) || condition === '')) {
+        const sel = isInternalRefSelector(action.selector)
+          ? action.selector
+          : sanitizeCssSelector(action.selector);
+        await root.locator(sel).first().waitFor({ state: 'hidden', timeout });
+        break;
+      }
       // Strip a trailing ":hidden" or ":not(:visible)" — hiddenness is enforced
       // via state:'hidden' below, so encoding it in the selector is redundant.
       const rawHidden = condition
         .replace(/:hidden$/, '')
         .replace(/:not\(:visible\)$/, '');
       // Wait for an element to disappear (spinner, overlay, loading indicator)
-      const hiddenSel = sanitizeCssSelector(rawHidden);
-      if (root !== page) {
+      const hiddenSel = isInternalRefSelector(rawHidden) ? rawHidden : sanitizeCssSelector(rawHidden);
+      if (root !== page || isInternalRefSelector(hiddenSel) || hiddenSel.startsWith('internal:') || hiddenSel.includes('>> internal:')) {
         await root.locator(hiddenSel).first().waitFor({ state: 'hidden', timeout });
       } else {
         await page.waitForSelector(hiddenSel, { state: 'hidden', timeout });
@@ -3891,11 +5718,17 @@ export async function executeWait(
     case 'count': {
       // Wait until a selector matches at least N elements (default 1)
       const expectedCount = parseInt(action.expected ?? '1', 10);
-      const target = root.locator(sanitizeCssSelector(condition));
+      const rawCountSel = action.selector && (isInternalRefSelector(action.selector) || condition === '')
+        ? action.selector
+        : condition;
+      const countSel = isInternalRefSelector(rawCountSel)
+        ? rawCountSel
+        : sanitizeCssSelector(rawCountSel);
+      const target = root.locator(countSel);
       await pollUntil(
         async () => (await target.count()) >= expectedCount,
         timeout,
-        `${condition} to match at least ${expectedCount} element(s)`,
+        `${rawCountSel} to match at least ${expectedCount} element(s)`,
         signal,
       );
       break;
@@ -3914,7 +5747,9 @@ export async function executeWait(
       const attr = negate ? expr.slice(1) : compared ? compared[1]!.trim() : expr.split('=')[0]!;
       const val = negate || compared ? null : (expr.split('=').slice(1).join('=') || null);
       const comparison = compared ? { op: compared[2]!, limit: Number(compared[3]) } : null;
-      const target = root.locator(sanitizeCssSelector(selector));
+      const target = root.locator(
+        isInternalRefSelector(selector) ? selector : sanitizeCssSelector(selector),
+      );
 
       if (comparison !== null) {
         await waitForThreshold({
@@ -4015,6 +5850,9 @@ export async function executeWait(
         { timeout },
       );
       break;
+
+    case 'change':
+      throw new Error('waitType "change" is run by the step loop diff-poller, not executeWait');
   }
   };
 
@@ -4033,7 +5871,7 @@ function inferWaitType(condition: string): NonNullable<AIAction['waitType']> {
   // Playwright's own selector forms, which rule 3 now recommends (issue 062).
   // Without this a `role=` condition fell through to 'text' and waited out its
   // whole timeout for the literal string "role=button[…]" to appear on screen.
-  if (/^(?:role|text|css|xpath)=/.test(condition) || /\s>>\s/.test(condition)) return 'selector';
+  if (/^(?:role|text|css|xpath)=|^internal:/.test(condition) || /\s>>\s/.test(condition)) return 'selector';
   // Tag-like selector: starts with a tag name immediately followed by a selector char (no space)
   if (/^[a-z][a-z0-9]*[#.\[:]/.test(condition)) return 'selector';
   return 'text';
@@ -4335,10 +6173,20 @@ async function executeCount(
     const visibleMatches = matches.locator('visible=true');
     const visible = await visibleMatches.count();
     const onlyOptions = visible === 0
-      && await matches.evaluateAll(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (els: any[]) => els.every((el) => el.tagName === 'OPTION' || el.tagName === 'OPTGROUP'),
-      ).catch(() => false);
+      && (selector.startsWith('aria-ref=')
+        ? await matches
+            .first()
+            .evaluate(
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (el: any) => el.tagName === 'OPTION' || el.tagName === 'OPTGROUP',
+            )
+            .catch(() => false)
+        : await matches
+            .evaluateAll(
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (els: any[]) => els.every((el) => el.tagName === 'OPTION' || el.tagName === 'OPTGROUP'),
+            )
+            .catch(() => false));
     if (!onlyOptions) {
       count = visible;
       counted = visibleMatches;
@@ -4536,57 +6384,122 @@ async function executeReadMultiple(
   const target = attribute ? `@${attribute}` : 'text';
   logger.subAction(`read[multiple] ${selector} ${target} → ${action.as ?? '(unnamed)'}`);
 
-  // Single round-trip: ship the extractor source to the page and run it
-  // across every match. The extractor body is duplicated literally inside
-  // the evaluateAll callback because Playwright cannot serialise references
-  // to closures in Node scope. Keeping this in lockstep with
-  // `extractValueInPage` is enforced by the tests in read-multiple.test.ts.
+  // Ship the extractor source to the page: `evaluateAll` reads every match in a
+  // single round-trip for ordinary selectors, while an `aria-ref=` selector
+  // targets a single snapshot handle and evaluates via `count()` +
+  // `first().evaluate(...)`. The extractor body is duplicated literally inside
+  // both callbacks because Playwright cannot serialise references to closures
+  // in Node scope. Keeping this in lockstep with `extractValueInPage` is
+  // enforced by the tests in read-multiple.test.ts.
   //
   // Each element's kind rides back beside its value, named as `describeMatches`
   // names it, so what the read matched costs no second round trip.
-  const read: Array<[string, string]> = await root.locator(selector).evaluateAll(
-    (els, args) => {
-      const { attribute, max } = args as { attribute?: string; max: number };
-      const slice = els.slice(0, max);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const valueOf = (e: any): string => {
-        if (attribute) {
-          if (attribute === 'url') {
-            const own = typeof e.getAttribute === 'function' ? e.getAttribute('url') : null;
-            if (typeof own === 'string' && own.length > 0) return own;
-            const doc = e.ownerDocument;
-            return doc && doc.location ? doc.location.href : '';
-          }
-          if (attribute === 'href' || attribute === 'src') {
-            const resolved = e[attribute];
-            if (typeof resolved === 'string' && resolved.length > 0) return resolved;
-          }
-          return typeof e.getAttribute === 'function'
-            ? (e.getAttribute(attribute) ?? '')
-            : '';
-        }
-        if (typeof e.value === 'string') return e.value;
-        // Without script, style and template text, as in extractValueInPage.
-        const notText = 'script,style,template,noscript';
-        if (typeof e.querySelector === 'function' && e.querySelector(notText)) {
-          const copy = e.cloneNode(true);
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          copy.querySelectorAll(notText).forEach((n: any) => n.remove());
-          return (copy.textContent ?? '').trim();
-        }
-        return (e.textContent ?? '').trim();
-      };
-      return slice.map((el): [string, string] => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const e = el as any;
-        const classes = (Array.from(e.classList ?? []) as string[])
-          .filter((c) => !/\d/.test(c))
-          .sort();
-        return [valueOf(e), [String(e.tagName ?? '').toLowerCase(), ...classes].join('.')];
-      });
-    },
-    { attribute, max: READ_MULTIPLE_MAX },
-  );
+  const loc = root.locator(selector);
+  const read: Array<[string, string]> = selector.startsWith('aria-ref=')
+    ? (await loc.count()) === 0
+      ? []
+      : await loc.first().evaluate(
+          (el, args) => {
+            const { attribute } = args as { attribute?: string };
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const e = el as any;
+            let extractedValue = '';
+            if (attribute) {
+              if (attribute === 'url') {
+                const own = typeof e.getAttribute === 'function' ? e.getAttribute('url') : null;
+                if (typeof own === 'string' && own.length > 0) {
+                  extractedValue = own;
+                } else {
+                  const doc = e.ownerDocument;
+                  extractedValue = doc && doc.location ? doc.location.href : '';
+                }
+              } else if (attribute === 'href' || attribute === 'src') {
+                const resolved = e[attribute];
+                if (typeof resolved === 'string' && resolved.length > 0) {
+                  extractedValue = resolved;
+                } else {
+                  extractedValue = typeof e.getAttribute === 'function'
+                    ? (e.getAttribute(attribute) ?? '')
+                    : '';
+                }
+              } else {
+                extractedValue = typeof e.getAttribute === 'function'
+                  ? (e.getAttribute(attribute) ?? '')
+                  : '';
+              }
+            } else if (typeof e.value === 'string') {
+              extractedValue = e.value;
+            } else {
+              const notText = 'script,style,template,noscript';
+              if (typeof e.querySelector === 'function' && e.querySelector(notText)) {
+                const copy = e.cloneNode(true);
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                copy.querySelectorAll(notText).forEach((n: any) => n.remove());
+                extractedValue = (copy.textContent ?? '').trim();
+              } else {
+                extractedValue = (e.textContent ?? '').trim();
+              }
+            }
+            const classes = (Array.from(e.classList ?? []) as string[])
+              .filter((c) => !/\d/.test(c))
+              .sort();
+            return [[extractedValue, [String(e.tagName ?? '').toLowerCase(), ...classes].join('.')] as [string, string]];
+          },
+          { attribute },
+        )
+    : await loc.evaluateAll(
+        (els, args) => {
+          const { attribute, max } = args as { attribute?: string; max: number };
+          const slice = els.slice(0, max);
+          return slice.map((el): [string, string] => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const e = el as any;
+            let extractedValue = '';
+            if (attribute) {
+              if (attribute === 'url') {
+                const own = typeof e.getAttribute === 'function' ? e.getAttribute('url') : null;
+                if (typeof own === 'string' && own.length > 0) {
+                  extractedValue = own;
+                } else {
+                  const doc = e.ownerDocument;
+                  extractedValue = doc && doc.location ? doc.location.href : '';
+                }
+              } else if (attribute === 'href' || attribute === 'src') {
+                const resolved = e[attribute];
+                if (typeof resolved === 'string' && resolved.length > 0) {
+                  extractedValue = resolved;
+                } else {
+                  extractedValue = typeof e.getAttribute === 'function'
+                    ? (e.getAttribute(attribute) ?? '')
+                    : '';
+                }
+              } else {
+                extractedValue = typeof e.getAttribute === 'function'
+                  ? (e.getAttribute(attribute) ?? '')
+                  : '';
+              }
+            } else if (typeof e.value === 'string') {
+              extractedValue = e.value;
+            } else {
+              // Without script, style and template text, as in extractValueInPage.
+              const notText = 'script,style,template,noscript';
+              if (typeof e.querySelector === 'function' && e.querySelector(notText)) {
+                const copy = e.cloneNode(true);
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                copy.querySelectorAll(notText).forEach((n: any) => n.remove());
+                extractedValue = (copy.textContent ?? '').trim();
+              } else {
+                extractedValue = (e.textContent ?? '').trim();
+              }
+            }
+            const classes = (Array.from(e.classList ?? []) as string[])
+              .filter((c) => !/\d/.test(c))
+              .sort();
+            return [extractedValue, [String(e.tagName ?? '').toLowerCase(), ...classes].join('.')];
+          });
+        },
+        { attribute, max: READ_MULTIPLE_MAX },
+      );
   const values = read.map(([value]) => value);
 
   // We capped inside the page. To tell the author whether anything was
@@ -4648,7 +6561,9 @@ async function matchedKinds(
   selector: string,
   limit = READ_MULTIPLE_MAX,
 ): Promise<string[] | undefined> {
-  return (await describeMatches(root.locator(selector), limit))?.map((g) => g.kind);
+  return (await describeMatches(root.locator(selector), limit, selector.startsWith('aria-ref=')))?.map(
+    (g) => g.kind,
+  );
 }
 
 /**
@@ -4663,20 +6578,37 @@ async function matchedKinds(
 async function describeMatches(
   matches: Locator,
   limit = READ_MULTIPLE_MAX,
+  isAriaRef = false,
 ): Promise<MatchGroup[] | undefined> {
   try {
-    const kinds: string[] = await matches.evaluateAll(
-      (els, max) =>
-        els.slice(0, max as number).map((el) => {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const e = el as any;
-          const classes = (Array.from(e.classList ?? []) as string[])
-            .filter((c) => !/\d/.test(c))
-            .sort();
-          return [String(e.tagName ?? '').toLowerCase(), ...classes].join('.');
-        }),
-      limit,
-    );
+    // Playwright 1.59.1's `evaluateAll` resolves selectors in `{ mainWorld: true }`,
+    // which cannot see `_lastAriaSnapshotForQuery` in the utility world; single-element
+    // `evaluate` resolves in the utility world and adopts into the main world.
+    const kinds: string[] = isAriaRef
+      ? (await matches.count()) === 0
+        ? []
+        : [
+            await matches.first().evaluate((el) => {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const e = el as any;
+              const classes = (Array.from(e.classList ?? []) as string[])
+                .filter((c) => !/\d/.test(c))
+                .sort();
+              return [String(e.tagName ?? '').toLowerCase(), ...classes].join('.');
+            }),
+          ]
+      : await matches.evaluateAll(
+          (els, max) =>
+            els.slice(0, max as number).map((el) => {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const e = el as any;
+              const classes = (Array.from(e.classList ?? []) as string[])
+                .filter((c) => !/\d/.test(c))
+                .sort();
+              return [String(e.tagName ?? '').toLowerCase(), ...classes].join('.');
+            }),
+          limit,
+        );
     // No values: a count stores a number, so any text it quoted would be page
     // text the run never held — a hidden cell, an inline script.
     return groupByKind(kinds.map((kind): [string, string] => ['', kind]), []);
@@ -5007,6 +6939,11 @@ const readTableInPage = new Function(
   'args',
   `return (\n${READ_TABLE_SCRIPT}\n)(matches, args);`,
 ) as unknown as (matches: unknown[], args: TableReadPageArgs) => TableReadOutcome;
+const readTableSingleInPage = new Function(
+  'el',
+  'args',
+  `return (\n${READ_TABLE_SCRIPT}\n)([el], args);`,
+) as unknown as (el: unknown, args: TableReadPageArgs) => TableReadOutcome;
 
 /**
  * Read named columns from one native `<table>` into one record per visible
@@ -5046,7 +6983,7 @@ export async function readTableRecords(
     + (request.mapping !== undefined ? ` (structure: ${request.mapping.kind})` : ''),
   );
 
-  const outcome = await root.locator(selector).evaluateAll(readTableInPage, {
+  const pageArgs: TableReadPageArgs = {
     selector,
     // Only the fields the page needs. `mode` is phase 1's `'text'` by
     // definition (the parser refuses anything else), so it would be noise.
@@ -5061,7 +6998,15 @@ export async function readTableRecords(
     mapping: request.mapping ?? null,
     maskValues: request.maskValues ?? [],
     structureSource: request.structureSource ?? 'model',
-  });
+  };
+  const tableLoc = root.locator(selector);
+  // Playwright 1.59.1's `evaluateAll` resolves in `{ mainWorld: true }`, which
+  // cannot see `_lastAriaSnapshotForQuery` in the utility world; `evaluate` on
+  // `.first()` resolves in the utility world and adopts the element into main.
+  const outcome =
+    selector.startsWith('aria-ref=') && (await tableLoc.count()) > 0
+      ? await tableLoc.first().evaluate(readTableSingleInPage, pageArgs)
+      : await tableLoc.evaluateAll(readTableInPage, pageArgs);
   if (!outcome.ok) {
     // A shape refusal is thrown as its own class rather than matched on by
     // sentence: the sentences are the author's and will keep changing, and a

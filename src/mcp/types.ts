@@ -524,7 +524,7 @@ export interface PeekCdpTabArgs {
    *  a project root from — and therefore the only thing that makes the capture
    *  run under the PROJECT's dom limits rather than the library defaults. */
   testFilePath: string;
-  format?: 'text' | 'dom' | 'screenshot' | undefined;
+  format?: 'text' | 'dom' | 'aria' | 'screenshot' | undefined;
   selector?: string | undefined;
   maxChars?: number | undefined;
   /** Screenshot only: the whole scrollable page instead of the viewport
@@ -578,7 +578,7 @@ export interface NavigatedTab {
  * `targetId` it read and the root its settings resolved against.
  *
  * Every format-specific half is optional because **this is a cast over an
- * untrusted wire, not a promise**: a `text`/`dom` read carries the four
+ * untrusted wire, not a promise**: a `text`/`dom`/`aria` read carries the four
  * character fields and no picture, a `screenshot` read carries the picture and
  * its dimensions and no characters, and a server from a build that predates
  * either sends neither. The caller checks the half its own request asked for
@@ -593,7 +593,7 @@ export interface PeekedTab {
   root: string | null;
   url: string;
   title: string;
-  format: 'text' | 'dom' | 'screenshot';
+  format: 'text' | 'dom' | 'aria' | 'screenshot';
   selector: string | null;
   content?: string;
   truncated?: boolean;
@@ -619,7 +619,7 @@ export interface GetCdpBrowsersArgs {
 /** Query for `GET /sessions/:id/content`. Omitted fields take the server's
  *  defaults (`text`, whole page, 20 000 chars). */
 export interface GetPageContentArgs {
-  format?: 'text' | 'dom' | undefined;
+  format?: 'text' | 'dom' | 'aria' | undefined;
   selector?: string | undefined;
   maxChars?: number | undefined;
 }
@@ -655,7 +655,7 @@ export interface PageContent {
   url: string;
   title: string;
   status: 'active' | 'executing';
-  format: 'text' | 'dom';
+  format: 'text' | 'dom' | 'aria';
   selector: string | null;
   content: string;
   truncated: boolean;

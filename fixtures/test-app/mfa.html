@@ -172,7 +172,7 @@
     <!-- Loading state: shown initially while "sending" the code -->
     <div id="loading-overlay" class="loading-overlay">
       <div class="spinner" aria-label="Loading"></div>
-      <span class="loading-text">Sending verification code...</span>
+      <span id="loading-text" class="loading-text">Sending verification code...</span>
     </div>
 
     <!-- MFA form: revealed after the delay -->
@@ -194,19 +194,50 @@
 
   <script>
     // Parse delay from query string: ?delay=5000 (default 3000ms)
+    // Optional ?countdown=1 ticks the remaining seconds on #loading-text once
+    // per second until the MFA form reveals (SPEC-aria-ref-snapshots.md §9.2).
     const params = new URLSearchParams(window.location.search);
     const delay = parseInt(params.get('delay') ?? '3000', 10);
     const validCode = params.get('code') ?? '123456';
+    const showCountdown = params.get('countdown') === '1' || params.get('countdown') === 'true';
 
     const codeInput = document.getElementById('mfa-code');
     const verifyBtn = document.getElementById('verify-btn');
+    const loadingText = document.getElementById('loading-text');
+    let countdownTimer = null;
+
+    function startWaitWithOptionalCountdown(durationMs, onReady) {
+      if (countdownTimer !== null) {
+        clearInterval(countdownTimer);
+        countdownTimer = null;
+      }
+      if (showCountdown && durationMs > 0) {
+        const deadline = Date.now() + durationMs;
+        const updateTick = () => {
+          const secsLeft = Math.max(1, Math.ceil((deadline - Date.now()) / 1000));
+          loadingText.textContent = `Sending verification code... (${secsLeft}s remaining)`;
+        };
+        updateTick();
+        countdownTimer = setInterval(updateTick, 1000);
+      } else {
+        loadingText.textContent = 'Sending verification code...';
+      }
+
+      setTimeout(() => {
+        if (countdownTimer !== null) {
+          clearInterval(countdownTimer);
+          countdownTimer = null;
+        }
+        onReady();
+      }, durationMs);
+    }
 
     // Show MFA form after delay (simulates server sending the code)
-    setTimeout(() => {
+    startWaitWithOptionalCountdown(delay, () => {
       document.getElementById('loading-overlay').classList.add('hidden');
       document.getElementById('mfa-form').classList.add('visible');
       codeInput.focus();
-    }, delay);
+    });
 
     // Enable verify button when 6 digits are entered
     codeInput.addEventListener('input', () => {
@@ -238,13 +269,13 @@
       overlay.classList.remove('hidden');
       form.classList.remove('visible');
 
-      setTimeout(() => {
+      startWaitWithOptionalCountdown(2000, () => {
         overlay.classList.add('hidden');
         form.classList.add('visible');
         codeInput.value = '';
         codeInput.focus();
         verifyBtn.disabled = true;
-      }, 2000);
+      });
     });
   </script>
 </body>

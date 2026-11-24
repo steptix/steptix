@@ -328,10 +328,12 @@ export type GeneratedEntry =
    *
    * `withheld` marks an answer that came back but must not be kept, and must
    * not be replaced by an `ai: true` entry either
-   * (docs/specs/SPEC-codebehind-robustness.md §6.2): its code still read with
-   * a different selector from the one the run read with after its one
-   * re-ask. The step gets NO entry — it runs on AI, which reads what the run
-   * read, and the next compile tries it again. Not fatal to any compile.
+   * (docs/specs/SPEC-codebehind-robustness.md §6.2;
+   * docs/specs/SPEC-aria-ref-snapshots.md §7.3): after its one re-ask, its
+   * code still read with a different selector from the one the run read with,
+   * or still used an ephemeral snapshot ref that cannot replay. The step gets
+   * NO entry — it runs on AI, and the next compile tries it again. Not fatal
+   * to any compile.
    */
   | {
       kind: 'error';
@@ -506,30 +508,34 @@ export interface EntryCheckContext {
  * All of the checks are for the case the prompt cannot cover: the model was
  * told the thing and wrote it the other way anyway. Two grades:
  *
- *  - **The read check** ({@link recordedReadMismatch}). A read with a
- *    different selector does not throw; it returns different data, and no
- *    later step can tell. An answer that still fails it after the one re-ask
- *    is WITHHELD: the step gets no entry at all. Keeping it would replay a
- *    wrong read; an `ai: true` entry would keep the step on AI for good.
+ *  - **Withholding checks** — the read check ({@link recordedReadMismatch})
+ *    and the ephemeral-ref check ({@link ephemeralRefInCodeComplaint}). A read
+ *    with a different selector does not throw; it returns different data, and
+ *    no later step can tell. An ephemeral snapshot ref (`aria-ref=`,
+ *    `data-steptix-ref`, `getByRef`, or a bare ref like `'e15'`/`'s1'`) fails
+ *    100% of replays. An answer that still fails either after the one re-ask
+ *    is WITHHELD: the step gets no entry at all. Keeping it would replay
+ *    broken code; an `ai: true` entry would keep the step on AI for good.
  *  - **The others** — selector ambiguity (it throws on replay, so it is
- *    self-announcing), a literal upload path, an undeclared context property,
- *    a stale tab handle (it drives the wrong tab and PASSES), a read that
- *    races its own action. One re-ask, then take what we get, warned about.
+ *    self-announcing), a literal upload path, a dropped long wait timeout, an
+ *    undeclared context property, a stale tab handle (it drives the wrong tab
+ *    and PASSES), a read that races its own action. One re-ask, then take what
+ *    we get, warned about.
  *
  * Which answer is kept:
  *
- * | First answer              | Re-ask                               | Kept                     |
- * |---------------------------|--------------------------------------|--------------------------|
- * | passes every check        | (not asked)                          | first                    |
- * | fails the read check      | fixes it                             | re-ask (warned)          |
- * | fails the read check      | still fails it, or no entry          | neither: withheld        |
- * | fails another check only  | keeps the read                       | re-ask (warned)          |
- * | fails another check only  | breaks the read, or no entry         | first (warned)           |
+ * | First answer               | Re-ask                                | Kept                     |
+ * |----------------------------|---------------------------------------|--------------------------|
+ * | passes every check         | (not asked)                           | first                    |
+ * | fails a withholding check  | fixes it (and passes both)            | re-ask (warned)          |
+ * | fails a withholding check  | still fails either, or no entry       | neither: withheld        |
+ * | fails another check only   | passes both withholding checks        | re-ask (warned)          |
+ * | fails another check only   | fails a withholding check, or no entry| first (warned)           |
  *
  * A recorded value written into the answer costs the one re-ask first, before
  * anything else looks at it (`askWithCaptureRetry`). If that one was spent,
- * the static faults are said rather than asked about — except a failed read,
- * which is withheld.
+ * the static faults are said rather than asked about — except a withholding
+ * fault, which is withheld.
  */
 async function askChecked(
   aiClient: AiClient,
@@ -552,7 +558,7 @@ async function askChecked(
       ...(checks.secrets && { secrets: checks.secrets }),
     });
   const otherFault = (code: string): string | undefined =>
-    staticEntryComplaint(code, checks.actions, checks.substitute) ??
+    nonWithholdingStaticComplaint(code, checks.actions, checks.substitute) ??
     undeclaredContextComplaint(code) ??
     staleHandleComplaint(code) ??
     unwaitedReadComplaint(code) ??
@@ -562,11 +568,15 @@ async function askChecked(
     chainedAssertionComplaint(code) ??
     tabIdentifierComplaint(code, checks.actions, checks.secrets);
 
+  const firstEphemeral = ephemeralRefInCodeComplaint(first.code);
   const firstRead = readFault(first.code);
   const firstOther = otherFault(first.code);
-  if (firstRead === undefined && firstOther === undefined) return first;
+  if (firstEphemeral === undefined && firstRead === undefined && firstOther === undefined) return first;
 
   if (asked.reasked) {
+    if (firstEphemeral !== undefined) {
+      return withheldForEphemeralRef(label, 'its one re-ask went to a recorded value it had written in');
+    }
     if (firstRead !== undefined) return withheldForRead(label, firstRead, 'its one re-ask went to a recorded value it had written in');
     logger.warn(
       `Code-behind for "${label}" has a fault the static check can see, and its one ` +
@@ -575,7 +585,7 @@ async function askChecked(
     return first;
   }
 
-  const complaint = [firstRead?.complaint, firstOther].filter((c) => c !== undefined).join('\n\n');
+  const complaint = [firstEphemeral, firstRead?.complaint, firstOther].filter((c) => c !== undefined).join('\n\n');
   // Said at info, in a line: a re-ask is a second model call, and how often
   // a compile needs one is what decides which model it should use
   // (docs/specs/SPEC-codebehind-robustness.md §6.10). The whole complaint stays
@@ -593,15 +603,33 @@ async function askChecked(
   // ONE re-ask, then decide. The second answer is never re-asked about, so
   // this cannot spin. A re-ask that errors (the call failed, or the new code
   // tripped the leak guard) or declines falls back to the first answer — unless
-  // that one read with the wrong selector, which no fallback can keep.
+  // that one tripped a withholding check, which no fallback can keep.
   if (second.kind !== 'entry') {
     const why = second.kind === 'error' ? second.message : second.reason;
+    if (firstEphemeral !== undefined) {
+      return withheldForEphemeralRef(label, `the re-ask produced no entry (${why})`);
+    }
     if (firstRead !== undefined) return withheldForRead(label, firstRead, `the re-ask produced no entry (${why})`);
     logger.debug(`The re-ask for "${label}" produced no entry (${why}); keeping the first answer`);
     return first;
   }
+  const secondEphemeral = ephemeralRefInCodeComplaint(second.code);
   const secondRead = readFault(second.code);
+  if (secondEphemeral !== undefined) {
+    if (firstEphemeral !== undefined) return withheldForEphemeralRef(label, 'the re-ask still did');
+    if (firstRead !== undefined) {
+      return withheldForEphemeralRef(label, 'the re-ask introduced an ephemeral snapshot ref');
+    }
+    logger.warn(
+      `Code-behind for "${label}": the re-ask introduced an ephemeral snapshot ref, so the first ` +
+        `answer is kept. ${firstOther ?? ''}`.trimEnd(),
+    );
+    return first;
+  }
   if (secondRead !== undefined) {
+    if (firstEphemeral !== undefined) {
+      return withheldForRead(label, secondRead, 'the first answer used an ephemeral snapshot ref');
+    }
     if (firstRead !== undefined) return withheldForRead(label, secondRead, 'the re-ask still did');
     // The re-ask broke the read the first answer had right: the first answer
     // stands, with the fault it was re-asked about said out loud.
@@ -622,6 +650,22 @@ function firstSentence(text: string): string {
   const sentence = end ? line.slice(0, end.index + 1) : line;
   return sentence.length > 240 ? `${sentence.slice(0, 239)}…` : sentence;
 }
+
+/** The withheld outcome for an entry that used an ephemeral snapshot ref. */
+function withheldForEphemeralRef(label: string, why: string): GeneratedEntry {
+  logger.warn(
+    `Code-behind for "${label}" was not written: ${EPHEMERAL_REF_WITHHELD}, and ${why}. ` +
+      'The step stays AI; the next compile tries again.',
+  );
+  return {
+    kind: 'error',
+    message: EPHEMERAL_REF_WITHHELD,
+    withheld: true,
+  };
+}
+
+/** Why a step is left without code when its code used an ephemeral snapshot ref. */
+export const EPHEMERAL_REF_WITHHELD = 'its code used an ephemeral snapshot ref that cannot replay';
 
 /** The withheld outcome for a read that did not keep the run's selector. */
 function withheldForRead(
@@ -650,10 +694,17 @@ export const READ_SELECTOR_WITHHELD = 'its code did not read with the selector t
 /** Today's warnings for faults an answer kept after its re-ask still has. */
 function warnRemainingFaults(code: string, label: string, checks: EntryCheckContext): void {
   const stillWrong = staticEntryComplaint(code, checks.actions, checks.substitute);
-  if (stillWrong !== undefined) {
+  const stillTimeout = waitTimeoutDroppedComplaint(code, checks.actions);
+  if (stillWrong !== undefined && stillWrong !== stillTimeout) {
     logger.warn(
       `Code-behind for "${label}" still has a fault the static check can see; ` +
         `it may throw or hard-code a path on replay. ${stillWrong}`,
+    );
+  }
+  if (stillTimeout !== undefined) {
+    logger.warn(
+      `Code-behind for "${label}" still omits the recorded wait timeout; ` +
+        `it may time out early on replay. ${stillTimeout}`,
     );
   }
   const stillUndeclared = undeclaredContextComplaint(code);
@@ -715,8 +766,10 @@ function warnRemainingFaults(code: string, label: string, checks: EntryCheckCont
 export interface EntryFault {
   check:
     | 'read'
+    | 'ephemeral-ref'
     | 'ambiguous-selector'
     | 'upload-path'
+    | 'wait-timeout-dropped'
     | 'undeclared-context'
     | 'stale-handle'
     | 'unwaited-read'
@@ -737,7 +790,8 @@ export interface EntryFault {
  * before and after a revision (docs/specs/SPEC-codebehind-robustness.md §6.2):
  * a revision may not bring into an entry a fault the generated entry did not
  * have. The checks that need the recording — the read check, selector
- * ambiguity, a literal upload path — run only when `actions` are given.
+ * ambiguity, a literal upload path, a dropped wait timeout — run only when
+ * `actions` are given.
  */
 export function entryFaults(
   code: string,
@@ -760,8 +814,10 @@ export function entryFaults(
   });
   if (read) out.push({ check: 'read', complaint: read.complaint, selector: read.selector });
   const found: Array<[EntryFault['check'], string | undefined]> = [
+    ['ephemeral-ref', ephemeralRefInCodeComplaint(code)],
     ['ambiguous-selector', ambiguousSelectorComplaint(code, actions, ctx.substitute)],
     ['upload-path', literalUploadPathComplaint(code, actions)],
+    ['wait-timeout-dropped', waitTimeoutDroppedComplaint(code, actions)],
     ['undeclared-context', undeclaredContextComplaint(code)],
     ['stale-handle', staleHandleComplaint(code)],
     ['unwaited-read', unwaitedReadComplaint(code)],
@@ -811,6 +867,48 @@ export interface ReadMismatch {
   complaint: string;
 }
 
+function nonBlank(value: string | undefined): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
+
+/**
+ * Strip comments and normalize quote style and punctuation spacing outside
+ * string literals, so `getByRole('heading', { name: 'Total' })` matches
+ * `getByRole("heading", {name: "Total"})` without matching inside comments.
+ */
+function canonicalExpression(expr: string): string {
+  const s = scan(expr);
+  const byStart = new Map<number, StringToken>();
+  for (const token of s.strings) byStart.set(token.start, token);
+  const parts: string[] = [];
+  let codeBuf = '';
+  const flushCode = (): void => {
+    if (!codeBuf) return;
+    parts.push(
+      codeBuf
+        .replace(/\s+/g, ' ')
+        .replace(/\s*([(){}[\],:.])\s*/g, '$1'),
+    );
+    codeBuf = '';
+  };
+  for (let i = 0; i < expr.length; i++) {
+    if (s.mask[i] === COMMENT) {
+      codeBuf += ' ';
+      continue;
+    }
+    const token = byStart.get(i);
+    if (token !== undefined) {
+      flushCode();
+      parts.push(JSON.stringify(token.value));
+      i = token.end - 1;
+      continue;
+    }
+    codeBuf += expr[i]!;
+  }
+  flushCode();
+  return parts.join('').trim();
+}
+
 /**
  * The first recorded `read` or `count` whose selector the entry does not
  * contain, or undefined when it reads with every one of them.
@@ -825,11 +923,12 @@ export interface ReadMismatch {
  * code holds as a string — single- or double-quoted, or a template literal —
  * after normalising whitespace and quote style. Accepted spellings: the
  * selector as recorded, after parameter substitution, or the action's verified
- * `targeting.resolvedSelector`; a selector split across a chain
- * (`frameLocator(a).locator(b)`, `locator(a).locator(b)`) counts when every
- * part is there. A template literal whose only expressions are
- * `step.getVar('name')` is read as `{{name}}` and substituted, so a locator
- * built from a parameter matches a recording that holds the parameter's value.
+ * `targeting.resolvedSelector` (and `targeting.normalizedLocator` for ref-based
+ * reads); a selector split across a chain (`frameLocator(a).locator(b)`,
+ * `locator(a).locator(b)`) counts when every part is there. A template literal
+ * whose only expressions are `step.getVar('name')` is read as `{{name}}` and
+ * substituted, so a locator built from a parameter matches a recording that
+ * holds the parameter's value.
  *
  * What it cannot tell: whether a DIFFERENT selector would have read the same
  * elements. `#account-list .account-name` would have; it is refused all the
@@ -857,24 +956,47 @@ export function recordedReadMismatch(
   },
 ): ReadMismatch | undefined {
   let held: Set<string> | undefined;
+  let canonicalCode: string | undefined;
   const asked = new Set<string>();
   for (const action of actions) {
     if (action.action !== 'read' && action.action !== 'count') continue;
-    const selector = action.selector;
-    if (typeof selector !== 'string' || selector.trim() === '') continue;
-    if (ANY_PLACEHOLDER_RE.test(selector) || envDataRefsIn(selector).length > 0) continue;
-    if (action.targeting?.resolvedBy === 'positional' && namesItsTarget(ctx.source)) continue;
-    if (asked.has(selector)) continue;
-    asked.add(selector);
+    const rawSelector = nonBlank(action.selector);
+    const resolvedSelector = nonBlank(action.targeting?.resolvedSelector);
+    const normalizedLocator = nonBlank(action.targeting?.normalizedLocator);
+    const effectiveSelector = rawSelector ?? resolvedSelector ?? normalizedLocator;
+    if (effectiveSelector === undefined) continue;
+    if (ANY_PLACEHOLDER_RE.test(effectiveSelector) || envDataRefsIn(effectiveSelector).length > 0) continue;
+    const isPositional =
+      action.targeting?.resolvedBy === 'positional' ||
+      (resolvedSelector === undefined && action.targeting?.normalizedBy === 'positional');
+    if (isPositional && namesItsTarget(ctx.source)) continue;
+    if (asked.has(effectiveSelector)) continue;
+    asked.add(effectiveSelector);
 
-    held ??= selectorStringsIn(code, ctx.substitute);
-    const spellings = [selector, ctx.substitute?.(selector), action.targeting?.resolvedSelector]
+    const spellings = [
+      rawSelector,
+      rawSelector !== undefined ? ctx.substitute?.(rawSelector) : undefined,
+      resolvedSelector,
+    ]
       .filter((s): s is string => typeof s === 'string' && s.trim() !== '')
       .map(normaliseSelector);
-    if (spellings.some((s) => coveredBy(s, held!))) continue;
+    if (spellings.length > 0) {
+      held ??= selectorStringsIn(code, ctx.substitute);
+      if (spellings.some((s) => coveredBy(s, held!))) continue;
+    }
 
-    const masked = redact(selector, [...(ctx.secrets ?? [])]);
-    return { selector: masked, complaint: readMismatchComplaint(action, masked, ctx) };
+    // For ref-based reads (where `action.selector` was absent), also accept
+    // the verified `targeting.normalizedLocator`.
+    if (rawSelector === undefined && normalizedLocator !== undefined) {
+      canonicalCode ??= canonicalExpression(code);
+      if (canonicalCode.includes(canonicalExpression(normalizedLocator))) continue;
+    }
+
+    const masked = redact(effectiveSelector, [...(ctx.secrets ?? [])]);
+    return {
+      selector: masked,
+      complaint: readMismatchComplaint(action, masked, ctx, rawSelector !== undefined),
+    };
   }
   return undefined;
 }
@@ -894,6 +1016,7 @@ function readMismatchComplaint(
   action: RecordedAction,
   selector: string,
   ctx: { recordedCaptures?: Record<string, string>; secrets?: readonly string[] },
+  hadRawSelector = true,
 ): string {
   const counts = action.action === 'count';
   const matched = action.targeting?.matchCount;
@@ -903,11 +1026,19 @@ function readMismatchComplaint(
     captured !== undefined ? `captured ${captured === 1 ? 'one value' : `${captured} values`}` : '',
   ].filter(Boolean).join(' and ');
   const resolved = action.targeting?.resolvedSelector;
+  const normalized = action.targeting?.normalizedLocator;
+  const alternative = hadRawSelector
+    ? resolved !== undefined
+      ? ` (or its verified resolvedSelector \`${redact(resolved, [...(ctx.secrets ?? [])])}\`)`
+      : ''
+    : resolved !== undefined && normalized !== undefined
+      ? ` (or its verified normalizedLocator \`${redact(normalized, [...(ctx.secrets ?? [])])}\`)`
+      : '';
   return (
     `The recorded run ${counts ? 'counted' : 'read'} with \`${selector}\`${facts ? `, which ${facts}` : ''}. ` +
     `Your entry ${counts ? 'counts' : 'reads'} with a different selector. A ${counts ? 'count' : 'read'} ` +
     'that matches more or fewer elements does not throw; it returns different data. Use the recorded ' +
-    `selector as written${resolved !== undefined ? ` (or its verified resolvedSelector \`${redact(resolved, [...(ctx.secrets ?? [])])}\`)` : ''} — ` +
+    `selector as written${alternative} — ` +
     'every part of it, `:first-child` and `:nth-of-type` included. Narrow or wait around it if you need ' +
     'to, but read with it.'
   );
@@ -1002,14 +1133,121 @@ function selectorStringsIn(
   return out;
 }
 
+const BARE_SNAPSHOT_REF_RE = /^(?:f\d+)?e\d+$|^s\d+$/;
+const GET_BY_REF_CALL_RE = /\.\s*getByRef\s*\(/;
+const REF_SELECTOR_CALL_RE =
+  /\.\s*(?:locator|frameLocator|waitForSelector|click|dblclick|check|uncheck|hover|focus|tap|\$\$?|\$\$?eval|querySelector(?:All)?)\s*\(\s*$|(?:^|[^\w$.])(?:page|frame)\s*\.\s*(?:fill|type|press|selectOption|setInputFiles)\s*\(\s*$|(?:^|[^\w$])selector\s*:\s*$/;
+
+const EPHEMERAL_REF_COMPLAINT =
+  'The entry uses an ephemeral snapshot reference (aria-ref=, data-steptix-ref, getByRef, or a bare ref like "e15"/"s1"), which only exists for one turn and fails 100% of replays. Replace it with the action\'s verified normalizedLocator (e.g. page.getByRole(...)), resolvedSelector, or a stable Playwright locator.';
+
 /**
- * Every static fault worth one re-ask, in the order they are checked.
- *
- * Selector ambiguity comes first deliberately: it is the fault the model gets
- * wrong more often, and a bare selector throws on replay where a literal path
- * merely breaks on the next machine.
+ * Reject any entry containing an ephemeral snapshot ref (`aria-ref=`,
+ * `data-steptix-ref`, `.getByRef(`, or a bare snapshot ref like `'e15'`/`'s1'`
+ * passed to a selector call). Comments are ignored via `scan(code)` so a note
+ * explaining a replacement never false-positives.
  */
-export function staticEntryComplaint(
+export function ephemeralRefInCodeComplaint(code: string): string | undefined {
+  const s = scan(code);
+  let nonCommentCode = '';
+  for (let i = 0; i < code.length; i++) {
+    nonCommentCode += s.mask[i] === CODE ? code[i] : ' ';
+  }
+
+  if (GET_BY_REF_CALL_RE.test(nonCommentCode)) {
+    return EPHEMERAL_REF_COMPLAINT;
+  }
+
+  const hasEphemeralAttr = (text: string): boolean =>
+    text.includes('aria-ref=') || text.includes('data-steptix-ref');
+
+  const isBareRefInSelectorCall = (start: number, value: string): boolean => {
+    if (!BARE_SNAPSHOT_REF_RE.test(value.trim())) return false;
+    const before = nonCommentCode.slice(Math.max(0, start - 60), start);
+    return REF_SELECTOR_CALL_RE.test(before);
+  };
+
+  for (const token of s.strings) {
+    if (hasEphemeralAttr(token.value) || isBareRefInSelectorCall(token.start, token.value)) {
+      return EPHEMERAL_REF_COMPLAINT;
+    }
+  }
+
+  for (let i = 0; i < code.length; i++) {
+    if (s.mask[i] !== TEMPLATE || (i > 0 && s.mask[i - 1] === TEMPLATE)) continue;
+    let end = i + 1;
+    while (end < code.length && s.mask[end] === TEMPLATE) end++;
+    const raw = code.slice(i, end);
+    const body =
+      raw.startsWith('`') && raw.endsWith('`') && raw.length >= 2 ? raw.slice(1, -1) : raw;
+    if (hasEphemeralAttr(body)) {
+      return EPHEMERAL_REF_COMPLAINT;
+    }
+    if (!body.includes('${') && isBareRefInSelectorCall(i, body)) {
+      return EPHEMERAL_REF_COMPLAINT;
+    }
+    i = end - 1;
+  }
+
+  return undefined;
+}
+
+const TIMEOUT_EXPR_PATTERNS: readonly RegExp[] = [
+  /\btimeout\s*:\s*([0-9][0-9_\s*]*[0-9]|[0-9]+)/g,
+  /\bwaitForTimeout\s*\(\s*([0-9][0-9_\s*]*[0-9]|[0-9]+)\s*\)/g,
+];
+
+function parseTimeoutExpression(expr: string): number | undefined {
+  const parts = expr.split('*');
+  let product = 1;
+  for (const rawPart of parts) {
+    const trimmed = rawPart.trim();
+    if (!/^\d(?:_?\d)*$/.test(trimmed)) return undefined;
+    const factor = Number(trimmed.replace(/_/g, ''));
+    if (!Number.isSafeInteger(factor)) return undefined;
+    product *= factor;
+    if (!Number.isFinite(product)) return undefined;
+  }
+  return product;
+}
+
+/**
+ * Reject an entry that omits an explicit timeout >= a recorded `wait` action's
+ * timeout above the 10000ms default (SPEC-aria-ref-snapshots.md §7.3).
+ */
+export function waitTimeoutDroppedComplaint(
+  code: string,
+  actions: readonly RecordedAction[],
+): string | undefined {
+  let maxWaitTimeout: number | undefined;
+  for (const action of actions) {
+    if (action.action !== 'wait') continue;
+    if (typeof action.timeout !== 'number' || !Number.isFinite(action.timeout) || action.timeout <= 10_000) {
+      continue;
+    }
+    if (maxWaitTimeout === undefined || action.timeout > maxWaitTimeout) {
+      maxWaitTimeout = action.timeout;
+    }
+  }
+  if (maxWaitTimeout === undefined) return undefined;
+
+  const text = codeOnly(code);
+  for (const pattern of TIMEOUT_EXPR_PATTERNS) {
+    for (const m of text.matchAll(pattern)) {
+      const value = parseTimeoutExpression(m[1]!);
+      if (value !== undefined && value >= maxWaitTimeout) return undefined;
+    }
+  }
+
+  return (
+    `The recorded run waited with an explicit timeout of ${maxWaitTimeout}ms, which exceeds the ` +
+    `10000ms default (and step.settle()'s 10s cap), but your entry specifies no timeout >= ${maxWaitTimeout}. ` +
+    `Pass { timeout: ${maxWaitTimeout} } explicitly to waitFor(...) / expect(...).`
+  );
+}
+
+/** Non-withholding static faults checked in `otherFault` inside `askChecked`. */
+function nonWithholdingStaticComplaint(
   code: string,
   actions: RecordedAction[],
   substitute?: ((text: string) => string) | undefined,
@@ -1018,7 +1256,26 @@ export function staticEntryComplaint(
     ambiguousSelectorComplaint(code, actions, substitute) ??
     unmatchedRoleNameComplaint(code, actions, substitute) ??
     hiddenToggleClickComplaint(code, actions, substitute) ??
-    literalUploadPathComplaint(code, actions)
+    literalUploadPathComplaint(code, actions) ??
+    waitTimeoutDroppedComplaint(code, actions)
+  );
+}
+
+/**
+ * Every static fault worth one re-ask, in the order they are checked.
+ *
+ * Ephemeral snapshot refs come first (guaranteed replay failure), followed by
+ * the five non-withholding checks: selector ambiguity, unmatched role names,
+ * hidden-toggle clicks, literal upload paths, and dropped long wait timeouts.
+ */
+export function staticEntryComplaint(
+  code: string,
+  actions: RecordedAction[],
+  substitute?: ((text: string) => string) | undefined,
+): string | undefined {
+  return (
+    ephemeralRefInCodeComplaint(code) ??
+    nonWithholdingStaticComplaint(code, actions, substitute)
   );
 }
 
@@ -2450,6 +2707,45 @@ export function accountPlaceholders(options: {
         return;
       }
     }
+    // In snapshot-ref ('aria') mode, element-targeting actions carry a ref
+    // rather than a selector, so the runtime model had no selector field in
+    // which to write `{{param}}` — it used the resolved value to pick the ref,
+    // and compile-time generation parameterizes the locator using `targeting`
+    // while `findInlinedParameterValue` still guards against hardcoded literals.
+    const refActions = actions.filter(
+      (a) =>
+        !EXPLORATION_ACTIONS.has(a.action) &&
+        Boolean(a.ref || a.targetRef || a.containerRef) &&
+        a.selector === undefined,
+    );
+    if (refActions.length > 0 && value !== undefined && value.trim() !== '') {
+      const trimmedValue = value.trim();
+      const needle = trimmedValue.toLowerCase();
+      const evidence: string[] = [];
+      for (const a of refActions) {
+        for (const s of [
+          a.targeting?.elementContextHtml,
+          a.targeting?.normalizedLocator,
+          a.targeting?.resolvedSelector,
+          a.targeting?.targetNormalizedLocator,
+          a.targeting?.targetResolvedSelector,
+        ]) {
+          if (typeof s === 'string' && s !== '') evidence.push(s);
+        }
+      }
+      if (
+        evidence.some((s) => s.toLowerCase().includes(needle)) ||
+        (name.endsWith('._row') && /^\d+$/.test(trimmedValue)) ||
+        refActions.every(
+          (a) =>
+            a.targeting?.elementContextHtml === undefined &&
+            a.targeting?.normalizedLocator === undefined &&
+            a.targeting?.resolvedSelector === undefined,
+        )
+      ) {
+        return;
+      }
+    }
     decline = `${describeGuardedName(name)} appears in no recorded action`;
   };
 
@@ -3580,6 +3876,8 @@ export function conditionEntryComplaint(code: string): string | undefined {
       'return true when the condition, as written, holds on the page now, false when it does not.'
     );
   }
+  const ephemeral = ephemeralRefInCodeComplaint(code);
+  if (ephemeral !== undefined) return ephemeral;
   return forbiddenCall(code, text);
 }
 
@@ -3786,7 +4084,8 @@ export interface RecordingEntryInput {
  *  - every recorded action is a `read` or a `count` (`find` and `expand` only
  *    showed the model the page, and a `noop` did nothing — it is how the model
  *    keeps a list read it was shown, src/runner/list-read-review.ts — so all
- *    three are left out), each with a selector;
+ *    three are left out), each with a selector or a verified
+ *    `targeting.resolvedSelector`;
  *  - each of them stores into a capture the step's own line declares, and
  *    every capture the line declares is stored by one of them — so the entry
  *    stores exactly what the run stored;
@@ -3818,13 +4117,17 @@ export function entryFromRecording(input: RecordingEntryInput): string | undefin
   const declared = new Set([...captures, ...inlineCaptureNames(binding.source)]);
   if (declared.size === 0) return undefined;
   const stored = new Set<string>();
+  const resolvedSelectors = new Map<RecordedAction, string>();
   for (const action of reads) {
-    if (typeof action.selector !== 'string' || action.selector.trim() === '') return undefined;
+    const effectiveSel =
+      nonBlank(action.selector) ?? nonBlank(action.targeting?.resolvedSelector);
+    if (effectiveSel === undefined) return undefined;
     if (typeof action.as !== 'string' || action.as.trim() === '') return undefined;
     const name = authored(action.as);
     if (!declared.has(name)) return undefined;
     stored.add(name);
     if (action.targeting?.resolvedBy === 'positional' && namesItsTarget(binding.source)) return undefined;
+    resolvedSelectors.set(action, effectiveSel);
   }
   for (const name of declared) if (!stored.has(name)) return undefined;
 
@@ -3834,12 +4137,13 @@ export function entryFromRecording(input: RecordingEntryInput): string | undefin
   if (envRefs.unresolved.length > 0) return undefined;
   const guarded = guardedValues(parameters, envRefs.resolved, binding.source);
   const fieldText = reads
-    .map((a) => [a.selector, a.attribute, a.pattern, a.frame].filter((f) => typeof f === 'string').join('\n'))
+    .map((a) => [resolvedSelectors.get(a), a.attribute, a.pattern, a.frame].filter((f) => typeof f === 'string').join('\n'))
     .join('\n');
   if (findInlinedParameterValue(fieldText, guarded)) return undefined;
 
   const calls = reads.flatMap((action) => {
-    const fields: string[] = [`selector: ${tsString(authoredPlaceholders(action.selector!, binding))}`];
+    const effectiveSel = resolvedSelectors.get(action)!;
+    const fields: string[] = [`selector: ${tsString(authoredPlaceholders(effectiveSel, binding))}`];
     if (action.action === 'read' && action.multiple === true) fields.push('multiple: true');
     if (action.action === 'read' && typeof action.attribute === 'string') {
       fields.push(`attribute: ${tsString(authoredPlaceholders(action.attribute, binding))}`);
