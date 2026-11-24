@@ -14,6 +14,7 @@ import { expandSkills } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { parseSetStep, setStepError, substitutePreservingSet } from './set-step.js';
 import { parseUseAiStep, useStepError } from './use-step.js';
+import { agentScopeOf, misplacedAgentOpenerError, noAgentMisuseError } from './agent-scope.js';
 import { unknownWholeStepBracketError } from './whole-step-bracket.js';
 import {
   parseFlowControlStep,
@@ -479,6 +480,7 @@ export function parseTestContent(rawContent: string, filePath = '<inline>'): Par
 
 function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
   const { sections, frontmatter, title } = parseSections(rawContent, filePath);
+  validateAgentScope(rawContent, filePath);
   // A baseUrl beginning ./ or ../ is a page beside the test, made its file://
   // URL here so every consumer, a run, a compile or a report, gets one a
   // browser can open (resolveBaseUrl). An inline parse has no file to start from.
@@ -522,6 +524,7 @@ function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
 
 function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
   const { sections, frontmatter, title } = parseSections(rawContent, filePath);
+  validateAgentScope(rawContent, filePath);
 
   // A skill's parameters are not runtime variables: `applySkillScope`
   // interpolates the caller's arguments into the body TEXT, so a `Set
@@ -1307,7 +1310,14 @@ export interface StepSpanScan {
  * Throws on an invalid section name (reserved / `[`-prefixed / `{{`-containing
  * / empty / duplicate).
  */
-export function scanStepSpans(rawContent: string, filePath: string): StepSpanScan {
+export function scanStepSpans(
+  rawContent: string,
+  filePath: string,
+  /** `quiet` skips the two warnings this scan says about a file — for a
+   *  caller that reads a file the parser has already read and warned about
+   *  (`agentScopeOf`), which would otherwise say each of them twice. */
+  opts: { quiet?: boolean } = {},
+): StepSpanScan {
   // The four line regexes live in ./line-grammar.js because the data-table
   // scan below reads the same span and has to agree with this pass about what
   // a step line and a heading are (HASHES_ONLY_RE catches a line that is
@@ -1425,7 +1435,7 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
         // and its condition is never asked. All three enforcers agree, which
         // is why nothing else can tell the author. Resolution is left exactly
         // as it is; this line is the only thing that says so out loud.
-        if (parseControlLine(name)) {
+        if (parseControlLine(name) && !opts.quiet) {
           logger.warn(
             `Section "${name}" at ${filePath}:${line} is named like a control ` +
               `line. A step whose text is exactly this heading calls the ` +
@@ -1478,7 +1488,7 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
   // author wrote is how the old grammar's absorption went unnoticed; refusing
   // the file would be worse, since the items are prose as far as the grammar
   // is concerned.
-  for (const d of dropped) {
+  for (const d of opts.quiet ? [] : dropped) {
     logger.warn(
       `${d.count} step(s) under "${d.name}" (${filePath}:${d.line}) are not run — a ` +
         `heading of depth 4 or more does not define a section. Use "### ${d.name}" ` +
@@ -1642,4 +1652,27 @@ export async function discoverTestFiles(
     ignore: ['**/node_modules/**'],
   });
   return files.sort();
+}
+
+/**
+ * The block rules of agent scope (docs/specs/SPEC-use-agent.md §5.1): a bare
+ * `[use agent]` anywhere but first in its block, and a `[no-agent]` where it
+ * cannot go (before `[no-hooks]`, on `[use agent]`, on a claimed line), are
+ * parse errors naming the line; a `[no-agent]` outside every scope changes
+ * nothing and says so.
+ * Run after `parseSections`, so a file it refuses is refused in its words.
+ */
+function validateAgentScope(rawContent: string, filePath: string): void {
+  const scope = agentScopeOf(rawContent, filePath);
+  const misplaced = scope.misplacedOpeners[0];
+  if (misplaced !== undefined) {
+    throw new Error(misplacedAgentOpenerError(` in ${filePath} at line ${misplaced}`));
+  }
+  const misuse = scope.misusedNoAgent[0];
+  if (misuse !== undefined) {
+    throw new Error(noAgentMisuseError(misuse.why, ` in ${filePath} at line ${misuse.line}`));
+  }
+  for (const line of scope.strayNoAgent) {
+    logger.warn(`${filePath}:${line}: [no-agent] is outside every agent scope, so it changes nothing.`);
+  }
 }

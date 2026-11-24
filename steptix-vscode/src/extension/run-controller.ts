@@ -14,6 +14,9 @@ import {
   extractSections,
   extractSteps,
   runStartFor,
+  agentWireFor,
+  agentLimitsFor,
+  type AgentApprovalAnswer,
   danglingChainMemberError,
   resolveRunSelection,
   sectionBodyLinesAt,
@@ -151,6 +154,9 @@ export interface ApiClientLike {
   /** Optional Phase-5 ack used by tool step-into. Tests that don't
    *  exercise the tool-debugger flow omit it. */
   ackToolDebugger?(sessionId: string): Promise<void>;
+  /** docs/specs/SPEC-use-agent.md §6.3. Optional, like the ack above, so a
+   *  test double without it still satisfies the interface. */
+  answerAgentApproval?(sessionId: string, requestId: string, answer: AgentApprovalAnswer): Promise<boolean>;
   /** Optional liveness probe (`GET /sessions/:id`). Used by the "re-run a
    *  skill step" path to refuse before reusing a dead session. When absent
    *  (older fakes) the re-run treats the session as live. */
@@ -556,6 +562,15 @@ export class RunController {
   /** Incremented per run; lets a background post-stop report poll (issue 021)
    *  detect that a newer run started and skip clobbering its report path. */
   private runGeneration = 0;
+  /**
+   * The logical run every batch belongs to (docs/specs/SPEC-use-agent.md
+   * §6.2, §6.3): minted when a run starts, kept across its rows, its Continue
+   * batches and its typed REPL turns, so the server keeps one agent workspace
+   * and one set of "for the rest of this run" answers for all of them.
+   */
+  private agentRunId = '';
+  /** The run `agentRunId` replaced, sent so the server ends it (§6.2). */
+  private previousAgentRunId = '';
   private lastResolvedEnvPath: string | null = null;
   private configSentForSession = false;
   /**
@@ -1917,6 +1932,29 @@ export class RunController {
   }
 
   /**
+   * Send the person's answer to the agent's Allow/Deny question
+   * (docs/specs/SPEC-use-agent.md §6.3). False when the question had closed
+   * already, which the server announced, so nothing more is needed.
+   */
+  async answerAgentApproval(requestId: string, answer: AgentApprovalAnswer): Promise<boolean> {
+    const client = this.currentClient;
+    const sessionId = this.currentSessionId;
+    if (!client || !sessionId || typeof client.answerAgentApproval !== 'function') return false;
+    try {
+      return await client.answerAgentApproval(sessionId, requestId, answer);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      vscode.window.setStatusBarMessage(`Steptix: the answer did not reach the server (${reason})`, 4000);
+      return false;
+    }
+  }
+
+  /** An agent line in the run's output (§8.8). */
+  postAgentLine(msg: string, kind: 'info' | 'warn'): void {
+    this.postOutput(msg, kind);
+  }
+
+  /**
    * Acknowledge a `tool:awaiting-debugger` pause point — the extension
    * calls this after `vscode.debug.startDebugging` has actually attached
    * VS Code's Node debugger to the server process. The server then
@@ -2964,6 +3002,10 @@ export class RunController {
     // supersedes it with no exception.
     this.parkedRunStartOwed = false;
     const runStartOwedAtStart = startsRun || inheritedRunStart;
+    if (startsRun || this.agentRunId === '') {
+      this.previousAgentRunId = this.agentRunId;
+      this.agentRunId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    }
 
     // A new run — including a Resume — supersedes any paused state, so the
     // keep-alive that was pinning the server through the pause is done.
@@ -3848,6 +3890,7 @@ export class RunController {
             ...(options.suppressServerBreakpoints && { suppressServerBreakpoints: true }),
             ...(sendRunStart && { runStart: true }),
             ...(detachedRead && { detachedBody: detachedRead }),
+            canApprove: !batchMode,
           });
           compileBlocksSent++;
           pendingRerun = undefined;
@@ -5252,8 +5295,11 @@ export class RunController {
      *  this is the run's reading of their bodies. Each step is sent with its
      *  section and place, so its code-behind binds under its section. */
     detachedBody?: DetachedBodies;
+    /** docs/specs/SPEC-use-agent.md §6.3: true for a run a person started,
+     *  never in batch mode. */
+    canApprove?: boolean;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, withinCompileRun, suppressServerBreakpoints, runStart, detachedBody } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, withinCompileRun, suppressServerBreakpoints, runStart, detachedBody, canApprove } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -5386,6 +5432,22 @@ export class RunController {
         ...(runStart === true && block[0] && {
           runStart: runStartFor(this.document.getText(), block[0].line),
         }),
+        // Which steps are agent steps because of their file, read from the
+        // same buffer as `steps` (docs/specs/SPEC-use-agent.md §5.7).
+        ...(() => {
+          const agent = agentWireFor(this.document.getText(), stepLines);
+          return agent ? { agent } : {};
+        })(),
+        // A person started this run and can answer the agent (§6.3).
+        ...(canApprove && { canApprove: true }),
+        // The run this batch belongs to, and the test's agent limits — both on
+        // every batch, since a row or a Continue must keep them (§6.2, §10).
+        agentRunId: this.agentRunId,
+        ...(this.previousAgentRunId !== '' && { agentRunEnds: this.previousAgentRunId }),
+        ...(() => {
+          const agentLimits = agentLimitsFor(parseConfig(this.document.getText()));
+          return agentLimits ? { agentLimits } : {};
+        })(),
       },
       signal,
     );
@@ -5690,6 +5752,10 @@ export class RunController {
               // root (and thus the same per-project env/data/config) it used for
               // the run this interactive step continues.
               testFilePath: this.document.uri.fsPath,
+              // A typed `[use agent]` turn: the person is right here to answer
+              // (docs/specs/SPEC-use-agent.md §6.3), and it is the same run.
+              canApprove: true,
+              agentRunId: this.agentRunId,
               env,
               ...(envName && { envName }),
               ...(() => {

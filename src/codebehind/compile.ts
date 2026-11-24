@@ -7,7 +7,8 @@ import type { TokenTracker } from '../utils/tokens.js';
 import { majorMinorLabel } from '../utils/file-stamp.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
-import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
+import { parseUseAgentStep, parseUseAiStep, parseUseStep } from '../parser/use-step.js';
+import { agentScopesForParsedTest } from '../agent/host.js';
 import {
   chainMembers,
   innermostLoopGuard,
@@ -39,6 +40,7 @@ import {
   SET_STEP_NOT_COMPILED,
   SURFACE_SWITCH_NOT_COMPILED,
   USE_AI_NOT_COMPILED,
+  USE_AGENT_NOT_COMPILED,
   valueMatchWarning,
   type ConditionObservation,
   type GeneratedEntry,
@@ -2385,6 +2387,9 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
     : undefined;
 
   const controls = test.expansion?.controls ?? [];
+  // Agent steps by scope (docs/specs/SPEC-use-agent.md §9): in an agent
+  // scope every plain step is one, and none of them compiles.
+  const agentScopes = agentScopesForParsedTest(test);
 
   return test.steps.map((step, i) => {
     const binding = registry?.bindingFor(i);
@@ -2436,6 +2441,10 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
       // model is to be asked on every run (stories/use-ai-step.md, decision 1).
       : parseUseAiStep(text)
       ? USE_AI_NOT_COMPILED
+      // An agent step, by its prefix or its scope, for the same reason
+      // (docs/specs/SPEC-use-agent.md §9).
+      : parseUseAgentStep(text) || agentScopes.scope[i]
+      ? USE_AGENT_NOT_COMPILED
       // A `[use computer]` / `[use browser]` line, on the same terms as `Set`
       // and the unconditional flow-control step: the loop dispatches it with
       // no model call, so there is nothing recorded for an entry to replace

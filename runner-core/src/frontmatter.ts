@@ -1,7 +1,8 @@
 /**
  * Minimal YAML frontmatter parser scoped to the fields Steptix actually
  * reads. Not a full YAML implementation — we only need `type`, `disabled`,
- * `env`, `tags`, and the `# Heading` line that follows the frontmatter.
+ * `env`, `tags`, `dataSources`, `agent`, and the `# Heading` line that
+ * follows the frontmatter.
  *
  * Targeted regex over the frontmatter span keeps the dependency surface
  * zero and avoids pulling a YAML lib into both the extension bundle and
@@ -25,6 +26,9 @@ export interface TestFrontmatter {
    *     catalog: ../data/catalog.json
    */
   dataSources?: Record<string, string>;
+  /** `agent: on` runs every plain step of the file as an agent step
+   *  (docs/specs/SPEC-use-agent.md §5.6). Read by {@link agentScopeOf}. */
+  agent?: boolean;
 }
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/;
@@ -33,7 +37,7 @@ const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/;
  * Parse the YAML frontmatter at the top of a markdown file. Returns an
  * empty object if there's no frontmatter or it's malformed.
  *
- * Recognises the four fields Steptix uses; anything else in the
+ * Recognises the fields Steptix uses; anything else in the
  * frontmatter is ignored. Unknown keys do not produce errors — this
  * parser is intentionally tolerant so users can add their own metadata.
  */
@@ -64,6 +68,9 @@ export function parseFrontmatter(text: string): TestFrontmatter {
         break;
       case 'env':
         out.env = unquote(valueRaw);
+        break;
+      case 'agent':
+        out.agent = parseBool(valueRaw);
         break;
       case 'dataSources': {
         // Block mapping only: `dataSources:` on its own line, followed by

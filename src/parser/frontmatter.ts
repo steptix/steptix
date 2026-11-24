@@ -24,6 +24,13 @@ export function parseFrontmatter(rawContent: string): {
   const typeRaw = typeof data['type'] === 'string' ? data['type'] : undefined;
   const typeVal = typeRaw === 'skill' || typeRaw === 'test' ? typeRaw : undefined;
   const dataSourcesVal = parseDataSources(data['dataSources']);
+  // `agent: on` (docs/specs/SPEC-use-agent.md §5.6). YAML 1.2 reads `on` as a
+  // string and `true` as a boolean, so both spellings are accepted, as
+  // runner-core's `parseBool` accepts them.
+  const agentRaw = data['agent'];
+  const agentVal =
+    agentRaw === true ||
+    (typeof agentRaw === 'string' && ['on', 'true', 'yes'].includes(agentRaw.trim().toLowerCase()));
 
   const frontmatter: TestFrontmatter = {
     tags,
@@ -32,6 +39,7 @@ export function parseFrontmatter(rawContent: string): {
     ...(envVal !== undefined && { env: envVal }),
     ...(typeVal !== undefined && { type: typeVal }),
     ...(dataSourcesVal !== undefined && { dataSources: dataSourcesVal }),
+    ...(agentVal && { agent: true }),
   };
 
   return {

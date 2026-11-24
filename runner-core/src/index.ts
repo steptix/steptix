@@ -10,6 +10,7 @@ export * from './control-line.js';
 export * from './use-step.js';
 export * from './whole-step-bracket.js';
 export * from './step-lines.js';
+export * from './agent-scope.js';
 export * from './data-rows.js';
 export * from './section-match.js';
 export * from './section-index.js';

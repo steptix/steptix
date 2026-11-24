@@ -11,6 +11,9 @@
  * See steptix-vscode/stories/specs/inline-sections-authoring.md §3.4.
  */
 import {
+  agentScopeOf,
+  misplacedAgentOpenerError,
+  noAgentMisuseError,
   buildSectionIndex,
   classifyLines,
   inertRegionHeading,
@@ -204,6 +207,42 @@ export function computeSectionDiagnostics(text: string): PlainDiagnostic[] {
       endCol: (lines[lineIdx] ?? '').length,
       severity: 'warning',
       message: `Did you mean section "${section.name}"?`,
+    });
+  }
+
+  // Agent scope's block rules (docs/specs/SPEC-use-agent.md §5.1), from the
+  // same `agentScopeOf` the run sends, in the CLI parser's words.
+  let agentScope: ReturnType<typeof agentScopeOf> | undefined;
+  try {
+    agentScope = agentScopeOf(text);
+  } catch {
+    agentScope = undefined;
+  }
+  for (const line of agentScope?.misplacedOpeners ?? []) {
+    out.push({
+      line: line - 1,
+      startCol: 0,
+      endCol: (lines[line - 1] ?? '').length,
+      severity: 'error',
+      message: misplacedAgentOpenerError(),
+    });
+  }
+  for (const { line, why } of agentScope?.misusedNoAgent ?? []) {
+    out.push({
+      line: line - 1,
+      startCol: 0,
+      endCol: (lines[line - 1] ?? '').length,
+      severity: 'error',
+      message: noAgentMisuseError(why),
+    });
+  }
+  for (const line of agentScope?.strayNoAgent ?? []) {
+    out.push({
+      line: line - 1,
+      startCol: 0,
+      endCol: (lines[line - 1] ?? '').length,
+      severity: 'warning',
+      message: '[no-agent] is outside every agent scope, so it changes nothing.',
     });
   }
 

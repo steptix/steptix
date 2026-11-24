@@ -2,6 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   isUseStepClaim as cliClaims,
   parseUseAiStep as cliParseAi,
+  parseUseAgentStep as cliParseAgent,
+  hasNoAgentMarker as cliNoAgent,
+  stripNoAgentMarker as cliStripNoAgent,
   parseUseStep as cliParse,
   useStepError as cliError,
   USE_SURFACES as cliSurfaces,
@@ -17,6 +20,9 @@ import {
 import {
   isUseStepClaim as coreClaims,
   parseUseAiStep as coreParseAi,
+  parseUseAgentStep as coreParseAgent,
+  hasNoAgentMarker as coreNoAgent,
+  stripNoAgentMarker as coreStripNoAgent,
   parseUseStep as coreParse,
   useStepError as coreError,
   USE_SURFACES as coreSurfaces,
@@ -155,6 +161,25 @@ const CORPUS = [
   'Verify the [use of ai] banner',
   '[user ai] x',
   '[use aim] x',
+
+  // ── `[use agent]` and `[no-agent]` (docs/specs/SPEC-use-agent.md §5.1) ──
+  '[use agent] Download the March report as CSV and store its path in report_csv',
+  '[use agent]',
+  '[USE AGENT]   ',
+  '[use: agent] Write a CSV of 25 customers',
+  '[use\tagent]Write a CSV',
+  '[no-hooks] [use agent] Export the ledger',
+  '[no-agent] [use agent] Export the ledger',
+  '[use agent timeout=30] Export the ledger',
+  '[use agent',
+  'Export the ledger [use agent] now',
+  'If the wizard is open, then [use agent] finish it',
+  '[no-agent] Verify the Orders page shows 120 orders',
+  '[no-hooks] [no-agent] Verify the heading',
+  '[no-agent] [no-hooks] Verify the heading',
+  '[No-Agent] [use computer]',
+  'Verify the [no-agent] marker is shown',
+  '[use agents] x',
 ];
 
 describe('src/parser/use-step.ts and runner-core/src/use-step.ts agree', () => {
@@ -165,6 +190,10 @@ describe('src/parser/use-step.ts and runner-core/src/use-step.ts agree', () => {
       // `[use ai]`, field for field: the text the model would read, the names
       // the step pins, and the names it defines in prose.
       expect(coreParseAi(line), line).toEqual(cliParseAi(line));
+      // `[use agent]` and its marker, field for field.
+      expect(coreParseAgent(line), line).toEqual(cliParseAgent(line));
+      expect(coreNoAgent(line), line).toBe(cliNoAgent(line));
+      expect(coreStripNoAgent(line), line).toBe(cliStripNoAgent(line));
     }
   });
 
@@ -227,6 +256,17 @@ describe('src/parser/use-step.ts and runner-core/src/use-step.ts agree', () => {
       'produces one value',
       'Put `[use ai]` at the start of the step',
       'cannot be the step a control line runs',
+    ]) {
+      if (!CORPUS.some((l) => cliError(l)?.includes(phrase))) missing.push(`no "${phrase}"`);
+    }
+    // `[use agent]`: both forms, the marker in both orders, and its refusals.
+    if (!CORPUS.some((l) => cliParseAgent(l)?.bare === true)) missing.push('no bare agent');
+    if (!CORPUS.some((l) => cliParseAgent(l)?.bare === false)) missing.push('no agent goal');
+    if (!CORPUS.some((l) => /^\[no-hooks\]\s*\[no-agent\]/i.test(l) && cliNoAgent(l))) missing.push('no hooks-then-agent');
+    if (!CORPUS.some((l) => /^\[no-agent\]\s*\[no-hooks\]/i.test(l) && cliNoAgent(l))) missing.push('no agent-then-hooks');
+    for (const phrase of [
+      '`[use agent]` takes no arguments',
+      'Put `[use agent]` at the start of the step',
     ]) {
       if (!CORPUS.some((l) => cliError(l)?.includes(phrase))) missing.push(`no "${phrase}"`);
     }

@@ -21,7 +21,7 @@ import {
   type EnvDataContext,
 } from '../parser/interpolate-env-data.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
-import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
+import { parseUseAgentStep, parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import { WIDE_PLACEHOLDER_SOURCE, dottedThroughRename, interpolate } from '../parser/parameters.js';
 import { boundValue } from '../runner/placeholder-substitution.js';
 import type { AssertionResult } from '../report/types.js';
@@ -120,6 +120,10 @@ export const SURFACE_SWITCH_NOT_COMPILED =
  */
 export const USE_AI_NOT_COMPILED = 'a [use ai] step asks the model on every run';
 
+/** An agent step is never compiled: the model answers on every run
+ *  (docs/specs/SPEC-use-agent.md §3, §9). Shared by the three classifiers. */
+export const USE_AGENT_NOT_COMPILED = 'an agent step asks the model on every run';
+
 /**
  * A `Set {{name}} to "…"` step's wording, shared by the boxed classifier
  * (`describeSteps`) and the live one (`generationRefusal`), which did not
@@ -150,6 +154,9 @@ export function refuseReason(
   // the step is never compiled because the author wants the model asked.
   if (parseUseAiStep(source)) {
     return USE_AI_NOT_COMPILED;
+  }
+  if (parseUseAgentStep(source)) {
+    return USE_AGENT_NOT_COMPILED;
   }
   if (BRACKET_TOKEN_STEP.test(source.trim())) {
     return 'the step carries a bracket marker whose contract generated code cannot honour';

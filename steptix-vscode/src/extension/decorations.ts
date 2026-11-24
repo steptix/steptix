@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { ActiveFileTracker, FileStateSnapshot } from './active-file-tracker.js';
-import { classifyLines, extractSteps } from 'steptix-runner-core';
+import { agentScopeOf, classifyLines, extractSteps } from 'steptix-runner-core';
+import { agentMarkHover, agentOptedOutHover } from './agent-marks-core.js';
 import { extractStepLineIds, findStepsHeadingLine } from './step-lines.js';
 import {
   failHoverMessage,
@@ -77,6 +78,11 @@ export class DecorationManager implements vscode.Disposable {
   private readonly statusStopped: vscode.TextEditorDecorationType;
   private readonly statusPlaceholder: vscode.TextEditorDecorationType;
   private readonly inertStep: vscode.TextEditorDecorationType;
+  /** A step that runs as an agent step, and a `[no-agent]` one inside a scope
+   *  (docs/specs/SPEC-use-agent.md §5.6): marked from the same
+   *  `agentScopeOf` the run sends, so the editor and the run agree. */
+  private readonly agentStep: vscode.TextEditorDecorationType;
+  private readonly agentOptedOut: vscode.TextEditorDecorationType;
   private readonly stepsSummary: vscode.TextEditorDecorationType;
   private readonly errorLine: vscode.TextEditorDecorationType;
   private readonly runningRow: vscode.TextEditorDecorationType;
@@ -143,6 +149,22 @@ export class DecorationManager implements vscode.Disposable {
     this.breakpointStopped = vscode.window.createTextEditorDecorationType(
       statusIcon('breakpoint-stopped.svg'),
     );
+    this.agentStep = vscode.window.createTextEditorDecorationType({
+      after: {
+        contentText: 'agent',
+        color: new vscode.ThemeColor('descriptionForeground'),
+        margin: '0 0 0 1em',
+        fontStyle: 'italic',
+      },
+    });
+    this.agentOptedOut = vscode.window.createTextEditorDecorationType({
+      after: {
+        contentText: 'opted out',
+        color: new vscode.ThemeColor('descriptionForeground'),
+        margin: '0 0 0 1em',
+        fontStyle: 'italic',
+      },
+    });
 
     this.stepsSummary = vscode.window.createTextEditorDecorationType({
       after: {
@@ -197,6 +219,8 @@ export class DecorationManager implements vscode.Disposable {
     this.statusStopped.dispose();
     this.statusPlaceholder.dispose();
     this.inertStep.dispose();
+    this.agentStep.dispose();
+    this.agentOptedOut.dispose();
     this.stepsSummary.dispose();
     this.errorLine.dispose();
     this.runningRow.dispose();
@@ -479,6 +503,22 @@ export class DecorationManager implements vscode.Disposable {
             "This step never runs: steps under a '####' heading are ignored. " +
             "Use '###' to define a section, then call it by name from the main flow.",
         })),
+    );
+    // Agent steps (docs/specs/SPEC-use-agent.md §5.6). A file the scope rule
+    // cannot read gets no marks; its diagnostics say why.
+    let agentScope: ReturnType<typeof agentScopeOf> | undefined;
+    try {
+      agentScope = agentScopeOf(snap.text);
+    } catch {
+      agentScope = undefined;
+    }
+    editor.setDecorations(
+      this.agentStep,
+      (agentScope?.steps ?? []).map((st) => ({ range: rangeAtLineEnd(st.line), hoverMessage: agentMarkHover(st) })),
+    );
+    editor.setDecorations(
+      this.agentOptedOut,
+      (agentScope?.optedOut ?? []).map((line) => ({ range: rangeAtLineEnd(line), hoverMessage: agentOptedOutHover() })),
     );
     editor.setDecorations(this.stepsSummary, summaryRanges);
     editor.setDecorations(this.errorLine, errorRanges);

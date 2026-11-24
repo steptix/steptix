@@ -1,7 +1,8 @@
 # Agent steps: `[use agent]`
 
-**Status:** draft. Reviewed with `/user-journey-review` on 2026-11-24: §5.7,
-§5.8 and §6.3 answer four findings, and §15 records the rest.
+**Status:** first build, 2026-11-25. Reviewed with `/user-journey-review` on
+2026-11-24: §5.7, §5.8 and §6.3 answer four findings, and §15 records the
+rest. §16 says what the first build decided and what it leaves out.
 **Opened:** 2026-11-24
 
 ## 1. What this is
@@ -236,9 +237,11 @@ Two more forms, for scope (§5.6):
   step of a block: the main flow of `## Steps`, or a `### Section` body.
   Anywhere else it is a parse error naming the line, since a bare directive
   halfway down a block reads as a switch that this design does not have.
-- **`[no-agent]`** at the start of a step, beside `[no-hooks]` and in either
-  order, opts that one step out of a scope. Outside a scope it is a no-op
-  with a warning.
+- **`[no-agent]`** at the start of a plain step, after `[no-hooks]` when both
+  are written, opts that one step out of a scope. Outside a scope it is a
+  no-op with a warning. Anywhere else — before `[no-hooks]`, on a
+  `[use agent]` line, on a line the parser claims — it is a parse error
+  naming the line (§16.1 says why).
 
 A file sets file scope with `agent: on` in its frontmatter
 (`src/parser/frontmatter.ts`).
@@ -249,6 +252,7 @@ One action per turn, in the existing action format, plus:
 
 | Action | Fields | Meaning |
 | --- | --- | --- |
+| `step` | `instruction` | Do one ordinary step on the current surface, written as an author writes one ("Click the Export button"). The ordinary step runner carries it out, with its own snapshot or screenshot (§16.1). |
 | `done` | `values: [{as, value}]` | Finished. Each value is stored as a variable, as `[use ai]` stores its one. |
 | `stuck` | `reason` | Cannot finish. The step fails with the reason. |
 | `tool` | `name`, `args` | Call a project tool. |
@@ -409,11 +413,11 @@ run on its own reaches the server as a step at the root, with no enclosing
 section (`runner-core/src/api-client.ts` `detachedBody`).
 
 - **One rule, two copies.** `agentScopeOf(text)` returns the lines that run
-  as agent steps. It lives in `runner-core/src/step-lines.ts` beside
-  `extractSteps`, with an import-free copy in `src/parser/` for the CLI and
-  for MCP's `run_test_file`, which read the file themselves. A parity test
-  keeps the two equal, as `tests/use-step-parity.test.ts` does for the
-  grammar. The editor's marks (§5.6) come from the same function.
+  as agent steps. It lives in `runner-core/src/agent-scope.ts`, with a copy
+  in `src/parser/agent-scope.ts` for the CLI and for MCP's `run_test_file`,
+  which read the file themselves. `tests/agent-scope.test.ts` keeps the two
+  equal, as `tests/use-step-parity.test.ts` does for the grammar. The
+  editor's marks (§5.6) come from the same function.
 - **On the wire.** `StepRequest.agent` says which steps of the batch are
   agent steps: `{ file?: true, steps?: number[] }`. `file` is set when the
   frontmatter says `agent: on`, and covers every plain step in `steps` and
@@ -1034,3 +1038,116 @@ Skills written for other agents in the same repository appear to Steptix's
 agent too, including any that tell an agent to commit or push. Suggested
 fix: default `agent.skillsDir` to a Steptix folder (`.steptix/agent-skills`),
 or document the sharing.
+
+## 16. The first build
+
+What the first build decided where this spec left a choice, and what it
+leaves for later. Nothing here has been measured on a live run yet (§12).
+
+### 16.1 Decisions
+
+- **Surface actions are ordinary steps.** The agent does not answer with
+  click, type or a coordinate itself. It answers `step` with one ordinary
+  step in an author's words, and the runner that carries out any plain step
+  carries it out — `executeStep` in browser mode, `executeComputerStep` in
+  computer mode — with its own snapshot or screenshot, its own model call,
+  and everything already built into those runners (settling, dialogs, tabs,
+  the computer frame). The agent's own view of the surface is a read-only
+  page snapshot, or a screenshot in computer mode. The cost is a second model
+  call for each surface action; live runs should say whether that is worth
+  replacing with the surface's actions answered directly.
+- **Where scope lives.** `agentScopeOf` is in `runner-core/src/agent-scope.ts`
+  and `src/parser/agent-scope.ts` rather than `step-lines.ts`; the rule
+  itself (`agentScopeOfBlocks`) is the same text in both, and
+  `tests/agent-scope.test.ts` compares them. `agentWireFor` (runner-core,
+  for the extension) and `agentWireScopeOf` (`src/`, for MCP and the CLI)
+  build `StepRequest.agent` from it.
+- **A test's lowering keys** are `agentMaxTurns:` and `agentTimeout:` in
+  `## Config` (a number of turns; a duration such as `90s` or `5m`). A value
+  that would raise the project's limit is ignored with a warning.
+- **One run, one agent state, whatever the sessions.** The extension mints
+  an `agentRunId` when a run starts and sends it on every batch of that run —
+  its rows, its Continue batches, its typed REPL turns — and the server keeps
+  the run's workspace and "for the rest of this run" answers under it, not on
+  the session. That is what lets a row loop that recycles its session between
+  rows ask once per pattern (§6.3). A client's new run names the run it
+  replaces (`agentRunEnds`), and the server ends that one only — the same
+  file can run in two places at once, and neither may end the other's. The
+  server stopping ends them all. A batch with no id (MCP,
+  raw Sessions API callers) keeps the state on its session, ended by the next
+  `runStart` or the session closing. The CLI ends its own when `runTest`
+  ends. So on the server a run's workspace outlives its last batch until the
+  next run of that file: only the client knows which batch was the last.
+- **The test's limits travel on every batch.** The extension sends a test's
+  `agentMaxTurns:` / `agentTimeout:` as `agentLimits` on every batch, since
+  `config` goes on a session's first batch only.
+- **Report copies are staged, then placed.** File copies and command logs are
+  staged in `.steptix/agent-report/<run>/step-<index>-<start>/`, one folder
+  per run of the step, so rows and loop passes keep their own. Writing the
+  report copies them into `<report>-agent/` under the same folder name and
+  removes the staged folder. Text is masked and written as UTF-8 (UTF-16 with
+  a byte order mark is read as text); a binary file is copied as it is.
+- **Hiding the question is not an answer.** VS Code hides a QuickPick for
+  Escape and also when another quick input opens, so hiding it leaves the
+  question open; a status-bar item says *waiting for your approval* and
+  reopens it, and `agent.approvalTimeoutMs` ends it if nobody answers.
+  Questions from two runs in one window queue, one picker at a time. A run's
+  end (its `done`, Stop included) closes its questions in the window even if
+  the server's close never arrives; a session closing closes its question as
+  a Stop does, never as an answer.
+- **Commands are checked part by part, and what cannot be checked is
+  refused.** A command line is split outside its quotes on `&&`, `||`, `;`,
+  `|` and new lines, and every part must pass the allow list or an answer.
+  Refused outright: `$(…)` and backticks (inside double quotes too), `(`,
+  `{` and `@(` outside quotes, a single `&` outside quotes (`2>&1` is a
+  redirection, and fine), a bare carriage return, an unclosed quote, any
+  typographic quote (PowerShell reads them as quotes), and on Linux and macOS
+  a backslash outside single quotes or a `$'…'`, which sh and bash read as
+  escapes. A program named by a path is matched by its name only in a
+  virtual environment's or `node_modules`' bin folder; anywhere else its path is part
+  of what a pattern must name, so a script the agent wrote and called
+  `git.cmd` is not `git`. `write_file` may not write into those bin folders,
+  so the agent cannot put a program there itself.
+- **The whole tree ends with the command.** On Windows the shell puts itself
+  in a Job Object that kills every process in it when the shell exits or is
+  killed, so a process whose own parent has already exited goes too; on Linux
+  and macOS the process group is killed when the shell exits, times out or is
+  stopped. A command's result settles once its output closes, or two seconds
+  after the shell exits if something nothing could reach still holds it. The
+  limit on Linux and macOS: a process that starts its own session (`setsid`,
+  a detached Node child) leaves the group, and Steptix cannot reach it.
+- **Where `[no-agent]` may go.** On a plain step only, and after `[no-hooks]`
+  when both are written. Before `[no-hooks]`, on a `[use agent]` line or on a
+  claimed line it is a parse error in the CLI and the editor, and a Run
+  refuses the file — every other grammar reads `[no-hooks]` only at the start
+  of a line, and none of them knows `[no-agent]`.
+- **A control line's tail** — the step after `then` — belongs to the control
+  line, which is claimed, so it is never an agent step by scope.
+- **Values `done` stores must be named in the goal**, as a whole word. Any
+  other name is not stored, and the model is told so on the next turn.
+- **Compile** refuses an agent step by its prefix and by its scope, and a
+  compile-mode run refuses any step whose result is an agent step's.
+
+### 16.2 Not in the first build
+
+- **Errands and the Electron runner** refuse a `[use agent]` step by name
+  instead of running it.
+- **Download handling** (§11) is still missing, so §4.1, §4.2 and §4.4 cannot
+  run yet.
+- **The live tests** of §12 are not written yet, so every number in §10 is
+  still a guess.
+- **Waiting for your approval** shows in the status bar and the run's
+  output, not yet on the step's line in the editor or in the run panel.
+- **The run panel** shows each turn as an output line (`agent:turn`), not the
+  header of §8.8.
+- **The scoreboard** (§8.10) records the ordinary steps an agent step asks
+  for, as ordinary steps; it has no line per agent turn yet.
+- **Premium requests** over the Copilot bridge are not counted: a `gateway/`
+  model names any gateway, not the bridge, and a wrong count is worse than
+  none.
+- **The inner step's detail** in the report: a `step` turn shows the ordinary
+  step's outcome and its actions' descriptions, not yet its sub-action blocks
+  (the DOM after the action, the computer frame) of §8.4.
+- **A detached section line** is labelled *main flow* in the badge's tooltip
+  rather than naming its section.
+- **§15** is unchanged: those findings are still open.

@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import zlib from 'node:zlib';
 import path from 'node:path';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import { loadToolCatalogue, type ToolCatalogue } from '../src/tools/registry.js';
@@ -14,6 +17,7 @@ import type { ToolCall } from '../src/tools/types.js';
  * and `browser` are absent, as they are for a tool step on a computer-mode
  * run. The tools that DO need the live app (check_health, read_page_title,
  * fetch_csrf_token) are in tool-end-to-end.test.ts; save_json has its own file.
+ * read_xlsx reads a workbook this file writes by hand.
  */
 
 const repoRoot = path.resolve(__dirname, '..');
@@ -152,5 +156,93 @@ describe('regex_extract fixture tool', () => {
       iban_country: 'DE',
       order_id: 'O-1007',
     });
+  });
+});
+
+describe('read_xlsx fixture tool', () => {
+  /** A zip written by hand: stored or deflated entries, no CRC (the reader checks none). */
+  function zipOf(entries: Record<string, string>, deflate = true): Buffer {
+    const locals: Buffer[] = [];
+    const central: Buffer[] = [];
+    let offset = 0;
+    for (const [name, text] of Object.entries(entries)) {
+      const raw = Buffer.from(text, 'utf8');
+      const data = deflate ? zlib.deflateRawSync(raw) : raw;
+      const nameBytes = Buffer.from(name, 'utf8');
+      const local = Buffer.alloc(30);
+      local.writeUInt32LE(0x04034b50, 0);
+      local.writeUInt16LE(deflate ? 8 : 0, 8);
+      local.writeUInt32LE(data.length, 18);
+      local.writeUInt32LE(raw.length, 22);
+      local.writeUInt16LE(nameBytes.length, 26);
+      const dir = Buffer.alloc(46);
+      dir.writeUInt32LE(0x02014b50, 0);
+      dir.writeUInt16LE(deflate ? 8 : 0, 10);
+      dir.writeUInt32LE(data.length, 20);
+      dir.writeUInt32LE(raw.length, 24);
+      dir.writeUInt16LE(nameBytes.length, 28);
+      dir.writeUInt32LE(offset, 42);
+      locals.push(local, nameBytes, data);
+      central.push(dir, nameBytes);
+      offset += local.length + nameBytes.length + data.length;
+    }
+    const dirBytes = Buffer.concat(central);
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(Object.keys(entries).length, 8);
+    end.writeUInt16LE(Object.keys(entries).length, 10);
+    end.writeUInt32LE(dirBytes.length, 12);
+    end.writeUInt32LE(offset, 16);
+    return Buffer.concat([...locals, dirBytes, end]);
+  }
+
+  const sheet =
+    '<worksheet><sheetData>' +
+    '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>' +
+    '<row r="2"><c r="A2" t="inlineStr"><is><t>Ada &amp; Co</t></is></c><c r="B2"><v>12.5</v></c></row>' +
+    '<row r="3"><c r="B3" t="str"><v>only B</v></c></row>' +
+    '</sheetData></worksheet>';
+  const strings = '<sst><si><t>Name</t></si><si><r><t>To</t></r><r><t>tal</t></r></si></sst>';
+
+  let dir: string;
+  beforeAll(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'read-xlsx-'));
+  });
+  afterAll(() => {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+  });
+
+  function readXlsx(args: Record<string, string>, resolvedParameters: Record<string, string> = {}) {
+    return run({ name: 'read_xlsx', args, outputAliases: {} }, resolvedParameters);
+  }
+
+  for (const deflate of [true, false]) {
+    it(`reads shared, rich, inline and plain cells, gaps kept (${deflate ? 'deflated' : 'stored'})`, async () => {
+      const file = path.join(dir, `book-${deflate}.xlsx`);
+      fs.writeFileSync(file, zipOf({ 'xl/sharedStrings.xml': strings, 'xl/worksheets/sheet1.xml': sheet }, deflate));
+      const vars: Record<string, string> = {};
+      const outcome = await readXlsx({ path: file, header: 'Name, Total' }, vars);
+      expect(outcome.status).toBe('passed');
+      expect(vars['xlsx_rows']).toBe('Name | Total\nAda & Co | 12.5\n | only B');
+      expect(String(vars['xlsx_row_count'])).toBe('3');
+    });
+  }
+
+  it('fails when the first row is not the header asked for', async () => {
+    const file = path.join(dir, 'header.xlsx');
+    fs.writeFileSync(file, zipOf({ 'xl/sharedStrings.xml': strings, 'xl/worksheets/sheet1.xml': sheet }));
+    const outcome = await readXlsx({ path: file, header: 'Name,Amount' });
+    expect(outcome.status).toBe('failed');
+    expect(outcome.error).toMatch(/first row is "Name, Total", not "Name, Amount"/);
+  });
+
+  it('fails on a file that is not a workbook, and on a missing one', async () => {
+    const file = path.join(dir, 'not.xlsx');
+    fs.writeFileSync(file, 'Name,Total\nAda,12.5\n');
+    expect((await readXlsx({ path: file })).error).toMatch(/is not a zip/);
+    expect((await readXlsx({ path: path.join(dir, 'missing.xlsx') })).error).toMatch(/cannot read/);
+    const noSheet = path.join(dir, 'no-sheet.xlsx');
+    fs.writeFileSync(noSheet, zipOf({ 'xl/workbook.xml': '<workbook/>' }));
+    expect((await readXlsx({ path: noSheet })).error).toMatch(/has no worksheet/);
   });
 });

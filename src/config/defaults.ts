@@ -50,6 +50,23 @@ export const DEFAULT_CONFIG: Config = {
     settleMs: 300,
     reportScreenshots: true,
   },
+  // docs/specs/SPEC-use-agent.md §10. `shell` is off by default for
+  // `desktop.enabled`'s reason: it decides whether a test may run commands.
+  agent: {
+    maxTurns: 30,
+    timeout: 600_000,
+    historyTurns: 4,
+    resultMaxChars: 8000,
+    maxContextTokens: 100_000,
+    shell: false,
+    allowCommands: ['node *', 'npm install *', 'npx *', 'python *', 'python3 *', 'py *', 'pip install *'],
+    commandTimeoutMs: 120_000,
+    approvalTimeoutMs: 60_000,
+    reportFileMaxBytes: 10 * 1024 * 1024,
+    folders: [],
+    keepWorkspace: false,
+    skillsDir: '.agents/skills',
+  },
   tests: {
     dir: './tests',
     dataDir: 'data',

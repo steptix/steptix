@@ -356,6 +356,7 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
   // Before the merge, on the file's own values: after it, a key the file left
   // out and a key the file got right are indistinguishable.
   assertDesktopSection(userConfig['desktop'], resolvedPath);
+  assertAgentSection(userConfig['agent'], resolvedPath);
   assertStatsSection(userConfig['stats'], resolvedPath);
   assertBlockAds(userConfig['browser'], resolvedPath);
   assertSnapshotMode(userConfig['browser'], resolvedPath);
@@ -481,6 +482,67 @@ function assertDesktopSection(desktop: unknown, configPath: string): void {
         `Invalid desktop.${key} in ${configPath}: expected a number, got ${describeValue(value)}.`,
       );
     }
+  }
+}
+
+/**
+ * The `agent` section's value types, checked at LOAD
+ * (docs/specs/SPEC-use-agent.md §10), for `assertDesktopSection`'s reason:
+ * `agent.shell` decides whether a test may run commands on this machine, so
+ * the string `"false"` must be refused rather than read as truthy, and a
+ * mistyped allow list must not fall through to a guess.
+ *
+ * Exported for its unit tests.
+ */
+export function assertAgentSection(agent: unknown, configPath: string): void {
+  if (agent === undefined) return;
+  if (!isPlainObject(agent)) {
+    throw new Error(
+      `Invalid "agent" in ${configPath}: expected an object, got ${describeValue(agent)}.`,
+    );
+  }
+  for (const key of ['shell', 'keepWorkspace'] as const) {
+    const value = agent[key];
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new Error(
+        `Invalid agent.${key} in ${configPath}: expected true or false, got ${describeValue(value)}. ` +
+          'Write the JSON boolean, without quotes.',
+      );
+    }
+  }
+  for (const key of [
+    'maxTurns',
+    'timeout',
+    'historyTurns',
+    'resultMaxChars',
+    'maxContextTokens',
+    'commandTimeoutMs',
+    'approvalTimeoutMs',
+    'reportFileMaxBytes',
+  ] as const) {
+    const value = agent[key];
+    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)) {
+      throw new Error(
+        `Invalid agent.${key} in ${configPath}: expected a positive number, got ${describeValue(value)}.`,
+      );
+    }
+  }
+  for (const key of ['allowCommands', 'folders'] as const) {
+    const value = agent[key];
+    if (
+      value !== undefined &&
+      (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.trim() === ''))
+    ) {
+      throw new Error(
+        `Invalid agent.${key} in ${configPath}: expected a list of non-empty strings, got ${describeValue(value)}.`,
+      );
+    }
+  }
+  const skillsDir = agent['skillsDir'];
+  if (skillsDir !== undefined && (typeof skillsDir !== 'string' || skillsDir.trim() === '')) {
+    throw new Error(
+      `Invalid agent.skillsDir in ${configPath}: expected a folder path, got ${describeValue(skillsDir)}.`,
+    );
   }
 }
 

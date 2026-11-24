@@ -14,7 +14,15 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { parseSectionDataRows, extractSections, matchText, sectionNameError } from 'steptix-runner-core';
+import {
+  agentScopeOf,
+  extractSections,
+  matchText,
+  misplacedAgentOpenerError,
+  noAgentMisuseError,
+  parseSectionDataRows,
+  sectionNameError,
+} from 'steptix-runner-core';
 
 /** One entry of the `sections` request field. */
 export interface SectionPayloadEntry {
@@ -251,7 +259,8 @@ export function detachedBodyDrift(
 }
 
 /**
- * Why `text`'s sections can't be run, or null if they can.
+ * Why `text` can't be run — its sections, or agent scope's block rules
+ * (docs/specs/SPEC-use-agent.md §5.1) — or null if it can.
  *
  * The CLI refuses bad names at parse time, and the wire format cannot even
  * represent a duplicate — a JSON object collapses them, last one wins. So
@@ -262,6 +271,15 @@ export function detachedBodyDrift(
  * Runs before any request is built, so a refused file costs nothing.
  */
 export function preflightSections(text: string): string | null {
+  // Agent scope's block rules (docs/specs/SPEC-use-agent.md §5.1): the CLI
+  // refuses these at parse time, so a Run here refuses them too rather than
+  // running a file the CLI would not.
+  const agent = agentScopeOf(text);
+  const opener = agent.misplacedOpeners[0];
+  if (opener !== undefined) return `Line ${opener}: ${misplacedAgentOpenerError()}`;
+  const misuse = agent.misusedNoAgent[0];
+  if (misuse !== undefined) return `Line ${misuse.line}: ${noAgentMisuseError(misuse.why)}`;
+
   const sections = extractSections(text);
   if (sections.length === 0) return null;
 

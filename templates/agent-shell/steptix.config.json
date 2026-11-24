@@ -1,0 +1,18 @@
+{
+  "ai": {
+    "model": "openai/gpt-6-luna"
+  },
+  "browser": {
+    "headed": true
+  },
+  "agent": {
+    "shell": true
+  },
+  "tests": {
+    "dir": "./tests",
+    "toolsDir": "../../fixtures/tools/src"
+  },
+  "reports": {
+    "outputDir": "./reports"
+  }
+}

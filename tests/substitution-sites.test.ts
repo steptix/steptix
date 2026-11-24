@@ -136,9 +136,16 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   // the instruction this loop shows the model is the AUTHORED one with its
   // `{{…}}` intact (§5.7). Nothing here is ever handed back to `parseSetStep`.
   'src/runner/computer-step.ts': { why: 'not-step-text', calls: 1 },
-  'src/runner/test-runner.ts': { why: 'step-text/authored', calls: 3 },
+  // The fourth call substitutes an agent step's `… otherwise …` tail MESSAGE
+  // for the report, as the `[use ai]` runner does — not step text
+  // (docs/specs/SPEC-use-agent.md §5.1).
+  'src/runner/test-runner.ts': { why: 'step-text/authored', calls: 4 },
   'src/server/errand-runner.ts': { why: 'step-text/authored', calls: 2 },
-  'src/server/session-manager.ts': { why: 'step-text/authored', calls: 4 },
+  // Two calls for agent steps (docs/specs/SPEC-use-agent.md): the tail
+  // MESSAGE, as in the CLI; and the partial-re-run guard's SUBJECT, which only
+  // asks whether a `{{__skill…}}` is left unresolved and is never sent or
+  // handed to `parseSetStep` — the goal itself keeps its `{{…}}` (§5.5).
+  'src/server/session-manager.ts': { why: 'step-text/authored', calls: 6 },
   'src/skills/expander.ts': { why: 'step-text/guarded', calls: 4 },
   'src/tools/executor.ts': { why: 'not-step-text', calls: 1 },
   // The Electron loop. Absent from the first version of this table, which is

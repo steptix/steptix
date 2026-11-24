@@ -20,7 +20,7 @@ import { captureScreenshot } from '../browser/screenshot.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
-import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
+import { parseUseAgentStep, parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
 import {
   failureTailContradictionError,
@@ -36,6 +36,7 @@ import {
 } from '../runner/flow-control.js';
 import { runSetStep } from '../runner/set-step-runner.js';
 import { runUseAiStep } from '../runner/use-ai-step-runner.js';
+import { AGENT_STEP_NOT_HERE } from '../agent/host.js';
 import { createStructureMemo } from '../runner/structure-memo.js';
 import { openRunStats, recordRunEnd, statsEnabledIn, type RunStats } from '../runner/run-stats.js';
 import { redact, runSecrets } from '../utils/secrets.js';
@@ -935,6 +936,19 @@ export class ErrandRunner {
             source: 'assignment',
           });
         }
+      } else if (parseUseAgentStep(originalStep)) {
+        // Not run by errands yet: refused by name rather than handed to the
+        // page model as prose, where it would be answered as a page step.
+        stepResult = {
+          index: line,
+          instruction,
+          status: 'failed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          error: AGENT_STEP_NOT_HERE,
+          aiExplanation: AGENT_STEP_NOT_HERE,
+        };
       } else if (useAiStep) {
         // `[use ai] <step>`: the model and nothing else — no page, no tabs to
         // reclaim — so it sits outside the try/finally beside `Set`. Its

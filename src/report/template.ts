@@ -1,3 +1,5 @@
+import { AGENT_CSS } from './agent-render.js';
+
 /**
  * Returns the embedded HTML template for test reports.
  * Self-contained — no external dependencies required at runtime.
@@ -344,6 +346,7 @@ export function getReportTemplate(): string {
 
     /* Tags */
     .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+${AGENT_CSS}
   </style>
 </head>
 <body>
@@ -403,6 +406,8 @@ export function getReportTemplate(): string {
     {{/if}}
   </div>
 
+  {{{agentBannerHtml}}}
+
   <div class="summary-bar">
     <div class="summary-stat">
       <span class="number">{{totalSteps}}</span>
@@ -426,6 +431,24 @@ export function getReportTemplate(): string {
     <div class="summary-stat">
       <span class="number stat-tolerated">{{toleratedSteps}}</span>
       <span class="label">Tolerated</span>
+    </div>
+    {{/if}}
+    {{#if agentSteps}}
+    <div class="summary-stat">
+      <span class="number stat-agent">{{agentSteps}}</span>
+      <span class="label">Agent</span>
+    </div>
+    <div class="summary-stat">
+      <span class="number">{{agentTurns}}</span>
+      <span class="label">Turns</span>
+    </div>
+    <div class="summary-stat">
+      <span class="number">{{agentCommands}}</span>
+      <span class="label">Commands</span>
+    </div>
+    <div class="summary-stat">
+      <span class="number">{{agentRefused}}</span>
+      <span class="label">Refused</span>
     </div>
     {{/if}}
     <div class="summary-stat">
@@ -465,6 +488,8 @@ export function getReportTemplate(): string {
     {{#each notices}}<li>{{this}}</li>{{/each}}
   </ul>
   {{/if}}
+
+  {{{agentTablesHtml}}}
 
   {{{diagnosisHtml}}}
 

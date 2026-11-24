@@ -49,7 +49,7 @@ import {
   returnExit,
   type ControlRecord,
 } from './control-flow.js';
-import { boundValue, dottedReferenceError } from './placeholder-substitution.js';
+import { boundValue, dottedReferenceError, substituteText } from './placeholder-substitution.js';
 import {
   applyPassBindings,
   evaluateGuard,
@@ -100,6 +100,22 @@ import {
 } from './flow-control.js';
 import { runSetStep } from './set-step-runner.js';
 import { runUseAiStep } from './use-ai-step-runner.js';
+import {
+  agentGoalOf,
+  agentScopesForParsedTest,
+  endAgentRun,
+  ensureAgentRun,
+  newAgentRun,
+  observePage,
+  observeScreen,
+  toolInfosOf,
+  withTestAgentLimits,
+} from '../agent/host.js';
+import { runAgentStep } from '../agent/runner.js';
+import { hasNoAgentMarker, parseUseAgentStep, stripNoAgentMarker } from '../parser/use-step.js';
+import { stripFailureTail } from '../parser/failure-tail.js';
+import { applyTailOutcome } from './failure-tail-outcome.js';
+import type { AgentRunState } from '../agent/runner.js';
 import { generateReport, getPrimaryModel, videoBaseNameFor, countStepOrigins } from '../report/generator.js';
 import { mergeRowReports, type RowReport } from '../report/merge-rows.js';
 import { appendRunHistory } from '../report/history-appender.js';
@@ -631,6 +647,9 @@ export async function runTest(
    * somewhere to write. One state machine, two run loops.
    */
   const surfaceState: SurfaceState = { surface: 'browser' };
+  /** The run's agent state, for the teardown to remove its workspace
+   *  (docs/specs/SPEC-use-agent.md §6.2). Set before the step loop. */
+  let agentRunForCleanup: AgentRunState | undefined;
   /**
    * Who holds the machine-wide computer lock for this run (§5.9).
    *
@@ -1438,6 +1457,14 @@ export async function runTest(
       bail = true;
     }
 
+    // Agent steps (docs/specs/SPEC-use-agent.md §5.6): which expanded steps run
+    // as agent steps by scope, read from the file's own text, and the run's
+    // agent state — its workspace, made at the first agent step, and removed
+    // when the run ends.
+    const agentScopes = agentScopesForParsedTest(test);
+    const agentRun = newAgentRun(projectRoot ?? path.dirname(test.filePath), `run-${Date.now()}`);
+    agentRunForCleanup = agentRun;
+
     for (let i = 0; i < stepLimit; i++) {
       if (bail) break;
 
@@ -2066,7 +2093,11 @@ export async function runTest(
       // rewrites now, so this is the same form the server has always held as
       // `originalStep` (stories/placeholder-preserving-actions.md §Runner and
       // server). It is what the model reads.
-      const rawInstruction = test.steps[i] ?? '';
+      // A `[no-agent]` step (docs/specs/SPEC-use-agent.md §5.1) runs as the
+      // ordinary step it would be outside any scope; the marker is read for
+      // the report's *opted out* marker and taken off the line.
+      const agentOptedOut = hasNoAgentMarker(test.steps[i] ?? '');
+      const rawInstruction = agentOptedOut ? stripNoAgentMarker(test.steps[i] ?? '') : (test.steps[i] ?? '');
       // `Set {{x}} to "…"` is read off the AUTHORED line and never
       // interpolated: `interpolate` would replace the TARGET with its own
       // value on any run after the first, and warn about it on the first
@@ -2079,6 +2110,16 @@ export async function runTest(
       // `store as {{x}}` is a definition that interpolation would overwrite on
       // a second pass.
       const useAiStep = setStep ? null : parseUseAiStep(rawInstruction);
+      // `[use agent]` (docs/specs/SPEC-use-agent.md): the line's own prefix, or
+      // a plain step in an agent scope. Never interpolated, for `[use ai]`'s
+      // reason: the goal keeps its `{{…}}`, shown masked beside it (§5.5).
+      const useAgentPrefix = setStep || useAiStep ? null : parseUseAgentStep(rawInstruction);
+      const agentStep: { bare: boolean; scope: import('../report/types.js').AgentStepScope } | null =
+        useAgentPrefix
+          ? { bare: useAgentPrefix.bare, scope: { reason: 'prefix' } }
+          : !setStep && !useAiStep && agentScopes.scope[i]
+            ? { bare: false, scope: agentScopes.scope[i]! }
+            : null;
       // `If … then return` / `… then stop`, likewise read off the AUTHORED
       // line (stories/step-flow-control.md, decision 2). The claim is textual
       // and is the same answer in every runner; the model only judges the
@@ -2094,7 +2135,7 @@ export async function runTest(
       // `Unresolved placeholder: {{payment}}` on every visit to every correct
       // table loop — noise in the one output that reads like a diagnosis.
       // Every run loop passes it; that is the whole point of the helper.
-      const instruction = setStep || useAiStep
+      const instruction = setStep || useAiStep || agentStep
         ? rawInstruction
         : interpolate(
             test.envData ? interpolateEnvData(rawInstruction, test.envData) : rawInstruction,
@@ -2286,6 +2327,145 @@ export async function runTest(
             `[ai] ${aiOutcome.name} = ` +
               `"${redact(maskRecordSecrets(aiOutcome.value ?? ''), secretsNow())}"`,
           );
+        }
+      } else if (agentStep?.bare) {
+        // A bare `[use agent]` (docs/specs/SPEC-use-agent.md §5.7) opens the
+        // scope its block's steps run in, and does nothing of its own.
+        const message =
+          'A bare [use agent] does nothing on its own: as the first step of its block it makes ' +
+          'the plain steps below it agent steps.';
+        logger.info(`Step ${i + 1}: ${message}`);
+        stepResult = {
+          index: i + 1,
+          instruction,
+          status: 'passed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          aiExplanation: message,
+        };
+      } else if (agentStep) {
+        // An agent step (docs/specs/SPEC-use-agent.md §5): turns until the
+        // model says done or stuck. The CLI has nobody to answer a question
+        // (§6.3), so the allow list is the whole answer.
+        const limits = withTestAgentLimits(config.agent, {
+          agentMaxTurns: test.config.agentMaxTurns,
+          agentTimeout: test.config.agentTimeout,
+        });
+        for (const warning of limits.warnings) logger.warn(warning);
+        for (const warning of ensureAgentRun(agentRun, config.agent)) logger.warn(warning);
+        const onComputer = surfaceState.surface === 'computer' && surfaceState.adapter !== undefined;
+        const live = session as BrowserSession | undefined;
+        const outcome = await runAgentStep({
+          index: i + 1,
+          instruction,
+          goal: stripFailureTail(agentGoalOf(rawInstruction)),
+          scope: agentStep.scope,
+          vars: resolvedParameters,
+          secrets: secretsNow(),
+          unmask: unmaskNames,
+          config: limits.config,
+          lowered: limits.lowered,
+          retries: config.execution.retries,
+          model: aiClient,
+          surface: {
+            kind: onComputer ? 'computer' : 'browser',
+            observe: () =>
+              onComputer
+                ? observeScreen(surfaceState.adapter!, config.desktop.maxImageWidth)
+                : observePage(live?.pageTracker.getActive(), secretsNow(), config.browser.domSnapshotCharLimit),
+            step: (stepText, stepSignal) =>
+              onComputer
+                ? executeComputerStep(
+                    i + 1,
+                    test.steps.length,
+                    stepText,
+                    {
+                      page: undefined as never,
+                      config,
+                      aiClient,
+                      contextContent,
+                      testName: test.title,
+                      ...(baseUrl !== undefined && { baseUrl }),
+                      conversationHistory: [...conversationHistory],
+                      apiResponseStore,
+                      csrfTokens,
+                      uploadPaths,
+                      resolvedParameters,
+                      browserTracker,
+                      ...placeholderOpts,
+                      ...(test.envData && { envData: test.envData }),
+                      ...askOpts,
+                      signal: stepSignal ?? deadline.signal,
+                      computer: computerContextFor(config.desktop, surfaceState.adapter!),
+                      stats: statsFor(),
+                    },
+                    stepText,
+                  )
+                : executeStep(
+                    i + 1,
+                    test.steps.length,
+                    stepText,
+                    {
+                      page: session.page,
+                      config,
+                      aiClient,
+                      contextContent,
+                      testName: test.title,
+                      ...(baseUrl !== undefined && { baseUrl }),
+                      conversationHistory: [...conversationHistory],
+                      apiResponseStore,
+                      csrfTokens,
+                      uploadPaths,
+                      resolvedParameters,
+                      pageTracker: session.pageTracker,
+                      browserTracker,
+                      structureMemo,
+                      ...placeholderOpts,
+                      ...askOpts,
+                      signal: stepSignal ?? deadline.signal,
+                      stats: statsFor(),
+                    },
+                    stepText,
+                  ),
+          },
+          tools: {
+            list: () => toolInfosOf(toolCatalogue),
+            call: async (name, toolArgs) => {
+              const toolOutcome = await executeToolStep(
+                { name, args: toolArgs, outputAliases: {} },
+                {
+                  page: live?.pageTracker.getActive() as ExecuteToolStepOptions['page'],
+                  context: live?.context as ExecuteToolStepOptions['context'],
+                  browser: live?.browser as ExecuteToolStepOptions['browser'],
+                  resolvedParameters,
+                  catalogue: toolCatalogue,
+                  ...(baseUrl !== undefined && { baseUrl }),
+                },
+              );
+              return {
+                ok: toolOutcome.status === 'passed',
+                outputs: toolOutcome.outputs,
+                ...(toolOutcome.error !== undefined && { error: toolOutcome.error }),
+              };
+            },
+          },
+          run: agentRun,
+          noAsker: 'CLI',
+          stepLabel: `step ${test.stepLines[i] ?? i + 1} of ${path.basename(test.filePath)}`,
+          priorSteps: stepResults
+            .slice(-20)
+            .map((r) => formatStepHistoryEntry(r.index, redact(r.instruction, secretsNow()), r.status === 'passed')),
+          signal: deadline.signal,
+          onTurn: (record, progress) =>
+            logger.info(`  [agent ${progress.turn}/${progress.maxTurns}] ${record.summary} → ${record.result}`),
+        });
+        const tailText = failureTail?.message
+          ? redact(substituteText(failureTail.message, { parameters: resolvedParameters, ...(test.envData ? { envData: test.envData } : {}) }), secretsNow())
+          : undefined;
+        stepResult = applyTailOutcome(outcome.result, failureTail, tailText);
+        for (const { name, value } of outcome.stored) {
+          logger.info(`[agent] ${name} = "${redact(maskRecordSecrets(value), secretsNow())}"`);
         }
       } else if (inputStep && !canAsk) {
         // Nobody to ask (steptix/steptix#47): a pipe or a closed stdin never
@@ -2641,6 +2821,8 @@ export async function runTest(
         },
         rawInstruction);
       }
+      // The *opted out* marker (docs/specs/SPEC-use-agent.md §8.6).
+      if (agentOptedOut && agentScopes.inScope[i]) stepResult.agentOptedOut = true;
 
       // The budget ran out while this step ran (steptix/steptix#47). The
       // executors answer the abort as a Stop — `interrupted`, "Aborted by
@@ -3057,6 +3239,11 @@ export async function runTest(
       status: overallStatus,
       steps: stepResults,
       totalSteps: test.steps.length,
+      // docs/specs/SPEC-use-agent.md §8.7.
+      ...(test.frontmatter.agent && { agentFile: true }),
+      ...(agentRunForCleanup && agentRunForCleanup.approvals.records.length > 0 && {
+        agentApprovals: [...agentRunForCleanup.approvals.records],
+      }),
       passedSteps,
       failedSteps,
       // Omitted (not 0) on a run that skipped nothing, so a report only grows
@@ -3197,6 +3384,9 @@ export async function runTest(
     // go — a pause for a person gives it back — and the step boundary in the
     // loop takes it again, as the server's does.
     releaseComputerLockAtRunEnd(surfaceState, computerLockId, extras.computerLock);
+    // The run's agent workspace goes with the run (§6.2); the report already
+    // holds its own copies of what the agent wrote (§8.5).
+    endAgentRun(agentRunForCleanup, config.agent);
 
     // The deadline's timer, on every way out — a throw included — so it never
     // fires after the run or holds the process (steptix/steptix#47). Cannot

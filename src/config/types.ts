@@ -297,6 +297,52 @@ export interface DesktopConfig {
   reportScreenshots: boolean;
 }
 
+/**
+ * Agent steps, `[use agent]` (docs/specs/SPEC-use-agent.md §10). Every key is
+ * project-level: a test's `## Config` may LOWER `maxTurns` and `timeout` and
+ * nothing else, because a test file in a shared repository must not be able
+ * to turn commands on, or widen what they may do, on a machine whose owner
+ * did not allow it (§6.1).
+ *
+ * Required on `Config` with a `defaults.ts` entry, like `desktop`, so a
+ * missing section reads as "shell off" rather than as `undefined`. The doc
+ * comment lives here for `DesktopConfig`'s reason.
+ */
+export interface AgentConfig {
+  /** Most turns one agent step may take. Default 30. */
+  maxTurns: number;
+  /** Most milliseconds one agent step may take. Default 600000. */
+  timeout: number;
+  /** How many recent turns keep their full result in the request (§5.5).
+   *  Default 4. */
+  historyTurns: number;
+  /** Characters of one result sent back to the model; the rest is cut to a
+   *  head and a tail (§5.5). Default 8000. */
+  resultMaxChars: number;
+  /** The size a request is kept under, in estimated tokens (§5.5). Default
+   *  100000. */
+  maxContextTokens: number;
+  /** Turn on files and commands (§6.1). Default false. */
+  shell: boolean;
+  /** Command patterns that run without asking (§6.3). */
+  allowCommands: string[];
+  /** Milliseconds one command may run. Default 120000. */
+  commandTimeoutMs: number;
+  /** Milliseconds an Allow/Deny question waits for an answer (§6.3). Default
+   *  60000. */
+  approvalTimeoutMs: number;
+  /** Largest file the report keeps a copy of (§8.5). Default 10 MB. */
+  reportFileMaxBytes: number;
+  /** Folders, relative to the project, the agent may read and write besides
+   *  its workspace (§6.2). */
+  folders: string[];
+  /** Keep the run's workspace after the run ends (§6.2). Default false. */
+  keepWorkspace: boolean;
+  /** Where agent skills live, relative to the project (§7). Default
+   *  `.agents/skills`. */
+  skillsDir: string;
+}
+
 export interface TestsConfig {
   /** Directory containing test .md files */
   dir: string;
@@ -611,6 +657,7 @@ export interface Config {
   ai: AiConfig;
   browser: BrowserConfig;
   desktop: DesktopConfig;
+  agent: AgentConfig;
   tests: TestsConfig;
   execution: ExecutionConfig;
   reports: ReportsConfig;
