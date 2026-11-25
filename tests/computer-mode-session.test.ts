@@ -1284,11 +1284,11 @@ describe("the project's context files reach the model", () => {
 // §5.4 — a bracket directive nobody dispatched never reaches the model
 // ---------------------------------------------------------------------------
 
-describe('an undispatched [tool:] / [macro:] line fails on the computer surface (§5.4)', () => {
+describe('an undispatched [tool:] / [macro:] line fails, on the computer surface (§5.4) and the page (SPEC-macros.md §7)', () => {
   /** Measured live: this exact step, with no `toolsDir`, was acted out by the
    *  model — Win+R, `calc`, Enter — on the real desktop. */
   const NO_TOOLS_MESSAGE =
-    '[tool: open_calculator] was not run: this request carried no tools directory (toolsDir), ' +
+    '[tool: open_calculator] was not run: Steptix was given no tools folder for this run, ' +
     'so no tool is loaded';
 
   /** Every model call the session could make, on the mocked client. */
@@ -1358,7 +1358,7 @@ describe('an undispatched [tool:] / [macro:] line fails on the computer surface 
 
     expect(response.status).toBe('failed');
     expect(response.error!.message).toContain(
-      '[macro: open-calculator] was not run: this request carried no macros directory (macrosDir)',
+      '[macro: open-calculator] was not run: Steptix was given no macros folder for this run',
     );
     expect(response.error!.message).toContain(
       'In computer mode a macro line is never handed to the model',
@@ -1390,17 +1390,48 @@ describe('an undispatched [tool:] / [macro:] line fails on the computer surface 
     expect(executeComputerStepMock).toHaveBeenCalledTimes(1);
   });
 
-  it('the page surface is unchanged: with no toolsDir the line still goes to the model as prose', async () => {
+  // SPEC-macros.md §7. This used to pin the page surface handing the line to
+  // the model as prose — and passing on the mock's say-so, a pass for a tool
+  // that never ran. The page surface now refuses it too, without the
+  // computer-mode sentence.
+  it.each([
+    ['[tool: open_calculator]', NO_TOOLS_MESSAGE],
+    [
+      '[macro: login]',
+      '[macro: login] was not run: Steptix was given no macros folder for this run',
+    ],
+    [
+      'Log in [macro: login]',
+      '[macro: login] was not run: Steptix was given no macros folder for this run',
+    ],
+  ])('on the page surface, %s with no folder fails unrun, and nothing is asked of the model', async (step, message) => {
     const manager = makeManager();
 
-    const response = await manager.executeSteps('s-tool-page', {
-      steps: ['[tool: open_calculator]'],
+    const response = await manager.executeSteps('s-page-raw', {
+      steps: [step, 'Click the Save button'],
+    });
+
+    expect(response.status).toBe('failed');
+    expect(response.error!.message).toContain(message);
+    expect(response.error!.message).not.toContain('In computer mode');
+    expect(response.results[0]!.status).toBe('failed');
+    expect(response.results[0]!.surface).toBeUndefined();
+    // The refusal stops the batch: the step after it never ran.
+    expect(response.results).toHaveLength(1);
+    expect(executeStepMock).not.toHaveBeenCalled();
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(modelCalls(manager, 's-page-raw')).toBe(0);
+  });
+
+  it('on the page surface, prose and a bare unknown bracket still go to the model', async () => {
+    const manager = makeManager();
+
+    const response = await manager.executeSteps('s-page-prose', {
+      steps: ['Select the [macro lens: 100mm] option', '[calculator]'],
     });
 
     expect(response.status).toBe('passed');
-    expect(executeStepMock).toHaveBeenCalledTimes(1);
-    expect(executeStepMock.mock.calls[0]![2]).toBe('[tool: open_calculator]');
-    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(executeStepMock).toHaveBeenCalledTimes(2);
   });
 });
 

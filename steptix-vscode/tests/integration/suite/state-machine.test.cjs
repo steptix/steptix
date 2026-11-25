@@ -541,6 +541,14 @@ describe('Steptix debug state machine', function () {
       );
       assert.deepEqual(fake.requests[1].sourceLines, [9]);
       assert.equal(fake.requests[1].runStart, undefined, 'spent by the REPL turn — never twice');
+      // A typed `[macro: x]` / `[tool: x]` has to expand and dispatch as the
+      // file's own would: the server refuses one with no folder
+      // (docs/specs/SPEC-macros.md §7). The repo config above these fixtures
+      // declares both, so the block request carries them.
+      assert.ok(fake.requests[1].macrosDir, 'the block request carries a macros folder');
+      assert.ok(fake.requests[1].toolsDir, 'the block request carries a tools folder');
+      assert.equal(turn.macrosDir, fake.requests[1].macrosDir, 'the REPL turn sends the same macros folder');
+      assert.equal(turn.toolsDir, fake.requests[1].toolsDir, 'the REPL turn sends the same tools folder');
       fake.end();
       await waitFor('run 1 idle', () => !hooks.isRunning());
 

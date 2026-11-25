@@ -286,9 +286,11 @@ function findConfigUpward(
  *
  * The literal fallback is required rather than tidy. A project that omits
  * `tests.macrosDir` but *has* `./macros` would otherwise be sent no macros
- * directory at all, and every `[macro: x]` line would ship to the AI as prose
- * — a silent, expensive wrong answer. (This repo's own config declares both,
- * so a live smoke test would never catch it.)
+ * directory at all, and every `[macro: x]` line would fail unrun for want of
+ * one (docs/specs/SPEC-macros.md §7) in a project whose macros are right
+ * there. Before that refusal it shipped to the AI as prose, a silent,
+ * expensive wrong answer. (This repo's own config declares both, so a live
+ * smoke test would never catch it.)
  *
  * The confinement check runs even when the directory is absent: a config
  * saying `"toolsDir": "../../../x"` is a refusal, not a shrug, whether or not

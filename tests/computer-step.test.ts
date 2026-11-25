@@ -24,6 +24,7 @@ import {
   resetComputerScreenshotNotice,
   stepReadsScreen,
   undispatchedDirectiveError,
+  undispatchedDirectiveResult,
   type ComputerStepOptions,
 } from '../src/runner/computer-step.js';
 import { createControlState, type ControlRecord } from '../src/runner/control-flow.js';
@@ -1681,14 +1682,16 @@ describe('image_input_unsupported fails the step at once (§15.4)', () => {
   });
 });
 
-describe('undispatchedDirectiveError — what may not reach the computer-surface model (§5.4)', () => {
-  const none = { toolsLoaded: false, macrosDirSupplied: false };
-  const all = { toolsLoaded: true, macrosDirSupplied: true };
+describe('undispatchedDirectiveError on the computer surface — what may not reach its model (§5.4)', () => {
+  const none = { surface: 'computer' as const, toolsLoaded: false, macrosDirSupplied: false };
+  const all = { surface: 'computer' as const, toolsLoaded: true, macrosDirSupplied: true };
 
-  it('names the missing toolsDir, and how to supply one', () => {
+  it('names the missing tools folder, and how to supply one', () => {
     const message = undispatchedDirectiveError('[tool: open_calculator]', none)!;
-    expect(message).toMatch(/^\[tool: open_calculator\] was not run: this request carried no tools directory \(toolsDir\)/);
-    expect(message).toContain('declare tests.toolsDir');
+    expect(message).toMatch(/^\[tool: open_calculator\] was not run: Steptix was given no tools folder for this run/);
+    expect(message).toContain(
+      'Keep the tools in a tools/src folder beside steptix.config.json, or set tests.toolsDir',
+    );
     expect(message).toContain('In computer mode a tool line is never handed to the model');
   });
 
@@ -1720,9 +1723,9 @@ describe('undispatchedDirectiveError — what may not reach the computer-surface
     );
   });
 
-  it('names the missing macrosDir for a raw macro line', () => {
+  it('names the missing macros folder for a raw macro line', () => {
     expect(undispatchedDirectiveError('[macro: auth/login]', none)).toMatch(
-      /^\[macro: auth\/login\] was not run: this request carried no macros directory \(macrosDir\)/,
+      /^\[macro: auth\/login\] was not run: Steptix was given no macros folder for this run/,
     );
   });
 
@@ -1742,6 +1745,64 @@ describe('undispatchedDirectiveError — what may not reach the computer-surface
     ]) {
       expect(undispatchedDirectiveError(step, none), step).toBeNull();
     }
+  });
+});
+
+describe('undispatchedDirectiveError on the page surface (SPEC-macros.md §7)', () => {
+  const none = { surface: 'browser' as const, toolsLoaded: false, macrosDirSupplied: false };
+  const all = { surface: 'browser' as const, toolsLoaded: true, macrosDirSupplied: true };
+
+  it('refuses a macro line nothing expanded, with the folder message and no computer-mode sentence', () => {
+    for (const step of ['[macro: login]', 'Log in [macro: login]', '[macro login]']) {
+      expect(undispatchedDirectiveError(step, none), step).toBe(
+        '[macro: login] was not run: Steptix was given no macros folder for this run, so the ' +
+          'macro was never turned into its steps. Keep the macros in a macros folder beside ' +
+          'steptix.config.json, or set tests.macrosDir in that file to the folder that holds them.',
+      );
+    }
+  });
+
+  it('refuses a tool line with no catalogue the same way', () => {
+    expect(undispatchedDirectiveError('[tool: echo]', none)).toBe(
+      '[tool: echo] was not run: Steptix was given no tools folder for this run, so no tool is ' +
+        'loaded. Keep the tools in a tools/src folder beside steptix.config.json, or set ' +
+        'tests.toolsDir in that file to the folder that holds them.',
+    );
+  });
+
+  it("a line that does not parse carries the parser's message and nothing after it", () => {
+    const message = undispatchedDirectiveError('[tool: echo count=abc]', none)!;
+    expect(message).toMatch(/^This \[tool: …\] line was not run: it does not parse\./);
+    expect(message).not.toContain('In computer mode');
+    expect(message.endsWith('\n')).toBe(false);
+  });
+
+  it('with everything loaded, says the runner dropped it', () => {
+    expect(undispatchedDirectiveError('[macro: login]', all)).toBe(
+      '[macro: login] was not run: macros are expanded into their steps before the run starts, ' +
+        'and this line reached the step loop unexpanded.',
+    );
+  });
+
+  it('leaves a bare unknown bracket and prose to the page model, as before', () => {
+    for (const step of [
+      '[calculator]',
+      'Click the equals button',
+      'Verify the [optional] banner is gone',
+      'Select the [macro lens: 100mm] option',
+      'Check the [macroscopic] label',
+    ]) {
+      expect(undispatchedDirectiveError(step, none), step).toBeNull();
+    }
+  });
+
+  it('records the refused row without a surface, as every page step does', () => {
+    const row = undispatchedDirectiveResult(3, '[macro: login]', 'refused', 'browser');
+    expect(row).toMatchObject({ index: 3, status: 'failed', turns: [], error: 'refused' });
+    expect('surface' in row).toBe(false);
+    expect(undispatchedDirectiveResult(3, '[macro: login]', 'refused', 'computer').surface).toBe(
+      'computer',
+    );
   });
 });
 

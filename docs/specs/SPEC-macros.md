@@ -2,8 +2,9 @@
 
 **Status:** built.
 **Opened:** 2026-11-25
-**Scope:** a rename. No new behaviour, no compatibility layer, no version
-change.
+**Scope:** a rename, with no compatibility layer and no version change
+(§1–§5), plus two gaps closed beside it: the editor finds the default
+folders (§6), and a call nothing ran is never handed to the model (§7).
 
 ## 1. Why
 
@@ -75,9 +76,10 @@ rules, with no code added for it:
     even with no such folder.
   - **In VS Code and MCP with no `./macros` folder**, no macros directory is
     sent (§6). A file with sections or control lines fails with the
-    expander's `no macros directory is configured` message. On the computer
-    surface, the line is refused unrun. On the page surface, the line goes to
-    the model as prose; that gap predates the rename (§6).
+    expander's `no macros directory is configured` message. Otherwise the
+    step fails unrun, on either surface, with
+    `[macro: login] was not run: Steptix was given no macros folder for this run, …`
+    (§7).
 
 ## 4. Moving a project
 
@@ -139,3 +141,39 @@ The rule:
 When there is no folder, Go to Definition on a macro name says
 `Steptix: no macros folder — steptix.config.json sets no tests.macrosDir and has no macros folder beside it.`
 (and the same for tools, naming `tests.toolsDir` and `tools/src`).
+
+## 7. A call nothing ran is never handed to the model
+
+Macros are expanded before the step loop starts, and `[tool:]` lines are
+dispatched in it. A `[macro: …]` or `[tool: …]` line that reaches the point
+where a step is handed to a model has therefore not run, and cannot run as
+written. Computer mode already refused such a line (SPEC-use-computer.md
+§5.4). The page surface used to hand it to the model as prose, so a step
+could pass without the macro or tool ever running, for example a Flick
+request, which sends no folder. Now both surfaces fail the step, with no
+model call and no capture, and the batch stops there.
+
+With no folder in the request, the messages are:
+
+- `[macro: login] was not run: Steptix was given no macros folder for this run, so the macro was never turned into its steps. Keep the macros in a macros folder beside steptix.config.json, or set tests.macrosDir in that file to the folder that holds them.`
+- `[tool: echo] was not run: Steptix was given no tools folder for this run, so no tool is loaded. Keep the tools in a tools/src folder beside steptix.config.json, or set tests.toolsDir in that file to the folder that holds them.`
+
+In computer mode each one ends with the sentence saying the model would act
+it out on the real screen. A line that names a macro or a tool but does not
+parse fails with the parser's message, and one that reached the loop with a
+folder supplied says the runner dropped it. A whole-step bracket that names
+no directive is unchanged on the page surface: file parsing refuses it, and
+a bare Sessions API batch still hands it to the model.
+
+The refusal covers the CLI runner and the server's step loop, the two loops
+that dispatch tools and run expanded macros. Every client of the server's
+loop that has a project sends its folders, so a project's own calls still
+run: the extension on a run and on a step typed at an `[interactive]`
+prompt, MCP's `run_steps`, and the compile route's recording runs. Hooks,
+the CLI's interactive REPL, errands (refused up front by MCP) and the
+Electron Runner UI (`npm run ui`), which has its own step loop, are not
+changed.
+
+Flick sends no folders at all, so a `[macro:]` or `[tool:]` line typed
+there always fails with these messages, whatever the project holds: Flick
+cannot run macros or tools.

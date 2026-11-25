@@ -584,6 +584,9 @@ export function modeMarkerText(surface: 'browser' | 'computer'): string {
 
 /** What the calling loop knows about why a directive went undispatched. */
 export interface DirectiveDispatchContext {
+  /** The surface the step was about to be answered on. Computer mode adds why
+   *  a model must never see the line, and refuses a bare unknown bracket too. */
+  surface: 'browser' | 'computer';
   /** A tool catalogue is loaded, so the loop dispatches every `[tool:]` line
    *  through it. False on a Sessions API request that carried no `toolsDir`. */
   toolsLoaded: boolean;
@@ -592,14 +595,21 @@ export interface DirectiveDispatchContext {
   macrosDirSupplied: boolean;
 }
 
-/** The sentence every refusal below ends with: why this surface refuses where
- *  the page surface still hands the line to the model as prose. */
-function neverActedOut(kind: 'tool' | 'macro' | 'bracket'): string {
+/** The sentence a computer-mode refusal ends with: why a model handed this
+ *  line would do harm there. The page surface's refusal ends without it. */
+function neverActedOut(kind: 'tool' | 'macro' | 'bracket', surface: 'browser' | 'computer'): string {
+  if (surface !== 'computer') return '';
   const what = kind === 'bracket' ? 'a bracket step nobody dispatched is' : `a ${kind} line is`;
   return (
     `In computer mode ${what} never handed to the model, because it would act it out ` +
     'on the real screen.'
   );
+}
+
+/** `message` followed by `suffix` after `separator`, or `message` alone when
+ *  there is no suffix. */
+function withSuffix(message: string, separator: string, suffix: string): string {
+  return suffix ? `${message}${separator}${suffix}` : message;
 }
 
 /** Run an invocation parser, keeping a syntax error as a value: a line that
@@ -615,85 +625,102 @@ function tryParse<T>(parse: () => T | null): { value: T } | { error: Error } | n
 
 /**
  * The failure for a step that is a bracket directive the loop did NOT
- * dispatch, when it is about to be answered on the computer surface — or null
- * for a step that is prose and may go to the model.
+ * dispatch, when it is about to be handed to a model — or null for a step that
+ * is prose and may go to the model.
  *
- * Measured live: a Sessions API request with no `toolsDir` ran
+ * A `[tool:]` line nothing dispatched and a `[macro:]` line nothing expanded
+ * cannot run as written, so whatever a model did with one, a pass included,
+ * would be a guess (docs/specs/SPEC-macros.md §7). On the computer surface it
+ * is worse. Measured live: a Sessions API request with no `toolsDir` ran
  * `[tool: open_calculator]` in computer mode. With no catalogue loaded the
  * line fell through to the model as prose, and the model ACTED IT OUT — Win+R,
- * `calc`, Enter — launching a program on the real desktop. On the page
- * surface the same fall-through is legacy and mostly harmless; here it is the
- * one thing computer mode must never let a model do.
+ * `calc`, Enter — launching a program on the real desktop. So computer mode
+ * also refuses a whole-step bracket that names no directive, which the page
+ * surface still hands to its model.
  *
  * Detection is by the runner's own parsers, not a new pattern: `parseToolCall`
  * and `parseMacroCall` are what decide elsewhere that a line IS a tool or a
  * macro call (a label before the bracket included), and
  * `unknownWholeStepBracketError` is §4.2's rule for a bracket step that names
  * no directive. Both loops call this only once every other dispatch has
- * passed the step by, immediately before `executeComputerStep`.
+ * passed the step by, immediately before the step is handed to a model.
  */
 export function undispatchedDirectiveError(
   step: string,
   context: DirectiveDispatchContext,
 ): string | null {
+  const { surface } = context;
   const tool = tryParse(() => parseToolCall(step));
   if (tool) {
     if ('error' in tool) {
-      return (
-        `This [tool: …] line was not run: it does not parse. ${tool.error.message}\n` +
-        neverActedOut('tool')
+      return withSuffix(
+        `This [tool: …] line was not run: it does not parse. ${tool.error.message}`,
+        '\n',
+        neverActedOut('tool', surface),
       );
     }
     const call = `[tool: ${tool.value.name}]`;
-    return context.toolsLoaded
-      ? `${call} was not run: the runner did not dispatch it as a tool call. ${neverActedOut('tool')}`
-      : `${call} was not run: this request carried no tools directory (toolsDir), so no tool ` +
-          `is loaded — declare tests.toolsDir in the project's steptix.config.json, or keep the ` +
-          `tools in tools/src beside it, so the client sends one. ${neverActedOut('tool')}`;
+    return withSuffix(
+      context.toolsLoaded
+        ? `${call} was not run: the runner did not dispatch it as a tool call.`
+        : `${call} was not run: Steptix was given no tools folder for this run, so no tool ` +
+            'is loaded. Keep the tools in a tools/src folder beside steptix.config.json, or ' +
+            'set tests.toolsDir in that file to the folder that holds them.',
+      ' ',
+      neverActedOut('tool', surface),
+    );
   }
 
   const macro = tryParse(() => parseMacroCall(step));
   if (macro) {
     if ('error' in macro) {
-      return (
-        `This [macro: …] line was not run: it does not parse. ${macro.error.message}\n` +
-        neverActedOut('macro')
+      return withSuffix(
+        `This [macro: …] line was not run: it does not parse. ${macro.error.message}`,
+        '\n',
+        neverActedOut('macro', surface),
       );
     }
     const call = `[macro: ${macro.value.name}]`;
-    return context.macrosDirSupplied
-      ? `${call} was not run: macros are expanded into their steps before the run starts, and ` +
-          `this line reached the step loop unexpanded. ${neverActedOut('macro')}`
-      : `${call} was not run: this request carried no macros directory (macrosDir), so the ` +
-          `macro was never expanded into its steps — declare tests.macrosDir in the project's ` +
-          `steptix.config.json, or keep the macros in a macros folder beside it, so the client ` +
-          `sends one. ${neverActedOut('macro')}`;
+    return withSuffix(
+      context.macrosDirSupplied
+        ? `${call} was not run: macros are expanded into their steps before the run starts, ` +
+            'and this line reached the step loop unexpanded.'
+        : `${call} was not run: Steptix was given no macros folder for this run, so the ` +
+            'macro was never turned into its steps. Keep the macros in a macros folder ' +
+            'beside steptix.config.json, or set tests.macrosDir in that file to the folder ' +
+            'that holds them.',
+      ' ',
+      neverActedOut('macro', surface),
+    );
   }
 
   // §4.2 is enforced where a FILE is parsed and where MCP assembles steps; a
   // bare Sessions API batch reaches this loop without either. On the page
-  // surface that stays as it was. Here it would be a model improvising on the
-  // real screen from a word in brackets.
+  // surface that stays as it was. In computer mode it would be a model
+  // improvising on the real screen from a word in brackets.
+  if (surface !== 'computer') return null;
   const bracket = unknownWholeStepBracketError(step);
-  if (bracket) return `${bracket} ${neverActedOut('bracket')}`;
+  if (bracket) return `${bracket} ${neverActedOut('bracket', surface)}`;
 
   return null;
 }
 
 /** The row a refused directive records: failed, zero turns, no model call, on
- *  the computer surface it was refused on. The message is the explanation too,
- *  as it is for the §5.1 refusals, so a client that shows `reasoning` rather
- *  than `error` still says why. */
+ *  the surface it was refused on (left unset for the page, as every page step
+ *  leaves it). The message is the explanation too, as it is for the §5.1
+ *  refusals, so a client that shows `reasoning` rather than `error` still says
+ *  why. */
 export function undispatchedDirectiveResult(
   index: number,
   instruction: string,
   error: string,
+  surface: 'browser' | 'computer',
 ): StepResult {
   return {
     index,
     instruction,
     status: 'failed',
-    surface: 'computer',
+    ...(surface === 'computer' && { surface: 'computer' as const }),
     turns: [],
     durationMs: 0,
     retried: false,

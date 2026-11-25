@@ -40,6 +40,13 @@ no folder from the editor. On the page surface its `[macro:]` lines went to
 the model as prose, and completion and Go to Definition found nothing
 (SPEC-macros.md §6).
 
+A `[macro: …]` line nothing expanded, or a `[tool: …]` line with no tools
+loaded, now fails unrun on the page surface too, as it already did in
+computer mode. It used to go to the model as prose, so the step could pass
+without the macro or tool ever running. The message says which folder
+Steptix was not given and how to supply it (SPEC-macros.md §7). The
+computer-mode message is reworded the same way.
+
 ### Added — accessibility snapshots are the default
 
 - **The model is shown an accessibility snapshot, and names the element by

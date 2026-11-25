@@ -2167,15 +2167,20 @@ export async function runTest(
             (item) => forEachPassOf(controls, controlState, item),
             (text) => redact(text, secretsNow()),
           );
-      // Read only by the branch just ahead of the computer-surface dispatch, so
-      // every earlier branch — `Set`, `[input:]`, a dispatched `[tool:]` — has
-      // already taken the steps it owns. This runner always loads a catalogue
-      // and always parses with a macros directory, so a directive that reaches
-      // that branch was dropped by whatever built `test`, and the message says
-      // so rather than blaming a missing directory.
+      // Read only by the branch just ahead of the model dispatches (computer and
+      // page), so every earlier branch — `Set`, `[input:]`, a dispatched
+      // `[tool:]` — has already taken the steps it owns. This runner always
+      // loads a catalogue and always parses with a macros directory, so a
+      // directive that reaches that branch was dropped by whatever built
+      // `test`, and the message says so rather than blaming a missing
+      // directory (docs/specs/SPEC-macros.md §7).
       const undispatchedDirective =
-        surfaceState.surface === 'computer' && !setStep && !useAiStep && !unconditionalFlowControl
-          ? undispatchedDirectiveError(rawInstruction, { toolsLoaded: true, macrosDirSupplied: true })
+        !setStep && !useAiStep && !unconditionalFlowControl
+          ? undispatchedDirectiveError(rawInstruction, {
+              surface: surfaceState.surface,
+              toolsLoaded: true,
+              macrosDirSupplied: true,
+            })
           : null;
       let stepResult: StepResult;
       let interactiveResults: StepResult[] = [];
@@ -2552,12 +2557,18 @@ export async function runTest(
         // Same path the hook executor uses; see runToolStep above.
         stepResult = await runToolStep(test.toolCalls[i]!, instruction, i + 1);
       } else if (undispatchedDirective !== null) {
-        // SPEC-use-computer.md §5.4: a `[tool:]` / `[macro:]` line that nothing
-        // above dispatched is never handed to the computer-surface model, which
+        // SPEC-macros.md §7, SPEC-use-computer.md §5.4: a `[tool:]` /
+        // `[macro:]` line that nothing above dispatched cannot run as written,
+        // so it is never handed to a model — on the computer surface the model
         // would act it out on the real screen. The server's loop refuses the
         // same, at the same point in its chain.
         logger.error(undispatchedDirective);
-        stepResult = undispatchedDirectiveResult(i + 1, instruction, undispatchedDirective);
+        stepResult = undispatchedDirectiveResult(
+          i + 1,
+          instruction,
+          undispatchedDirective,
+          surfaceState.surface,
+        );
       } else if (surfaceState.surface === 'computer' && surfaceState.adapter) {
         // ── THE COMPUTER SURFACE (SPEC-use-computer.md §5.5) ───────────────
         //

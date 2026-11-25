@@ -477,13 +477,20 @@ with a message naming the cause, without a capture or a model call. That
 happens when a Sessions API request carried no `toolsDir`, so no catalogue is
 loaded. The same goes for a raw `[macro: …]` line (macros are expanded before
 the loop, so a raw one means nothing expanded it) and for a whole-step
-bracket that §4.2 refuses. The page surface still hands those lines to the
-model as prose. Here that was measured live: handed `[tool: open_calculator]`,
-the model pressed Win+R, typed `calc` and launched the program itself. An
-unknown tool name with a catalogue loaded already failed on both surfaces
-with the catalogue's message. Both loops check this last, just before
-`executeComputerStep` (`undispatchedDirectiveError` in
+bracket that §4.2 refuses. Here that was measured live: handed
+`[tool: open_calculator]`, the model pressed Win+R, typed `calc` and launched
+the program itself, so the message ends by saying a model would act it out
+on the real screen. An unknown tool name with a catalogue loaded already
+failed on both surfaces with the catalogue's message. Both loops check this
+last, just before a step is handed to `executeComputerStep` or, on the page,
+`executeStep` (`undispatchedDirectiveError` in
 `src/runner/computer-step.ts`).
+
+The page surface refuses an undispatched `[tool: …]` or `[macro: …]` line
+the same way, with the same message minus that last sentence: the line
+cannot run as written, so anything the model did with it, a pass included,
+would be a guess. A whole-step bracket that names no directive still goes to
+the page model as prose there; §4.2 is enforced where a file is parsed.
 
 ### 5.5 The loop
 

@@ -108,11 +108,12 @@ export function testsNeedProject(userRoot: string): McpToolError {
  * `run_steps` in project-less mode with `[macro:]` / `[tool:]` steps.
  *
  * Refused up front rather than sent: without a `macrosDir`/`toolsDir` on the
- * wire the server ships these lines to the AI as prose — a silent, expensive
- * wrong answer three layers down. And they cannot be given a directory,
- * deliberately: a machine-global macros or tools directory would mean any
- * conversation, in any directory, executes code from a path no repo owns and
- * no review covers (stories/mcp-no-project.md, locked).
+ * wire the server fails these lines unrun, with advice about project folders
+ * that a project-less run cannot follow (docs/specs/SPEC-macros.md §7). And
+ * they cannot be given a directory, deliberately: a machine-global macros or
+ * tools directory would mean any conversation, in any directory, executes
+ * code from a path no repo owns and no review covers
+ * (stories/mcp-no-project.md, locked).
  */
 export function projectlessCodeSteps(
   offending: readonly string[],
@@ -125,7 +126,7 @@ export function projectlessCodeSteps(
   return preflightError(
     `${offending.length} step(s) invoke a macro or tool, but no project resolved — ` +
       'and macros and tools are code, code belongs to a project, so ' +
-      'project-less runs refuse them rather than sending them to the AI as prose.\n' +
+      'project-less runs refuse them.\n' +
       `${where}\n` +
       `Steps: ${offending.map((step) => JSON.stringify(step)).join(', ')}\n` +
       'Run from inside the project (or pass project_root) to use its macros ' +
@@ -675,8 +676,9 @@ export function errandsHaveNoSessions(sessionId: string): McpToolError {
  *
  * The same token rule `run_steps` refuses in user scope, and for the same
  * reason: an errand deliberately carries no `macrosDir`/`toolsDir`, and the
- * server's behaviour for such a line with no directory on the wire is to hand
- * it to the AI as prose — a silent, expensive wrong answer three layers down.
+ * errand runner (src/server/errand-runner.ts), which neither expands macros
+ * nor dispatches tools, would hand such a line to the AI as prose — a silent,
+ * expensive wrong answer three layers down.
  */
 export function errandCodeSteps(offending: readonly string[]): McpToolError {
   return preflightError(

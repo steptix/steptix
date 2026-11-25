@@ -952,7 +952,7 @@ describe('MacroSurfaceStack — the shared push/pop both loops use', () => {
 // §5.4 — a bracket directive nobody dispatched never reaches the model
 // ---------------------------------------------------------------------------
 
-describe('an undispatched [tool:] / [macro:] line fails on the CLI computer surface (§5.4)', () => {
+describe('an undispatched [tool:] / [macro:] line fails on the CLI, computer surface (§5.4) and page (SPEC-macros.md §7)', () => {
   const ACTED_OUT =
     'In computer mode a tool line is never handed to the model, because it would act it out on the real screen.';
 
@@ -1056,16 +1056,25 @@ describe('an undispatched [tool:] / [macro:] line fails on the CLI computer surf
     expect(existsSync(markerPath)).toBe(false);
   });
 
-  it('the page surface is unchanged: an undispatched tool line still goes to executeStep', async () => {
+  // SPEC-macros.md §7. This used to pin the page surface handing the line to
+  // executeStep — and passing on the mock's say-so, for a tool that never
+  // ran. The page surface refuses it now too, without the computer sentence.
+  it('on the page surface an undispatched tool line fails too, and executeStep is never called', async () => {
     const report = await runTest(
-      makeInstance(['[tool: open_calculator]']),
+      makeInstance(['[tool: open_calculator]', 'Click equals']),
       configWithTools(),
       '',
       extras(),
     );
 
-    expect(report.status).toBe('passed');
-    expect(executeStepMock).toHaveBeenCalledTimes(1);
+    expect(report.status).toBe('failed');
+    expect(report.steps[0]!.status).toBe('failed');
+    expect(report.steps[0]!.error).toMatch(
+      /^\[tool: open_calculator\] was not run: the runner did not dispatch it as a tool call\.$/,
+    );
+    expect(report.steps[0]!.surface).toBeUndefined();
+    expect(report.steps).toHaveLength(1);
+    expect(executeStepMock).not.toHaveBeenCalled();
     expect(executeComputerStepMock).not.toHaveBeenCalled();
   });
 });

@@ -179,9 +179,10 @@ export interface StreamStepsRequest {
    * Absolute path to the project's macros directory (`macrosDir` in
    * `steptix.config.*`). When supplied, the server runs `expandMacros` over the
    * incoming `steps`, dispatches the flattened result, and emits
-   * `frame:push` / `frame:pop` events around each macro body. Omit to use
-   * the legacy behaviour (raw steps shipped straight to the runner — fine
-   * for tests with no `[macro: ...]` lines).
+   * `frame:push` / `frame:pop` events around each macro body. When omitted
+   * the steps are not expanded (unless the batch has sections or control
+   * lines), and the server fails a `[macro: ...]` step unrun
+   * (docs/specs/SPEC-macros.md §7).
    */
   macrosDir?: string;
   /**
@@ -234,7 +235,8 @@ export interface StreamStepsRequest {
    * Absolute path to the project's tools directory (`toolsDir` in
    * `steptix.config.*`). When supplied, the server loads the tool catalogue
    * once per session and dispatches `[tool: ...]` steps through
-   * `executeToolStep` — without it, tool lines reach the AI as plain text.
+   * `executeToolStep` — without it, the server fails a tool line unrun
+   * (docs/specs/SPEC-macros.md §7).
    */
   toolsDir?: string;
   /**

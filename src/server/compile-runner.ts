@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { basename, dirname, join as pathJoin, resolve as pathResolve } from 'node:path';
 import type { Config } from '../config/types.js';
@@ -364,12 +365,19 @@ export class CodeBehindCompiler {
         });
       }
 
+      const toolsDir = pathResolve(bundle.projectRoot ?? process.cwd(), bundle.config.tests.toolsDir);
       const stepRequest: StepRequest = {
         steps: test.steps.slice(0, count),
         // The compile's resolved map, never the parsed test's raw values.
         parameters: { ...run.parameters },
         testFilePath: test.filePath,
         sourceLines: test.stepLines.slice(0, count),
+        // The parse above already expanded the macros, but `[tool:]` lines run
+        // in the session's loop, which refuses one with no catalogue loaded
+        // (docs/specs/SPEC-macros.md §7) — as `steptix compile`, which runs
+        // `runTest` with the project's catalogue, never would. Sent only when
+        // the folder exists, as the extension and MCP send it.
+        ...(existsSync(toolsDir) && { toolsDir }),
         ...(envName && { envName }),
         ...(bundle.envBundle && { env: bundle.envBundle.env }),
         captureStepContext: run.captureContext,

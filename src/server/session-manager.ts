@@ -429,8 +429,9 @@ export interface StepRequest {
    * server runs `expandMacros` over `steps`, flattens `[macro: ...]`
    * invocations, and emits `frame:push` / `frame:pop` events around each
    * expanded macro body so step-into-aware clients can render a multi-file
-   * call stack. Omit to keep the legacy behaviour (raw steps fed straight
-   * to the runner — fine when no `[macro: ...]` lines are present).
+   * call stack. When omitted, steps are not expanded (unless the batch has
+   * sections or control lines), and a `[macro: ...]` step fails unrun with a
+   * message saying so (docs/specs/SPEC-macros.md §7).
    */
   macrosDir?: string;
   /**
@@ -494,9 +495,9 @@ export interface StepRequest {
    * Absolute path to the project's tools directory. When supplied, the
    * server loads the `ToolCatalogue` once per session and dispatches every
    * `[tool: ...]` step through `executeToolStep` (the same code path the
-   * CLI runner uses). Without `toolsDir` the legacy behaviour applies —
-   * `[tool: ...]` lines reach the LLM as raw text, which it doesn't know
-   * how to execute.
+   * CLI runner uses). Without `toolsDir` no tool is loaded, and a
+   * `[tool: ...]` step fails unrun with a message saying so, on either
+   * surface (docs/specs/SPEC-macros.md §7).
    */
   toolsDir?: string;
   /**
@@ -755,8 +756,9 @@ export interface FrameInfo {
  * endpoint converts these to SSE frames; the non-streaming endpoint ignores
  * them.
  *
- * The `frame:*` variants are emitted only when the client asks for macro
- * expansion (via `StepRequest.macrosDir`). Legacy clients can ignore them.
+ * The `frame:*` variants are emitted only when the steps are expanded: when
+ * the client sends `StepRequest.macrosDir`, or the batch has sections or
+ * control lines. Clients that never send those can ignore them.
  */
 /**
  * Which tab a step actually ran in (stories/mcp-cdp-browser.md §11).
@@ -4267,8 +4269,8 @@ export class SessionManager {
     // on the session. The step loop later dispatches `[tool: ...]` lines
     // through `executeToolStep` so deterministic tool code runs on the server
     // (parallel to how the CLI runner dispatches them). Without `toolsDir`
-    // `[tool: ...]` lines reach the AI as plain text — same as pre-Phase-5
-    // behaviour.
+    // no catalogue is loaded, and the loop fails a `[tool: ...]` step unrun
+    // (docs/specs/SPEC-macros.md §7).
     //
     // Reload (rather than reuse the cache) when the `toolsDir` changed since
     // the cached catalogue was built, or when that catalogue is empty — a
@@ -4329,8 +4331,9 @@ export class SessionManager {
     }
     // A batch that omits `toolsDir` deliberately KEEPS a catalogue an earlier
     // batch loaded — `session.toolCatalogue` is sticky, matching the
-    // `envBundle`/`sessionConfig` precedent, so Steptix's Continue (which
-    // re-sends steps without re-sending `toolsDir`) still dispatches tools.
+    // `envBundle`/`sessionConfig` precedent, so a later batch from a client
+    // that does not re-send `toolsDir` (a bare Sessions API batch) still
+    // dispatches tools.
     //
     // stories/mcp-no-project.md's "no tools project-less" guarantee is enforced
     // MCP-side instead (`isCodeStep` in assemble.ts refuses `[macro:]`/
@@ -4345,7 +4348,8 @@ export class SessionManager {
     // `[macro: ...]` lines into their bodies before execution and remember
     // the per-step origin so step-into-aware clients see `frame:push` /
     // `frame:pop` events around each macro body. Without `macrosDir` the
-    // existing flow is preserved verbatim (raw steps shipped to the runner).
+    // raw steps go to the loop as they are, where a raw `[macro:]` line fails
+    // unrun (docs/specs/SPEC-macros.md §7).
     // …and when any step is a control line, for the same reason the CLI's
     // parser widened its own gate: the tail is a step the expander has to
     // place, and skipping expansion would ship `While the Next button is
@@ -7065,28 +7069,24 @@ export class SessionManager {
         // Tool-step branch — when the step is a `[tool: ...]` invocation
         // AND we have a loaded catalogue, dispatch through `executeToolStep`
         // (the same code path the CLI runner uses) and shape the outcome
-        // into a `StepResult` so the rest of the loop is unchanged. Without
-        // a catalogue, fall through to `executeStep` and let the AI loop
-        // see the raw `[tool: ...]` text (legacy behaviour).
+        // into a `StepResult` so the rest of the loop is unchanged.
         const toolCall =
           setStep || useAiStep || unconditionalFlowControl
             ? null
             : toolCatalogue
               ? parseToolCall(originalStep)
               : null;
-        // …except on the computer surface, where that legacy fall-through is
-        // refused (SPEC-use-computer.md §5.4): a model handed `[tool: x]` as
-        // prose acts it out on the real desktop. Same for a raw `[macro: x]`,
-        // which only survives to here when nothing expanded it. Computed for
-        // the steps the branches below would otherwise send to
-        // `executeComputerStep`, and nothing else.
+        // Without a catalogue the line cannot run, and neither can a raw
+        // `[macro: x]`, which only survives to here when nothing expanded it:
+        // the step fails rather than going to a model as prose, where a pass
+        // would be a guess (SPEC-macros.md §7) and, in computer mode, a model
+        // acts it out on the real desktop (SPEC-use-computer.md §5.4).
+        // Computed for the steps the branches below would otherwise send to
+        // `executeComputerStep` or `executeStep`, and nothing else.
         const undispatchedDirective =
-          session.surface === 'computer' &&
-          !toolCall &&
-          !setStep &&
-          !useAiStep &&
-          !unconditionalFlowControl
+          !toolCall && !setStep && !useAiStep && !unconditionalFlowControl
             ? undispatchedDirectiveError(originalStep, {
+                surface: session.surface,
                 toolsLoaded: toolCatalogue !== undefined,
                 macrosDirSupplied: !!request.macrosDir,
               })
@@ -7345,13 +7345,14 @@ export class SessionManager {
               });
             }
           } else if (undispatchedDirective !== null) {
-            // A `[tool:]` / `[macro:]` line nothing above dispatched, on the
-            // computer surface: fail it here, before any capture or model call.
+            // A `[tool:]` / `[macro:]` line nothing above dispatched, on
+            // either surface: fail it here, before any capture or model call.
             logger.error(undispatchedDirective);
             stepResult = undispatchedDirectiveResult(
               effectiveSourceLines?.[i] ?? i + 1,
               originalStep,
               undispatchedDirective,
+              session.surface,
             );
           } else if (session.surface === 'computer' && session.computerAdapter) {
             // ── THE COMPUTER SURFACE (SPEC-use-computer.md §5.5) ──────────

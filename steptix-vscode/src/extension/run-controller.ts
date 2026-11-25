@@ -5312,9 +5312,10 @@ export class RunController {
 
     // Resolve the project's macros directory so the server can expand
     // `[macro: ...]` lines and emit `frame:push` / `frame:pop` events around
-    // their bodies. Without a resolved macrosDir the server falls back to
-    // the legacy raw-step path — fine for tests that never reference a
-    // macro, but macro invocations would hit the AI as literal strings.
+    // their bodies. The folder is the declared one, else `./macros` when it
+    // exists (docs/specs/SPEC-macros.md §6). Without one the server expands
+    // only sections and control lines — fine for tests that never reference a
+    // macro — and fails a `[macro: ...]` step unrun (§7).
     const projectDirs = resolveProjectDirs(this.document.uri);
     const macrosDir = projectDirs?.macrosDir ?? null;
     const toolsDir = projectDirs?.toolsDir ?? null;
@@ -5676,6 +5677,10 @@ export class RunController {
         // in that list, and the server starts on `browser` without one.
         const text = this.document.getText();
         const runStart = takeRunStart() ? runStartFor(text, line) : undefined;
+        // The same folders the run sends, so a typed `[macro: x]` expands and a
+        // typed `[tool: x]` dispatches as it would in the file; without them
+        // the server refuses the line (docs/specs/SPEC-macros.md §7).
+        const interactiveDirs = resolveProjectDirs(this.document.uri);
         try {
           const events = client.streamSteps(
             sessionId,
@@ -5704,6 +5709,8 @@ export class RunController {
                 Object.keys(sessionConfig).length > 0 && { config: sessionConfig }),
               ...(Object.keys(params).length > 0 && { parameters: params }),
               ...(logging && { logging }),
+              ...(interactiveDirs?.macrosDir && { macrosDir: interactiveDirs.macrosDir }),
+              ...(interactiveDirs?.toolsDir && { toolsDir: interactiveDirs.toolsDir }),
             },
             signal,
           );

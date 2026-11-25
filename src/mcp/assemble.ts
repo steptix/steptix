@@ -3,9 +3,10 @@
  *
  * Both run tools land here, and both assemble the *same* project fields —
  * `run_steps` is not a lesser path. Sending steps without `macrosDir`,
- * `toolsDir` or the composed `env` would make `[macro: x]` and `[tool: x]`
- * lines ship to the AI as prose and run against the *server process's* AI key
- * and model rather than the project's.
+ * `toolsDir` or the composed `env` would make the server refuse `[macro: x]`
+ * and `[tool: x]` lines unrun (docs/specs/SPEC-macros.md §7), and run the
+ * rest against the *server process's* AI key and model rather than the
+ * project's.
  *
  * Two things are worth knowing before editing this file:
  *
@@ -391,10 +392,10 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
   const testFilePath = path.join(project.projectRoot, SYNTHETIC_STEPS_BASENAME);
 
   // Rule 6 of stories/mcp-no-project.md. In user scope `macrosDir`/`toolsDir`
-  // are null by construction, and the server's behaviour for a `[macro:]` or
-  // `[tool:]` line with no directory on the wire is to hand it to the AI as
-  // prose — a silent, expensive wrong answer three layers down. Refused here,
-  // before any session exists, with the reason and the fix.
+  // are null by construction, and the server fails a `[macro:]` or `[tool:]`
+  // line with no directory on the wire, with advice about project folders
+  // that a project-less run cannot follow (docs/specs/SPEC-macros.md §7).
+  // Refused here, before any session exists, with the reason and the fix.
   if (project.scope === 'user') {
     const offending = args.steps.filter((step) => isCodeStep(step));
     if (offending.length > 0) {
