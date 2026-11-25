@@ -5,7 +5,7 @@ import type { RunEvent } from '../src/mcp/types.js';
 
 // ---------------------------------------------------------------------------
 // The fold turns "what executed" into "what you asked for", and those two
-// lists are different whenever the server expands a skill or a section, or
+// lists are different whenever the server expands a macro or a section, or
 // when a conditional group runs. Nearly every case below is one where the
 // obvious implementation reports something false — a passing branch as never
 // executed, a human-gated step as passed, one section invocation overwriting
@@ -38,16 +38,16 @@ const rootFrame: FrameInfo = {
   line: 0,
 };
 
-function skillFrame(id: string, line: number, name: string): FrameInfo {
+function macroFrame(id: string, line: number, name: string): FrameInfo {
   // `line` is the invocation site in the test file — the only link an expanded
   // step keeps back to the step the agent actually sent.
-  return { id, parentId: '', kind: 'skill', uri: 'c:/proj/skills/login.md', line, skillName: name };
+  return { id, parentId: '', kind: 'macro', uri: 'c:/proj/macros/login.md', line, macroName: name };
 }
 
 describe('root vs expanded steps', () => {
   it('treats an absent frame as a root step', () => {
     // The server omits `frame` entirely when nothing expanded, which is the
-    // common case once skillsDir is only sent when it exists on disk.
+    // common case once macrosDir is only sent when it exists on disk.
     const result = fold({
       events: [
         { type: 'step:start', line: 10 },
@@ -84,7 +84,7 @@ describe('root vs expanded steps', () => {
   });
 
   it('maps an expanded step back to the step that invoked it', () => {
-    const frame = skillFrame('f1', 11, 'login');
+    const frame = macroFrame('f1', 11, 'login');
     const result = fold({
       events: [
         { type: 'frame:push', frame },
@@ -95,13 +95,13 @@ describe('root vs expanded steps', () => {
       expansionPossible: true,
     });
 
-    const row = result.steps.find((s) => s.frameKind === 'skill');
+    const row = result.steps.find((s) => s.frameKind === 'macro');
     expect(row).toMatchObject({
       sentIndex: 1,
       frameName: 'login',
-      uri: 'c:/proj/skills/login.md',
+      uri: 'c:/proj/macros/login.md',
       line: 3,
-      // The skill body is a file the agent never sent, so we have no text to
+      // The macro body is a file the agent never sent, so we have no text to
       // show — uri + line + frameName is the identifier.
       text: null,
     });
@@ -116,7 +116,7 @@ describe('root vs expanded steps', () => {
       kind: 'section',
       uri: TEST_FILE,
       line: 10,
-      skillName: 'Log in',
+      macroName: 'Log in',
     };
     const frame2: FrameInfo = { ...frame, id: 'sec2', line: 12 };
 
@@ -440,13 +440,13 @@ describe('step outcomes', () => {
     // outermost frame's invocation line.
     const result = fold({
       events: [
-        { type: 'frame:push', frame: skillFrame('f1', 11, 'Sign in') },
-        { type: 'step:start', line: 40, frame: skillFrame('f1', 11, 'Sign in') },
-        { type: 'step:pass', line: 40, frame: skillFrame('f1', 11, 'Sign in') },
+        { type: 'frame:push', frame: macroFrame('f1', 11, 'Sign in') },
+        { type: 'step:start', line: 40, frame: macroFrame('f1', 11, 'Sign in') },
+        { type: 'step:pass', line: 40, frame: macroFrame('f1', 11, 'Sign in') },
         {
           type: 'step:skip',
           line: 41,
-          frame: skillFrame('f1', 11, 'Sign in'),
+          frame: macroFrame('f1', 11, 'Sign in'),
           reason: 'Not run: step 1 returned from "Sign in"',
         },
         { type: 'frame:pop', frameId: 'f1', outputs: {} },
@@ -459,7 +459,7 @@ describe('step outcomes', () => {
     // property of the fixture rather than of the behaviour under test.
     expect(result.steps.find((row) => row.status === 'skipped')).toMatchObject({
       sentIndex: 1,
-      frameKind: 'skill',
+      frameKind: 'macro',
       frameName: 'Sign in',
       line: 41,
       output: 'Not run: step 1 returned from "Sign in"',
@@ -513,7 +513,7 @@ describe('step outcomes', () => {
 
 describe('run-level reporting', () => {
   it('falls back to an error output when no step failed', () => {
-    // A bad env name, a tool-catalogue load failure or a skill-expansion
+    // A bad env name, a tool-catalogue load failure or a macro-expansion
     // failure produce no step:fail at all — their only text is an output
     // event, emitted before any step started.
     const result = fold({

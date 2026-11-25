@@ -75,14 +75,14 @@ export function runSetStep(
   // disagree about what a rebind means.
   bindVariable(scope, step.name, outcome.value);
 
-  // A skill-internal name is namespaced by `applySkillScope` and must never
+  // A macro-internal name is namespaced by `applyMacroScope` and must never
   // be reported: `computeStepCaptures` (CLI) and `autoCapturedNames` (server,
-  // errand) both drop `__skill*`, and writing `outputs` / `assigned`
-  // directly bypassed both — so a `Set {{scratch}}` inside a skill surfaced
-  // `__skill1_scratch` in the report, the HTTP outputs map and the Variables
+  // errand) both drop `__macro*`, and writing `outputs` / `assigned`
+  // directly bypassed both — so a `Set {{scratch}}` inside a macro surfaced
+  // `__macro1_scratch` in the report, the HTTP outputs map and the Variables
   // panel. The assignment itself still happens; only its reporting is
   // suppressed, which is exactly what the two existing filters do.
-  const reportable = !step.name.startsWith('__skill');
+  const reportable = !step.name.startsWith('__macro');
 
   return {
     result: {

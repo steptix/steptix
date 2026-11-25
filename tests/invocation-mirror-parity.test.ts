@@ -18,7 +18,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { isCodeStep } from '../src/mcp/assemble.js';
-import { parseSkillCall } from '../src/skills/skill-call-parser.js';
+import { parseMacroCall } from '../src/macros/macro-call-parser.js';
 import { parseToolCall } from '../src/tools/tool-call-parser.js';
 
 /** Non-breaking space — U+00A0, the one a paste from a rendered page leaves
@@ -28,7 +28,7 @@ const NBSP = ' ';
 
 /** What the RUNNER does with the line: is it dispatched/expanded as a call? */
 function runnerTreatsAsCall(line: string): boolean {
-  for (const parse of [parseSkillCall, parseToolCall]) {
+  for (const parse of [parseMacroCall, parseToolCall]) {
     try {
       if (parse(line)) return true;
     } catch {
@@ -43,29 +43,29 @@ function runnerTreatsAsCall(line: string): boolean {
 
 const LINES = [
   // Real calls, both spellings, labelled and bare.
-  '[skill: login]',
-  '[skill login]',
-  '[skill:login]',
-  '[skill : login]',
-  '[skill\tlogin]',
+  '[macro: login]',
+  '[macro login]',
+  '[macro:login]',
+  '[macro : login]',
+  '[macro\tlogin]',
   '[tool: seed_cart items=2]',
   '[tool seed_cart items=2]',
-  'Log in as admin [skill login role="admin"]',
+  'Log in as admin [macro login role="admin"]',
   'Seed the cart [tool: seed_cart items=2]',
-  '[skill: auth/login username password]',
+  '[macro: auth/login username password]',
   // Prose that must NOT be claimed by anything.
-  '[skills]',
-  '[skillful]',
-  '[skill]',
+  '[macros]',
+  '[macroscopic]',
+  '[macro]',
   '[toolbox]',
   'Verify the button reads [Tool Settings]',
-  'Confirm the [Skill Level] badge shows Expert',
+  'Confirm the [Macro Level] badge shows Expert',
   'The nav shows [TOOL BAR] in caps',
-  '[SKILL: login]',
+  '[MACRO: login]',
   '[TOOL: x]',
-  '[ skill: login]',
-  `[skill${NBSP}login]`,
-  'Click the [skill guide](https://example.com) link',
+  '[ macro: login]',
+  `[macro${NBSP}login]`,
+  'Click the [macro guide](https://example.com) link',
   'Read the [tool reference](./ref.md) page',
   'Open the cart and check out',
   'Set the ratio to 3:1',
@@ -73,8 +73,8 @@ const LINES = [
   // Scanning only the first match made all three of these prose — so the
   // runner skipped a live call, and `isCodeStep` said "no invocation here"
   // for a step carrying one, which is the property run_errand relies on.
-  'See the [skill guide](./g.md) and then [skill: login]',
-  'Check the [skill level: expert] badge then [skill: login]',
+  'See the [macro guide](./g.md) and then [macro: login]',
+  'Check the [macro level: expert] badge then [macro: login]',
   'Verify the [tool "bar"] icon, then [tool: seed_cart items=2]',
 ];
 
@@ -88,21 +88,21 @@ describe('invocation token mirrors agree with the tokenizer', () => {
   });
 
   it('is case-sensitive, matching the scanner', () => {
-    // `[SKILL: x]` is prose to the runner. A mirror that claimed it made
+    // `[MACRO: x]` is prose to the runner. A mirror that claimed it made
     // `run_errand` refuse a step the server would have run.
-    expect(isCodeStep('[SKILL: login]')).toBe(false);
-    expect(runnerTreatsAsCall('[SKILL: login]')).toBe(false);
+    expect(isCodeStep('[MACRO: login]')).toBe(false);
+    expect(runnerTreatsAsCall('[MACRO: login]')).toBe(false);
   });
 
   it('is unanchored, so a labelled call is still a call', () => {
     expect(isCodeStep('Seed the cart [tool: seed_cart]')).toBe(true);
-    expect(isCodeStep('Log in as admin [skill login]')).toBe(true);
+    expect(isCodeStep('Log in as admin [macro login]')).toBe(true);
   });
 
   it("uses the scanner's separator class, not `\\s`", () => {
     // `skipInlineSpace` consumes only a space or a tab, so a non-breaking
     // space never opens a call — on either side of the mirror.
-    expect(isCodeStep(`[skill${NBSP}login]`)).toBe(false);
-    expect(runnerTreatsAsCall(`[skill${NBSP}login]`)).toBe(false);
+    expect(isCodeStep(`[macro${NBSP}login]`)).toBe(false);
+    expect(runnerTreatsAsCall(`[macro${NBSP}login]`)).toBe(false);
   });
 });

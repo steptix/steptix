@@ -6,7 +6,7 @@ import type { AIAction, ChatMessage } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import type { StepResult } from '../src/report/types.js';
 import {
   accountPlaceholders,
@@ -38,7 +38,7 @@ import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
  * the recorded selector says `text={{plan}}`.
  *
  * Two carve-outs are tested as hard as the rule: a name the binding's SCOPE
- * supplies (a skill argument, a looped section's row) keeps the old value
+ * supplies (a macro argument, a looped section's row) keeps the old value
  * match silently, because in phase 1 the expander bakes those into the body
  * text and no token can exist; and a recording made before the change — no
  * action names anything — is judged the old way for every step, with one
@@ -60,7 +60,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });
@@ -372,7 +372,7 @@ describe('the value-match fallback, and its warning', () => {
 });
 
 describe('the scope carve-out (decision 6)', () => {
-  it('recovers a SKILL parameter by value with no warning at all', async () => {
+  it('recovers a MACRO parameter by value with no warning at all', async () => {
     // The expander interpolated the caller's argument into the body text, so
     // the runtime never saw a placeholder and the model could not have named
     // one. Warning here would drown the measurement in cases nobody can act on.
@@ -398,25 +398,25 @@ describe('the scope carve-out (decision 6)', () => {
     expect(result.kind).toBe('entry');
   });
 
-  it('holds a skill RENAME to the exact rule, under its run-time name', async () => {
+  it('holds a macro RENAME to the exact rule, under its run-time name', async () => {
     // A rename is not a carve-out: the expander rewrote the step text to
-    // `{{__skill1_username}}` and the RUNTIME substitutes that, so the model
+    // `{{__macro1_username}}` and the RUNTIME substitutes that, so the model
     // is shown a placeholder and can name it. The reason names the authored
     // name, which is what the author wrote.
     const named = await generate({
       source: 'Sign in as {{username}}',
-      binding: { scope: { renames: { username: '__skill1_username' }, inputs: {} } },
-      actions: [act({ action: 'type', selector: '#u', value: '{{__skill1_username}}' })],
-      parameters: { __skill1_username: 'alice' },
+      binding: { scope: { renames: { username: '__macro1_username' }, inputs: {} } },
+      actions: [act({ action: 'type', selector: '#u', value: '{{__macro1_username}}' })],
+      parameters: { __macro1_username: 'alice' },
       entry: `{ source: 'Sign in as {{username}}', async run({ page, step }) { await page.fill('#u', String(step.getVar('username'))); } }`,
     });
     expect(named.result.kind).toBe('entry');
 
     const silent = await generate({
       source: 'Sign in as {{username}}',
-      binding: { scope: { renames: { username: '__skill1_username' }, inputs: {} } },
+      binding: { scope: { renames: { username: '__macro1_username' }, inputs: {} } },
       actions: [act({ action: 'click', selector: '#go' })],
-      parameters: { __skill1_username: 'alice' },
+      parameters: { __macro1_username: 'alice' },
     });
     expect(silent.result.kind).toBe('declined');
     expect(silent.result.kind === 'declined' && silent.result.reason).toBe(
@@ -867,7 +867,7 @@ describe('a scope read for a reference named after a prototype key', () => {
   });
 
   it('declines, rather than THROWING, when a rename targets a prototype key', () => {
-    // A skill output the caller aliased onto `constructor`, with nothing bound
+    // A macro output the caller aliased onto `constructor`, with nothing bound
     // to it yet. The value lookup is `resolvedParameters[renamed]`, so bare it
     // handed `value?.trim()` the `Object` function and the compile died on
     // `value.trim is not a function` — a TypeError out of a pre-check, in
@@ -891,7 +891,7 @@ describe('a scope read for a reference named after a prototype key', () => {
   });
 
   it('reports an unresolvable caller argument bound to a prototype-key name', () => {
-    // `[skill: login constructor="${data.username}"]` in a run with no
+    // `[macro: login constructor="${data.username}"]` in a run with no
     // environment. The argument is in the frame's `inputs`, raw.
     const binding = bindingFor('Sign in as {{constructor}}', {
       scope: { renames: {}, inputs: { constructor: '${data.username}' } },

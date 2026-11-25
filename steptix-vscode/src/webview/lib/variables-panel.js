@@ -21,7 +21,7 @@
  *   runtimeSources   — optional map {name → 'capture' | 'toolOutput' |
  *                      'assignment' | 'generated'} carrying the `source` discriminator from
  *                      each `capture` event (see runner-core CaptureEvent).
- *                      Lets the panel tell a value a skill/tool returned, or
+ *                      Lets the panel tell a value a macro/tool returned, or
  *                      one a `Set` step assigned, apart from one extracted
  *                      from the page. Absent / unknown names default to
  *                      `'capture'` (the conservative back-compat default for
@@ -48,12 +48,12 @@ const OUTPUT_PATTERN = /\[output:\s*(\w+)\]/i;
 // `[as: x]`. Filled by a `capture` event exactly as an `[output:]` row is.
 // Missing from this list, the panel held such a value and showed no row for it.
 const STORE_AS_RE = /\[(?:store[ \t]+as|as)[ \t]*:[ \t]*(\w+(?:[ \t]*,[ \t]*\w+)*)[ \t]*\]/gi;
-// `[skill: name ... out.foo="caller_alias"]` exposes `caller_alias` into
+// `[macro: name ... out.foo="caller_alias"]` exposes `caller_alias` into
 // the caller's scope. Authors reference it later via `{{caller_alias}}`
 // but never declare it under `## Parameters` — without surfacing it from
 // the invocation line, the Variables panel would silently omit a value
 // that's both captured (via `capture` events) and used downstream.
-const SKILL_OUT_ALIAS_RE = /\bout\.\w+\s*=\s*"([^"]+)"/g;
+const MACRO_OUT_ALIAS_RE = /\bout\.\w+\s*=\s*"([^"]+)"/g;
 // `Set {{name}} to "…"` — the same anchored form the extension scanner and the
 // runtime read (stories/variable-assignment.md). The row appears before a run,
 // like an [output:] row does, and fills in from the `capture` event when the
@@ -95,7 +95,7 @@ function useAiExplicitName(instruction) {
 /**
  * Map a `capture` event's wire `source` discriminator onto the value the
  * panel renders. Closed union per the protocol: `'capture'` (extracted from
- * the page), `'toolOutput'` (returned by a `[tool:]` / `[skill:]` call),
+ * the page), `'toolOutput'` (returned by a `[tool:]` / `[macro:]` call),
  * `'assignment'` (a `Set` step) or `'generated'` (a `[use ai]` step — made
  * up by the model from the step text alone).
  *
@@ -207,13 +207,13 @@ export function collectVariables(text, parameterValues, runtimeValues, runtimeSo
       });
       seen.add(setMatch[1]);
     }
-    // `[skill: foo out.x="alias"]` — surface every caller alias.
+    // `[macro: foo out.x="alias"]` — surface every caller alias.
     // Same semantic as a step-level [output:] from the caller's
-    // perspective: the skill captures `x` and exposes it back as
+    // perspective: the macro captures `x` and exposes it back as
     // `alias` in the caller's scope.
-    SKILL_OUT_ALIAS_RE.lastIndex = 0;
+    MACRO_OUT_ALIAS_RE.lastIndex = 0;
     let aliasMatch;
-    while ((aliasMatch = SKILL_OUT_ALIAS_RE.exec(raw)) !== null) {
+    while ((aliasMatch = MACRO_OUT_ALIAS_RE.exec(raw)) !== null) {
       const aliasName = aliasMatch[1];
       if (!seen.has(aliasName)) {
         out.push({

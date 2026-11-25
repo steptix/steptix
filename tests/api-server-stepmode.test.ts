@@ -1,9 +1,9 @@
 /**
  * End-to-end test for the step-into wire protocol over HTTP:
  *
- *  - `POST /sessions/:id/steps` with `skillsDir` + `testFilePath`
- *    triggers server-side skill expansion and emits frame:push / frame:pop
- *    events around the skill body. (Catches the Phase 1 wiring gap where
+ *  - `POST /sessions/:id/steps` with `macrosDir` + `testFilePath`
+ *    triggers server-side macro expansion and emits frame:push / frame:pop
+ *    events around the macro body. (Catches the Phase 1 wiring gap where
  *    the api-server's field validator was dropping these.)
  *  - `stepMode: 'into'` on the request body pauses the run after every
  *    step, emitting `step:awaiting` events the client can resume from.
@@ -12,7 +12,7 @@
  *  - `runControl` returns 409 when no run is paused.
  *
  * The browser / AI / step-executor are mocked the same way `api-server.test.ts`
- * mocks them; the skill expander and the api-server's request handling
+ * mocks them; the macro expander and the api-server's request handling
  * are exercised for real.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -178,7 +178,7 @@ const cfg: Config = {
 
 let server: Server;
 let baseUrl: string;
-let skillsDir: string;
+let macrosDir: string;
 let testFilePath: string;
 let sessionManager: import('../src/server/session-manager.js').SessionManager;
 
@@ -193,31 +193,31 @@ beforeAll(async () => {
     baseUrl = `http://127.0.0.1:${addr.port}`;
   }
 
-  // Fixture skill + test file in a temp dir.
-  skillsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'stepmode-skills-'));
+  // Fixture macro + test file in a temp dir.
+  macrosDir = await fs.mkdtemp(path.join(os.tmpdir(), 'stepmode-macros-'));
   await fs.writeFile(
-    path.join(skillsDir, 'demo_skill.md'),
+    path.join(macrosDir, 'demo_macro.md'),
     `---
-type: skill
+type: macro
 ---
-# demo_skill
+# demo_macro
 
 ## Steps
-1. First skill step
-2. Second skill step
+1. First macro step
+2. Second macro step
 `,
   );
-  // A second skill that declares a parameter — needed for the
+  // A second macro that declares a parameter — needed for the
   // scope-shows-inputs regression test. The expander INLINES the
   // value into the step text at expansion time, so without the
   // frameInputs side-channel the value would never appear in the
   // runtime scope.
   await fs.writeFile(
-    path.join(skillsDir, 'parameterized_skill.md'),
+    path.join(macrosDir, 'parameterized_macro.md'),
     `---
-type: skill
+type: macro
 ---
-# parameterized_skill
+# parameterized_macro
 
 ## Parameters
 - query: the search term
@@ -227,16 +227,16 @@ type: skill
 2. Second step also using {{query}}
 `,
   );
-  // Nested-skill fixtures for the call-stack / output-flow tests.
+  // Nested-macro fixtures for the call-stack / output-flow tests.
   // outer takes `outer_arg`, declares output `outer_result`. Its body
   // calls inner and captures inner's `inner_result`, then stores its
   // own value into outer_result.
   await fs.writeFile(
-    path.join(skillsDir, 'outer_skill.md'),
+    path.join(macrosDir, 'outer_macro.md'),
     `---
-type: skill
+type: macro
 ---
-# outer_skill
+# outer_macro
 
 ## Parameters
 - outer_arg: caller-supplied outer value
@@ -245,16 +245,16 @@ type: skill
 - outer_result: the value outer exposes back to its caller
 
 ## Steps
-1. [skill: inner_skill inner_arg="INNER_PASSED" out.inner_result="captured_from_inner"]
+1. [macro: inner_macro inner_arg="INNER_PASSED" out.inner_result="captured_from_inner"]
 2. [output: outer_result] Determine outer's final value
 `,
   );
   await fs.writeFile(
-    path.join(skillsDir, 'inner_skill.md'),
+    path.join(macrosDir, 'inner_macro.md'),
     `---
-type: skill
+type: macro
 ---
-# inner_skill
+# inner_macro
 
 ## Parameters
 - inner_arg: caller-supplied inner value
@@ -267,15 +267,15 @@ type: skill
 2. [output: inner_result] Inner produces a value
 `,
   );
-  // A skill called twice in the same test — used for the per-instance
-  // input-isolation regression test. Same skill file; different
+  // A macro called twice in the same test — used for the per-instance
+  // input-isolation regression test. Same macro file; different
   // caller args on each invocation.
   await fs.writeFile(
-    path.join(skillsDir, 'reentrant_skill.md'),
+    path.join(macrosDir, 'reentrant_macro.md'),
     `---
-type: skill
+type: macro
 ---
-# reentrant_skill
+# reentrant_macro
 
 ## Parameters
 - token: caller-supplied token
@@ -285,12 +285,12 @@ type: skill
 2. Use {{token}} in step two
 `,
   );
-  testFilePath = path.join(skillsDir, 'fake-test.md');
+  testFilePath = path.join(macrosDir, 'fake-test.md');
 });
 
 afterAll(async () => {
   await new Promise<void>((r, e) => server.close((err) => err ? e(err) : r()));
-  await fs.rm(skillsDir, { recursive: true, force: true });
+  await fs.rm(macrosDir, { recursive: true, force: true });
 });
 
 /** Open an SSE stream and yield parsed events as they arrive. */
@@ -343,14 +343,14 @@ async function runControl(sessionId: string, mode: string): Promise<number> {
 }
 
 describe('api-server step-into protocol', () => {
-  it('skillsDir triggers expansion and emits frame:push/frame:pop around the skill body', async () => {
+  it('macrosDir triggers expansion and emits frame:push/frame:pop around the macro body', async () => {
     const sessionId = 'frame-events-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
     const events: any[] = [];
     for await (const ev of sseEvents(url, {
-      steps: ['Open the page', '[skill: demo_skill]', 'Verify result'],
+      steps: ['Open the page', '[macro: demo_macro]', 'Verify result'],
       sourceLines: [1, 2, 3],
-      skillsDir,
+      macrosDir,
       testFilePath,
     })) {
       events.push(ev);
@@ -358,38 +358,38 @@ describe('api-server step-into protocol', () => {
     }
 
     const types = events.map((e) => e.type);
-    // Frame events must surround the skill body.
+    // Frame events must surround the macro body.
     const pushIdx = types.indexOf('frame:push');
     const popIdx = types.indexOf('frame:pop');
     expect(pushIdx).toBeGreaterThan(-1);
     expect(popIdx).toBeGreaterThan(pushIdx);
 
-    // Step events inside the skill body must carry the frame payload.
+    // Step events inside the macro body must carry the frame payload.
     const insideFrame = events.filter(
       (e, i) => i > pushIdx && i < popIdx && e.type === 'step:start',
     );
     expect(insideFrame.length).toBeGreaterThan(0);
     for (const ev of insideFrame) {
       expect(ev.frame).toBeDefined();
-      expect(ev.frame.skillName).toBe('demo_skill');
+      expect(ev.frame.macroName).toBe('demo_macro');
     }
 
-    // Top-level skill frame MUST carry its invocation line on the
+    // Top-level macro frame MUST carry its invocation line on the
     // wire — the client uses `frame.line` to paint pass/running on
-    // the test file's `[skill: ...]` step row. A regression that
+    // the test file's `[macro: ...]` step row. A regression that
     // dropped the sourceLines thread-through left `line: 0`, which
     // silently no-ops the client paint (it checks `line > 0`), so
     // the row stayed blank even on a successful run.
     const push = events[pushIdx];
     expect(push.frame.parentId).toBeNull();
-    expect(push.frame.line).toBe(2); // sourceLines[1] = 2 (the [skill:] line)
+    expect(push.frame.line).toBe(2); // sourceLines[1] = 2 (the [macro:] line)
   });
 
-  it('report StepResults use ordinal indexes and carry sourceSkill (parity with CLI runner)', async () => {
+  it('report StepResults use ordinal indexes and carry sourceMacro (parity with CLI runner)', async () => {
     // The server emits step:* events keyed by source line so the client
     // gutter can paint accurately. But the HTML report needs different
     // identity — ordinal indexes ("Step 1, 2, 3…") and per-step
-    // sourceSkill chips, matching what the CLI's test-runner produces.
+    // sourceMacro chips, matching what the CLI's test-runner produces.
     // This test asserts the session-manager re-stamps both before
     // pushing into the report's StepResults array.
     const { generateReport } = await import('../src/report/generator.js');
@@ -399,11 +399,11 @@ describe('api-server step-into protocol', () => {
     const sessionId = 'report-parity-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
     for await (const ev of sseEvents(url, {
-      // Test layout: inline → skill expansion (multiple body steps) → inline.
-      // The skill is `demo_skill`, defined in this test file's skillsDir.
-      steps: ['Open the page', '[skill: demo_skill]', 'Verify result'],
+      // Test layout: inline → macro expansion (multiple body steps) → inline.
+      // The macro is `demo_macro`, defined in this test file's macrosDir.
+      steps: ['Open the page', '[macro: demo_macro]', 'Verify result'],
       sourceLines: [10, 20, 30],
-      skillsDir,
+      macrosDir,
       testFilePath,
     })) {
       if (ev.type === 'done') break;
@@ -414,56 +414,56 @@ describe('api-server step-into protocol', () => {
     const steps = report.steps;
 
     // Index sequencing: ordinal 1, 2, 3, … regardless of where the
-    // steps came from (test vs skill body) or what their source lines
-    // are. Pre-fix this was effectiveSourceLines values like 10, <skill
-    // body lines>, 30 — leaking the skill-file line numbers into the
+    // steps came from (test vs macro body) or what their source lines
+    // are. Pre-fix this was effectiveSourceLines values like 10, <macro
+    // body lines>, 30 — leaking the macro-file line numbers into the
     // report header.
     expect(steps.map((s: { index: number }) => s.index)).toEqual(
       steps.map((_: unknown, i: number) => i + 1),
     );
 
-    // sourceSkill: present on the skill-body steps, absent on the
+    // sourceMacro: present on the macro-body steps, absent on the
     // inline top-level steps. CLI's test-runner.ts threads
-    // `test.sourceSkills[i]` into result.sourceSkill at the same point.
-    const sourceSkills = steps.map(
-      (s: { sourceSkill?: string }) => s.sourceSkill ?? null,
+    // `test.sourceMacros[i]` into result.sourceMacro at the same point.
+    const sourceMacros = steps.map(
+      (s: { sourceMacro?: string }) => s.sourceMacro ?? null,
     );
     // First and last steps are inline (no chip); the middle steps come
-    // from demo_skill expansion (chip = 'demo_skill').
-    expect(sourceSkills[0]).toBeNull();
-    expect(sourceSkills[sourceSkills.length - 1]).toBeNull();
-    const middleSkills = sourceSkills.slice(1, -1);
-    expect(middleSkills.length).toBeGreaterThan(0);
-    for (const name of middleSkills) {
-      expect(name).toBe('demo_skill');
+    // from demo_macro expansion (chip = 'demo_macro').
+    expect(sourceMacros[0]).toBeNull();
+    expect(sourceMacros[sourceMacros.length - 1]).toBeNull();
+    const middleMacros = sourceMacros.slice(1, -1);
+    expect(middleMacros.length).toBeGreaterThan(0);
+    for (const name of middleMacros) {
+      expect(name).toBe('demo_macro');
     }
   });
 
-  it('edits to a skill file between requests are picked up — skill cache is invalidated per /steps call', async () => {
-    // Regression: the module-level skill cache in src/skills/expander.ts is
+  it('edits to a macro file between requests are picked up — macro cache is invalidated per /steps call', async () => {
+    // Regression: the module-level macro cache in src/macros/expander.ts is
     // keyed by `filePath::envName` with no mtime invalidation. The Electron
     // UI runner clears the cache at run-start; the API server (which
-    // steptix-vscode talks to) did not. Result: editing a skill file
+    // steptix-vscode talks to) did not. Result: editing a macro file
     // during a paused run was masked by the stale parse until the server
     // restarted.
     //
-    // The fix: executeSteps() calls clearSkillCache() at the top of every
+    // The fix: executeSteps() calls clearMacroCache() at the top of every
     // request. This test exercises that wiring end-to-end.
     const { executeStep } = await import('../src/runner/step-executor.js');
     const exec = vi.mocked(executeStep);
     const defaultImpl = exec.getMockImplementation();
 
-    const skillName = 'edit_pickup';
-    const skillPath = path.join(skillsDir, `${skillName}.md`);
+    const macroName = 'edit_pickup';
+    const macroPath = path.join(macrosDir, `${macroName}.md`);
     await fs.writeFile(
-      skillPath,
+      macroPath,
       `---
-type: skill
+type: macro
 ---
-# ${skillName}
+# ${macroName}
 
 ## Steps
-1. ORIGINAL skill body line
+1. ORIGINAL macro body line
 `,
     );
 
@@ -477,12 +477,12 @@ type: skill
     });
 
     // Batch 1 — should run the ORIGINAL body.
-    const sessionId = 'skill-cache-' + Date.now();
+    const sessionId = 'macro-cache-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
     for await (const ev of sseEvents(url, {
-      steps: [`[skill: ${skillName}]`],
+      steps: [`[macro: ${macroName}]`],
       sourceLines: [1],
-      skillsDir,
+      macrosDir,
       testFilePath,
     })) {
       if (ev.type === 'done') break;
@@ -490,26 +490,26 @@ type: skill
     const firstBatch = [...capturedInstructions];
     expect(firstBatch.some((i) => i.includes('ORIGINAL'))).toBe(true);
 
-    // Edit the skill on disk — same path, new body.
+    // Edit the macro on disk — same path, new body.
     capturedInstructions.length = 0;
     await fs.writeFile(
-      skillPath,
+      macroPath,
       `---
-type: skill
+type: macro
 ---
-# ${skillName}
+# ${macroName}
 
 ## Steps
-1. UPDATED skill body line
+1. UPDATED macro body line
 `,
     );
 
     // Batch 2 — without the cache clear, would still execute the ORIGINAL
     // line because expander's module-level Map still holds the first parse.
     for await (const ev of sseEvents(url, {
-      steps: [`[skill: ${skillName}]`],
+      steps: [`[macro: ${macroName}]`],
       sourceLines: [1],
-      skillsDir,
+      macrosDir,
       testFilePath,
     })) {
       if (ev.type === 'done') break;
@@ -521,12 +521,12 @@ type: skill
 
     exec.mockReset();
     if (defaultImpl) exec.mockImplementation(defaultImpl);
-    await fs.rm(skillPath);
+    await fs.rm(macroPath);
   });
 
   describe('project-root wiring', () => {
-    // The api-server-stepmode test infrastructure puts its skillsDir at
-    // `os.tmpdir()/stepmode-skills-XXXX`, NOT inside a real project. These
+    // The api-server-stepmode test infrastructure puts its macrosDir at
+    // `os.tmpdir()/stepmode-macros-XXXX`, NOT inside a real project. These
     // tests need a directory tree the project-root resolver can find a
     // steptix.config marker in (code-behind, recordings, env/data files), so we
     // set one up per-test.
@@ -843,30 +843,30 @@ type: skill
     expect(scope.token).toBe('sk-supersecret');
   });
 
-  it('stepMode=over from the root pauses inside the skill, then back at depth 0', async () => {
-    // Phase 3.1.e — the "Step Over a skill" end-to-end path. Three inline
-    // steps, the middle one `[skill: demo_skill]`, which expands to two body
-    // steps on skill-file lines 7 and 8. `over` pauses when the next step's
+  it('stepMode=over from the root pauses inside the macro, then back at depth 0', async () => {
+    // Phase 3.1.e — the "Step Over a macro" end-to-end path. Three inline
+    // steps, the middle one `[macro: demo_macro]`, which expands to two body
+    // steps on macro-file lines 7 and 8. `over` pauses when the next step's
     // depth is <= the CURRENT step's depth:
     //
     //   step 1 (depth 0) → next is body #1 (depth 1): 1 > 0, no pause.
     //   body #1 (depth 1) → next is body #2 (depth 1): PAUSE, naming line 8.
-    //     Inside the skill — once the run IS at depth 1, `over` steps one
+    //     Inside the macro — once the run IS at depth 1, `over` steps one
     //     statement of that frame, which is debugger-correct.
     //   body #2 (depth 1) → next is step 3 (depth 0): PAUSE, naming line 3.
     //   step 3 is the last step: no pause.
     //
     // So the pauses are exactly [8, 3]. `into` would give [7, 8, 3] and `out`
     // fewer still, which is what makes this test about `over`.
-    const sessionId = 'stepmode-over-skill-' + Date.now();
+    const sessionId = 'stepmode-over-macro-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
     const events: any[] = [];
 
     const consume = (async () => {
       for await (const ev of sseEvents(url, {
-        steps: ['Open the page', '[skill: demo_skill]', 'Verify result'],
+        steps: ['Open the page', '[macro: demo_macro]', 'Verify result'],
         sourceLines: [1, 2, 3],
-        skillsDir,
+        macrosDir,
         testFilePath,
         stepMode: 'over',
       })) {
@@ -881,14 +881,14 @@ type: skill
 
     const awaiting = events.filter((e) => e.type === 'step:awaiting');
     expect(awaiting.map((e) => e.line)).toEqual([8, 3]);
-    // The first pause names a line of the SKILL file, so it carries the
-    // skill's frame; the second is back in the test's own flow.
-    expect(awaiting[0].frame?.skillName).toBe('demo_skill');
+    // The first pause names a line of the MACRO file, so it carries the
+    // macro's frame; the second is back in the test's own flow.
+    expect(awaiting[0].frame?.macroName).toBe('demo_macro');
 
-    // Total step:pass count: 1 (step 1 inline) + 2 (skill body) + 1
-    // (step 3 inline) = 4. The skill INVOCATION line (step 2) doesn't
+    // Total step:pass count: 1 (step 1 inline) + 2 (macro body) + 1
+    // (step 3 inline) = 4. The macro INVOCATION line (step 2) doesn't
     // emit its own step:pass because expansion replaces it with the
-    // skill's body — the invocation line is folded away.
+    // macro's body — the invocation line is folded away.
     const passCount = events.filter((e) => e.type === 'step:pass').length;
     expect(passCount).toBe(4);
 
@@ -898,19 +898,19 @@ type: skill
   });
 
   // ─────────────────────────────────────────────────────────────────
-  // Server-side breakpoints (skill-file breakpoint support).
+  // Server-side breakpoints (macro-file breakpoint support).
   //
-  // Pre-fix: a breakpoint set inside a skill `.md` was completely
+  // Pre-fix: a breakpoint set inside a macro `.md` was completely
   // ignored — the extension's client-side `trimAtBreakpoint` only
-  // looked at the TEST file's breakpoints, and skill expansion is
-  // server-side so the skill body steps weren't in the pre-expansion
+  // looked at the TEST file's breakpoints, and macro expansion is
+  // server-side so the macro body steps weren't in the pre-expansion
   // step list. The fix moves breakpoint checking to the server for
   // non-test-file URIs.
   // ─────────────────────────────────────────────────────────────────
 
-  it('frame:scope fires immediately after frame:push (scope visible at skill entry)', async () => {
+  it('frame:scope fires immediately after frame:push (scope visible at macro entry)', async () => {
     // Bug fix: when paused at a breakpoint on the FIRST step of a
-    // skill, the Variables view was empty because frame:scope only
+    // macro, the Variables view was empty because frame:scope only
     // fired after step:pass/fail. Now frame:scope is emitted right
     // after frame:push so the entry-time scope (including the input
     // parameters the expander injected) is observable from the
@@ -920,9 +920,9 @@ type: skill
     const events: any[] = [];
 
     for await (const ev of sseEvents(url, {
-      steps: ['[skill: demo_skill]'],
+      steps: ['[macro: demo_macro]'],
       sourceLines: [1],
-      skillsDir,
+      macrosDir,
       testFilePath,
     })) {
       events.push(ev);
@@ -931,52 +931,52 @@ type: skill
 
     // Find the first frame:push and the first frame:scope that follows
     // it carrying that frame's id. The scope event MUST come BEFORE
-    // any step:pass inside the skill body — that's the contract.
+    // any step:pass inside the macro body — that's the contract.
     const pushIdx = events.findIndex((e) => e.type === 'frame:push');
     expect(pushIdx).toBeGreaterThan(-1);
     const pushedFrameId = events[pushIdx].frame.id;
 
-    const firstSkillPassIdx = events.findIndex(
+    const firstMacroPassIdx = events.findIndex(
       (e, i) => i > pushIdx && e.type === 'step:pass',
     );
-    const skillScopeIdx = events.findIndex(
+    const macroScopeIdx = events.findIndex(
       (e, i) =>
         i > pushIdx &&
         e.type === 'frame:scope' &&
         e.frameId === pushedFrameId,
     );
-    expect(skillScopeIdx).toBeGreaterThan(-1);
-    expect(skillScopeIdx).toBeLessThan(firstSkillPassIdx);
+    expect(macroScopeIdx).toBeGreaterThan(-1);
+    expect(macroScopeIdx).toBeLessThan(firstMacroPassIdx);
     // And it must follow IMMEDIATELY after push (no other events
     // between — the entry-time snapshot is the contract).
-    expect(skillScopeIdx).toBe(pushIdx + 1);
+    expect(macroScopeIdx).toBe(pushIdx + 1);
   });
 
-  it('skill input parameters are visible in the frame:scope on entry (and stay visible across steps)', async () => {
+  it('macro input parameters are visible in the frame:scope on entry (and stay visible across steps)', async () => {
     // The bug this fixes: the expander INLINES the caller's parameter
-    // values directly into the skill body's step text at expansion
+    // values directly into the macro body's step text at expansion
     // time. They never reach `resolvedParameters`, so a debugger pause
-    // inside the skill saw an empty Variables view — "the param
+    // inside the macro saw an empty Variables view — "the param
     // doesn't look like it's being passed in." Fix: the expander
     // records `call.args` on the `ExpandedFrame.inputs` field; the
     // server merges that into the `frame:scope` payload on entry AND
     // on every subsequent step:pass / step:fail emit inside the
     // frame, so the param stays visible for the whole frame lifetime.
-    const sessionId = 'skill-inputs-' + Date.now();
+    const sessionId = 'macro-inputs-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
     const events: any[] = [];
 
     for await (const ev of sseEvents(url, {
-      steps: ['[skill: parameterized_skill query="OpenAI GPT-5"]'],
+      steps: ['[macro: parameterized_macro query="OpenAI GPT-5"]'],
       sourceLines: [1],
-      skillsDir,
+      macrosDir,
       testFilePath,
     })) {
       events.push(ev);
       if (ev.type === 'done') break;
     }
 
-    // The frame:scope event emitted right after the skill's
+    // The frame:scope event emitted right after the macro's
     // frame:push MUST contain query="OpenAI GPT-5".
     const pushIdx = events.findIndex((e) => e.type === 'frame:push');
     expect(pushIdx).toBeGreaterThan(-1);
@@ -989,30 +989,30 @@ type: skill
     // And query must STILL be present in every later frame:scope
     // event for this frame (i.e. after each step:pass), so the
     // Variables view doesn't wipe the param between steps.
-    const skillScopes = events.filter(
+    const macroScopes = events.filter(
       (e) => e.type === 'frame:scope' && e.frameId === pushedFrameId,
     );
-    expect(skillScopes.length).toBeGreaterThanOrEqual(2);
-    for (const s of skillScopes) {
+    expect(macroScopes.length).toBeGreaterThanOrEqual(2);
+    for (const s of macroScopes) {
       expect(s.scope.query).toBe('OpenAI GPT-5');
     }
   });
 
-  it('breakpointsByUri pauses execution before the matching skill-body step', async () => {
-    const sessionId = 'skill-bp-pause-' + Date.now();
+  it('breakpointsByUri pauses execution before the matching macro-body step', async () => {
+    const sessionId = 'macro-bp-pause-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
     const events: any[] = [];
-    const skillPath = path.join(skillsDir, 'demo_skill.md');
+    const macroPath = path.join(macrosDir, 'demo_macro.md');
 
     const consume = (async () => {
       for await (const ev of sseEvents(url, {
-        steps: ['[skill: demo_skill]'],
+        steps: ['[macro: demo_macro]'],
         sourceLines: [1],
-        skillsDir,
+        macrosDir,
         testFilePath,
-        // demo_skill.md has "1. First skill step" on line 7. Setting a
+        // demo_macro.md has "1. First macro step" on line 7. Setting a
         // breakpoint there should pause BEFORE that step runs.
-        breakpointsByUri: { [skillPath]: [7] },
+        breakpointsByUri: { [macroPath]: [7] },
       })) {
         events.push(ev);
         if (ev.type === 'step:awaiting') {
@@ -1024,49 +1024,49 @@ type: skill
     })();
     await consume;
 
-    // The pause MUST come before the first skill body step:pass.
+    // The pause MUST come before the first macro body step:pass.
     const awaitingIdx = events.findIndex((e) => e.type === 'step:awaiting');
-    const firstSkillPassIdx = events.findIndex(
-      (e) => e.type === 'step:pass' && e.frame?.skillName === 'demo_skill',
+    const firstMacroPassIdx = events.findIndex(
+      (e) => e.type === 'step:pass' && e.frame?.macroName === 'demo_macro',
     );
     expect(awaitingIdx).toBeGreaterThan(-1);
-    expect(firstSkillPassIdx).toBeGreaterThan(awaitingIdx);
+    expect(firstMacroPassIdx).toBeGreaterThan(awaitingIdx);
 
-    // The step:awaiting payload should point at the skill file's line.
+    // The step:awaiting payload should point at the macro file's line.
     expect(events[awaitingIdx]).toMatchObject({
       type: 'step:awaiting',
       line: 7,
     });
-    expect(events[awaitingIdx].frame?.skillName).toBe('demo_skill');
+    expect(events[awaitingIdx].frame?.macroName).toBe('demo_macro');
 
-    // Done as passed — both skill body steps ran after the resume.
+    // Done as passed — both macro body steps ran after the resume.
     const done = events.find((e) => e.type === 'done');
     expect(done?.status).toBe('passed');
   });
 
-  it('skill breakpoint + trailing test step: frame:pop fires BEFORE the trailing step (so the [skill:] line can paint pass)', async () => {
-    // User-reported regression: skill-demo.md has
-    //   1. [skill: duckduckgo_search ...]
+  it('macro breakpoint + trailing test step: frame:pop fires BEFORE the trailing step (so the [macro:] line can paint pass)', async () => {
+    // User-reported regression: macro-demo.md has
+    //   1. [macro: duckduckgo_search ...]
     //   2. Navigate to {{target_url}}
-    // and a breakpoint sits inside the skill body. After Continue
+    // and a breakpoint sits inside the macro body. After Continue
     // and a clean run completion, the test file's step 1 (the
-    // [skill:] line) should show the green ✓. Internally that means
-    // the server MUST emit frame:pop between the last skill-body
+    // [macro:] line) should show the green ✓. Internally that means
+    // the server MUST emit frame:pop between the last macro-body
     // step:pass and the trailing test step:start — the extension's
-    // frame:pop handler is what paints `pass` on the [skill:] line.
-    const sessionId = 'skill-bp-trailing-' + Date.now();
+    // frame:pop handler is what paints `pass` on the [macro:] line.
+    const sessionId = 'macro-bp-trailing-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
     const events: any[] = [];
-    const skillPath = path.join(skillsDir, 'demo_skill.md');
+    const macroPath = path.join(macrosDir, 'demo_macro.md');
 
     const consume = (async () => {
       for await (const ev of sseEvents(url, {
-        steps: ['[skill: demo_skill]', 'Trailing test step'],
+        steps: ['[macro: demo_macro]', 'Trailing test step'],
         sourceLines: [1, 2],
-        skillsDir,
+        macrosDir,
         testFilePath,
-        // Breakpoint on skill body line 7 (demo_skill's first step).
-        breakpointsByUri: { [skillPath]: [7] },
+        // Breakpoint on macro body line 7 (demo_macro's first step).
+        breakpointsByUri: { [macroPath]: [7] },
       })) {
         events.push(ev);
         if (ev.type === 'step:awaiting') {
@@ -1078,13 +1078,13 @@ type: skill
     await consume;
 
     // Locate critical anchors:
-    //   - last skill-body step:pass (highest index where frame.skillName === demo_skill)
-    //   - frame:pop for the skill
+    //   - last macro-body step:pass (highest index where frame.macroName === demo_macro)
+    //   - frame:pop for the macro
     //   - step:start for the trailing test step (line 2, no frame OR test-root frame)
-    const lastSkillPassIdx = (() => {
+    const lastMacroPassIdx = (() => {
       let idx = -1;
       events.forEach((e, i) => {
-        if (e.type === 'step:pass' && e.frame?.skillName === 'demo_skill') idx = i;
+        if (e.type === 'step:pass' && e.frame?.macroName === 'demo_macro') idx = i;
       });
       return idx;
     })();
@@ -1093,8 +1093,8 @@ type: skill
       (e) => e.type === 'step:start' && e.line === 2,
     );
 
-    expect(lastSkillPassIdx).toBeGreaterThan(-1);
-    expect(framePopIdx).toBeGreaterThan(lastSkillPassIdx);
+    expect(lastMacroPassIdx).toBeGreaterThan(-1);
+    expect(framePopIdx).toBeGreaterThan(lastMacroPassIdx);
     expect(trailingStartIdx).toBeGreaterThan(framePopIdx);
 
     // Clean run.
@@ -1102,17 +1102,17 @@ type: skill
     expect(done?.status).toBe('passed');
   });
 
-  it('a step:fail inside a skill body stops the run — no further skill steps run, no trailing test step runs', async () => {
-    // Regression: a user observation that "a failed step in the skill
+  it('a step:fail inside a macro body stops the run — no further macro steps run, no trailing test step runs', async () => {
+    // Regression: a user observation that "a failed step in the macro
     // doesn't seem to stop the test" prompted a careful audit of the
     // failure path. The server's step loop MUST `break` on stepResult
     // status !== 'passed', short-circuiting both:
-    //   (a) the remaining skill-body steps for that frame, and
-    //   (b) any trailing test-frame steps after the skill.
+    //   (a) the remaining macro-body steps for that frame, and
+    //   (b) any trailing test-frame steps after the macro.
     // We verify by mocking executeStep to fail on its SECOND call,
     // then asserting:
-    //   - exactly one step:pass + one step:fail land on demo_skill body lines,
-    //   - no step:start for skill body line 8 (the second skill step never starts),
+    //   - exactly one step:pass + one step:fail land on demo_macro body lines,
+    //   - no step:start for macro body line 8 (the second macro step never starts),
     //   - no step:start for the trailing test step (line 2),
     //   - frame:pop fires (call-stack cleanup happens),
     //   - done.status === 'failed'.
@@ -1124,7 +1124,7 @@ type: skill
     let afterFailureCalls = 0;
     exec.mockImplementationOnce(async () => ({
       index: 1,
-      instruction: 'first skill step',
+      instruction: 'first macro step',
       status: 'passed',
       turns: [],
       durationMs: 5,
@@ -1133,9 +1133,9 @@ type: skill
     }));
     exec.mockImplementationOnce(async () => ({
       index: 2,
-      instruction: 'failing skill step',
+      instruction: 'failing macro step',
       status: 'failed',
-      error: 'simulated failure inside skill',
+      error: 'simulated failure inside macro',
       turns: [],
       durationMs: 5,
       retried: false,
@@ -1162,37 +1162,37 @@ type: skill
       };
     });
 
-    const sessionId = 'skill-fail-stops-' + Date.now();
+    const sessionId = 'macro-fail-stops-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
     const events: any[] = [];
 
     for await (const ev of sseEvents(url, {
-      steps: ['[skill: demo_skill]', 'Trailing test step'],
+      steps: ['[macro: demo_macro]', 'Trailing test step'],
       sourceLines: [1, 2],
-      skillsDir,
+      macrosDir,
       testFilePath,
     })) {
       events.push(ev);
       if (ev.type === 'done') break;
     }
 
-    // demo_skill has 2 body steps on lines 7 and 8 — the first runs
+    // demo_macro has 2 body steps on lines 7 and 8 — the first runs
     // (mock returns passed), the second fails.
     const passes = events.filter(
-      (e) => e.type === 'step:pass' && e.frame?.skillName === 'demo_skill',
+      (e) => e.type === 'step:pass' && e.frame?.macroName === 'demo_macro',
     );
     expect(passes.map((e) => e.line)).toEqual([7]);
 
     const fails = events.filter((e) => e.type === 'step:fail');
     expect(fails).toHaveLength(1);
     expect(fails[0].line).toBe(8);
-    expect(fails[0].frame?.skillName).toBe('demo_skill');
+    expect(fails[0].frame?.macroName).toBe('demo_macro');
 
-    // The second skill step's start IS emitted (since failure is
-    // reported AFTER executeStep returns), but no second skill step:pass.
+    // The second macro step's start IS emitted (since failure is
+    // reported AFTER executeStep returns), but no second macro step:pass.
     // The crucial assertion: no step:start for the trailing test step.
     const trailingStart = events.find(
-      (e) => e.type === 'step:start' && e.line === 2 && !e.frame?.skillName,
+      (e) => e.type === 'step:start' && e.line === 2 && !e.frame?.macroName,
     );
     expect(trailingStart).toBeUndefined();
 
@@ -1224,19 +1224,19 @@ type: skill
   it('breakpointsByUri does NOT loop — once consumed, the same step does not re-pause', async () => {
     // Regression: without consumedBreakpoints tracking, the server
     // would re-pause on the SAME step every time Continue arrived.
-    const sessionId = 'skill-bp-noloop-' + Date.now();
+    const sessionId = 'macro-bp-noloop-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
     const events: any[] = [];
-    const skillPath = path.join(skillsDir, 'demo_skill.md');
+    const macroPath = path.join(macrosDir, 'demo_macro.md');
 
     let awaitingCount = 0;
     const consume = (async () => {
       for await (const ev of sseEvents(url, {
-        steps: ['[skill: demo_skill]'],
+        steps: ['[macro: demo_macro]'],
         sourceLines: [1],
-        skillsDir,
+        macrosDir,
         testFilePath,
-        breakpointsByUri: { [skillPath]: [7] },
+        breakpointsByUri: { [macroPath]: [7] },
       })) {
         events.push(ev);
         if (ev.type === 'step:awaiting') {
@@ -1254,19 +1254,19 @@ type: skill
 
   // ─────────────────────────────────────────────────────────────────
   // Multi-frame scope coverage — call stack chain + per-frame
-  // isolation + same-skill-twice independence. The previous tests
-  // covered single-skill scope; these protect the nested and
+  // isolation + same-macro-twice independence. The previous tests
+  // covered single-macro scope; these protect the nested and
   // repeated-invocation cases that are easy to break with subtle
   // changes to the expander's frame-input recording.
   // ─────────────────────────────────────────────────────────────────
 
-  it('nested skills: each frame:scope carries its OWN caller-supplied inputs (no cross-contamination)', async () => {
-    // Test → outer_skill (outer_arg="OUTER") → inner_skill
+  it('nested macros: each frame:scope carries its OWN caller-supplied inputs (no cross-contamination)', async () => {
+    // Test → outer_macro (outer_arg="OUTER") → inner_macro
     //                                          (inner_arg="INNER_PASSED")
     //
     // Three scope contracts to verify simultaneously:
     //   1. Outer's entry frame:scope contains outer_arg, NOT inner_arg
-    //      (the inner skill hasn't been entered yet).
+    //      (the inner macro hasn't been entered yet).
     //   2. Inner's entry frame:scope contains inner_arg, NOT outer_arg
     //      (outer's params are inlined into outer's step text, not
     //       stored as variables — the frame chain isolates them).
@@ -1282,9 +1282,9 @@ type: skill
     const events: any[] = [];
 
     for await (const ev of sseEvents(url, {
-      steps: ['[skill: outer_skill outer_arg="OUTER" out.outer_result="from_outer"]'],
+      steps: ['[macro: outer_macro outer_arg="OUTER" out.outer_result="from_outer"]'],
       sourceLines: [1],
-      skillsDir,
+      macrosDir,
       testFilePath,
     })) {
       events.push(ev);
@@ -1294,8 +1294,8 @@ type: skill
     // Locate the two frame:push events in order.
     const pushes = events.filter((e) => e.type === 'frame:push');
     expect(pushes).toHaveLength(2);
-    expect(pushes[0].frame.skillName).toBe('outer_skill');
-    expect(pushes[1].frame.skillName).toBe('inner_skill');
+    expect(pushes[0].frame.macroName).toBe('outer_macro');
+    expect(pushes[1].frame.macroName).toBe('inner_macro');
     expect(pushes[1].frame.parentId).toBe(pushes[0].frame.id);
 
     // The frame:scope event paired with each push lives at index
@@ -1323,16 +1323,16 @@ type: skill
     expect(pops[1].frameId).toBe(pushes[0].frame.id);
   });
 
-  it('same skill called twice: each invocation has its OWN inputs visible (no leak from prior call)', async () => {
-    // Test step 1: [skill: reentrant_skill token="FIRST"]
-    // Test step 2: [skill: reentrant_skill token="SECOND"]
+  it('same macro called twice: each invocation has its OWN inputs visible (no leak from prior call)', async () => {
+    // Test step 1: [macro: reentrant_macro token="FIRST"]
+    // Test step 2: [macro: reentrant_macro token="SECOND"]
     //
     // Each invocation gets a NEW frame id (the expander's
     // instanceId increments), and frameInputs is keyed by frame id.
     // So instance #1's scope shows token="FIRST", instance #2's
     // shows token="SECOND". Catches: a regression where the
     // expander shared a single inputs map across invocations of
-    // the same skill, or where frameInputs was keyed by skill name
+    // the same macro, or where frameInputs was keyed by macro name
     // instead of frame id.
     const sessionId = 'reentrant-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
@@ -1340,22 +1340,22 @@ type: skill
 
     for await (const ev of sseEvents(url, {
       steps: [
-        '[skill: reentrant_skill token="FIRST"]',
-        '[skill: reentrant_skill token="SECOND"]',
+        '[macro: reentrant_macro token="FIRST"]',
+        '[macro: reentrant_macro token="SECOND"]',
       ],
       sourceLines: [1, 2],
-      skillsDir,
+      macrosDir,
       testFilePath,
     })) {
       events.push(ev);
       if (ev.type === 'done') break;
     }
 
-    // Two distinct frame ids — same skill, different invocations.
+    // Two distinct frame ids — same macro, different invocations.
     const pushes = events.filter((e) => e.type === 'frame:push');
     expect(pushes).toHaveLength(2);
-    expect(pushes[0].frame.skillName).toBe('reentrant_skill');
-    expect(pushes[1].frame.skillName).toBe('reentrant_skill');
+    expect(pushes[0].frame.macroName).toBe('reentrant_macro');
+    expect(pushes[1].frame.macroName).toBe('reentrant_macro');
     expect(pushes[0].frame.id).not.toBe(pushes[1].frame.id);
 
     // First instance's entry scope.
@@ -1368,7 +1368,7 @@ type: skill
     expect(secondScope?.scope?.token).toBe('SECOND');
     // And the second invocation's frame:scope events emitted
     // AFTER the first instance's frame:pop must not retain "FIRST"
-    // — frameInputs lookup is per frame id, not per skill name.
+    // — frameInputs lookup is per frame id, not per macro name.
     const secondInstanceScopes = events.filter(
       (e) => e.type === 'frame:scope' && e.frameId === pushes[1].frame.id,
     );
@@ -1445,8 +1445,8 @@ type: skill
   // line", whose request expands — a request that does not never reaches the
   // breakpoint check at all, so it cannot tell the rule from its absence.
 
-  it('aborts cleanly when a [skill:] invocation has a syntax error', async () => {
-    // A malformed skill call (unterminated quoted argument) must not crash
+  it('aborts cleanly when a [macro:] invocation has a syntax error', async () => {
+    // A malformed macro call (unterminated quoted argument) must not crash
     // the SSE stream or run any steps. The server should surface the parser
     // error via an `output kind:error` event AND a `done status:error`, so
     // the client can show the message without the run silently hanging.
@@ -1454,16 +1454,16 @@ type: skill
     const executeStepMock = vi.mocked(executeStep);
     executeStepMock.mockClear();
 
-    const sessionId = 'skill-syntax-' + Date.now();
+    const sessionId = 'macro-syntax-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
 
     const events: any[] = [];
     for await (const ev of sseEvents(url, {
-      // Unterminated string after `query="` — parseSkillCall throws
-      // SkillCallSyntaxError, which expandSkills propagates verbatim.
-      steps: ['[skill: parameterized_skill query="oops]'],
+      // Unterminated string after `query="` — parseMacroCall throws
+      // MacroCallSyntaxError, which expandMacros propagates verbatim.
+      steps: ['[macro: parameterized_macro query="oops]'],
       sourceLines: [1],
-      skillsDir,
+      macrosDir,
       testFilePath,
     })) {
       events.push(ev);
@@ -1481,7 +1481,7 @@ type: skill
     );
     expect(errorOutputs.length).toBeGreaterThan(0);
     const combined = errorOutputs.map((e) => e.msg).join('\n');
-    expect(combined).toMatch(/Skill expansion failed/);
+    expect(combined).toMatch(/Macro expansion failed/);
     expect(combined).toMatch(/unterminated string for argument 'query'/);
 
     // No step should have been executed — expansion fails before the browser

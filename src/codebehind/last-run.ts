@@ -29,7 +29,7 @@ export interface LastRunStep {
   section?: string;
   /**
    * The entry's target `.steps.ts` (the binding's `file`). Part of the row's
-   * identity where present: a skill-body step and a test-frame step can share
+   * identity where present: a macro-body step and a test-frame step can share
    * `source` and an empty `section`, and only the file tells them apart.
    * Optional so sidecars written before the field still read back.
    */

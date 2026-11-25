@@ -144,7 +144,7 @@ Runs as code: no AI call and no page interaction. The value is text only — not
 
 A `{{name}}` the run cannot resolve fails the step, naming it, rather than storing the literal. `Set {{name}} to` claims the line, so a malformed one (no quotes, or text after the closing quote) is a parse error rather than prose sent to the model; `Set the filter to Recent` names no variable and remains an ordinary AI step.
 
-The target must be a runtime variable. A skill's own `## Parameters`, and the columns of a table under a `### Section`, are interpolated into the step text at expansion time rather than kept as variables, so assigning to one is refused at parse time. A test's `## Parameters` and the columns of a table under `## Steps` are runtime values and may be assigned freely.
+The target must be a runtime variable. A macro's own `## Parameters`, and the columns of a table under a `### Section`, are interpolated into the step text at expansion time rather than kept as variables, so assigning to one is refused at parse time. A test's `## Parameters` and the columns of a table under `## Steps` are runtime values and may be assigned freely.
 
 #### `[use ai] <step>` — Ask the Model for a Value
 
@@ -160,7 +160,7 @@ Sends the rest of the step, with its placeholders filled in, to the model **on i
 - **Asked on every run.** Never compiled into code-behind, and a hand-written `.steps.ts` entry for its text is never run. A value that must be the same every time is a tool's job.
 - **The step text is everything the model knows.** Put the date, or anything else it needs, in the step. A secret-named value that fills a placeholder reaches the model as `***` (by the `## Values` block's rule, `## Config: unmask:` included), and an unresolved `{{name}}` or `${…}` fails the step before any model call.
 - **A poor source of randomness.** "Random" may repeat between runs.
-- **The name.** `[store as: x]`, `[as: x]`, `[output: x]` or prose `store as {{x}}` pins it, and the model's own name is then ignored. With none, the model's name is used only if the step says it as a whole word (case-insensitive); otherwise the step fails, naming both fixes. The check rules out invented names, not unnamed steps: a step that never names its value can be stored under any word of its sentence. More than one name is refused. Inside a skill the name must be `[store as: x]` or `store as {{x}}`.
+- **The name.** `[store as: x]`, `[as: x]`, `[output: x]` or prose `store as {{x}}` pins it, and the model's own name is then ignored. With none, the model's name is used only if the step says it as a whole word (case-insensitive); otherwise the step fails, naming both fixes. The check rules out invented names, not unnamed steps: a step that never names its value can be stored under any word of its sentence. More than one name is refused. Inside a macro the name must be `[store as: x]` or `store as {{x}}`.
 - **The reply.** The model answers `{"as": name, "value": v}` or `{"error": reason}`. An `error` fails the step with the reason and is not retried; any other shape, an empty value, or a list or object is retried within `execution.retries`.
 - `[use ai]` must open the step (after an optional `[no-hooks]`), takes no arguments, and cannot be a control line's tail. The `capture` event for its value carries `source: "generated"`.
 
@@ -228,7 +228,7 @@ If any interactive command fails, the overall step is marked as failed. The same
 
 ### Inline Sections
 
-An `### Name` heading **inside `## Steps`** defines a named block of reusable steps — an inline skill, without the separate file or the parameter declarations. A step invokes it by writing the section's name as its **entire text**; the bare name *is* the call.
+An `### Name` heading **inside `## Steps`** defines a named block of reusable steps — an inline macro, without the separate file or the parameter declarations. A step invokes it by writing the section's name as its **entire text**; the bare name *is* the call.
 
 ```markdown
 ## Parameters
@@ -255,16 +255,16 @@ An `### Name` heading **inside `## Steps`** defines a named block of reusable st
 
 Here steps 1 and 4 both call `### Login`, and step 3 calls `### Checkout`. Each call expands inline to the section's body before the run, so the runner, the report, and Steptix's debugger see the fully-expanded flow.
 
-**When to use a section instead of a skill:** a section groups steps *within one test* and shares the test's scope — no parameters, no outputs, no second file. Reach for a skill when a block is shared *across* tests or genuinely needs its own inputs.
+**When to use a section instead of a macro:** a section groups steps *within one test* and shares the test's scope — no parameters, no outputs, no second file. Reach for a macro when a block is shared *across* tests or genuinely needs its own inputs.
 
 **Grammar**
 
 - A section's body is every numbered item from its `### Name` heading until the next `###`/`##` heading or end of file. A `####` heading with text inside a body is inert prose; a hashes-only line (`###`, `####`, …) is an error (empty name).
 - The **main flow** is the numbered items *before the first `###`*. It cannot resume after a section begins — once the first `###` appears, every later numbered item belongs to a section.
-- A section may call other sections in the same file, and may call skills. Skill files follow the same grammar, so a skill body may define and invoke its own sections.
+- A section may call other sections in the same file, and may call macros. Macro files follow the same grammar, so a macro body may define and invoke its own sections.
 - Sections are macros, not functions: **no per-section `## Parameters`/`## Outputs`**, and a section invoked twice runs twice. A `[store as: X]` inside a test-file section body is visible to every later step of the test.
 
-**Matching** is on the step's raw text (minus the `N. ` prefix), trimmed and **case-insensitive** — `Login`, `login`, and `LOGIN` all call `### Login`. Inline markdown is *not* normalized: `1. **Login**` is an ordinary AI step, not a call. A step that parses as `[skill:]`, `[tool:]`, `[input:]`, or `[interactive]` is never a section call. A trailing period or a typo is a near-miss, not a call — Steptix squiggles those as "Did you mean…?" while you type.
+**Matching** is on the step's raw text (minus the `N. ` prefix), trimmed and **case-insensitive** — `Login`, `login`, and `LOGIN` all call `### Login`. Inline markdown is *not* normalized: `1. **Login**` is an ordinary AI step, not a call. A step that parses as `[macro:]`, `[tool:]`, `[input:]`, or `[interactive]` is never a section call. A trailing period or a typo is a near-miss, not a call — Steptix squiggles those as "Did you mean…?" while you type.
 
 **Names** may contain spaces (`### Log in as admin`). Refused at parse time: a reserved H2 keyword (`Steps`, `Config`, `Parameters`, `Outputs`, `Hooks`), a name beginning with `[`, a name containing `{{`, an empty name, and a duplicate (case-insensitively) within one file.
 
@@ -581,7 +581,7 @@ Field notes:
 - `browser.browser` is one of `'chromium' | 'firefox' | 'webkit'`.
 - `execution.promptOnAmbiguity` asks the user when the AI is unsure.
 - `execution.defaultHooks` can declare project-level hooks, e.g.
-  `"defaultHooks": { "beforeEach": ["[skill: dismiss_obstacles]"] }`.
+  `"defaultHooks": { "beforeEach": ["[macro: dismiss_obstacles]"] }`.
 - `reports.embedScreenshots` toggles base64 embed vs separate files.
 - Secrets (`AI_API_KEY`, etc.) live in `.env`, never in this file — they are
   injected at load time.

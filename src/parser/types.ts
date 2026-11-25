@@ -10,8 +10,8 @@ export interface TestFrontmatter {
    *  escape hatch for tests pinned to a single env (e.g. a smoke test that
    *  must always hit prod). */
   env?: string;
-  /** "skill" marks the file as a reusable step macro, not a runnable test */
-  type?: 'test' | 'skill';
+  /** "macro" marks the file as a reusable step macro, not a runnable test */
+  type?: 'test' | 'macro';
   /** "replace" ignores project-level defaultHooks for this test; "merge" (default)
    *  runs defaults before per-test hooks. */
   hooks?: 'merge' | 'replace';
@@ -130,10 +130,10 @@ export interface HookToolCalls {
 
 /**
  * Parallel-to-`hooks` shape: a `(string | null)[]` per scope, attributing
- * each hook instruction to the outermost skill it came from (or null when
+ * each hook instruction to the outermost macro it came from (or null when
  * authored inline). Used by the report renderer to show provenance chips.
  */
-export interface HookSourceSkills {
+export interface HookSourceMacros {
   before: (string | null)[];
   beforeEach: (string | null)[];
   afterEach: (string | null)[];
@@ -162,7 +162,7 @@ export interface ParsedSection {
    * `steps`.
    *
    * Not redundant with `steps`: the expander recursion runs over
-   * `applySkillScope` output and `extractPlainText`-normalised text, so
+   * `applyMacroScope` output and `extractPlainText`-normalised text, so
    * without the raw parallel a formatted body line could wrongly resolve to a
    * section. Match resolution uses `rawSteps?.[i] ?? steps[i]` (contract §2.1)
    * so the server — which has no raw parallel — stays correct too.
@@ -214,15 +214,15 @@ export interface ParsedTest {
    * a parse error rather than a run that silently loops zero times.
    */
   dataRows?: Array<Record<string, string>>;
-  /** Ordered list of natural language step instructions (skills already expanded) */
+  /** Ordered list of natural language step instructions (macros already expanded) */
   steps: string[];
   /**
    * Parallel to `steps` — 1-based source line in `filePath` for each step
-   * before skill expansion. After `expandSkills` runs the array length will
+   * before macro expansion. After `expandMacros` runs the array length will
    * exceed the count of inline test-file steps; entries that came from a
-   * skill body keep the *invocation* line in the test file (so reports and
+   * macro body keep the *invocation* line in the test file (so reports and
    * inline-mode runs can still point at a real line in the open test file).
-   * The step-into wire trace carries the per-skill-body origin separately
+   * The step-into wire trace carries the per-macro-body origin separately
    * via `frame:push` events.
    */
   stepLines: number[];
@@ -234,20 +234,20 @@ export interface ParsedTest {
    *  to the tool executor instead of the AI loop. */
   toolCalls: (import('../tools/types.js').ToolCall | null)[];
   /** Parallel to `steps` — when non-null, the step came from inside the
-   *  named (outermost) skill. Surfaced by the report so each step row
-   *  shows which skill it originated from. */
-  sourceSkills: (string | null)[];
+   *  named (outermost) macro. Surfaced by the report so each step row
+   *  shows which macro it originated from. */
+  sourceMacros: (string | null)[];
   /**
    * Parallel to `steps` — when non-null, the step came from inside the named
-   * inline section. Set to the *outermost section that sits outside any skill
+   * inline section. Set to the *outermost section that sits outside any macro
    * frame*, i.e. a section of this file.
    *
-   * A skill's own internal sections are never surfaced here — the skill badge
-   * already names what the author wrote, and skill-private names are noise in
+   * A macro's own internal sections are never surfaced here — the macro badge
+   * already names what the author wrote, and macro-private names are noise in
    * a test report. But a step inside one still reports the enclosing *test*
-   * section if there is one: for test → `### A` → skill S → S's `### B`, the
-   * answer is "A". Only a skill invoked from the root flow yields null.
-   * Both this and `sourceSkills` can be set at once.
+   * section if there is one: for test → `### A` → macro S → S's `### B`, the
+   * answer is "A". Only a macro invoked from the root flow yields null.
+   * Both this and `sourceMacros` can be set at once.
    */
   sourceSections: (string | null)[];
   /**
@@ -276,13 +276,13 @@ export interface ParsedTest {
    */
   expansion?: {
     rawSteps: string[];
-    origins: import('../skills/expander.js').ExpandedStepOrigin[];
-    frames: Record<string, import('../skills/expander.js').ExpandedFrame>;
+    origins: import('../macros/expander.js').ExpandedStepOrigin[];
+    frames: Record<string, import('../macros/expander.js').ExpandedFrame>;
     /**
      * Parallel to `steps` — non-null on a control-flow guard, giving the
      * index range of its body and the end of its chain
      * (stories/control-flow.md §Design). All-null for a file with no control
-     * lines. See `SkillExpansion.controls`.
+     * lines. See `MacroExpansion.controls`.
      */
     controls: (import('../runner/control-flow.js').ControlRecord | null)[];
   };
@@ -296,7 +296,7 @@ export interface ParsedTest {
    * environment, in which case those placeholders are still literal text.
    */
   envData?: import('./interpolate-env-data.js').EnvDataContext;
-  /** Pre/post-step hook instructions (skills already expanded). */
+  /** Pre/post-step hook instructions (macros already expanded). */
   hooks: TestHooks;
   /**
    * Parallel to `hooks`: each hook line as the AUTHOR wrote it, `${env.X}` /
@@ -310,45 +310,45 @@ export interface ParsedTest {
   authoredHooks?: TestHooks;
   /** Parallel to `hooks` — tool-call markers per hook instruction. */
   hookToolCalls: HookToolCalls;
-  /** Parallel to `hooks` — source-skill attribution per hook instruction. */
-  hookSourceSkills: HookSourceSkills;
+  /** Parallel to `hooks` — source-macro attribution per hook instruction. */
+  hookSourceMacros: HookSourceMacros;
 }
 
 /**
- * A parsed skill: a reusable, parameterised sequence of steps invoked from
- * a test via `[skill: name arg="value"]`. Skills expand at parse time —
+ * A parsed macro: a reusable, parameterised sequence of steps invoked from
+ * a test via `[macro: name arg="value"]`. Macros expand at parse time —
  * the runner only ever sees the flattened step list on `ParsedTest.steps`.
  */
-export interface ParsedSkill {
-  /** Absolute path to the skill .md file */
+export interface ParsedMacro {
+  /** Absolute path to the macro .md file */
   filePath: string;
-  /** Skill name (from H1, used as the invocation key) */
+  /** Macro name (from H1, used as the invocation key) */
   name: string;
   /** Declared input parameter names (with optional default/hint text) */
   parameters: Record<string, string>;
   /** Declared output names — only these leak back to the caller's scope */
   outputs: string[];
-  /** Skill body — natural-language steps, may reference {{param}} and other skills */
+  /** Macro body — natural-language steps, may reference {{param}} and other macros */
   steps: string[];
   /** Parallel to `steps` — 1-based source line in `filePath`. Used by the
    *  step-into protocol (Phase 1) to attribute each expanded step to its
-   *  origin file+line inside the skill .md. */
+   *  origin file+line inside the macro .md. */
   stepLines: number[];
   /**
-   * Inline sections defined in this skill's own `## Steps`, keyed by
-   * `matchText(name)`. A skill body may define and invoke its own sections;
-   * they live inside that skill instance's scope, so `applySkillScope`
+   * Inline sections defined in this macro's own `## Steps`, keyed by
+   * `matchText(name)`. A macro body may define and invoke its own sections;
+   * they live inside that macro instance's scope, so `applyMacroScope`
    * transforms fresh copies of these bodies per invocation (never mutate the
-   * cached `ParsedSkill`).
+   * cached `ParsedMacro`).
    */
   sections: Record<string, ParsedSection>;
   /** Parallel to `steps` — raw line text used as the match side for bare-name
-   *  calls in this skill's body. See `ParsedSection.rawSteps`. */
+   *  calls in this macro's body. See `ParsedSection.rawSteps`. */
   rawSteps: string[];
   /**
-   * Skill-private named data-source files declared in frontmatter. Each
+   * Macro-private named data-source files declared in frontmatter. Each
    * entry registers a placeholder namespace `${<name>.X.Y}` resolved locally
-   * inside this skill's body — invisible to callers. Path strings may
+   * inside this macro's body — invisible to callers. Path strings may
    * reference `${env.X}` and `${envName}` only. See
    * stories/skill-data-sources.md.
    */

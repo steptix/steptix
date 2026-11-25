@@ -44,7 +44,7 @@ import {
 const CORPUS = [
   // ── the six forms, plainly ────────────────────────────────────────────
   'If the Cash checkbox is ticked, then Pay with cash',
-  'If {{plan}} is "pro" then [skill: enable_pro_features]',
+  'If {{plan}} is "pro" then [macro: enable_pro_features]',
   'Else if the Card checkbox is ticked, then Pay by card',
   'Otherwise if the Card checkbox is ticked, then Pay by card',
   'Otherwise, Pay by card',
@@ -199,7 +199,7 @@ const CORPUS = [
   'Repeatedly click',
   'Click the Login button',
   'Set {{x}} to "y"',
-  '[skill: login]',
+  '[macro: login]',
   '[tool: fetch_orders]',
   '[input: pin] Enter your PIN',
   '[interactive]',

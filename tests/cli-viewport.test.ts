@@ -139,13 +139,13 @@ function makeInstance(config: TestConfig): TestInstance {
     stepLines: [1],
     skipHooks: [false],
     toolCalls: [null],
-    sourceSkills: [null],
+    sourceMacros: [null],
     sourceSections: [null],
     sections: {},
     rawSteps: [...steps],
     hooks: { before: [], beforeEach: [], afterEach: [], after: [] },
     hookToolCalls: { before: [], beforeEach: [], afterEach: [], after: [] },
-    hookSourceSkills: { before: [], beforeEach: [], afterEach: [], after: [] },
+    hookSourceMacros: { before: [], beforeEach: [], afterEach: [], after: [] },
   };
   return { test, resolvedParameters: {} };
 }

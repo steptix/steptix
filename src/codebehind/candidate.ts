@@ -43,7 +43,7 @@ export type CompilePhase =
 /**
  * One step's place in a compile.
  *
- * `key` identifies the *entry*, not the step: a section or skill body is
+ * `key` identifies the *entry*, not the step: a section or macro body is
  * defined once and inlined many times, so several expanded steps can share one
  * entry. Generation is keyed by entry, which is why the same body compiles once
  * however many times it is called.
@@ -154,7 +154,7 @@ export class Candidate {
       occurrence: binding.occurrence,
       entryCode,
       // The header names the file this code-behind belongs to — which for a
-      // skill's entries is the skill, not the test that pulled it in.
+      // macro's entries is the macro, not the test that pulled it in.
       markdownFile: binding.file.replace(/\.steps\.ts$/, '.md'),
     };
     // The file as it stands, loading the on-disk original the first time. An

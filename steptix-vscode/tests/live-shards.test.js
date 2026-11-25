@@ -168,7 +168,7 @@ test("copyWorkspace: brings the fixtures, leaves the per-run leftovers", () => {
   write(path.join(src, ".env"), "STEPTIX_SERVER_URL=http://localhost:3100\n");
   write(path.join(src, "init", "steptix.config.json"), "{}");
   write(path.join(src, "init", "tests", "example.md"), "## Steps\n");
-  write(path.join(src, "init", "skills", "flows", "enter_email.md"), "skill\n");
+  write(path.join(src, "init", "macros", "flows", "enter_email.md"), "macro\n");
   // Leftovers a previous local run would have left behind.
   write(path.join(src, "init", "reports", "old-run.html"), "<html>");
   write(path.join(src, "init", ".steptix", "cdp-profiles", "chromium-default", "Local State"), "{}");
@@ -180,7 +180,7 @@ test("copyWorkspace: brings the fixtures, leaves the per-run leftovers", () => {
   assert.ok(fs.existsSync(path.join(dest, ".env")));
   assert.ok(fs.existsSync(path.join(dest, "init", "steptix.config.json")));
   assert.ok(fs.existsSync(path.join(dest, "init", "tests", "example.md")));
-  assert.ok(fs.existsSync(path.join(dest, "init", "skills", "flows", "enter_email.md")));
+  assert.ok(fs.existsSync(path.join(dest, "init", "macros", "flows", "enter_email.md")));
 
   assert.equal(fs.existsSync(path.join(dest, "init", "reports")), false, "reports/");
   assert.equal(fs.existsSync(path.join(dest, "init", ".steptix")), false, ".steptix/");
@@ -261,7 +261,7 @@ test("rebaseConfigPaths: in-tree paths stay relative so they travel with the cop
   // Rewriting these would be the opposite of the point: every shard's reports
   // and tests would resolve back to the one original workspace.
   const { original, copy } = workspaceWithConfig({
-    tests: { dir: "./tests", dataDir: "./data", skillsDir: "./skills" },
+    tests: { dir: "./tests", dataDir: "./data", macrosDir: "./macros" },
     reports: { outputDir: "./reports" },
   });
 
@@ -272,7 +272,7 @@ test("rebaseConfigPaths: in-tree paths stay relative so they travel with the cop
   );
   assert.equal(written.tests.dir, "./tests");
   assert.equal(written.tests.dataDir, "./data");
-  assert.equal(written.tests.skillsDir, "./skills");
+  assert.equal(written.tests.macrosDir, "./macros");
   assert.equal(written.reports.outputDir, "./reports");
 });
 

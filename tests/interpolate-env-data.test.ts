@@ -1,7 +1,7 @@
 /**
  * Tests for `${env.X}` / `${data.X.Y}` parse-time interpolation.
  *
- * The interpolator is the substitution stage between skill expansion and the
+ * The interpolator is the substitution stage between macro expansion and the
  * existing `{{parameter}}` runtime substitution. These tests cover the
  * surface contract that step authors and the parser depend on.
  */

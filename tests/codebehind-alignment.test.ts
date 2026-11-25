@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import {
   buildCodeBehindRegistry,
   codeBehindPathFor,
@@ -12,11 +12,11 @@ import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
  * Binding: which `.steps.ts` entry (if any) each expanded step owns.
- * See stories/step-codebehind.md, "Binding" and "Sections and skills".
+ * See stories/step-codebehind.md, "Binding" and "Sections and macros".
  *
  * Every case drives `parseTestFile` + expansion rather than hand-building
  * step arrays — the contract's §2.3 lesson. Hand-built inputs bypass
- * `extractPlainText` and `applySkillScope`, which are exactly the transforms
+ * `extractPlainText` and `applyMacroScope`, which are exactly the transforms
  * that make the match side interesting.
  *
  * Fixtures live under the repo (not `os.tmpdir()`) so a `.steps.ts` can
@@ -37,7 +37,7 @@ let counter = 0;
 let dir: string;
 
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });
@@ -72,11 +72,11 @@ ${scope}    source: ${JSON.stringify(source)},
 
 async function registryFor(
   testPath: string,
-  opts: { skillsDir?: string; warnings?: string[] } = {},
+  opts: { macrosDir?: string; warnings?: string[] } = {},
 ): Promise<{ steps: string[]; registry: CodeBehindRegistry }> {
   const parsed = await parseTestFile(
     testPath,
-    opts.skillsDir ? { skillsDir: opts.skillsDir } : {},
+    opts.macrosDir ? { macrosDir: opts.macrosDir } : {},
   );
   const expansion = parsed.expansion!;
   const registry = await buildCodeBehindRegistry(
@@ -246,75 +246,75 @@ describe('code-behind binding — sections', () => {
   });
 });
 
-describe('code-behind binding — skills', () => {
-  const skill = [
-    '---', 'type: skill', '---', '# login', '',
+describe('code-behind binding — macros', () => {
+  const macro = [
+    '---', 'type: macro', '---', '# login', '',
     '## Parameters', '- username: who', '',
     '## Steps', '1. Sign in as {{username}}',
   ].join('\n');
 
-  it('resolves a skill-body step to the SKILL\'s own .steps.ts, shared by every caller', async () => {
-    const skillsDir = path.join(dir, 'skills');
-    const skillPath = await write('skills/login.md', skill);
-    await write('skills/login.steps.ts', stepsFile([entry('Sign in as {{username}}', 'from-skill')]));
-    const a = await write('a.md', ['# A', '', '## Steps', '1. [skill: login username="alice"]'].join('\n'));
-    const b = await write('b.md', ['# B', '', '## Steps', '1. [skill: login username="bob"]'].join('\n'));
+  it('resolves a macro-body step to the MACRO\'s own .steps.ts, shared by every caller', async () => {
+    const macrosDir = path.join(dir, 'macros');
+    const macroPath = await write('macros/login.md', macro);
+    await write('macros/login.steps.ts', stepsFile([entry('Sign in as {{username}}', 'from-macro')]));
+    const a = await write('a.md', ['# A', '', '## Steps', '1. [macro: login username="alice"]'].join('\n'));
+    const b = await write('b.md', ['# B', '', '## Steps', '1. [macro: login username="bob"]'].join('\n'));
 
-    const ra = await registryFor(a, { skillsDir });
-    const rb = await registryFor(b, { skillsDir });
+    const ra = await registryFor(a, { macrosDir });
+    const rb = await registryFor(b, { macrosDir });
 
-    expect(ra.registry.bindingFor(0)?.file).toBe(codeBehindPathFor(skillPath));
-    expect(rb.registry.bindingFor(0)?.file).toBe(codeBehindPathFor(skillPath));
-    expect(await markerAt(ra.registry, 0)).toBe('from-skill');
-    expect(await markerAt(rb.registry, 0)).toBe('from-skill');
+    expect(ra.registry.bindingFor(0)?.file).toBe(codeBehindPathFor(macroPath));
+    expect(rb.registry.bindingFor(0)?.file).toBe(codeBehindPathFor(macroPath));
+    expect(await markerAt(ra.registry, 0)).toBe('from-macro');
+    expect(await markerAt(rb.registry, 0)).toBe('from-macro');
   });
 
   it('binds the AUTHORED text, not the interpolated text', async () => {
-    const skillsDir = path.join(dir, 'skills');
-    await write('skills/login.md', skill);
-    const t = await write('t.md', ['# T', '', '## Steps', '1. [skill: login username="alice"]'].join('\n'));
+    const macrosDir = path.join(dir, 'macros');
+    await write('macros/login.md', macro);
+    const t = await write('t.md', ['# T', '', '## Steps', '1. [macro: login username="alice"]'].join('\n'));
 
-    const { steps, registry } = await registryFor(t, { skillsDir });
+    const { steps, registry } = await registryFor(t, { macrosDir });
     expect(steps[0]).toBe('Sign in as alice');
     expect(registry.bindingFor(0)?.source).toBe('Sign in as {{username}}');
   });
 
-  it('resolves a skill-internal section to the skill file, under the section scope', async () => {
-    const skillsDir = path.join(dir, 'skills');
-    const skillPath = await write('skills/login.md', [
-      '---', 'type: skill', '---', '# login', '',
+  it('resolves a macro-internal section to the macro file, under the section scope', async () => {
+    const macrosDir = path.join(dir, 'macros');
+    const macroPath = await write('macros/login.md', [
+      '---', 'type: macro', '---', '# login', '',
       '## Parameters', '- username: who', '',
       '## Steps', '1. Open the form', '2. Fill it', '',
       '### Fill it', '1. Type {{username}}',
     ].join('\n'));
-    await write('skills/login.steps.ts', stepsFile([
-      entry('Type {{username}}', 'skill-section', 'Fill it'),
+    await write('macros/login.steps.ts', stepsFile([
+      entry('Type {{username}}', 'macro-section', 'Fill it'),
     ]));
-    const t = await write('t.md', ['# T', '', '## Steps', '1. [skill: login username="alice"]'].join('\n'));
+    const t = await write('t.md', ['# T', '', '## Steps', '1. [macro: login username="alice"]'].join('\n'));
 
-    const { registry } = await registryFor(t, { skillsDir });
+    const { registry } = await registryFor(t, { macrosDir });
     const bodyBinding = registry.bindingFor(1)!;
-    expect(bodyBinding.file).toBe(codeBehindPathFor(skillPath));
+    expect(bodyBinding.file).toBe(codeBehindPathFor(macroPath));
     expect(bodyBinding.section).toBe('Fill it');
-    expect(await markerAt(registry, 1)).toBe('skill-section');
+    expect(await markerAt(registry, 1)).toBe('macro-section');
   });
 
-  it('a test-file section keeps the TEST file, even when a skill runs inside it', async () => {
-    const skillsDir = path.join(dir, 'skills');
-    await write('skills/login.md', skill);
+  it('a test-file section keeps the TEST file, even when a macro runs inside it', async () => {
+    const macrosDir = path.join(dir, 'macros');
+    await write('macros/login.md', macro);
     const t = await write('t.md', [
       '# T', '', '## Steps',
       '1. Sign in block',
       '',
       '### Sign in block',
-      '1. [skill: login username="alice"]',
+      '1. [macro: login username="alice"]',
       '2. Confirm the banner',
     ].join('\n'));
 
-    const { registry } = await registryFor(t, { skillsDir });
-    // Step 0 came from the skill body (skill file, no section scope);
+    const { registry } = await registryFor(t, { macrosDir });
+    // Step 0 came from the macro body (macro file, no section scope);
     // step 1 is the section's own body step (test file, section scope).
-    expect(registry.bindingFor(0)?.file).toBe(codeBehindPathFor(path.join(dir, 'skills', 'login.md')));
+    expect(registry.bindingFor(0)?.file).toBe(codeBehindPathFor(path.join(dir, 'macros', 'login.md')));
     expect(registry.bindingFor(0)?.section).toBeUndefined();
     expect(registry.bindingFor(1)?.file).toBe(codeBehindPathFor(t));
     expect(registry.bindingFor(1)?.section).toBe('Sign in block');

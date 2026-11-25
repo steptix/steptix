@@ -63,7 +63,7 @@
  *    shows the yellow arrow; the server's batch simply ended. So the release
  *    measured at the pause is the step loop's `finally` — §5.9's "a batch the
  *    client cut at a breakpoint" — not the `releaseLockForPause` path that a
- *    skill or section breakpoint takes. Continue then sends steps 5-9 as a new
+ *    macro or section breakpoint takes. Continue then sends steps 5-9 as a new
  *    batch with no `runStart`, which keeps the session on the computer surface
  *    and must take the lock again at step 5.
  *

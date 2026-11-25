@@ -444,17 +444,17 @@ export function runSecrets(run: {
 
 /**
  * {@link runSecrets}, plus the secrets among the values a run holds only in
- * its STEP TEXT: each skill call's arguments and each looped section's row
- * (`ExpandedFrame.inputs`, src/skills/expander.ts). The expander writes those
+ * its STEP TEXT: each macro call's arguments and each looped section's row
+ * (`ExpandedFrame.inputs`, src/macros/expander.ts). The expander writes those
  * into the body's text rather than into the variable map, so the map alone
  * never learns them — a `password` column printed in clear in the step line
  * and the report, and reached the model in a `[use ai]` step (issue 060).
  *
  * Each input map is judged ON ITS OWN and the answers pooled. Merging the maps
  * first, `{ ...parameters, ...inputs }`, keeps one value per name, which is
- * two leaks: a second row's `password` evicts the first row's, and a skill
+ * two leaks: a second row's `password` evicts the first row's, and a macro
  * argument written `password="{{password}}"` — the ordinary way to hand a
- * login skill the test's password — evicts the test's real password in favour
+ * login macro the test's password — evicts the test's real password in favour
  * of the placeholder text.
  */
 export function runSecretsWithInputs(

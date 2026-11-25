@@ -12,7 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { expandSkills, clearSkillCache, type SkillExpansion } from '../src/skills/expander.js';
+import { expandMacros, clearMacroCache, type MacroExpansion } from '../src/macros/expander.js';
 import { parseTestContent } from '../src/parser/markdown.js';
 import {
   frameExitIndex,
@@ -26,24 +26,24 @@ let tmpDir: string;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'flow-control-frames-'));
-  clearSkillCache();
+  clearMacroCache();
 });
 
 afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
-async function writeSkill(name: string, content: string): Promise<void> {
+async function writeMacro(name: string, content: string): Promise<void> {
   await fs.writeFile(path.join(tmpDir, `${name}.md`), content);
 }
 
-/** Expand a whole test document — sections, skills and all — the way
+/** Expand a whole test document — sections, macros and all — the way
  *  `parseTestFile` does, so `origins`/`frames` are the real thing. */
-async function expand(md: string): Promise<SkillExpansion> {
+async function expand(md: string): Promise<MacroExpansion> {
   const filePath = path.join(tmpDir, 'flow.md');
   await fs.writeFile(filePath, md);
   const parsed = parseTestContent(md, filePath);
-  return expandSkills(parsed.steps, tmpDir, undefined, filePath, parsed.stepLines, {
+  return expandMacros(parsed.steps, tmpDir, undefined, filePath, parsed.stepLines, {
     sections: parsed.sections,
     rawSteps: parsed.rawSteps,
     warnDeadSections: false,
@@ -52,11 +52,11 @@ async function expand(md: string): Promise<SkillExpansion> {
 
 /** `frameExitIndex` over a whole expansion, so a test can read the shape of
  *  the flat list beside the answer. */
-function exitOf(exp: SkillExpansion, i: number): number {
+function exitOf(exp: MacroExpansion, i: number): number {
   return frameExitIndex(exp.origins, exp.frames, i, exp.steps.length);
 }
 
-function labelOf(exp: SkillExpansion, i: number): string | null {
+function labelOf(exp: MacroExpansion, i: number): string | null {
   return frameLabel(exp.origins, exp.frames, i);
 }
 
@@ -174,11 +174,11 @@ describe('frameExitIndex — a section', () => {
     expect(labelOf(exp, 0)).toBe('Outer');
   });
 
-  it('ends the SKILL, not the enclosing section, for a skill called inside one', async () => {
-    await writeSkill(
+  it('ends the MACRO, not the enclosing section, for a macro called inside one', async () => {
+    await writeMacro(
       'login',
       `---
-type: skill
+type: macro
 ---
 # login
 ## Steps
@@ -194,7 +194,7 @@ type: skill
 
 ### Prepare
 1. Open the login page
-2. [skill: login]
+2. [macro: login]
 3. Close the banner
 `);
     expect(exp.steps).toEqual([
@@ -205,7 +205,7 @@ type: skill
       'Finish',
     ]);
     expect(labelOf(exp, 1)).toBe('login');
-    // Only the skill body ends: `Close the banner` belongs to the section.
+    // Only the macro body ends: `Close the banner` belongs to the section.
     expect(exitOf(exp, 1)).toBe(2);
   });
 });

@@ -1,6 +1,6 @@
 /**
  * Completion provider for `${env.X}` / `${data.X.Y}` / `${<source>.X}` /
- * `${envName}` references in test and skill Markdown.
+ * `${envName}` references in test and macro Markdown.
  *
  * Which files feed the suggestions mirrors what the SERVER — the component
  * that actually resolves these references — would load for a run:
@@ -22,7 +22,7 @@
  *  - `data.*`: `<dataDir>/<envName>.json` under the same project root,
  *    `dataDir` from `tests.dataDir` (default `data`).
  *  - `<source>.*`: the file's own `dataSources:` frontmatter, paths resolved
- *    against the file's directory (skills additionally interpolate
+ *    against the file's directory (macros additionally interpolate
  *    `${env.X}` / `${envName}` in the path, tests take it literally).
  *
  * The same provider serves the `{{name}}` half — the *runtime* variables a run
@@ -118,12 +118,12 @@ export class EnvDataCompletionProvider implements vscode.CompletionItemProvider 
     if (!isTestFile(text)) return [];
 
     const fm = parseFrontmatter(text);
-    const isSkill = fm.type === 'skill';
-    // In frontmatter, `${...}` only occurs inside a skill's dataSources path,
+    const isMacro = fm.type === 'macro';
+    // In frontmatter, `${...}` only occurs inside a macro's dataSources path,
     // where the runtime accepts `${env.X}` and `${envName}` alone. A test's
     // frontmatter interpolates nothing — offer nothing there.
     const pathPosition = inFrontmatter(text, position.line);
-    if (pathPosition && !isSkill) return [];
+    if (pathPosition && !isMacro) return [];
 
     const envName = activeEnvFor(fm);
     // No env → the run interpolates nothing; completing a reference here
@@ -141,8 +141,8 @@ export class EnvDataCompletionProvider implements vscode.CompletionItemProvider 
       ];
       const plain = namespaceCompletions({
         envName,
-        dataDetail: isSkill
-          ? null // skills never see the caller-env data file
+        dataDetail: isMacro
+          ? null // macros never see the caller-env data file
           : displayPath(dataFile, projectRoot) + (fs.existsSync(dataFile) ? '' : ' (not found)'),
         sources: Object.entries(fm.dataSources ?? {}).map(([name, declared]) => ({
           name,
@@ -166,12 +166,12 @@ export class EnvDataCompletionProvider implements vscode.CompletionItemProvider 
     // The remaining namespaces read a JSON tree — resolve which file's.
     let treeFile: string | null = null;
     if (!pathPosition) {
-      if (ref.namespace === 'data' && !isSkill) {
+      if (ref.namespace === 'data' && !isMacro) {
         treeFile = dataFile;
       } else {
         const declared = fm.dataSources?.[ref.namespace];
         if (declared !== undefined) {
-          treeFile = resolveSourcePath(declared, document.uri.fsPath, isSkill, env, envName);
+          treeFile = resolveSourcePath(declared, document.uri.fsPath, isMacro, env, envName);
         }
       }
     }
@@ -189,7 +189,7 @@ export class EnvDataCompletionProvider implements vscode.CompletionItemProvider 
    * name a table-loop body is usually about.
    *
    * Same file gates as the `${...}` half minus one: `{{}}` interpolates
-   * nowhere in frontmatter (a skill's dataSources path takes `${env.X}` only),
+   * nowhere in frontmatter (a macro's dataSources path takes `${env.X}` only),
    * and — the deliberate difference — there is **no env gate**. A run resolves
    * `{{}}` from its parameter map whether or not an env is selected; the env
    * only decides what a `$VAR` parameter value previews as, and with none the

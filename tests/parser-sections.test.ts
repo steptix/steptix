@@ -114,7 +114,7 @@ describe('section name validation', () => {
   );
 
   it('refuses a name beginning with [', () => {
-    expect(() => parseTestContent(withName('[skill: x]'))).toThrow(/may not begin with/i);
+    expect(() => parseTestContent(withName('[macro: x]'))).toThrow(/may not begin with/i);
   });
 
   it('refuses a name containing {{', () => {

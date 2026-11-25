@@ -61,7 +61,7 @@ const CONFIG_PATH_KEYS = [
   ['tests', 'dir'],
   ['tests', 'dataDir'],
   ['tests', 'contextDir'],
-  ['tests', 'skillsDir'],
+  ['tests', 'macrosDir'],
   ['tests', 'toolsDir'],
   ['reports', 'outputDir'],
   ['api', 'specsDir'],

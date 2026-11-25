@@ -186,13 +186,13 @@ function makeTest(steps: string[], filePath: string): ParsedTest {
     stepLines: steps.map((_, i) => i + 1),
     skipHooks: steps.map(() => false),
     toolCalls: steps.map(() => null),
-    sourceSkills: steps.map(() => null),
+    sourceMacros: steps.map(() => null),
     sourceSections: steps.map(() => null),
     sections: {},
     rawSteps: [...steps],
     hooks: { before: [], beforeEach: [], afterEach: [], after: [] },
     hookToolCalls: { before: [], beforeEach: [], afterEach: [], after: [] },
-    hookSourceSkills: { before: [], beforeEach: [], afterEach: [], after: [] },
+    hookSourceMacros: { before: [], beforeEach: [], afterEach: [], after: [] },
   };
 }
 
@@ -552,14 +552,14 @@ describe('the last-run sidecar consecutive-stale count', () => {
     expect(steps[1]!.staleRuns).toBe(1);
   });
 
-  it('does not confuse a skill-body step with a test step of the same wording', async () => {
+  it('does not confuse a macro-body step with a test step of the same wording', async () => {
     const md = path.join(dir, 'scoped.md');
     const inTest = row({ index: 1, file: '/p/tests/checkout.steps.ts' });
-    const inSkill = row({ index: 2, file: '/p/tests/skills/login.steps.ts' });
+    const inMacro = row({ index: 2, file: '/p/tests/macros/login.steps.ts' });
 
-    await writeLastRun(md, [inTest, inSkill]);
-    await writeLastRun(md, [inTest, { ...inSkill, stale: false, error: undefined }]);
-    await writeLastRun(md, [inTest, inSkill]);
+    await writeLastRun(md, [inTest, inMacro]);
+    await writeLastRun(md, [inTest, { ...inMacro, stale: false, error: undefined }]);
+    await writeLastRun(md, [inTest, inMacro]);
 
     const steps = (await readLastRun(md))!.steps;
     expect(steps[0]!.staleRuns).toBe(3);

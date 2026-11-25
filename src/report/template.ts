@@ -196,11 +196,11 @@ export function getReportTemplate(): string {
     .captures-title { font-weight: 700; color: var(--pass); font-size: 0.8rem; margin-bottom: 6px; }
     .captures-block .tool-kv-key { color: var(--pass); }
 
-    /* Source-skill chip — origin of an expanded step */
-    .badge-skill { background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
-    .badge-skill::before { content: 'skill: '; opacity: 0.6; }
+    /* Source-macro chip — origin of an expanded step */
+    .badge-macro { background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
+    .badge-macro::before { content: 'macro: '; opacity: 0.6; }
     /* Inline-section chip — a "### Name" block within the test file. Distinct
-       from .badge-skill because the prefix below is baked into the rule. */
+       from .badge-macro because the prefix below is baked into the rule. */
     .badge-section { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
     .badge-section::before { content: 'section: '; opacity: 0.6; }
     /* How a step avoided the model: the code mark for its own code-behind. Same

@@ -133,14 +133,14 @@ test("collectVariables: case-insensitive [INPUT:] / [OUTPUT:] markers", () => {
   assert.deepEqual(got.map((v) => v.name), ["x", "y"]);
 });
 
-test("collectVariables: [skill: foo out.x=\"alias\"] surfaces alias as an output", () => {
-  // Real-world shape from skill-demo.md — caller exposes the skill's
+test("collectVariables: [macro: foo out.x=\"alias\"] surfaces alias as an output", () => {
+  // Real-world shape from macro-demo.md — caller exposes the macro's
   // captured value under a friendlier name and references it
   // downstream as `{{target_url}}`. Without surfacing the alias the
   // panel hides the value the user can actually see at runtime.
   const text = [
     "## Steps",
-    "1. [skill: duckduckgo_search query=\"OpenAI GPT-5\" out.first_result_url=\"target_url\"]",
+    "1. [macro: duckduckgo_search query=\"OpenAI GPT-5\" out.first_result_url=\"target_url\"]",
     "2. Navigate to {{target_url}}",
   ].join("\n");
   const got = collectVariables(text, {}, { target_url: "https://example.com" });
@@ -150,10 +150,10 @@ test("collectVariables: [skill: foo out.x=\"alias\"] surfaces alias as an output
   assert.equal(target.value, "https://example.com");
 });
 
-test("collectVariables: multiple out.X=\"Y\" aliases on a single skill call", () => {
+test("collectVariables: multiple out.X=\"Y\" aliases on a single macro call", () => {
   const text = [
     "## Steps",
-    "1. [skill: foo out.a=\"first\" out.b=\"second\"]",
+    "1. [macro: foo out.a=\"first\" out.b=\"second\"]",
   ].join("\n");
   const got = collectVariables(text, {}, { first: "F", second: "S" });
   const names = got.map((v) => v.name);
@@ -225,7 +225,7 @@ test("collectVariables: distinguishes parameter, page capture, and tool output i
     "- user: $USER",
     "## Steps",
     "1. [output: pageTitle] grab the title",
-    '2. [skill: search query="x" out.url="resultUrl"]',
+    '2. [macro: search query="x" out.url="resultUrl"]',
   ].join("\n");
   const got = collectVariables(
     text,
@@ -239,7 +239,7 @@ test("collectVariables: distinguishes parameter, page capture, and tool output i
   assert.equal(byName.user.captureSource, undefined);
   // Page capture.
   assert.equal(byName.pageTitle.captureSource, "capture");
-  // Tool output — a skill aliasing its capture into the caller's scope; the
+  // Tool output — a macro aliasing its capture into the caller's scope; the
   // streaming capture event carried source: 'toolOutput'. The visually
   // distinct one.
   assert.equal(byName.resultUrl.captureSource, "toolOutput");
@@ -485,7 +485,7 @@ test("maskIfSecretInline: a secret-named capture is still masked whole", () => {
   assert.equal(maskIfSecretInline("tokens", capture), "*".repeat(8));
 });
 
-// The skill-rerun scope editor decides read-only from exactly this: a value we
+// The macro-rerun scope editor decides read-only from exactly this: a value we
 // have to mask cannot be an editable input, because the mask is what the edit
 // would send back (steptix-runner.jsx, `display !== value`).
 test("maskIfSecretInline: a masked row is one whose render differs from its value", () => {

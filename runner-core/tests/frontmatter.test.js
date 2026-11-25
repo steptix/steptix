@@ -8,8 +8,8 @@ test('parseFrontmatter: empty input returns empty object', () => {
 });
 
 test('parseFrontmatter: reads type field', () => {
-  const text = '---\ntype: skill\n---\n# Skill name\n';
-  assert.deepEqual(parseFrontmatter(text), { type: 'skill' });
+  const text = '---\ntype: macro\n---\n# Macro name\n';
+  assert.deepEqual(parseFrontmatter(text), { type: 'macro' });
 });
 
 test('parseFrontmatter: disabled true', () => {
@@ -69,24 +69,24 @@ test('parseFrontmatter: inline-flow dataSources is ignored, siblings still parse
 });
 
 test('parseFrontmatter: tolerates unknown keys', () => {
-  const text = '---\nauthor: Paul\ntype: skill\ndate: 2026-01-01\n---\n';
-  assert.deepEqual(parseFrontmatter(text), { type: 'skill' });
+  const text = '---\nauthor: Paul\ntype: macro\ndate: 2026-01-01\n---\n';
+  assert.deepEqual(parseFrontmatter(text), { type: 'macro' });
 });
 
 test('parseFrontmatter: comments stripped, quoted values preserved', () => {
-  const text = '---\ntype: skill # this is a comment\nenv: "prod#1"\n---\n';
-  assert.deepEqual(parseFrontmatter(text), { type: 'skill', env: 'prod#1' });
+  const text = '---\ntype: macro # this is a comment\nenv: "prod#1"\n---\n';
+  assert.deepEqual(parseFrontmatter(text), { type: 'macro', env: 'prod#1' });
 });
 
 test('parseFrontmatter: malformed frontmatter (no closing ---) returns empty', () => {
-  const text = '---\ntype: skill\n# never closes\n';
+  const text = '---\ntype: macro\n# never closes\n';
   assert.deepEqual(parseFrontmatter(text), {});
 });
 
 test('parseFrontmatter: multiple fields together', () => {
   const text = [
     '---',
-    'type: skill',
+    'type: macro',
     'disabled: false',
     'env: staging',
     'tags: [smoke]',
@@ -94,7 +94,7 @@ test('parseFrontmatter: multiple fields together', () => {
     '# Title',
   ].join('\n');
   assert.deepEqual(parseFrontmatter(text), {
-    type: 'skill',
+    type: 'macro',
     disabled: false,
     env: 'staging',
     tags: ['smoke'],
@@ -102,7 +102,7 @@ test('parseFrontmatter: multiple fields together', () => {
 });
 
 test('parseTitleHeading: reads first # heading after frontmatter', () => {
-  const text = '---\ntype: skill\n---\n\n# My Test\n\n## Steps\n1. go\n';
+  const text = '---\ntype: macro\n---\n\n# My Test\n\n## Steps\n1. go\n';
   assert.equal(parseTitleHeading(text), 'My Test');
 });
 

@@ -192,7 +192,7 @@ test('a cancelled prompt stops the rows after it, and says so on the row itself'
 
 test('a failure in another FILE names the file, and quotes nothing', () => {
   // `mainFlowOrdinal` and `stepTextAt` read the TEST document at the failure's
-  // line, so a skill-body failure on line 12 was reported as "step 2" and
+  // line, so a macro-body failure on line 12 was reported as "step 2" and
   // quoted as whatever the test's line 12 says — a step this row may never
   // have run.
   assert.equal(rowFailureDetail('run', 2, 'login.md'), 'failed in login.md');

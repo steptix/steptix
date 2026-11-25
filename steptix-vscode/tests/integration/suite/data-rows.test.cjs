@@ -1740,7 +1740,7 @@ describe('Steptix data-row selection', function () {
     // left the suite green. A whole body running produces a start and a pass
     // for every step of it, so this is also the shape the real case has.
     const uri = await open('data-rows-body.tmp.md');
-    const frame = { id: 'f1', kind: 'section', uri: uri.fsPath, skillName: 'Log In' };
+    const frame = { id: 'f1', kind: 'section', uri: uri.fsPath, macroName: 'Log In' };
     const mark = hooks.hostMessageCount();
     await runSelection([range(7, 9), range(17)], (f) => {
       // Line 16 is body step 1 — the one the selection left out.
@@ -1815,7 +1815,7 @@ describe('Steptix data-row selection', function () {
     // once with the sentinel and once without. The negative alone would pass
     // just as happily if `step:pass` had been dropped as a trigger outright.
     const uri = await open('data-rows-body.tmp.md');
-    const frame = { id: 'f1', kind: 'section', uri: uri.fsPath, skillName: 'Log In' };
+    const frame = { id: 'f1', kind: 'section', uri: uri.fsPath, macroName: 'Log In' };
     const saidIt = (lines) => lines.filter((l) => l.includes('the server ran the whole section body'));
 
     const quiet = hooks.hostMessageCount();
@@ -2002,7 +2002,7 @@ describe('Steptix data-row selection', function () {
     await open('data-rows-body.tmp.md');
     const mark = hooks.hostMessageCount();
     await runSelection([range(7, 9), range(17)], (f) => {
-      f.push({ type: 'step:start', line: 17, frame: { id: 'f1', kind: 'section', uri: fixtureUri('data-rows-body.tmp.md').fsPath, skillName: 'Log In' } });
+      f.push({ type: 'step:start', line: 17, frame: { id: 'f1', kind: 'section', uri: fixtureUri('data-rows-body.tmp.md').fsPath, macroName: 'Log In' } });
       f.end();
     });
 

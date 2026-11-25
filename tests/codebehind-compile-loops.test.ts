@@ -6,7 +6,7 @@ import type { ChatMessage } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import type { StepResult, LoopMarker } from '../src/report/types.js';
 import {
   compileTest,
@@ -42,7 +42,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });
@@ -1307,22 +1307,22 @@ describe('steptix compile — the prompts mask what the run masked, round 3', ()
     });
   }
 
-  it("G2: shows a For each's dotted value inside a skill body — the pass's binding, not the author's word", async () => {
+  it("G2: shows a For each's dotted value inside a macro body — the pass's binding, not the author's word", async () => {
     // `keyword` holds `key`: asked about the AUTHORED `row.keyword`, which no
     // mark names, the author rule masked `AU` out of the block the model
     // writes its selector from. The pass marked the SCOPED name.
     const md = await write(
       'tests/search.md',
-      ['# Search', '', '## Parameters', '- rows: [{"keyword":"AU"},{"keyword":"NZ"}]', '', '## Steps', '1. [skill: search_all list="{{rows}}"]', ''].join('\n'),
+      ['# Search', '', '## Parameters', '- rows: [{"keyword":"AU"},{"keyword":"NZ"}]', '', '## Steps', '1. [macro: search_all list="{{rows}}"]', ''].join('\n'),
     );
     await write(
-      'skills/search_all.md',
-      ['---', 'type: skill', '---', '# search_all', '', '## Parameters', '- list: the rows', '', '## Steps', '1. For each {{row}} in {{list}}, Search for {{row.keyword}}', ''].join('\n'),
+      'macros/search_all.md',
+      ['---', 'type: macro', '---', '# search_all', '', '## Parameters', '- list: the rows', '', '## Steps', '1. For each {{row}} in {{list}}, Search for {{row.keyword}}', ''].join('\n'),
     );
-    const test = await parseTestFile(md, { skillsDir: path.join(dir, 'skills') });
+    const test = await parseTestFile(md, { macrosDir: path.join(dir, 'macros') });
     const control = test.expansion!.controls!.find((c) => c !== null)!;
     const item = control.kind === 'foreach' ? control.item : '';
-    expect(item).toMatch(/^__skill\d+_row$/);
+    expect(item).toMatch(/^__macro\d+_row$/);
     const pass = (index: number, keyword: string): LoopMarker => ({
       kind: 'iteration',
       label: 'x',
@@ -1353,17 +1353,17 @@ describe('steptix compile — the prompts mask what the run masked, round 3', ()
     expect(generationFor(prompts, 'Search for {{row.keyword}}')).toContain('{{row.keyword}} resolved to "AU" on this run');
   });
 
-  it("G3: masks a secret a skill's caller passed, inside another argument — generation and summary alike", async () => {
+  it("G3: masks a secret a macro's caller passed, inside another argument — generation and summary alike", async () => {
     // The run's own `secretsNow` merges every frame's inputs into the mask set;
-    // the compile's prompts took the parameter map's alone, and a skill's
+    // the compile's prompts took the parameter map's alone, and a macro's
     // arguments exist under no name there.
     const KEY = 'uk_live_1234';
-    const md = await write('tests/api.md', ['# Api', '', '## Steps', `1. [skill: api token="${KEY}" header="Bearer ${KEY}"]`, ''].join('\n'));
+    const md = await write('tests/api.md', ['# Api', '', '## Steps', `1. [macro: api token="${KEY}" header="Bearer ${KEY}"]`, ''].join('\n'));
     await write(
-      'skills/api.md',
-      ['---', 'type: skill', '---', '# api', '', '## Parameters', '- token: the key', '- header: the header', '', '## Steps', '1. Type {{header}} into the Authorization box', ''].join('\n'),
+      'macros/api.md',
+      ['---', 'type: macro', '---', '# api', '', '## Parameters', '- token: the key', '- header: the header', '', '## Steps', '1. Type {{header}} into the Authorization box', ''].join('\n'),
     );
-    const test = await parseTestFile(md, { skillsDir: path.join(dir, 'skills') });
+    const test = await parseTestFile(md, { macrosDir: path.join(dir, 'macros') });
     const record = outcome([typedRow(1, 'hdr', '{{header}}')], 1);
     const { client, prompts } = fakeAi();
     const { runner } = scriptedRunner(record, [

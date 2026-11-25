@@ -11,14 +11,14 @@
  * The rule is narrow on purpose, and the narrowness is the whole design:
  *
  *  - Only a step that is NOTHING BUT one bracket token is judged. A bracket
- *    inside a longer step stays prose, so `[skillful]` and `Verify the
+ *    inside a longer step stays prose, so `[macroscopic]` and `Verify the
  *    [optional] banner` are exactly as they were.
  *  - Only the FIRST `]` closing at the very end counts as "one token", so a
  *    step carrying two brackets, or a JSON array argument, is not judged
  *    either — those are longer steps by construction.
  *
  * **What counts as known.** The five step directives §4.2 lists —
- * `[skill …]`, `[tool …]`, `[input …]`, `[interactive]`, `[use …]` — plus the
+ * `[macro …]`, `[tool …]`, `[input …]`, `[interactive]`, `[use …]` — plus the
  * INLINE markers `[output: x]`, `[as: x]` and `[store as: x]`, which are legal
  * anywhere in a step and therefore legal alone in one. Leaving those three out
  * would turn a degenerate-but-legal line into a new parse error on files that
@@ -27,10 +27,10 @@
  * step that was only the marker is left empty rather than bracketed.)
  *
  * Known-ness is tested case-INSENSITIVELY, which is wider than the runner in
- * one place: `[SKILL: login]` is prose to `parseInvocation` (case-sensitive,
+ * one place: `[MACRO: login]` is prose to `parseInvocation` (case-sensitive,
  * deliberately) yet counts as known here. That is the conservative direction.
  * This rule's job is to catch INVENTED directives, and "did you mean
- * `[skill: name]`?" is a poor way to tell an author their only mistake was a
+ * `[macro: name]`?" is a poor way to tell an author their only mistake was a
  * shift key — while flagging it would make §4.2 a behaviour change for files
  * that merely shout.
  *
@@ -51,10 +51,10 @@ const NO_HOOKS_PREFIX = /^\[no-hooks\]\s*/i;
 /**
  * The tokens that ARE directives.
  *
- * `skill` / `tool` / `input` demand a `[ \t:]` separator, matching
- * `invocationTokenPattern`'s class — so a bare `[skill]` or `[input]` is an
+ * `macro` / `tool` / `input` demand a `[ \t:]` separator, matching
+ * `invocationTokenPattern`'s class — so a bare `[macro]` or `[input]` is an
  * unknown bracket and gets told what the form is, which is the right answer
- * for a line that names no skill.
+ * for a line that names no macro.
  *
  * `use` admits `]` as well, so the bare `[use]` is NOT reported here: it is a
  * `[use` claim, and `useStepError` owns it with a message that names the
@@ -62,7 +62,7 @@ const NO_HOOKS_PREFIX = /^\[no-hooks\]\s*/i;
  * same holds for a bare `[use ai]`, which is told it needs a step after it.
  */
 const KNOWN_DIRECTIVE_RES: readonly RegExp[] = [
-  /^\[(?:skill|tool|input)(?=[ \t:])/i,
+  /^\[(?:macro|tool|input)(?=[ \t:])/i,
   /^\[use(?=[ \t:\]])/i,
   /^\[interactive[ \t]*\]$/i,
   /^\[(?:output|as|store[ \t]+as)[ \t]*:/i,
@@ -75,7 +75,7 @@ export const KNOWN_WHOLE_STEP_DIRECTIVES: readonly string[] = [
   '[use computer]',
   '[use browser]',
   '[interactive]',
-  '[skill: name]',
+  '[macro: name]',
   '[tool: name]',
   '[input: name]',
 ];
@@ -135,7 +135,7 @@ export function closestDirective(token: string): string | null {
  *  is not a did-you-mean candidate ({@link KNOWN_WHOLE_STEP_DIRECTIVES}), but
  *  an author told "the directives are…" should be told all of them. */
 const DIRECTIVE_LIST =
-  '`[skill: name]`, `[tool: name]`, `[input: name]`, `[interactive]`, ' +
+  '`[macro: name]`, `[tool: name]`, `[input: name]`, `[interactive]`, ' +
   '`[use computer]`, `[use browser]` and `[use ai] <step>`';
 
 /**

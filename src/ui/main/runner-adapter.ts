@@ -18,7 +18,7 @@ import type { BrowserSession } from '../../browser/manager.js';
 
 import { aiConfigured, loadConfig } from '../../config/loader.js';
 import { parseTestFile } from '../../parser/markdown.js';
-import { clearSkillCache } from '../../skills/expander.js';
+import { clearMacroCache } from '../../macros/expander.js';
 import { expandTestInstances, parseTimeoutMs } from '../../runner/test-runner.js';
 import { executeStep } from '../../runner/step-executor.js';
 import { launchBrowser, closeBrowser } from '../../browser/manager.js';
@@ -108,7 +108,7 @@ function runIsKeyless(config: Config): boolean {
  * The env/data context for one named environment, composed the way `steptix run`
  * composes it: this process's environment, the project's base `.env` for
  * anything missing, `.env.<name>` on top, and `data/<name>.json`. The project
- * is the working directory, as it already is for `skillsDir` and `loadConfig`
+ * is the working directory, as it already is for `macrosDir` and `loadConfig`
  * in this runner.
  *
  * `mutateProcessEnv` because a `## Parameters` `$VAR` reads `process.env`
@@ -461,7 +461,7 @@ export class UIRunnerAdapter {
   /**
    * What this run must never print, as it stands now: its secret-named
    * parameters and env/data secrets (`runSecrets`), plus the secrets among the
-   * values expansion wrote into STEP TEXT — each skill call's arguments and
+   * values expansion wrote into STEP TEXT — each macro call's arguments and
    * each looped section's row (`ExpandedFrame.inputs`). No variable map holds
    * those, so without them a `password` column printed in clear in the panel,
    * the model's `## Prior Steps`, the report and the scoreboard (issue 060).
@@ -521,12 +521,12 @@ export class UIRunnerAdapter {
     // 1. Load config
     this.config = await loadConfig();
 
-    // Clear the module-level skill cache at run-start so disk edits to skill
+    // Clear the module-level macro cache at run-start so disk edits to macro
     // files in the dev loop are picked up — the UI server is long-lived, so
-    // without this an edited skill stays masked by its earlier-cached parse.
-    clearSkillCache();
+    // without this an edited macro stays masked by its earlier-cached parse.
+    clearMacroCache();
 
-    // 2. Parse the test file (expanding any [skill: ...] references), with the
+    // 2. Parse the test file (expanding any [macro: ...] references), with the
     // run's env/data context when an environment is selected.
     //
     // The parser resolves `${env.X}` / `${data.x}` — validating them, loading
@@ -537,11 +537,11 @@ export class UIRunnerAdapter {
     // AUTOMATION_ENV, which `steptix ui --env` sets for this process, then the
     // test's own `env:` frontmatter, then none — and none leaves a `${…}` as
     // written, exactly as the CLI does without `--env`.
-    const skillsDir = pathResolve(process.cwd(), this.config.tests.skillsDir);
+    const macrosDir = pathResolve(process.cwd(), this.config.tests.macrosDir);
     const dataDir = this.config.tests.dataDir;
     const runEnvName = process.env['AUTOMATION_ENV']?.trim() || undefined;
     const initial = await parseTestFile(filePath, {
-      skillsDir,
+      macrosDir,
       ...(runEnvName && { envData: await envContextFor(runEnvName, dataDir) }),
     });
     // Frontmatter `env:` is honoured only when nothing run-wide pinned one —
@@ -550,7 +550,7 @@ export class UIRunnerAdapter {
     const parsedTest =
       !runEnvName && initial.frontmatter.env
         ? await parseTestFile(filePath, {
-            skillsDir,
+            macrosDir,
             envData: await envContextFor(initial.frontmatter.env, dataDir),
           })
         : initial;
@@ -738,7 +738,7 @@ export class UIRunnerAdapter {
       // both take their own branch before the executor is reached.
       const failureTail = setStep || flowControlClaim ? null : parseFailureTail(rawInstruction);
       // Decision 8's backstop: the Runner UI parses the file for real, so the
-      // validator normally catches this first — but a `[skill: …]` body read at
+      // validator normally catches this first — but a `[macro: …]` body read at
       // run time never passed it.
       const failureTailContradiction =
         setStep || flowControlClaim ? false : isFailureTailContradiction(rawInstruction);
@@ -801,8 +801,8 @@ export class UIRunnerAdapter {
         // reason's `step N` uses.
         //
         // `expansion.rawSteps`, not `rawInstruction`: `parsedTest.steps[i]` is
-        // the EXPANDED list, so inside a skill body it has already had the
-        // call's arguments interpolated into it — `[skill: Login
+        // the EXPANDED list, so inside a macro body it has already had the
+        // call's arguments interpolated into it — `[macro: Login
         // password="hunter2"]` over a body step `If {{password}} is remembered
         // then return` would otherwise write the literal password into a run
         // log, a report cell and an IPC message. `rawSteps` is the match side,
@@ -1026,7 +1026,7 @@ export class UIRunnerAdapter {
           instruction,
           scope: this.resolvedParameters,
           envData: parsedTest.envData,
-          // With the skill arguments and looped-section rows the expander
+          // With the macro arguments and looped-section rows the expander
           // wrote into step text, which no variable map holds — the runner
           // masks them in the text it sends (issue 060).
           secrets: this.secretsNow(),

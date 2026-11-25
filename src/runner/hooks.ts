@@ -1,12 +1,12 @@
 import type { Config } from '../config/types.js';
 import type {
-  HookSourceSkills,
+  HookSourceMacros,
   HookToolCalls,
   ParsedTest,
   TestHooks,
 } from '../parser/types.js';
 import { EMPTY_HOOKS } from '../parser/types.js';
-import { expandSkills } from '../skills/expander.js';
+import { expandMacros } from '../macros/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 
 export interface ResolvedHooks extends TestHooks {
@@ -15,8 +15,8 @@ export interface ResolvedHooks extends TestHooks {
   /** Parallel-to-`hooks` tool-call markers — when non-null, the runner
    *  dispatches the instruction to the tool executor instead of the AI loop. */
   toolCalls: HookToolCalls;
-  /** Parallel-to-`hooks` source-skill attribution for report rendering. */
-  sourceSkills: HookSourceSkills;
+  /** Parallel-to-`hooks` source-macro attribution for report rendering. */
+  sourceMacros: HookSourceMacros;
   /**
    * Parallel to `hooks`: each line as authored, `${…}` intact — the test's
    * `ParsedTest.authoredHooks` where the parse substituted its references, the
@@ -35,9 +35,9 @@ export interface ResolvedHooks extends TestHooks {
  * If the test's frontmatter sets `hooks: replace`, defaults are ignored and
  * only per-test hooks are used.
  *
- * Skill references in project defaults are expanded here, using the same
- * `skillsDir` that expanded the test's own hooks at parse time. Tool-call
- * markers and source-skill attribution are derived for both default and
+ * Macro references in project defaults are expanded here, using the same
+ * `macrosDir` that expanded the test's own hooks at parse time. Tool-call
+ * markers and source-macro attribution are derived for both default and
  * per-test hooks so the runner can dispatch tools and tag report rows
  * uniformly across all four scopes.
  */
@@ -62,11 +62,11 @@ export async function resolveHooks(
     after: [...defaults.toolCalls.after, ...test.hookToolCalls.after],
   };
 
-  const sourceSkills: HookSourceSkills = {
-    before: [...defaults.sourceSkills.before, ...test.hookSourceSkills.before],
-    beforeEach: [...defaults.sourceSkills.beforeEach, ...test.hookSourceSkills.beforeEach],
-    afterEach: [...defaults.sourceSkills.afterEach, ...test.hookSourceSkills.afterEach],
-    after: [...defaults.sourceSkills.after, ...test.hookSourceSkills.after],
+  const sourceMacros: HookSourceMacros = {
+    before: [...defaults.sourceMacros.before, ...test.hookSourceMacros.before],
+    beforeEach: [...defaults.sourceMacros.beforeEach, ...test.hookSourceMacros.beforeEach],
+    afterEach: [...defaults.sourceMacros.afterEach, ...test.hookSourceMacros.afterEach],
+    after: [...defaults.sourceMacros.after, ...test.hookSourceMacros.after],
   };
 
   // The test's own lines as written, beside the defaults, which were never
@@ -85,21 +85,21 @@ export async function resolveHooks(
     merged.afterEach.length > 0 ||
     merged.after.length > 0;
 
-  return { ...merged, hasAny, toolCalls, sourceSkills, authored };
+  return { ...merged, hasAny, toolCalls, sourceMacros, authored };
 }
 
-/** Internal — defaults expanded with parallel toolCalls + sourceSkills metadata. */
+/** Internal — defaults expanded with parallel toolCalls + sourceMacros metadata. */
 interface ExpandedDefaults {
   steps: TestHooks;
   toolCalls: HookToolCalls;
-  sourceSkills: HookSourceSkills;
+  sourceMacros: HookSourceMacros;
 }
 
 function emptyResolvedHooks(): ExpandedDefaults {
   return {
     steps: EMPTY_HOOKS,
     toolCalls: { before: [], beforeEach: [], afterEach: [], after: [] },
-    sourceSkills: { before: [], beforeEach: [], afterEach: [], after: [] },
+    sourceMacros: { before: [], beforeEach: [], afterEach: [], after: [] },
   };
 }
 
@@ -107,7 +107,7 @@ async function expandDefaults(config: Config): Promise<ExpandedDefaults> {
   const d = config.execution.defaultHooks;
   if (!d) return emptyResolvedHooks();
 
-  const skillsDir = config.tests.skillsDir;
+  const macrosDir = config.tests.macrosDir;
   const expand = async (
     raws: string[] | undefined,
   ): Promise<{ steps: string[]; sources: (string | null)[]; tools: ReturnType<typeof parseToolCall>[] }> => {
@@ -116,12 +116,12 @@ async function expandDefaults(config: Config): Promise<ExpandedDefaults> {
     // scopes pass it: project `defaultHooks` are never validated at parse
     // time, so a control line there would split into an unevaluated guard and
     // an unconditional tail (stories/control-flow.md).
-    const exp = await expandSkills(raws, skillsDir, undefined, undefined, undefined, {
+    const exp = await expandMacros(raws, macrosDir, undefined, undefined, undefined, {
       expandControlLines: false,
     });
     return {
       steps: exp.steps,
-      sources: exp.sourceSkills,
+      sources: exp.sourceMacros,
       tools: exp.steps.map((s) => parseToolCall(s)),
     };
   };
@@ -144,7 +144,7 @@ async function expandDefaults(config: Config): Promise<ExpandedDefaults> {
       afterEach: afterEach.tools,
       after: after.tools,
     },
-    sourceSkills: {
+    sourceMacros: {
       before: before.sources,
       beforeEach: beforeEach.sources,
       afterEach: afterEach.sources,

@@ -3,8 +3,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseTestContent, parseTestFile, parseSkillFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { parseTestContent, parseTestFile, parseMacroFile } from '../src/parser/markdown.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import { parseControlLine } from '../src/parser/control-line.js';
 import { logger } from '../src/utils/logger.js';
 
@@ -14,7 +14,7 @@ import { logger } from '../src/utils/logger.js';
  * Two rules with two different reaches, and the split matters:
  *
  *  - `controlLineError` runs over every step line of every flow — main flow
- *    and every section body, of tests AND skills — because a claim that does
+ *    and every section body, of tests AND macros — because a claim that does
  *    not complete has to be an error wherever it is written.
  *  - the STRUCTURE rules (a chain is consecutive lines of ONE flow, one
  *    `Otherwise` and it comes last, what a tail may be) are checked per flow,
@@ -26,7 +26,7 @@ let tmpDir: string;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'control-parse-'));
-  clearSkillCache();
+  clearMacroCache();
 });
 
 afterEach(async () => {
@@ -57,9 +57,9 @@ describe('a claim that does not complete is refused, wherever it is written', ()
     ).toThrow(/separates its condition from the step it repeats with a comma/);
   });
 
-  it('in a skill body', async () => {
+  it('in a macro body', async () => {
     const file = await write('s.md', ['# s', '', '## Steps', '', '1. For each {{a}}, Check it'].join('\n'));
-    await expect(parseSkillFile(file)).rejects.toThrow(/The list is missing/);
+    await expect(parseMacroFile(file)).rejects.toThrow(/The list is missing/);
   });
 
   it('and a well-formed line passes', () => {
@@ -240,10 +240,10 @@ describe('what a tail may not be', () => {
     ).toThrow(/names `\[interactive\]` as the step to run/);
   });
 
-  it('but a [skill:] / [tool:] / Set tail is fine', () => {
+  it('but a [macro:] / [tool:] / Set tail is fine', () => {
     const parsed = parseTestContent(
       doc(
-        '1. If a, then [skill: login]',
+        '1. If a, then [macro: login]',
         '2. Else if b, then [tool: fetch_orders]',
         '3. Otherwise, Set {{plan}} to "free"',
       ),
@@ -287,12 +287,12 @@ describe('the bare-name section match resolves first (decision 3)', () => {
 });
 
 describe('the two bake-over refusals', () => {
-  it('For each over a declared skill parameter', async () => {
+  it('For each over a declared macro parameter', async () => {
     const file = await write(
       'sk.md',
       [
         '---',
-        'type: skill',
+        'type: macro',
         '---',
         '# sk',
         '',
@@ -305,17 +305,17 @@ describe('the two bake-over refusals', () => {
         '1. For each {{account}} in {{accounts}}, Check the account',
       ].join('\n'),
     );
-    await expect(parseSkillFile(file)).rejects.toThrow(
-      /Cannot loop over \{\{account\}\}.*parameter of this skill/s,
+    await expect(parseMacroFile(file)).rejects.toThrow(
+      /Cannot loop over \{\{account\}\}.*parameter of this macro/s,
     );
   });
 
-  it('…including one written in a skill-internal section body', async () => {
+  it('…including one written in a macro-internal section body', async () => {
     const file = await write(
       'sk2.md',
       [
         '---',
-        'type: skill',
+        'type: macro',
         '---',
         '# sk2',
         '',
@@ -332,7 +332,7 @@ describe('the two bake-over refusals', () => {
         '1. For each {{account}} in {{accounts}}, Check the account',
       ].join('\n'),
     );
-    await expect(parseSkillFile(file)).rejects.toThrow(/Cannot loop over \{\{account\}\}/);
+    await expect(parseMacroFile(file)).rejects.toThrow(/Cannot loop over \{\{account\}\}/);
   });
 
   it('but the LIST name is not refused — passing a placeholder through is legitimate', async () => {
@@ -340,7 +340,7 @@ describe('the two bake-over refusals', () => {
       'sk3.md',
       [
         '---',
-        'type: skill',
+        'type: macro',
         '---',
         '# sk3',
         '',
@@ -353,7 +353,7 @@ describe('the two bake-over refusals', () => {
         '1. For each {{account}} in {{accounts}}, Check the account',
       ].join('\n'),
     );
-    await expect(parseSkillFile(file)).resolves.toBeTruthy();
+    await expect(parseMacroFile(file)).resolves.toBeTruthy();
   });
 
   it('For each over a column of the table the enclosing section loops over', () => {
@@ -379,7 +379,7 @@ describe('the two bake-over refusals', () => {
     // The item side leaves a line that claims the form and fails it; the list
     // side leaves `For each {{account}} in Savings, …`, which claims nothing
     // and runs as one prose step with the record still naming `accounts`.
-    // A row value is a literal, which is the whole difference from the skill
+    // A row value is a literal, which is the whole difference from the macro
     // parameter above.
     expect(() =>
       parseTestContent(
@@ -454,7 +454,7 @@ describe('hooks are outside the feature', () => {
         '1. Click Login',
       ].join('\n'),
     );
-    const parsed = await parseTestFile(file, { skillsDir: tmpDir });
+    const parsed = await parseTestFile(file, { macrosDir: tmpDir });
     expect(parsed.hooks.before).toEqual(['If a cookie banner appears, then Dismiss it']);
   });
 });
@@ -472,7 +472,7 @@ describe('what parseTestFile hands the runner', () => {
         '1. Click Pay now',
       ),
     );
-    const parsed = await parseTestFile(file, { skillsDir: tmpDir });
+    const parsed = await parseTestFile(file, { macrosDir: tmpDir });
     expect(parsed.steps).toEqual([
       'If cash, then Pay with cash',
       'Click Pay now',
@@ -503,14 +503,14 @@ describe('what parseTestFile hands the runner', () => {
         '2. Verify the receipt',
       ),
     );
-    const parsed = await parseTestFile(file, { skillsDir: tmpDir });
+    const parsed = await parseTestFile(file, { macrosDir: tmpDir });
     expect(parsed.steps).toHaveLength(4);
     expect(parsed.skipHooks).toEqual([true, true, true, false]);
   });
 
   it('a guard is never a tool call, however its tail is written', async () => {
     const file = await write('tc.md', doc('1. If cash, then [tool: pay_now]'));
-    const parsed = await parseTestFile(file, { skillsDir: tmpDir });
+    const parsed = await parseTestFile(file, { macrosDir: tmpDir });
     expect(parsed.toolCalls[0]).toBeNull();
     expect(parsed.toolCalls[1]).toMatchObject({ name: 'pay_now' });
   });

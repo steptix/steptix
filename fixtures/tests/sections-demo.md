@@ -7,8 +7,8 @@ tags: [demo, sections]
 
 Demonstrates inline sections: a named block of steps defined by a `###`
 heading inside `## Steps`, invoked by writing its name as the whole step
-text. `Sign in` is invoked twice and its body calls a skill, so the expanded
-run carries both a section and a skill badge on those rows.
+text. `Sign in` is invoked twice and its body calls a macro, so the expanded
+run carries both a section and a macro badge on those rows.
 
 ## Parameters
 - username: $LOGIN_USERNAME
@@ -22,5 +22,5 @@ run carries both a section and a skill badge on those rows.
 5. Verify the order confirmation shows "Thank you"
 
 ### Sign in
-1. [skill: fill_login_form username="{{username}}" password="{{password}}"]
+1. [macro: fill_login_form username="{{username}}" password="{{password}}"]
 2. Verify the dashboard greeting is visible

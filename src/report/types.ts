@@ -321,7 +321,7 @@ export interface StepResult {
    *  explicit `[output: X]` declarations alike (issue 042), keyed by
    *  variable name. Omitted (not empty) when the step captured nothing, so
    *  the report can skip the section entirely rather than show an empty
-   *  box on every ordinary step. Skill-internal `__skill*` names are never
+   *  box on every ordinary step. Macro-internal `__macro*` names are never
    *  included — same invariant as session.outputs. */
   outputs?: Record<string, string>;
   /** Screenshot captured at the end of the step */
@@ -576,14 +576,14 @@ export interface StepResult {
     outputs: Record<string, string>;
     logs: Array<{ level: 'info' | 'warn' | 'error'; message: string }>;
   };
-  /** Name of the outermost skill this step came from, if any. Surfaced as a
-   *  chip in the step header so the report shows skill provenance even after
+  /** Name of the outermost macro this step came from, if any. Surfaced as a
+   *  chip in the step header so the report shows macro provenance even after
    *  parse-time expansion has flattened the call away. */
-  sourceSkill?: string;
+  sourceMacro?: string;
   /** Name of the inline `### Name` section this step came from, if any.
-   *  Rendered as a chip *alongside* the skill chip, not instead of it — a
-   *  skill invoked from inside a section carries both. Sections private to a
-   *  skill are not surfaced here; see `SkillExpansion.sourceSections`. */
+   *  Rendered as a chip *alongside* the macro chip, not instead of it — a
+   *  macro invoked from inside a section carries both. Sections private to a
+   *  macro are not surfaced here; see `MacroExpansion.sourceSections`. */
   sourceSection?: string;
   /** True when this is the step that was in flight when the user STOPPED the run
    *  (issue 021). The report renders it as a distinct "aborted" state — not a red

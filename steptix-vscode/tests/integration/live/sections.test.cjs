@@ -138,7 +138,7 @@ describe('Steptix live — inline sections expand server-side', function () {
       120_000,
     );
 
-    // The invocation line carries the aggregate, exactly as a `[skill:]` row
+    // The invocation line carries the aggregate, exactly as a `[macro:]` row
     // does — sections inherit that for free, and this is where it is proved
     // against a real server rather than scripted events.
     await waitFor(
@@ -153,8 +153,8 @@ describe('Steptix live — inline sections expand server-side', function () {
     const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
     console.log('[live] statuses:', JSON.stringify(statuses));
 
-    // Body statuses land on the TEST file's own URI. For a skill they would
-    // land on the skill file; a section body is defined here, so the whole
+    // Body statuses land on the TEST file's own URI. For a macro they would
+    // land on the macro file; a section body is defined here, so the whole
     // run paints in one editor.
     assert.ok(
       statuses[BODY_FIRST] !== undefined,
@@ -166,7 +166,7 @@ describe('Steptix live — inline sections expand server-side', function () {
       .runningFrameStack()
       .filter((f) => f.kind === 'section');
     if (sectionFrames.length > 0) {
-      assert.equal(sectionFrames[0].skillName, 'Check the page');
+      assert.equal(sectionFrames[0].macroName, 'Check the page');
       assert.equal(
         sectionFrames[0].uri,
         testFile,

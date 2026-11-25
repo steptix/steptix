@@ -271,6 +271,25 @@ beforeAll(async () => {
   await fs.writeFile(path.join(projectRoot, '.env'), '');
   await fs.writeFile(path.join(projectRoot, 'with-context.md'), WITH_CONTEXT_MD);
   await fs.writeFile(path.join(projectRoot, 'without-context.md'), WITHOUT_CONTEXT_MD);
+  // A tool in the default `tools/src` (the config above declares none), for
+  // the `[tool:]` recording case at the bottom of this file.
+  const toolsDir = path.join(projectRoot, 'tools', 'src');
+  await fs.mkdir(toolsDir, { recursive: true });
+  const defineToolImport = path.resolve(__dirname, '..', 'src', 'tools', 'index.ts').replace(/\\/g, '/');
+  await fs.writeFile(
+    path.join(toolsDir, 'mark_done.ts'),
+    `import fs from 'node:fs';
+import { defineTool } from '${defineToolImport}';
+export default defineTool({
+  name: 'mark_done', description: 'mark_done', parameters: {}, outputs: {},
+  async run() { fs.writeFileSync(${JSON.stringify(path.join(projectRoot, 'marked.txt'))}, 'yes'); },
+});
+`,
+  );
+  await fs.writeFile(
+    path.join(projectRoot, 'with-tool.md'),
+    ['# Mark it', '', '## Steps', '1. Open the grid', '2. [tool: mark_done]', ''].join('\n'),
+  );
 });
 
 afterAll(async () => {
@@ -348,5 +367,23 @@ describe('the compile route and a test without ## Context', () => {
     expect(events.find((e) => e.type === 'error')).toBeUndefined();
 
     expect(stepContexts).toEqual([PROJECT_CONTEXT, PROJECT_CONTEXT]);
+  });
+});
+
+// The route's runner builds the step request itself, so the project's tools
+// folder has to be put there too: the session's loop refuses a `[tool:]` line
+// with no catalogue loaded (docs/specs/SPEC-macros.md §7).
+describe('the compile route and a test with a [tool:] step', () => {
+  it("records the tool step by running the project's tool, not refusing it", async () => {
+    const marker = path.join(projectRoot, 'marked.txt');
+    await fs.rm(marker, { force: true });
+
+    const events = await compile(path.join(projectRoot, 'with-tool.md'));
+
+    expect(events.find((e) => e.type === 'error')).toBeUndefined();
+    expect(JSON.stringify(events)).not.toContain('was not run');
+    expect(await fs.readFile(marker, 'utf8')).toBe('yes');
+    // Only the prose step reached the model.
+    expect(stepContexts).toHaveLength(1);
   });
 });

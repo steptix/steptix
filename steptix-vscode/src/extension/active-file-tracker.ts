@@ -229,7 +229,7 @@ export class ActiveFileTracker {
           this.updateContextKey();
           this.emit();
         } else if (marksMoved) {
-          // A skill file open beside the test, edited while it carries marks
+          // A macro file open beside the test, edited while it carries marks
           // from a descent: nothing else repaints it.
           this.emit();
         }
@@ -330,7 +330,7 @@ export class ActiveFileTracker {
    * Every enabled SourceBreakpoint across markdown files, grouped by
    * absolute file path. Used at run-start to ship the full per-URI map
    * to the server so it can pause before any step (test file OR
-   * expanded skill body line) that matches a breakpoint.
+   * expanded macro body line) that matches a breakpoint.
    *
    * Filters to `.md` files only — VS Code's breakpoint store is global
    * across all languages, but we only care about Steptix files.
@@ -489,11 +489,11 @@ export class ActiveFileTracker {
 
   /**
    * Flip every `running` status across every tracked URI to `stopped`.
-   * Used on Stop: a run that descended into a skill leaves `running`
-   * statuses on both the test file's `[skill: ...]` aggregate line AND
-   * on the skill file's own body lines. The single-URI `markRunningStopped`
-   * only catches one of those, so a Stop while inside a skill would
-   * leave skill-file lines spinning indefinitely.
+   * Used on Stop: a run that descended into a macro leaves `running`
+   * statuses on both the test file's `[macro: ...]` aggregate line AND
+   * on the macro file's own body lines. The single-URI `markRunningStopped`
+   * only catches one of those, so a Stop while inside a macro would
+   * leave macro-file lines spinning indefinitely.
    */
   markAllRunningStopped(): void {
     let changed = false;
@@ -662,7 +662,7 @@ export class ActiveFileTracker {
     }
     // Repaint the arrow at its new home. When the edited document is the
     // current editor the change handler already emits; emit here only
-    // otherwise so a background skill-file edit still repaints.
+    // otherwise so a background macro-file edit still repaints.
     if (event.document !== this.currentEditor?.document) this.emit();
   }
 
@@ -716,7 +716,7 @@ export class ActiveFileTracker {
    * Distinct from `snapshot()` which returns the active-editor snapshot
    * for the sidebar webview; this variant lets the DecorationManager
    * paint every visible editor against its own per-URI state, which is
-   * what Phase 2 needs when a run descends into a skill `.md` that lives
+   * what Phase 2 needs when a run descends into a macro `.md` that lives
    * in a different file from the test.
    */
   snapshotFor(uri: vscode.Uri): FileStateSnapshot | null {

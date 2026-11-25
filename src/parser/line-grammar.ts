@@ -1,5 +1,5 @@
 /**
- * The raw-line grammar of a test/skill markdown file.
+ * The raw-line grammar of a test/macro markdown file.
  *
  * These live here rather than inside the scanner that first needed them
  * because two scanners now read the same span and have to agree about what a

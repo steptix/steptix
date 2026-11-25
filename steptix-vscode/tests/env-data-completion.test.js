@@ -114,7 +114,7 @@ test('malformed bodies are not references (space inside, digit-first namespace)'
 // ---------------------------------------------------------------------------
 
 test('inFrontmatter covers the span, delimiters included, and not the rest', () => {
-  const text = ['---', 'type: skill', 'dataSources:', '---', '', '## Steps'].join('\n');
+  const text = ['---', 'type: macro', 'dataSources:', '---', '', '## Steps'].join('\n');
   // Delimiter lines classify as frontmatter too (runner-core classifyLines).
   // Immaterial to the provider: a `---` fence line can never contain `${`.
   assert.equal(inFrontmatter(text, 0), true);
@@ -301,7 +301,7 @@ test('a test with an active env offers data, sources, env, and envName', () => {
   assert.equal(items[3].detail, 'local');
 });
 
-test('null dataDetail suppresses data — how the wiring handles skills', () => {
+test('null dataDetail suppresses data — how the wiring handles macros', () => {
   const items = namespaceCompletions({ ...FULL, dataDetail: null });
   assert.deepEqual(
     items.map((i) => i.label),
@@ -309,7 +309,7 @@ test('null dataDetail suppresses data — how the wiring handles skills', () => 
   );
 });
 
-test('path position (skill dataSources path) restricts to env + envName', () => {
+test('path position (macro dataSources path) restricts to env + envName', () => {
   const items = namespaceCompletions({ ...FULL, pathPosition: true });
   assert.deepEqual(
     items.map((i) => i.label),
@@ -402,7 +402,7 @@ const CAPTURES = [
   '4. Grab the reference [store as: order_id]', //              17
   '5. Read the fee and record it [output: mid_line]', //        18
   '6. Capture the total and store it as {{prose_total}}', //    19
-  '7. [skill: login out.token="session" out.k="not a name"]', // 20
+  '7. [macro: login out.token="session" out.k="not a name"]', // 20
   '8. Verify {{', //                                            21
   '9. Sign out [store as: too_late]', //                        22
 ].join('\n');

@@ -52,7 +52,7 @@ export interface SectionIndex {
 /**
  * A step opening with `[` is treated as a directive, not a section call.
  *
- * Contract §2.2 names four tokens (`[skill:`, `[tool:`, `[input:`,
+ * Contract §2.2 names four tokens (`[macro:`, `[tool:`, `[input:`,
  * `[interactive]`); this is deliberately broader. Be precise about what the
  * difference costs:
  *
@@ -132,7 +132,7 @@ export function buildSectionIndex(text: string): SectionIndex {
       // NEAR MISS is reported at the same column, where the author has to fix
       // it.
       //
-      // A bracket-directive tail (`[skill:]`, `[tool:]`) drops out entirely,
+      // A bracket-directive tail (`[macro:]`, `[tool:]`) drops out entirely,
       // for the reason a bracket-directive step does: its own grammar claims
       // it, and a section name may not begin with `[`.
       const control = parseControlLine(located.text);

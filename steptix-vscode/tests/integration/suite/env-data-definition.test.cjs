@@ -4,7 +4,7 @@
  * scan are unit-tested (`tests/env-data-definition.test.js`); this proves the
  * wiring — the data file resolves under the `steptix.config.json` project root
  * for the ACTIVE env, the overlay .env wins over the base, dataSources
- * namespaces navigate to their own file, and the gates (no env, skills'
+ * namespaces navigate to their own file, and the gates (no env, macros'
  * `data`, undeclared namespaces) yield no navigation.
  *
  * Same layout convention as the completion suite next door: the project lives
@@ -22,7 +22,7 @@ const FIXTURES_DIR =
 const PROJECT_DIR = path.join(FIXTURES_DIR, 'dd-project');
 
 const STEPS_MD = path.join(PROJECT_DIR, 'dd-steps.md');
-const SKILL_MD = path.join(PROJECT_DIR, 'dd-skill.md');
+const MACRO_MD = path.join(PROJECT_DIR, 'dd-macro.md');
 const HOOKED_MD = path.join(PROJECT_DIR, 'dd-hooked.md');
 const DATA_JSON = path.join(PROJECT_DIR, 'data', 'dd1.json');
 const CATALOG_JSON = path.join(PROJECT_DIR, 'data', 'dd-catalog.json');
@@ -191,13 +191,13 @@ describe('Steptix ${...} go-to-definition', function () {
     fs.writeFileSync(STEPS_MD, STEPS_LINES.join('\n'));
     fs.writeFileSync(HOOKED_MD, HOOKED_LINES.join('\n'));
     fs.writeFileSync(
-      SKILL_MD,
+      MACRO_MD,
       [
         '---',
-        'type: skill',
+        'type: macro',
         '---',
         '',
-        '# dd skill',
+        '# dd macro',
         '',
         '## Steps',
         '1. Use ${data.users.admin.email} here',
@@ -291,14 +291,14 @@ describe('Steptix ${...} go-to-definition', function () {
     );
   });
 
-  it('skills never navigate ${data...} — they cannot see the caller data file', async () => {
+  it('macros never navigate ${data...} — they cannot see the caller data file', async () => {
     await setEnv('dd1');
-    assertNoFileTargets(await defsAt(SKILL_MD, '1. Use ${data', 'email'));
-    // …and with NO env either: the refusal is about being a skill, so it must
+    assertNoFileTargets(await defsAt(MACRO_MD, '1. Use ${data', 'email'));
+    // …and with NO env either: the refusal is about being a macro, so it must
     // not be pre-empted by advice to select an environment, which could not
     // make this navigable.
     await setEnv(undefined);
-    assertNoFileTargets(await defsAt(SKILL_MD, '1. Use ${data', 'email'));
+    assertNoFileTargets(await defsAt(MACRO_MD, '1. Use ${data', 'email'));
   });
 
   it('with no environment selected there is nothing to navigate to', async () => {

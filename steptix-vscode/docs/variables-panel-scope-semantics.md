@@ -11,7 +11,7 @@ emits a `frame:scope` event carrying:
 
 ```ts
 {
-  frameId: '' | 'fN',                // '' = test (root) frame; 'fN' = a skill frame
+  frameId: '' | 'fN',                // '' = test (root) frame; 'fN' = a macro frame
   scope: Record<string, string>,     // copy of the runtime resolvedParameters
   bindings?: string[],               // dotted names a `For each` pass bound here
   unmask?: string[],                 // the run's `## Config: unmask:` names
@@ -45,30 +45,30 @@ the longer ones it prefixes (`payment` before `payment.payee`), and a
 columns, and `_` sits between the upper- and lower-case letters in code-unit
 order, which delivered that by luck for `payee` and not at all for an
 `Amount` alias. The view's title flips between `Variables (test)` and
-`Variables (skill: <name>)` depending on the active frame.
+`Variables (macro: <name>)` depending on the active frame.
 
 ## Why the scope payload is "flat" (and looks leaky)
 
 The server keeps **one** runtime variable map — `resolvedParameters` —
-shared across the whole run including any skill descents. The expander
-( `src/skills/expander.ts` ) namespaces a skill's internal variables to
-`__skillN_x` so two skills' internals don't collide, and adds the
-caller's output alias as a separate entry. After a skill exits, **none
+shared across the whole run including any macro descents. The expander
+( `src/macros/expander.ts` ) namespaces a macro's internal variables to
+`__macroN_x` so two macros' internals don't collide, and adds the
+caller's output alias as a separate entry. After a macro exits, **none
 of these get garbage-collected** — the namespaced names linger in
 `resolvedParameters` for the rest of the run.
 
-So a test that ran `[skill: foo]` once will, for the rest of the run,
+So a test that ran `[macro: foo]` once will, for the rest of the run,
 have entries like:
 
 ```
 caller_var         = whatever
 target_url         = https://...      ← output alias the caller wrote
-first_result_url   = https://...      ← skill's declared output name
-__skill1_query     = OpenAI GPT-5     ← skill's internal var
-__skill1_something = ...              ← more skill internals
+first_result_url   = https://...      ← macro's declared output name
+__macro1_query     = OpenAI GPT-5     ← macro's internal var
+__macro1_something = ...              ← more macro internals
 ```
 
-The Variables view inherits this — the `__skillN_x` names would
+The Variables view inherits this — the `__macroN_x` names would
 otherwise clutter the test-frame view with noise the user never wrote.
 
 ## Phase 4.1 mitigations (current)
@@ -76,21 +76,21 @@ otherwise clutter the test-frame view with noise the user never wrote.
 Two view-side filters apply:
 
   1. **Test-frame filter.** When the active frame is the test (root)
-     frame, entries matching `/^__skill\d+_/` are hidden. The user
+     frame, entries matching `/^__macro\d+_/` are hidden. The user
      sees only the variables they authored / captured at the test
      level.
-  2. **Skill-frame passthrough.** When the active frame is a skill,
-     all entries are shown — including `__skillN_x` — because inside
-     the skill those ARE the locals (just renamed for namespacing).
+  2. **Macro-frame passthrough.** When the active frame is a macro,
+     all entries are shown — including `__macroN_x` — because inside
+     the macro those ARE the locals (just renamed for namespacing).
 
 Caveats:
   - The duplicate `first_result_url = ...` / `target_url = ...` pair
-    when a skill aliases an output is still visible at the test frame.
+    when a macro aliases an output is still visible at the test frame.
     Both names are the user's; the view shows both. Not ideal but
     accurate.
-  - The view doesn't yet reverse-resolve the rename inside a skill
+  - The view doesn't yet reverse-resolve the rename inside a macro
     frame. So inside `duckduckgo_search` you'd see
-    `__skill1_query` rather than the `query` the author wrote.
+    `__macro1_query` rather than the `query` the author wrote.
 
 ## Phase 4.B (planned)
 
@@ -98,18 +98,18 @@ Replace the view-side filters with **proper per-frame scope** emitted
 by the server:
 
   - The expander threads its per-instance rename map
-    (`internalRenames` + `outputRenames` in `applySkillScope`) into the
+    (`internalRenames` + `outputRenames` in `applyMacroScope`) into the
     `ExpandedFrame` payload.
   - The server's `frame:scope` event carries the renamed-back map: the
-    skill's scope shows the names the author wrote, not their
+    macro's scope shows the names the author wrote, not their
     namespaced form. Caller-side aliases stay as they are in the
     caller's frame.
   - The view trusts the server's payload and renders it verbatim —
     no string-pattern filter needed.
 
 This will also fix the duplicate-pair issue (the test-frame scope will
-only contain the caller's alias; the skill scope will only contain the
-skill's declared output name).
+only contain the caller's alias; the macro scope will only contain the
+macro's declared output name).
 
 ## What the view does NOT do
 
@@ -139,5 +139,5 @@ skill's declared output name).
 
   - View provider: [`steptix-vscode/src/extension/variables-view.ts`](../src/extension/variables-view.ts)
   - Server emit site: [`src/server/session-manager.ts`](../../src/server/session-manager.ts) (`frame:scope` after `step:pass` / `step:fail`)
-  - Expander rename scheme: [`src/skills/expander.ts`](../../src/skills/expander.ts) (`applySkillScope`)
+  - Expander rename scheme: [`src/macros/expander.ts`](../../src/macros/expander.ts) (`applyMacroScope`)
   - Mask helper: [`runner-core/src/repl.ts`](../../runner-core/src/repl.ts) (`maskIfSecret`)

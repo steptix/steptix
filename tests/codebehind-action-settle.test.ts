@@ -7,7 +7,7 @@ import type { AIAction } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import { buildCodeBehindRegistry, type CodeBehindBinding } from '../src/codebehind/loader.js';
 import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
@@ -89,7 +89,7 @@ beforeAll(async () => {
   tmpBase = await makeScratchBase('action-settle');
 });
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   timeline.events = [];
   timeline.url = 'http://localhost:8787/index.html';
   timeline.urlOnTitle = undefined;

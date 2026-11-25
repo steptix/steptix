@@ -335,11 +335,11 @@ describe('runUseAiStep — the name', () => {
     expect(outcome.result.status).toBe('failed');
   });
 
-  it('a skill-internal name is bound and never reported, as runSetStep does it', async () => {
-    const { outcome, scope } = await run('[use ai] Give a code [store as: __skill1_code]', [
+  it('a macro-internal name is bound and never reported, as runSetStep does it', async () => {
+    const { outcome, scope } = await run('[use ai] Give a code [store as: __macro1_code]', [
       '{"value": "C-1"}',
     ]);
-    expect(scope).toEqual({ __skill1_code: 'C-1' });
+    expect(scope).toEqual({ __macro1_code: 'C-1' });
     expect(outcome.result.status).toBe('passed');
     expect(outcome.result.outputs).toBeUndefined();
     expect(outcome.name).toBeUndefined();
@@ -594,11 +594,11 @@ describe('runUseAiStep — a value hidden from the model (issue 060)', () => {
     );
   });
 
-  it('inside a skill, names the variable as the author wrote it, not as `__skill1_…`', async () => {
-    // `applySkillScope` renames a skill-internal `{{token}}` per call.
+  it('inside a macro, names the variable as the author wrote it, not as `__macro1_…`', async () => {
+    // `applyMacroScope` renames a macro-internal `{{token}}` per call.
     const echo = echoModel();
-    const { outcome } = await run('[use ai] Repeat {{__skill1_token}} exactly [store as: __skill1_copy]', [], {
-      scope: { __skill1_token: 'tok-SECRET-9' },
+    const { outcome } = await run('[use ai] Repeat {{__macro1_token}} exactly [store as: __macro1_copy]', [], {
+      scope: { __macro1_token: 'tok-SECRET-9' },
       aiClient: echo.model,
     });
     expect(outcome.result.error).toBe(
@@ -606,7 +606,7 @@ describe('runUseAiStep — a value hidden from the model (issue 060)', () => {
         'a [use ai] step cannot use a secret. ' +
         '`{{token}}` is hidden by its name, which contains "token"; if it is not a secret, rename it.',
     );
-    expect(outcome.result.error).not.toContain('__skill');
+    expect(outcome.result.error).not.toContain('__macro');
   });
 
   it('a secret inside a record is named as PART of the reference that holds it', async () => {
@@ -729,14 +729,14 @@ describe('runUseAiStep — a value hidden from the model (issue 060)', () => {
 });
 
 describe('runUseAiStep — a secret written into the step\'s own words (issue 060)', () => {
-  // What a skill argument or a looped section's row leaves behind: the
+  // What a macro argument or a looped section's row leaves behind: the
   // expander wrote the value into the text, so no `{{…}}` is left to name it,
   // and the loop's mask set (`runSecretsWithInputs`) is the only thing that
   // knows it. Here the set is handed over as a loop would hand it.
   const ROW_SECRET = 'row-SECRET-9';
   const IN_TEXT_HINT =
     " A secret's value is masked wherever it appears in the step's text, including where a " +
-    "skill's argument or a looped section's row put it.";
+    "macro's argument or a looped section's row put it.";
 
   it('reaches the model masked, with the sentence, and an echo fails the step', async () => {
     const echo = echoModel();

@@ -18,10 +18,10 @@ export interface CompileProposal {
   /** The test that was compiled, for titles and messages. */
   testFilePath: string;
   /** Absolute `.steps.ts` path → proposed content. More than one when the
-   *  test invokes skills, whose entries compile into the skill's own file. */
+   *  test invokes macros, whose entries compile into the macro's own file. */
   files: Record<string, string>;
   /** Where Apply should land the author afterwards, when it is not the test
-   *  file — a skill-file single-step compile returns to the SKILL, whose
+   *  file — a macro-file single-step compile returns to the MACRO, whose
    *  step the author is iterating on, not the test whose session recorded
    *  it. Absent means `testFilePath`, the behaviour every other compile
    *  keeps. */
@@ -60,7 +60,7 @@ export class CodeBehindDiffs implements vscode.Disposable {
    * proposal on the right.
    *
    * The last one opened is the one left focused, so a single-file compile —
-   * every compile that touches no skills — behaves as if it opened one editor.
+   * every compile that touches no macros — behaves as if it opened one editor.
    */
   async open(proposal: CompileProposal): Promise<void> {
     this.proposal = proposal;

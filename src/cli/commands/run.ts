@@ -109,21 +109,21 @@ async function runCommand(
     process.exit(0);
   }
 
-  // Parse test files (expanding any [skill: ...] references).
+  // Parse test files (expanding any [macro: ...] references).
   //
   // Two-pass strategy when there's no run-wide --env: parse once with the
   // (possibly empty) bundle so we can read frontmatter, then re-parse any
   // test that declared its own `env:` override with that test's bundle. This
   // avoids loading a per-test env until we know we need it.
   logger.info(`Discovering tests from ${testFiles.length} file(s)...`);
-  const skillsDir = path.resolve(process.cwd(), config.tests.skillsDir);
+  const macrosDir = path.resolve(process.cwd(), config.tests.macrosDir);
   const envDataCtx = cliEnvName
     ? { env: runBundle.env, data: runBundle.data, envName: runBundle.envName }
     : undefined;
   const parsedAll = await Promise.all(
     testFiles.map(async (f) => {
       const initial = await parseTestFile(f, {
-        skillsDir,
+        macrosDir,
         ...(envDataCtx && { envData: envDataCtx }),
       });
       // Honour frontmatter env: only when CLI/envvar didn't pin one already.
@@ -135,7 +135,7 @@ async function runCommand(
           mutateProcessEnv: true,
         });
         return parseTestFile(f, {
-          skillsDir,
+          macrosDir,
           envData: {
             env: perTestBundle.env,
             data: perTestBundle.data,
@@ -146,8 +146,8 @@ async function runCommand(
       return initial;
     }),
   );
-  // Skip files marked as skills — they're library code, not runnable tests.
-  const parsedTests = parsedAll.filter((t) => t.frontmatter.type !== 'skill');
+  // Skip files marked as macros — they're library code, not runnable tests.
+  const parsedTests = parsedAll.filter((t) => t.frontmatter.type !== 'macro');
 
   // Filter by tags
   const tags = opts.tag

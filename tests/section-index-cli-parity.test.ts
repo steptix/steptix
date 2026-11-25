@@ -6,7 +6,7 @@ import { parseTestContent } from '../src/parser/markdown.js';
 import { buildSectionIndex } from '../runner-core/src/section-index.ts';
 import { extractSections, findWrappedStepLines } from '../runner-core/src/step-lines.ts';
 import { matchText } from '../src/parser/section-match.js';
-import { expandSkills } from '../src/skills/expander.js';
+import { expandMacros } from '../src/macros/expander.js';
 
 /**
  * The editor's view of "what is a call" vs the runtime's.
@@ -234,7 +234,7 @@ const allIndexCalls = (text: string): Set<string> =>
 
 /**
  * Every call the CLI actually resolves, as `line:name`. Derived from the
- * parse rather than the expansion so it needs no skillsDir: a step is a call
+ * parse rather than the expansion so it needs no macrosDir: a step is a call
  * iff its match text names a defined section.
  */
 function allCliCalls(text: string): Set<string> | null {
@@ -409,13 +409,13 @@ describe('wrapped body steps are detected, not silently truncated', () => {
  * The set above (`allCliCalls`) reads only the parse, which is enough while
  * every call site is the whole step — but a control line's call site is its
  * TAIL, and that resolution happens during expansion. So this side is derived
- * from the frames `expandSkills` really builds: a `section` frame's
+ * from the frames `expandMacros` really builds: a `section` frame's
  * `invocationLine` is the line that called it, tail or not. Nothing here
  * restates the rule under test; it reports what ran.
  */
 async function expandedSectionCalls(text: string): Promise<Set<string>> {
   const parsed = parseTestContent(text, 'parity.md');
-  const expansion = await expandSkills(
+  const expansion = await expandMacros(
     parsed.steps,
     undefined,
     undefined,
@@ -426,7 +426,7 @@ async function expandedSectionCalls(text: string): Promise<Set<string>> {
   const out = new Set<string>();
   for (const frame of Object.values(expansion.frames)) {
     if (frame.kind !== 'section' || frame.invocationLine === null) continue;
-    out.add(`${frame.invocationLine}:${matchText(frame.skillName ?? '')}`);
+    out.add(`${frame.invocationLine}:${matchText(frame.macroName ?? '')}`);
   }
   return out;
 }

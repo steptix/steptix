@@ -808,8 +808,8 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   const stepNumberLabel = overrides.numberLabel ?? `Step ${step.index}`;
   const displayedInstruction = overrides.displayInstruction ?? step.instruction;
 
-  const sourceSkillBadge = step.sourceSkill
-    ? `<span class="badge badge-skill" title="Step expanded from skill ${escapeHtml(step.sourceSkill)}">${escapeHtml(step.sourceSkill)}</span>`
+  const sourceMacroBadge = step.sourceMacro
+    ? `<span class="badge badge-macro" title="Step expanded from macro ${escapeHtml(step.sourceMacro)}">${escapeHtml(step.sourceMacro)}</span>`
     : '';
 
   // The code mark for code-behind — the one way a step avoids the model, and
@@ -830,7 +830,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
       ? `<span class="badge badge-codebehind" title="Ran this step's code-behind — no AI call">${CODE_BEHIND_MARK} code</span>`
       : '';
 
-  // Alongside the skill chip, not instead of it: a skill invoked from inside
+  // Alongside the macro chip, not instead of it: a macro invoked from inside
   // a section carries both.
   const iterationSuffix =
     step.loop && step.loop.kind === 'iteration'
@@ -866,7 +866,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     <span class="step-instruction">${escapeHtml(displayedInstruction)}</span>
     ${loopBadge}
     ${sourceSectionBadge}
-    ${sourceSkillBadge}
+    ${sourceMacroBadge}
     ${originBadge}
     ${tabBadge}
     ${retryBadge}

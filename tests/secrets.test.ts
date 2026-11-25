@@ -63,7 +63,7 @@ describe('secretValues / runSecrets — what counts', () => {
 
 describe('runSecretsWithInputs — the values a frame holds only in its step text', () => {
   it('keeps every frame\'s value of a name, and the test\'s own beside them (issue 060)', () => {
-    // Two rows of a `password` column, and a login skill handed the test's
+    // Two rows of a `password` column, and a login macro handed the test's
     // password as the placeholder text — the shape a merged map collapsed to
     // one value per name, dropping `row-1` and the real `hunter2-real`.
     const secrets = runSecretsWithInputs({ parameters: { password: 'hunter2-real', user: 'ada' } }, [

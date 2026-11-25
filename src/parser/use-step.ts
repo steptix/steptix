@@ -17,11 +17,11 @@
  *    substituted value is not one an author wrote, and what a run does must
  *    be readable from the file.
  *  - {@link useStepError} is what a PARSE-TIME validator asks. A line opening
- *    `[use` has CLAIMED the form the way `[skill:` claims one, so a claim that
+ *    `[use` has CLAIMED the form the way `[macro:` claims one, so a claim that
  *    does not complete is an error naming the line rather than prose handed to
  *    a model — the §4.2 failure this directive's bracket spelling exists to
  *    make impossible. It runs where `setStepError` runs: the `## Steps` main
- *    flow and every `### Section` body of a test or skill, plus MCP-supplied
+ *    flow and every `### Section` body of a test or macro, plus MCP-supplied
  *    steps, and NOT over `## Hooks` entries, project `defaultHooks`, or steps
  *    posted straight to the Sessions API. (§4.4 refuses a SURFACE SWITCH in a
  *    hook outright — that is the hook loader's rule, not this module's, and it
@@ -81,7 +81,7 @@ const NO_HOOKS_PREFIX = /^\[no-hooks\]\s*/i;
  * instead of a generic "not a directive".
  *
  * Case-INSENSITIVE, unlike the invocation tokenizer. The invocation grammar is
- * case-sensitive because `[SKILL: x]` is prose to the runner and a mirror that
+ * case-sensitive because `[MACRO: x]` is prose to the runner and a mirror that
  * claimed it would refuse a step the server runs happily; here the runner
  * itself reads the directive case-insensitively (§4.1), so the claim must too.
  *
@@ -300,7 +300,7 @@ function skipInlineSpace(source: string, from: number): number {
 /**
  * A reason plus the source line and a caret under the offending column — the
  * shape `formatMessage` in invocation-parser.ts produces, so a `[use …]`
- * refusal and a `[skill: …]` refusal read as one diagnostic style.
+ * refusal and a `[macro: …]` refusal read as one diagnostic style.
  *
  * The caret is measured against the NORMALISED line, which is also what is
  * printed, so the two can never be out of step by the width of a stripped

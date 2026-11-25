@@ -227,7 +227,7 @@ export interface CompileSummary {
 export interface CompileResult {
   status: CompileStatus;
   /** Proposed content, keyed by absolute `.steps.ts` path. A test that invokes
-   *  skills compiles into the skills' own files, so this can span several. */
+   *  macros compiles into the macros' own files, so this can span several. */
   files: Record<string, string>;
   summary: CompileSummary;
 }
@@ -303,7 +303,7 @@ export interface CompileRunOutcome {
 export type CompileRunner = (request: CompileRunRequest) => Promise<CompileRunOutcome>;
 
 export interface CompileOptions {
-  /** The parsed test, already skill/section-expanded. */
+  /** The parsed test, already macro/section-expanded. */
   test: ParsedTest;
   config: Config;
   /**
@@ -706,7 +706,7 @@ export async function compileTest(callerOptions: CompileOptions): Promise<Compil
   /**
    * The mask set a prompt built from `values` for one binding is masked with —
    * the run's (`runSecrets`), that binding's frame inputs (the run's own
-   * `secretsNow` merges them: `[skill: api header="Bearer <key>"]`), and the
+   * `secretsNow` merges them: `[macro: api header="Bearer <key>"]`), and the
    * recovered secrets above.
    */
   const promptSecretsFor = (values: Record<string, string>, binding: CodeBehindBinding | undefined): string[] =>
@@ -724,7 +724,7 @@ export async function compileTest(callerOptions: CompileOptions): Promise<Compil
   const observationsFor = (member: number): RecordedObservation[] =>
     observationsOf(recordVisits, member, snapshots);
   // One entry, several steps: the rows of a `### Section` table, or a section
-  // or skill called twice, bind one entry (`entryKeyOf`), and `selectSteps`
+  // or macro called twice, bind one entry (`entryKeyOf`), and `selectSteps`
   // stood the first of them in for all, before there was a recording to choose
   // by. Its evidence is the best of theirs, ranked as `evidenceRows` ranks the
   // passes of one index (`evidenceRank`): a row that read items beats one whose
@@ -1087,7 +1087,7 @@ export async function compileTest(callerOptions: CompileOptions): Promise<Compil
     //
     // Judged from the RUN's recording rather than from the file, and that is
     // the whole reason it is here and not in `describeSteps`: a shared
-    // `### Section` or a skill body runs on whatever surface its caller was
+    // `### Section` or a macro body runs on whatever surface its caller was
     // on, so the file cannot know. `ai: true` with the reason, and no model
     // call — generation would be asked to write a `page.mouse.click(812, 544)`
     // that means something else on the next machine.
@@ -2405,7 +2405,7 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
     // A guard whose condition the MODEL decides — `If`, `Else if`, `While`,
     // `Repeat … until` — compiles to a `condition` entry
     // (stories/codebehind-loops-and-conditions.md, decision 4). Read off the
-    // authored line, so a skill body's `{{order}}` is the author's.
+    // authored line, so a macro body's `{{order}}` is the author's.
     const condition = controls[i] ? compilableCondition(text) !== undefined : false;
     const ineligible = controls[i] && !condition
       ? // `Otherwise` has no condition, `For each` reads a list and never asks
@@ -2635,7 +2635,7 @@ function maskedSpans(shown: string, start: string): string[] | undefined {
  *
  * `final` is the run's final map, and it answers two things the rows cannot:
  *
- *  - a name no row reports at all — a skill-internal capture, which `outputs`
+ *  - a name no row reports at all — a macro-internal capture, which `outputs`
  *    never carries — filled into every snapshot that lacks it, never under a
  *    root the fold has bound (so the last pass's `order.note` cannot leak into
  *    a pass whose row had no note);

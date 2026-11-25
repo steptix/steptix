@@ -69,7 +69,7 @@ describe('acquireComputerLock — §5.9', () => {
   });
 
   it('is idempotent for the same pid AND session, keeping the original `since`', () => {
-    // Sections and skills open with `[use computer]` defensively (§4.5), so
+    // Sections and macros open with `[use computer]` defensively (§4.5), so
     // re-entry is the normal case, not the odd one. The record must still say
     // when the mouse was FIRST taken. Taken long ago here: two acquires a
     // millisecond apart would stamp the same `since`, rewritten or not.

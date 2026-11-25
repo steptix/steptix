@@ -668,7 +668,7 @@ describe('a loop clones its tail frames per pass', () => {
     expect(new Set(pushes.map((f) => f.id)).size).toBe(3);
     // …all naming the same section, at the same file and line.
     for (const frame of pushes) {
-      expect(frame.skillName).toBe('Go to the next page');
+      expect(frame.macroName).toBe('Go to the next page');
       expect(frame.kind).toBe('section');
     }
     // One pop per pass: the guard's own frame is the test root.
@@ -702,11 +702,11 @@ describe('a loop clones its tail frames per pass', () => {
 
     const pushes = events.filter((e) => e.type === 'frame:push').map((e) => e.frame);
     // One for the outer pass, one per inner pass.
-    expect(pushes.map((f) => f.skillName)).toEqual(['Outer body', 'Inner body', 'Inner body']);
+    expect(pushes.map((f) => f.macroName)).toEqual(['Outer body', 'Inner body', 'Inner body']);
     // The two inner passes are DIFFERENT frames — they used to share the one
     // the outer pass had cloned, because the walk asked "is there an alias
     // anywhere on the stack" instead of "has THIS pass cloned it".
-    const inner = pushes.filter((f) => f.skillName === 'Inner body');
+    const inner = pushes.filter((f) => f.macroName === 'Inner body');
     expect(new Set(inner.map((f) => f.id)).size).toBe(2);
     // …and each carries its own iteration, with no count while it runs.
     expect(inner.map((f) => f.iteration)).toEqual([1, 2]);

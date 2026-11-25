@@ -107,7 +107,7 @@ describe('Steptix flow control — step:skip', function () {
       kind: 'section',
       uri: testPath,
       line: CALL_SIGN_IN,
-      skillName: 'Sign in',
+      macroName: 'Sign in',
     };
     acceptCookies = {
       id: 'f2',
@@ -115,7 +115,7 @@ describe('Steptix flow control — step:skip', function () {
       kind: 'section',
       uri: testPath,
       line: BODY_CALL,
-      skillName: 'Accept cookies',
+      macroName: 'Accept cookies',
     };
 
     await vscode.commands.executeCommand('vscode.open', testUri);
@@ -242,30 +242,30 @@ describe('Steptix flow control — step:skip', function () {
     );
   });
 
-  it('routes a skipped SKILL-body line to the skill file, not the test file', async () => {
+  it('routes a skipped MACRO-body line to the macro file, not the test file', async () => {
     // The other half of the routing rule. A section body line lives in the
-    // test file (asserted above); a skill body line lives in the skill's own
+    // test file (asserted above); a macro body line lives in the macro's own
     // `.md`, and `step:skip` has to honour `frame.uri` exactly as `step:pass`
     // does or the ◌ lands on whatever sits at that line number in the test.
-    const skillPath = path.resolve(FIXTURES_DIR, 'fake-skill.md');
-    const skillUri = vscode.Uri.file(skillPath);
-    const skillFrame = {
+    const macroPath = path.resolve(FIXTURES_DIR, 'fake-macro.md');
+    const macroUri = vscode.Uri.file(macroPath);
+    const macroFrame = {
       id: 'f9',
       parentId: null,
-      kind: 'skill',
-      uri: skillPath,
+      kind: 'macro',
+      uri: macroPath,
       line: CALL_SIGN_IN,
-      skillName: 'fake_skill',
+      macroName: 'fake_macro',
     };
 
     void vscode.commands.executeCommand('steptix.runAll');
     await waitFor('stream active', () => fake.hasActiveStream);
 
-    fake.push({ type: 'frame:push', frame: skillFrame });
-    fake.push({ type: 'step:pass', line: 3, frame: skillFrame });
-    fake.push({ type: 'step:skip', line: 4, frame: skillFrame, reason: RETURN_REASON });
-    await waitFor('skill-file line 4 shows skip', () => {
-      const snap = hooks.tracker.snapshotFor(skillUri);
+    fake.push({ type: 'frame:push', frame: macroFrame });
+    fake.push({ type: 'step:pass', line: 3, frame: macroFrame });
+    fake.push({ type: 'step:skip', line: 4, frame: macroFrame, reason: RETURN_REASON });
+    await waitFor('macro-file line 4 shows skip', () => {
+      const snap = hooks.tracker.snapshotFor(macroUri);
       if (!snap) return false;
       return Object.fromEntries(snap.statuses)[4] === 'skip';
     });
@@ -274,7 +274,7 @@ describe('Steptix flow control — step:skip', function () {
     assert.equal(
       testStatuses[4],
       undefined,
-      'the test file must not inherit a skill-body skip',
+      'the test file must not inherit a macro-body skip',
     );
 
     fake.push({ type: 'frame:pop', frameId: 'f9', outputs: {} });

@@ -1,6 +1,6 @@
 /**
  * Tokenizer for `[tool: name ...]` invocations. Shares grammar logic with
- * the skill-call parser via `parseInvocation` — see
+ * the macro-call parser via `parseInvocation` — see
  * `src/parser/invocation-parser.ts` for the full grammar and shorthand rules.
  */
 

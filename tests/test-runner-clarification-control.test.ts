@@ -171,13 +171,13 @@ function makeTest(steps: string[]): ParsedTest {
     stepLines: steps.map((_, i) => i + 1),
     skipHooks: steps.map(() => false),
     toolCalls: steps.map(() => null),
-    sourceSkills: steps.map(() => null),
+    sourceMacros: steps.map(() => null),
     sourceSections: steps.map(() => null),
     sections: {},
     rawSteps: [...steps],
     hooks: { before: [], beforeEach: [], afterEach: [], after: [] },
     hookToolCalls: { before: [], beforeEach: [], afterEach: [], after: [] },
-    hookSourceSkills: { before: [], beforeEach: [], afterEach: [], after: [] },
+    hookSourceMacros: { before: [], beforeEach: [], afterEach: [], after: [] },
   };
 }
 
@@ -444,9 +444,9 @@ describe('test-runner — captured `as` values reach the report', () => {
     expect(report.steps[0]!.outputs).toBeUndefined();
   });
 
-  it('never surfaces a __skill*-namespaced `as` capture', async () => {
+  it('never surfaces a __macro*-namespaced `as` capture', async () => {
     executeStepMock.mockImplementationOnce(async (_idx, _total, _instruction, opts) => {
-      opts.resolvedParameters['__skill1_total'] = '37.76';
+      opts.resolvedParameters['__macro1_total'] = '37.76';
       return {
         index: 1,
         instruction: 'Read the total',
@@ -458,7 +458,7 @@ describe('test-runner — captured `as` values reach the report', () => {
           aiInteractions: [],
           subActions: [{
             index: 1,
-            action: { action: 'read', selector: '#total', as: '__skill1_total', description: 'internal skill capture' },
+            action: { action: 'read', selector: '#total', as: '__macro1_total', description: 'internal macro capture' },
             durationMs: 10,
           }],
         }],

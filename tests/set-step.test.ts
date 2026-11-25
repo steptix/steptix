@@ -338,15 +338,15 @@ describe('a Set target that needs a guarded write', () => {
     expect(scope['__proto__']).toBe('hello');
   });
 
-  it('does not report a skill-internal name', async () => {
-    // `computeStepCaptures` and `autoCapturedNames` both drop `__skill*`;
-    // writing outputs directly bypassed both, surfacing `__skill1_scratch` in
+  it('does not report a macro-internal name', async () => {
+    // `computeStepCaptures` and `autoCapturedNames` both drop `__macro*`;
+    // writing outputs directly bypassed both, surfacing `__macro1_scratch` in
     // the report, the HTTP outputs map and the Variables panel.
     const { runSetStep } = await import('../src/runner/set-step-runner.js');
     const scope: Record<string, string> = {};
-    const out = runSetStep({ name: '__skill1_scratch', template: 'v' }, 'x', 1, scope);
+    const out = runSetStep({ name: '__macro1_scratch', template: 'v' }, 'x', 1, scope);
     expect(out.result.status).toBe('passed');
-    expect(scope['__skill1_scratch']).toBe('v'); // the assignment still happens
+    expect(scope['__macro1_scratch']).toBe('v'); // the assignment still happens
     expect(out.result.outputs).toBeUndefined(); // its reporting does not
     expect(out.assigned).toBeUndefined();
   });

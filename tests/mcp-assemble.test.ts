@@ -3,7 +3,7 @@
  *
  * The wire body is an allow-list on the server side, so the failure mode these
  * tests exist to catch is a *silent field drop*: a payload that assembles
- * cleanly, posts successfully, and runs with the wrong environment, no skills
+ * cleanly, posts successfully, and runs with the wrong environment, no macros
  * directory, or un-interpolated placeholders. Every assertion below is against
  * the finished `request`, not against an intermediate.
  *
@@ -23,7 +23,7 @@ import { PreflightFailure } from '../src/mcp/types.js';
 // CLI parser reads from the same file, and what the server does with what
 // this module sends.
 import { parseTestFile } from '../src/parser/markdown.js';
-import { expandSkills } from '../src/skills/expander.js';
+import { expandMacros } from '../src/macros/expander.js';
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mcp');
 
@@ -92,8 +92,8 @@ beforeEach(() => {
   process.env['LOCALAPPDATA'] = userRootTmp;
   process.env['XDG_CONFIG_HOME'] = userRootTmp;
   root = makeProject(
-    { tests: { skillsDir: './skills', toolsDir: './tools/src' } },
-    ['skills', 'tools/src', 'data'],
+    { tests: { macrosDir: './macros', toolsDir: './tools/src' } },
+    ['macros', 'tools/src', 'data'],
   );
 });
 
@@ -130,7 +130,7 @@ describe('assembleTestFile — goldens', () => {
     ]);
     expect(run.request.sourceLines).toEqual([16, 17]);
     expect(run.request.testFilePath).toBe(testFile('env-frontmatter.md'));
-    expect(run.request.skillsDir).toBe(path.join(root, 'skills'));
+    expect(run.request.macrosDir).toBe(path.join(root, 'macros'));
     expect(run.request.toolsDir).toBe(path.join(root, 'tools', 'src'));
     expect(run.sentSteps).toBe(run.request.steps);
     expect(run.warnings).toEqual([]);
@@ -203,7 +203,7 @@ describe('assembleTestFile — goldens', () => {
     // up: the same payload the server would be handed produces the same match
     // sides the CLI parse of the same file does, for every iteration of the
     // loop.
-    const expanded = await expandSkills(
+    const expanded = await expandMacros(
       run.request.steps,
       undefined,
       undefined,
@@ -314,7 +314,7 @@ describe('assembleTestFile — goldens', () => {
     const warnings = run.warnings.join('\n');
     expect(warnings).toContain('Parameter "extra" is not declared');
     expect(warnings).toContain('{{orderId}}');
-    expect(warnings).toContain('skill bodies');
+    expect(warnings).toContain('macro bodies');
   });
 
   it('warns about steps that need a human', async () => {
@@ -330,10 +330,10 @@ describe('assembleTestFile — goldens', () => {
     expect(run.warnings.join('\n')).toContain('Source line numbers were unusable');
   });
 
-  it('uses the defaults.ts literals when the config declares no skillsDir', async () => {
-    const bare = makeProject({ tests: { dir: './tests' } }, ['skills']);
+  it('uses the defaults.ts literals when the config declares no macrosDir', async () => {
+    const bare = makeProject({ tests: { dir: './tests' } }, ['macros']);
     const run = await assembleTestFile({ path: testFile('simple.md', bare), resolveProject });
-    expect(run.request.skillsDir).toBe(path.join(bare, 'skills'));
+    expect(run.request.macrosDir).toBe(path.join(bare, 'macros'));
     // ./tools/src does not exist in this project, so the field is omitted
     // rather than pointed at nothing.
     expect(run.request.toolsDir).toBeUndefined();
@@ -353,10 +353,10 @@ describe('assembleTestFile — goldens', () => {
 });
 
 describe('assembleTestFile — refusals', () => {
-  it('refuses a skill file', async () => {
-    const text = await refusalText(() => assemble('skill.md'));
-    expect(text).toContain('type: skill');
-    expect(text).toContain(testFile('skill.md'));
+  it('refuses a macro file', async () => {
+    const text = await refusalText(() => assemble('macro.md'));
+    expect(text).toContain('type: macro');
+    expect(text).toContain(testFile('macro.md'));
   });
 
   it('refuses a test with no steps', async () => {
@@ -439,7 +439,7 @@ describe('assembleSteps', () => {
     expect(run.request.dataSources).toBeUndefined();
     expect(run.request.envName).toBe('uat');
     expect(run.request.env?.['BASE_URL']).toBe('https://uat.example.com');
-    expect(run.request.skillsDir).toBe(path.join(root, 'skills'));
+    expect(run.request.macrosDir).toBe(path.join(root, 'macros'));
     expect(run.request.toolsDir).toBe(path.join(root, 'tools', 'src'));
     expect(run.sentSteps).toEqual(run.request.steps);
   });

@@ -1284,11 +1284,11 @@ describe("the project's context files reach the model", () => {
 // §5.4 — a bracket directive nobody dispatched never reaches the model
 // ---------------------------------------------------------------------------
 
-describe('an undispatched [tool:] / [skill:] line fails on the computer surface (§5.4)', () => {
+describe('an undispatched [tool:] / [macro:] line fails, on the computer surface (§5.4) and the page (SPEC-macros.md §7)', () => {
   /** Measured live: this exact step, with no `toolsDir`, was acted out by the
    *  model — Win+R, `calc`, Enter — on the real desktop. */
   const NO_TOOLS_MESSAGE =
-    '[tool: open_calculator] was not run: this request carried no tools directory (toolsDir), ' +
+    '[tool: open_calculator] was not run: Steptix was given no tools folder for this run, ' +
     'so no tool is loaded';
 
   /** Every model call the session could make, on the mocked client. */
@@ -1349,22 +1349,22 @@ describe('an undispatched [tool:] / [skill:] line fails on the computer surface 
     expect(modelCalls(manager, 's-tool-unknown')).toBe(0);
   });
 
-  it('a raw [skill:] line with no skillsDir fails the same way', async () => {
+  it('a raw [macro:] line with no macrosDir fails the same way', async () => {
     const manager = makeManager();
 
-    const response = await manager.executeSteps('s-skill-raw', {
-      steps: ['[use computer]', '[skill: open-calculator]'],
+    const response = await manager.executeSteps('s-macro-raw', {
+      steps: ['[use computer]', '[macro: open-calculator]'],
     });
 
     expect(response.status).toBe('failed');
     expect(response.error!.message).toContain(
-      '[skill: open-calculator] was not run: this request carried no skills directory (skillsDir)',
+      '[macro: open-calculator] was not run: Steptix was given no macros folder for this run',
     );
     expect(response.error!.message).toContain(
-      'In computer mode a skill line is never handed to the model',
+      'In computer mode a macro line is never handed to the model',
     );
     expect(executeComputerStepMock).not.toHaveBeenCalled();
-    expect(modelCalls(manager, 's-skill-raw')).toBe(0);
+    expect(modelCalls(manager, 's-macro-raw')).toBe(0);
   });
 
   it('a whole-step bracket that names no directive is refused too (§4.2)', async () => {
@@ -1390,17 +1390,48 @@ describe('an undispatched [tool:] / [skill:] line fails on the computer surface 
     expect(executeComputerStepMock).toHaveBeenCalledTimes(1);
   });
 
-  it('the page surface is unchanged: with no toolsDir the line still goes to the model as prose', async () => {
+  // SPEC-macros.md §7. This used to pin the page surface handing the line to
+  // the model as prose — and passing on the mock's say-so, a pass for a tool
+  // that never ran. The page surface now refuses it too, without the
+  // computer-mode sentence.
+  it.each([
+    ['[tool: open_calculator]', NO_TOOLS_MESSAGE],
+    [
+      '[macro: login]',
+      '[macro: login] was not run: Steptix was given no macros folder for this run',
+    ],
+    [
+      'Log in [macro: login]',
+      '[macro: login] was not run: Steptix was given no macros folder for this run',
+    ],
+  ])('on the page surface, %s with no folder fails unrun, and nothing is asked of the model', async (step, message) => {
     const manager = makeManager();
 
-    const response = await manager.executeSteps('s-tool-page', {
-      steps: ['[tool: open_calculator]'],
+    const response = await manager.executeSteps('s-page-raw', {
+      steps: [step, 'Click the Save button'],
+    });
+
+    expect(response.status).toBe('failed');
+    expect(response.error!.message).toContain(message);
+    expect(response.error!.message).not.toContain('In computer mode');
+    expect(response.results[0]!.status).toBe('failed');
+    expect(response.results[0]!.surface).toBeUndefined();
+    // The refusal stops the batch: the step after it never ran.
+    expect(response.results).toHaveLength(1);
+    expect(executeStepMock).not.toHaveBeenCalled();
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(modelCalls(manager, 's-page-raw')).toBe(0);
+  });
+
+  it('on the page surface, prose and a bare unknown bracket still go to the model', async () => {
+    const manager = makeManager();
+
+    const response = await manager.executeSteps('s-page-prose', {
+      steps: ['Select the [macro lens: 100mm] option', '[calculator]'],
     });
 
     expect(response.status).toBe('passed');
-    expect(executeStepMock).toHaveBeenCalledTimes(1);
-    expect(executeStepMock.mock.calls[0]![2]).toBe('[tool: open_calculator]');
-    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(executeStepMock).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -1469,7 +1500,7 @@ describe('a pause inside a batch gives the lock back (§5.9)', () => {
    * A batch whose third step calls a section, with a breakpoint on a body
    * line. A section body lives in the test file but only exists after
    * expansion, so the client cannot trim at it and the SERVER pauses there —
-   * the same server-side pause a skill-file breakpoint takes.
+   * the same server-side pause a macro-file breakpoint takes.
    *
    *     3. <main[0]>        10. Click Save    <- breakpoint
    *     4. <main[1]>        11. Click Close
@@ -1884,55 +1915,55 @@ describe('a [tool:] line on the computer surface takes the lock (§5.9)', () => 
 });
 
 // ---------------------------------------------------------------------------
-// §4.5 — a skill call restores the caller's surface on return, `computer`
+// §4.5 — a macro call restores the caller's surface on return, `computer`
 // included
 //
 // Review finding: restoring a computer-surface caller was a no-op. A caller in
-// computer mode whose skill ran `[use browser]` came back on the browser, and
+// computer mode whose macro ran `[use browser]` came back on the browser, and
 // its next desktop step went to the page.
 // ---------------------------------------------------------------------------
 
-describe('a skill that leaves computer mode hands the caller back its computer surface (§4.5)', () => {
-  let skillsDir: string;
+describe('a macro that leaves computer mode hands the caller back its computer surface (§4.5)', () => {
+  let macrosDir: string;
   beforeEach(() => {
-    skillsDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-computer-skills-'));
+    macrosDir = mkdtempSync(path.join(os.tmpdir(), 'steptix-computer-macros-'));
     writeFileSync(
-      path.join(skillsDir, 'check-page.md'),
-      ['---', 'type: skill', '---', '# check-page', '', '## Steps', '1. [use browser]', '2. Click the heading', ''].join('\n'),
+      path.join(macrosDir, 'check-page.md'),
+      ['---', 'type: macro', '---', '# check-page', '', '## Steps', '1. [use browser]', '2. Click the heading', ''].join('\n'),
     );
   });
   afterEach(() => {
-    rmSync(skillsDir, { recursive: true, force: true });
+    rmSync(macrosDir, { recursive: true, force: true });
   });
 
-  const STEPS = ['[use computer]', '[skill: check-page]', 'Click Save in the dialog'];
+  const STEPS = ['[use computer]', '[macro: check-page]', 'Click Save in the dialog'];
 
   it('re-enters computer mode through [use computer]: the next caller step runs on the computer, under the lock', async () => {
     const holders = recordLockHolders();
     const manager = makeManager();
     const testFilePath = writeProject({ desktop: { enabled: true } });
 
-    const response = await manager.executeSteps('s-skill-back', { steps: STEPS, skillsDir, testFilePath });
+    const response = await manager.executeSteps('s-macro-back', { steps: STEPS, macrosDir, testFilePath });
 
     expect(response.error?.message).toBeUndefined();
     expect(response.status).toBe('passed');
-    // The skill body ran on the page…
+    // The macro body ran on the page…
     expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual(['Click the heading']);
     // …and the caller's next step on the computer, holding the lock.
     expect(executeComputerStepMock.mock.calls.map((c) => c[2])).toEqual(['Click Save in the dialog']);
-    expect(holders).toEqual(['s-skill-back']);
-    // A full entry — the skill's [use browser] dropped the adapter — so §5.1's
+    expect(holders).toEqual(['s-macro-back']);
+    // A full entry — the macro's [use browser] dropped the adapter — so §5.1's
     // preconditions ran again.
     expect(loadDesktopAdapter).toHaveBeenCalledTimes(2);
     expect(probeComputerCapture).toHaveBeenCalledTimes(2);
-    expect(managed(manager, 's-skill-back').surface).toBe('computer');
+    expect(managed(manager, 's-macro-back').surface).toBe('computer');
     expect(existsSync(lockPath)).toBe(false);
   });
 
   it('when the re-entry fails, the step it was restoring for fails with the enter error and nothing runs on it', async () => {
     const manager = makeManager();
     const testFilePath = writeProject({ desktop: { enabled: true } });
-    // Another session takes the lock while the skill is on the browser.
+    // Another session takes the lock while the macro is on the browser.
     executeStepMock.mockImplementationOnce(async (_i, _n, instruction) => {
       acquireComputerLock('s-other', { lockPath });
       return { index: 1, instruction, status: 'passed', turns: [], durationMs: 1, retried: false };
@@ -1940,15 +1971,15 @@ describe('a skill that leaves computer mode hands the caller back its computer s
     const events: RunEvent[] = [];
 
     const response = await manager.executeSteps(
-      's-skill-busy',
-      { steps: STEPS, skillsDir, testFilePath },
+      's-macro-busy',
+      { steps: STEPS, macrosDir, testFilePath },
       (e) => events.push(e),
     );
 
     const inUse = computerLockInUseMessage({ pid: process.pid, sessionId: 's-other', since: '' });
     expect(response.status).toBe('failed');
     expect(response.error!.message).toContain(inUse);
-    expect(response.error!.message).toContain('returned from a skill');
+    expect(response.error!.message).toContain('returned from a macro');
     const fail = events.find((e) => e.type === 'step:fail') as Extract<RunEvent, { type: 'step:fail' }>;
     expect(fail.error).toContain(inUse);
     // The caller's step went nowhere: not to the computer, not to the page.

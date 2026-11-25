@@ -82,7 +82,7 @@ import {
 import { decideConditionLocally, type LocalDecision } from './literal-decision.js';
 import { storeCapture } from './store-capture.js';
 import { isReviewAnswer, leavesPageAsRead, listReadConcern, sameListRead, storedName, type ListReadConcern } from './list-read-review.js';
-import { referencedVariableNames } from '../skills/expander.js';
+import { referencedVariableNames } from '../macros/expander.js';
 import {
   isReturnClaim,
   parseFlowControlStep,
@@ -800,7 +800,7 @@ export function applyFailureTail(result: StepResult, opts: StepExecutorOptions):
  * INTACT — what the model is shown, beside a `## Values` block saying what each
  * one holds (stories/placeholder-preserving-actions.md, decision 1). It
  * defaults to `instruction`, which is right for a caller that has no separate
- * authored form: the interactive REPL's user-typed line, and a `[skill:]`
+ * authored form: the interactive REPL's user-typed line, and a `[macro:]`
  * argument the expander already baked in (phase 2).
  */
 export async function executeStep(
@@ -832,7 +832,7 @@ export async function executeStep(
       // Read now, so a secret this step captured is masked in its own lines.
       // The loop's own set on `stats.maskValues` is merged in beside it, and
       // that is the one that holds the values expansion wrote into the step
-      // text (skill arguments, a looped section's row) — no option here
+      // text (macro arguments, a looped section's row) — no option here
       // carries them (`runSecretsWithInputs`, src/utils/secrets.ts).
       maskValues: secretsFor(opts),
     });

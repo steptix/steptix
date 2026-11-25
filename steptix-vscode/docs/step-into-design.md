@@ -5,14 +5,14 @@ Scope: `steptix-vscode` extension, `runner-core`, server (`src/`).
 
 ## Goal
 
-When a Steptix run is paused at a breakpoint on a `[skill: ...]` or
+When a Steptix run is paused at a breakpoint on a `[macro: ...]` or
 `[tool: ...]` line, the user can **step into** that invocation:
 
-- **Skill**: open the skill's `.md` file, park the yellow pause arrow on its
+- **Macro**: open the macro's `.md` file, park the yellow pause arrow on its
   first step, and let the existing Run / Pause / Resume / breakpoints /
-  Step Over machinery operate inside the skill. Nested skill calls compose
-  recursively, building a call stack. When the skill finishes, control
-  returns to the **next line in the caller**, with the skill's aliased
+  Step Over machinery operate inside the macro. Nested macro calls compose
+  recursively, building a call stack. When the macro finishes, control
+  returns to the **next line in the caller**, with the macro's aliased
   outputs visible in caller scope.
 - **Tool**: hand off to VS Code's standard Node.js debugger attached to the
   server process, with execution paused at the tool's `run()` entry — the
@@ -20,7 +20,7 @@ When a Steptix run is paused at a breakpoint on a `[skill: ...]` or
   inside the `.ts` source.
 
 Plus: a **Variables panel** that shows the current frame's variable scope
-(caller vs skill, with output aliases visible at frame boundaries).
+(caller vs macro, with output aliases visible at frame boundaries).
 
 ## Non-goals
 
@@ -29,20 +29,21 @@ Plus: a **Variables panel** that shows the current frame's variable scope
 - Conditional / hit-count breakpoints. The existing breakpoint model stays.
 - Remote `STEPTIX_SERVER_URL` support for tool step-into. Tool descent requires a
   local server running with `--inspect`; remote setups get a clear
-  "feature unavailable" error and skill step-into continues to work.
+  "feature unavailable" error and macro step-into continues to work.
 
 ## User stories
 
-1. **Step into a skill, run to completion.** Author hits F9 on line 12 of
-   [fixtures/tests/skill-demo.md](../../fixtures/tests/skill-demo.md), hits F5
-   to run. Pauses at the `[skill: duckduckgo_search ...]` line. Hits F11.
-   `fixtures/skills/duckduckgo_search.md` opens, arrow on step 1. F10 walks
-   through the skill's steps. After the last skill step, the arrow returns
+1. **Step into a macro, run to completion.** The stories use an example test,
+   `macro-demo.md`, that calls a `duckduckgo_search` macro; neither file is in
+   the repo. Author hits F9 on line 12 of `macro-demo.md`, hits F5
+   to run. Pauses at the `[macro: duckduckgo_search ...]` line. Hits F11.
+   `macros/duckduckgo_search.md` opens, arrow on step 1. F10 walks
+   through the macro's steps. After the last macro step, the arrow returns
    to line 13 of the test (`Navigate to {{target_url}}`) and `target_url` is
    visible in the Variables panel.
-2. **Step into a nested skill.** Same as above but a skill body itself
-   contains a `[skill: ...]` line. F11 there descends again; call stack
-   shows test → outer skill → inner skill. Step Out (Shift+F11) pops one
+2. **Step into a nested macro.** Same as above but a macro body itself
+   contains a `[macro: ...]` line. F11 there descends again; call stack
+   shows test → outer macro → inner macro. Step Out (Shift+F11) pops one
    frame at a time.
 3. **Step into a tool.** Author hits F9 on a `[tool: ...]` line, hits F5,
    pauses there, hits F11. A VS Code Node debug session attaches (or
@@ -53,9 +54,9 @@ Plus: a **Variables panel** that shows the current frame's variable scope
 4. **Tool step-into without `--inspect`.** Author hits F11 on a `[tool: ...]`
    line but the server wasn't launched with `--inspect`. A
    `vscode.window.showErrorMessage` surfaces a one-line cause + a "How to
-   fix" action that opens the docs. Skill step-into is unaffected.
+   fix" action that opens the docs. Macro step-into is unaffected.
 5. **Inspect scope while paused.** While paused (anywhere — top-level,
-   inside a skill, inside a nested skill), the Variables panel shows the
+   inside a macro, inside a nested macro), the Variables panel shows the
    active frame's scope. Switching frames in the call-stack view updates
    the panel.
 
@@ -66,8 +67,8 @@ The steptix-vscode run path is line-by-line over the **currently-open
 `trimAtBreakpoint` slices the step list at the first breakpoint;
 [active-file-tracker.ts](../src/extension/active-file-tracker.ts) tracks the
 pause line and renders the yellow arrow via
-[decorations.ts](../src/extension/decorations.ts). Skills are flattened
-**server-side** at parse time by [src/skills/expander.ts](../../src/skills/expander.ts)
+[decorations.ts](../src/extension/decorations.ts). Macros are flattened
+**server-side** at parse time by [src/macros/expander.ts](../../src/macros/expander.ts)
 — the extension never sees the expansion. Tools execute inside the server
 at [src/tools/executor.ts:164](../../src/tools/executor.ts#L164)
 (`def.run(typedArgs, ctx)`). The wire protocol
@@ -81,11 +82,11 @@ Three packages touched, each with a distinct responsibility:
 
 | Package | Responsibility |
 | --- | --- |
-| **server** (`src/`) | Per-call skill expansion (or step-by-step emission with frame info) so the client knows what file/line each emitted step came from. Cooperates on tool-pause via a request flag that injects an inspector pause at the tool dispatcher. Surfaces variable scope snapshots per step. |
+| **server** (`src/`) | Per-call macro expansion (or step-by-step emission with frame info) so the client knows what file/line each emitted step came from. Cooperates on tool-pause via a request flag that injects an inspector pause at the tool dispatcher. Surfaces variable scope snapshots per step. |
 | **runner-core** | Protocol additions: frame info on step events, step-mode controls, scope payload, tool-pause flag. Client-side `ApiClient` learns the new request fields and emits the new event variants. |
 | **steptix-vscode** | Call-stack model, multi-file yellow-arrow that follows the active frame, Step Into / Step Over / Step Out commands, Variables panel webview, Node-debugger handoff for tool descent, settings for inspector port. |
 
-## Skill step-into
+## Macro step-into
 
 ### Conceptual model: frames
 
@@ -95,8 +96,8 @@ The extension grows a **frame stack** keyed by the active run:
 type Frame = {
   uri: vscode.Uri;          // file the arrow lives in for this frame
   line: number;              // 1-based source line currently paused on
-  kind: 'test' | 'skill';
-  skillName?: string;        // populated for kind === 'skill'
+  kind: 'test' | 'macro';
+  macroName?: string;        // populated for kind === 'macro'
   scope: Record<string, string>;   // resolved vars at this frame
   // For provenance: which line in the parent invoked this frame
   callerUri?: vscode.Uri;
@@ -104,7 +105,7 @@ type Frame = {
 };
 ```
 
-The bottom of the stack is always the test file. Each `[skill: ...]`
+The bottom of the stack is always the test file. Each `[macro: ...]`
 descent pushes a new frame; Step Out / falling-off-the-end pops one.
 
 Today `breakpointStop` is a single `number | null` on each tracked
@@ -119,10 +120,10 @@ matches the top frame's URI. Files for non-top frames stay un-decorated
 Two viable approaches; we'll go with **(B)** because it keeps the server
 honest about expansion and lets the extension stay declarative.
 
-- **(A) Client-side recursive expansion.** Move skill expansion into
-  `runner-core` so the extension can walk a skill's `.md` itself and send
+- **(A) Client-side recursive expansion.** Move macro expansion into
+  `runner-core` so the extension can walk a macro's `.md` itself and send
   *one expanded step at a time* to the server. The server stops doing
-  skill flattening for stepped runs. Simpler protocol, more work in the
+  macro flattening for stepped runs. Simpler protocol, more work in the
   client.
 - **(B) Server emits per-step frame info.** Keep expansion server-side but
   change the emission contract: `step:start` carries a frame descriptor
@@ -139,10 +140,10 @@ trace they get today):
 export interface FrameInfo {
   id: string;               // stable per run
   parentId: string | null;  // null at the test frame
-  kind: 'test' | 'skill';
+  kind: 'test' | 'macro';
   uri: string;              // file:// URI of the step's origin file
   line: number;             // 1-based line in that file
-  skillName?: string;       // for kind === 'skill'
+  macroName?: string;       // for kind === 'macro'
 }
 
 export interface StepStartEvent {
@@ -174,8 +175,8 @@ interface StreamStepsRequest {
   // ...existing fields...
   stepMode?: {
     /** 'continue' = run normally; 'into' = pause before each step,
-     *  descending into skill/tool calls; 'over' = pause before each
-     *  step, atomic over skill/tool calls; 'out' = run to end of
+     *  descending into macro/tool calls; 'over' = pause before each
+     *  step, atomic over macro/tool calls; 'out' = run to end of
      *  current frame, then pause. */
     mode: 'continue' | 'into' | 'over' | 'out';
     /** When true, the server pauses immediately before the tool
@@ -185,14 +186,14 @@ interface StreamStepsRequest {
 }
 ```
 
-### Wire-level flow for "Step Into a skill"
+### Wire-level flow for "Step Into a macro"
 
 1. User paused at test line 12 (frame stack: `[test@12]`). Variables
    panel shows test scope. Yellow arrow on test:12.
 2. User hits F11. Extension sends a new request to the server: resume
    from frame top with `stepMode.mode = 'into'`.
-3. Server begins executing line 12. It's a skill call. Before executing
-   the skill's first step it emits `frame:push` with origin =
+3. Server begins executing line 12. It's a macro call. Before executing
+   the macro's first step it emits `frame:push` with origin =
    `duckduckgo_search.md` step 1. The runner is still in `mode = 'into'`,
    so it then pauses after `step:start` and waits for the next control
    message.
@@ -201,37 +202,37 @@ interface StreamStepsRequest {
    call-stack view and Variables panel.
 5. User hits F10. Extension sends `stepMode.mode = 'over'`. Server runs
    the current step to `step:pass`, then pauses before the next.
-6. Repeat until the skill emits `frame:pop`. Extension pops the frame,
+6. Repeat until the macro emits `frame:pop`. Extension pops the frame,
    merges `outputs` into the now-top frame's scope, advances the arrow
    to the next line in the caller (test:13).
 
-### Hitting breakpoints inside a skill file
+### Hitting breakpoints inside a macro file
 
 Breakpoints already live in `vscode.debug.breakpoints` keyed by URI. The
 existing `tracker.breakpoints(uri)` ([active-file-tracker.ts:159](../src/extension/active-file-tracker.ts#L159))
 generalises trivially — we just look up by the **frame's** URI when
 checking whether to pause. The breakpoint set sent on the wire becomes a
 per-frame structure: `Record<uri, number[]>` covering test + every
-referenced skill file. The server, knowing each step's origin frame,
+referenced macro file. The server, knowing each step's origin frame,
 checks `breakpoints[frame.uri].includes(frame.line)`.
 
-### Nested skills
+### Nested macros
 
 Falls out of the model for free: the server emits another `frame:push`
-when entering a skill from inside a skill. The extension's stack grows;
+when entering a macro from inside a macro. The extension's stack grows;
 the call-stack view shows the chain.
 
 ### Edge cases
 
-- **Skill cycle.** Already prevented by [expander.ts:101-104](../../src/skills/expander.ts#L101-L104). No change.
-- **Pause during a skill that emits no steps.** Skills with empty step
+- **Macro cycle.** Already prevented by [expander.ts:101-104](../../src/macros/expander.ts#L101-L104). No change.
+- **Pause during a macro that emits no steps.** Macros with empty step
   lists shouldn't exist (the parser would reject), but if one is reached
   the server emits `frame:push` then immediately `frame:pop` with no
   steps between — the extension pops without parking.
-- **Stop while inside a skill.** Existing `stop` command unwinds the
+- **Stop while inside a macro.** Existing `stop` command unwinds the
   whole stack; extension clears all frames, hides all yellow arrows.
-- **A skill that calls a `[tool: ...]`.** Tool entry pause-flag composes:
-  while we're stepping inside the skill, the next `[tool: ...]` line
+- **A macro that calls a `[tool: ...]`.** Tool entry pause-flag composes:
+  while we're stepping inside the macro, the next `[tool: ...]` line
   honours step-into the same way.
 
 ## Tool step-into
@@ -350,7 +351,7 @@ export interface FrameScopeEvent {
 - Two-column list: name, value. Truncate long values, click to expand.
 - Mask values whose names match the existing secret heuristic
   (`maskIfSecret`). Same redaction the run log already uses.
-- Header per frame shows the frame's identity (test path, or skill
+- Header per frame shows the frame's identity (test path, or macro
   name + invocation line) so users see *which* scope they're looking at.
 - Output aliases are surfaced at frame boundaries: when a child frame
   pops, the merged aliases highlight briefly in the parent's view
@@ -383,8 +384,8 @@ the test file.
 
 | Command id | Default keybinding | When | Behaviour |
 | --- | --- | --- | --- |
-| `steptix.stepInto` | F11 | `paused` | Step into the skill/tool on the current paused line. Falls back to "step over" semantics if the line isn't a `[skill: ...]` or `[tool: ...]` invocation. |
-| `steptix.stepOver` | F10 | `paused` | Execute one step and pause again. Skill/tool calls are atomic. |
+| `steptix.stepInto` | F11 | `paused` | Step into the macro/tool on the current paused line. Falls back to "step over" semantics if the line isn't a `[macro: ...]` or `[tool: ...]` invocation. |
+| `steptix.stepOver` | F10 | `paused` | Execute one step and pause again. Macro/tool calls are atomic. |
 | `steptix.stepOut` | Shift+F11 | `paused` and frame stack > 1 | Run to end of current frame, pause on the caller's next line. Disabled at the test frame. |
 | `steptix.resume` | F5 | `paused` (existing) | Unchanged behaviour: continue until next breakpoint or end-of-run. |
 
@@ -424,40 +425,40 @@ POST /run/{runId}/ack-debugger   // body: { attached: true }
 
 All additions are optional; servers that don't implement them keep
 emitting the legacy flat trace and the extension transparently degrades
-to today's behaviour (skill/tool lines stay atomic; Step Into is greyed
+to today's behaviour (macro/tool lines stay atomic; Step Into is greyed
 out and shows a tooltip explaining the server doesn't support it).
 
 ## Phased delivery
 
 The work is large enough to benefit from horizontal slices.
 
-### Phase 1 — Frames over the wire (skills only, no UI yet)
+### Phase 1 — Frames over the wire (macros only, no UI yet)
 - runner-core: protocol additions (`frame:push`, `frame:pop`,
   `frame:scope`, frame field on step events).
-- server: emit frames during skill expansion. Existing
+- server: emit frames during macro expansion. Existing
   expander.ts becomes a step-iterator that emits frame events
   between expanded steps. No step-mode pausing yet — server runs
   through normally.
-- Tests: integration test that runs `skill-demo.md` and asserts the
+- Tests: integration test that runs `macro-demo.md` and asserts the
   emitted event sequence includes a `frame:push` / `frame:pop`
-  surrounding the skill body.
+  surrounding the macro body.
 
 ### Phase 2 — Extension call-stack model + arrow follows frames
 - Extension: `RunController` consumes frame events, maintains a frame
   stack, drives the yellow arrow to the top frame's URI+line.
 - Behaviour for a normal run is **unchanged from the user's view**
   (frames are just an internal representation), but the arrow may
-  cross files during a skill body.
+  cross files during a macro body.
 - Call-stack view added (read-only, no clicks-to-navigate yet).
 
-### Phase 3 — Step Into / Over / Out for skills
+### Phase 3 — Step Into / Over / Out for macros
 - runner-core: `stepMode` field on the request.
 - server: respect `stepMode`, pause between steps when `mode === 'into'`
   or `'over'`. Resume-control endpoint: `POST /run/{runId}/step` with
   `{ mode }`.
 - Extension: F10 / F11 / Shift+F11 commands; per-frame breakpoint
   delivery; updated context keys.
-- User-visible feature lands here for skills.
+- User-visible feature lands here for macros.
 
 ### Phase 4 — Variables panel
 - Server: emit `frame:scope` on every step boundary.
@@ -489,15 +490,15 @@ The work is large enough to benefit from horizontal slices.
   same machine, only one can hold `--inspect=9229`. The
   `steptix.inspectorPort` setting plus a clear error message
   handles this; out of scope to auto-discover.
-- **Breakpoints in unopened skill files.** VS Code holds breakpoints
+- **Breakpoints in unopened macro files.** VS Code holds breakpoints
   for files even when they're not open in an editor, so we don't have
-  to pre-open skill files to honour their breakpoints. Verified by
+  to pre-open macro files to honour their breakpoints. Verified by
   the `tracker.breakpoints(uri)` implementation
   ([active-file-tracker.ts:159-179](../src/extension/active-file-tracker.ts#L159-L179)) which
   reads from `vscode.debug.breakpoints` directly.
 - **Backward compat against older servers.** The extension must
   detect (via the absence of `frame:push` events during a known
-  skill-containing run) that the server hasn't been upgraded, and
+  macro-containing run) that the server hasn't been upgraded, and
   surface a one-line "Step Into requires server vN.M+" warning when
   the user hits F11.
 - **Step Into on a non-invocation line.** Spec says "fall back to
@@ -510,8 +511,8 @@ The work is large enough to benefit from horizontal slices.
   variants; legacy events still narrow correctly.
 - **Unit (extension):** frame-stack reducer (push, pop, scope merge)
   in isolation; arrow-decoration routing across multiple URIs.
-- **Integration (server):** running `skill-demo.md` with `stepMode.mode`
-  in each value produces the expected pause boundaries; nested skill
+- **Integration (server):** running `macro-demo.md` with `stepMode.mode`
+  in each value produces the expected pause boundaries; nested macro
   fixture produces the expected push/pop chain.
 - **Integration (extension):** mocked server emits a scripted event
   trace; assert the extension's visible state (call stack view,
@@ -523,16 +524,16 @@ The work is large enough to benefit from horizontal slices.
   stepping works, resume returns control to the Steptix run.
 - **Manual (degraded modes):** remote `STEPTIX_SERVER_URL` → tool step-into
   errors gracefully; server without `--inspect` → tool step-into
-  errors gracefully; older server without frame events → skill step-
+  errors gracefully; older server without frame events → macro step-
   into reports as unsupported.
 
 ## Out of scope (followups, not this design)
 
-- Conditional / hit-count breakpoints, including inside skill files.
+- Conditional / hit-count breakpoints, including inside macro files.
 - Editing variable values from the Variables panel (a real REPL).
 - Stepping into AI-driven natural-language steps (e.g. seeing the
   individual page actions an LLM step took).
-- "Run to cursor" inside a skill file (the cursor lives in the skill,
+- "Run to cursor" inside a macro file (the cursor lives in the macro,
   the run is in the test). Doable, but extra UX scaffolding.
 - Persisting frame state across a window reload — runs already don't
   survive that.

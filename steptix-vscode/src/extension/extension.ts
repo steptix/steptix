@@ -31,7 +31,7 @@ import {
 } from './row-selection-core.js';
 import { SteptixRunnerView } from './runner-view.js';
 import { RunController, defaultApiClientFactory } from './run-controller.js';
-import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
+import type { ApiClientFactory, MacroDebugContext } from './run-controller.js';
 import {
   bindingFor,
   isCheckCurrent,
@@ -43,7 +43,7 @@ import {
   type FileIdentity,
 } from './controller-binding-core.js';
 import { registerCommands } from './commands/index.js';
-import type { SkillRunTarget } from './skill-run-targets.js';
+import type { MacroRunTarget } from './macro-run-targets.js';
 import { CodeBehindDiffs } from './codebehind-diff.js';
 import { StepRecorder, type PersistedRecording, type RecordingReport } from './step-recorder.js';
 import { disposeOutputChannel, getOutputChannel } from './output-channel.js';
@@ -165,7 +165,7 @@ class RunControllerRegistry implements vscode.Disposable {
   /** Per-controller record of where a step:awaiting yellow ▶ is currently
    *  painted. Set on step:awaiting, cleared on the next step:start (or on
    *  done). Lets us drop the marker even when it lives on a different URI
-   *  from the controller's own document (skill files). */
+   *  from the controller's own document (macro files). */
   private readonly stepPausedAt = new Map<
     string,
     { uri: vscode.Uri; line: number }
@@ -332,8 +332,8 @@ class RunControllerRegistry implements vscode.Disposable {
    * into the guard's old line, where moved it repaints that step's own ✓.
    * And a Continue after the run parked, which sends the edited text, would
    * miss every mark an edit during the stream had moved. Holding would also
-   * need an owner to ask whether a stream is live, and a skill file's memory
-   * is written by the TEST's controller, not one keyed by the skill's URI.
+   * need an owner to ask whether a stream is live, and a macro file's memory
+   * is written by the TEST's controller, not one keyed by the macro's URI.
    */
   private moveRememberedMarks(event: vscode.TextDocumentChangeEvent): void {
     if (event.contentChanges.length === 0) return;
@@ -469,7 +469,7 @@ class RunControllerRegistry implements vscode.Disposable {
     yield* this.batchControllers.values();
   }
 
-  /** Editor-attached controllers — the skill-file session picker's candidate
+  /** Editor-attached controllers — the macro-file session picker's candidate
    *  pool. Batch controllers are excluded on purpose: their sessions are
    *  unique per run and torn down when the batch ends, so there is never one
    *  to inject a step into. */
@@ -478,7 +478,7 @@ class RunControllerRegistry implements vscode.Disposable {
   }
 
   /**
-   * Re-sync the Variables panel's "re-run this skill step" affordance with
+   * Re-sync the Variables panel's "re-run this macro step" affordance with
    * what is actually parked.
    *
    * An injected run CONSUMES its host's parked failure — `resetFrameState`
@@ -488,15 +488,15 @@ class RunControllerRegistry implements vscode.Disposable {
    * test, so a `null` post also erased a second test's still-valid failure.
    * Re-posting whatever is still parked covers both.
    */
-  refreshSkillRerunPanel(): void {
-    const failure = this.controllerWithSkillFailure()?.skillRerunPayload() ?? null;
-    this.view.post({ type: 'skillRerunAvailable', failure });
+  refreshMacroRerunPanel(): void {
+    const failure = this.controllerWithMacroFailure()?.macroRerunPayload() ?? null;
+    this.view.post({ type: 'macroRerunAvailable', failure });
   }
 
-  /** Test-only: the skill session picker resolves through this instead of a
+  /** Test-only: the macro session picker resolves through this instead of a
    *  QuickPick when set — integration tests cannot drive native UI. */
-  pickSkillSessionForTest:
-    | ((targets: SkillRunTarget[]) => SkillRunTarget | undefined)
+  pickMacroSessionForTest:
+    | ((targets: MacroRunTarget[]) => MacroRunTarget | undefined)
     | null = null;
 
   /** Test-only: swap the health probe / spawn used by every controller.
@@ -579,16 +579,16 @@ class RunControllerRegistry implements vscode.Disposable {
       // client trims those before sending.
       () => this.tracker.allMarkdownBreakpoints(),
       // At run start, controller asks us to clear statuses on the test
-      // file + every skill file the previous run descended into. This
+      // file + every macro file the previous run descended into. This
       // gives a "re-run = fresh slate" UX: the new run repaints as it
       // goes, and lines/files the new run doesn't touch correctly stay
       // blank instead of showing stale ✓s from the prior run.
       (uris) => {
         for (const uri of uris) this.clearStatusesFor(uri);
       },
-      // Fresh-run hook: a full run from the top drops this test's skill-debug
+      // Fresh-run hook: a full run from the top drops this test's macro-debug
       // context (the banner + "run on stopped session" affordance go stale).
-      () => this.clearSkillDebugIfOwnedBy(document.uri.toString()),
+      () => this.clearMacroDebugIfOwnedBy(document.uri.toString()),
       // NOTE: `lineStatuses` / `lineHovers` are set on the instance below —
       // the positional list is already long enough that a ninth argument
       // would need two `undefined` placeholders to reach.
@@ -670,7 +670,7 @@ class RunControllerRegistry implements vscode.Disposable {
       this.clientFactory, // inherit the active factory (test injection)
       () => ({}), // batch ignores breakpoints
       () => {}, // never clear editor statuses
-      () => {}, // never disturb the editor's skill-debug context
+      () => {}, // never disturb the editor's macro-debug context
       undefined, // pollSleep — real timer
       // A flask run needs the same server as an editor run, so it gets the
       // same pre-run check and auto-start.
@@ -793,7 +793,7 @@ class RunControllerRegistry implements vscode.Disposable {
   ): void {
     if (this.controllers.get(key) !== controller) return;
     const uri = controller.document.uri;
-    // Read before `resetFrameState` forgets the skill files the run entered.
+    // Read before `resetFrameState` forgets the macro files the run entered.
     const touched = controller.touchedFileUris;
     const done: string[] = [];
     if (controller.isRunning) done.push('stopped its run');
@@ -809,7 +809,7 @@ class RunControllerRegistry implements vscode.Disposable {
     this.clearStepPaused(uri);
     this.tracker.setBreakpointStop(uri, null);
     for (const file of touched) this.tracker.markRunningStopped(file);
-    this.clearSkillDebugIfOwnedBy(key);
+    this.clearMacroDebugIfOwnedBy(key);
 
     if (controller.mayHoldSession) {
       let closing: Promise<void> | undefined;
@@ -933,10 +933,10 @@ class RunControllerRegistry implements vscode.Disposable {
   }
 
   /** Phase 3.1.a — clear every step-paused yellow ▶ marker across all
-   *  tracked controllers. Called on Stop so a step:awaiting on a skill
+   *  tracked controllers. Called on Stop so a step:awaiting on a macro
    *  file's URI doesn't linger after the user has cancelled the run.
    *  (The active-editor-only setBreakpointStop(null) in the Stop
-   *  handlers misses skill-file markers.) */
+   *  handlers misses macro-file markers.) */
   clearAllStepPausedMarkers(): void {
     for (const [, entry] of this.stepPausedAt) {
       this.tracker.setBreakpointStop(entry.uri, null);
@@ -973,8 +973,8 @@ class RunControllerRegistry implements vscode.Disposable {
    * Does the ACTIVE editor show a parked step-pause?
    *
    * Keyed on the file the yellow ▶ is painted on, not just the controller's
-   * own document: a run that stepped into a skill body parks its pause on the
-   * SKILL file, and that is where the author drives Step Over / Step Out from.
+   * own document: a run that stepped into a macro body parks its pause on the
+   * MACRO file, and that is where the author drives Step Over / Step Out from.
    */
   private stepPausedForActive(): boolean {
     const active = this.tracker.activeEditor?.document.uri.toString();
@@ -1011,46 +1011,46 @@ class RunControllerRegistry implements vscode.Disposable {
     return this.controllers.get(uri);
   }
 
-  /** The controller holding a parked skill-step failure, if any. Fallback for
+  /** The controller holding a parked macro-step failure, if any. Fallback for
    *  the re-run routing when the test URI doesn't resolve a controller. At most
    *  one is parked at a time in practice. */
-  controllerWithSkillFailure(): RunController | undefined {
+  controllerWithMacroFailure(): RunController | undefined {
     for (const c of this.controllers.values()) {
-      if (c.lastSkillFailure) return c;
+      if (c.lastMacroFailure) return c;
     }
     return undefined;
   }
 
-  /** Single active "debug a skill after Stop" context — the stopped test whose
-   *  skill the user is iterating on (see stories/specs/skill-debug-after-stop.md).
-   *  At most one at a time; the latest Stop-in-a-skill replaces the previous.
-   *  Drives the "Run selected skill steps on stopped session" command and the
+  /** Single active "debug a macro after Stop" context — the stopped test whose
+   *  macro the user is iterating on (see stories/specs/skill-debug-after-stop.md).
+   *  At most one at a time; the latest Stop-in-a-macro replaces the previous.
+   *  Drives the "Run selected macro steps on stopped session" command and the
    *  status-bar banner. */
-  private _skillDebug: SkillDebugContext | null = null;
+  private _macroDebug: MacroDebugContext | null = null;
   /** Wired by activate() to refresh the status-bar banner when this changes. */
-  onSkillDebugChange?: () => void;
+  onMacroDebugChange?: () => void;
 
-  /** The current skill-debug context, or null. */
-  get skillDebug(): SkillDebugContext | null {
-    return this._skillDebug;
+  /** The current macro-debug context, or null. */
+  get macroDebug(): MacroDebugContext | null {
+    return this._macroDebug;
   }
 
-  /** Set/replace the skill-debug context (latest Stop wins). */
-  setSkillDebug(ctx: SkillDebugContext): void {
-    this._skillDebug = ctx;
-    this.onSkillDebugChange?.();
+  /** Set/replace the macro-debug context (latest Stop wins). */
+  setMacroDebug(ctx: MacroDebugContext): void {
+    this._macroDebug = ctx;
+    this.onMacroDebugChange?.();
   }
 
   /** Clear the context unconditionally (Close Session; dead-session pre-flight). */
-  clearSkillDebug(): void {
-    if (!this._skillDebug) return;
-    this._skillDebug = null;
-    this.onSkillDebugChange?.();
+  clearMacroDebug(): void {
+    if (!this._macroDebug) return;
+    this._macroDebug = null;
+    this.onMacroDebugChange?.();
   }
 
   /** Clear it only if owned by `testUri` — used when that test starts a fresh run. */
-  clearSkillDebugIfOwnedBy(testUri: string): void {
-    if (this._skillDebug?.testUri.toString() === testUri) this.clearSkillDebug();
+  clearMacroDebugIfOwnedBy(testUri: string): void {
+    if (this._macroDebug?.testUri.toString() === testUri) this.clearMacroDebug();
   }
 
   /**
@@ -1204,7 +1204,7 @@ class RunControllerRegistry implements vscode.Disposable {
           this.refreshRunningContext();
           // Reveal the frame's file the same way a step:start would, so
           // the user can SEE the line about to execute (e.g. inside a
-          // skill body) without having to open it manually.
+          // macro body) without having to open it manually.
           if (ev.frame) this.maybeRevealFrame(uri, ev.frame, ev.line);
           break;
         }
@@ -1275,8 +1275,8 @@ class RunControllerRegistry implements vscode.Disposable {
           // A step an `If … then return` left behind
           // (stories/step-flow-control.md, decision 9). Routed by `frame` the
           // way step:pass is — a section body line reports with the section
-          // frame, whose `uri` is the test file, a skill-body line with the
-          // skill file — so ◌ lands in the editor the author is looking at.
+          // frame, whose `uri` is the test file, a macro-body line with the
+          // macro file — so ◌ lands in the editor the author is looking at.
           //
           // Two things this deliberately does NOT do. It does not touch the
           // returned frame's own CALL line: that frame ran and returned, and
@@ -1301,7 +1301,7 @@ class RunControllerRegistry implements vscode.Disposable {
           const failureDetail = stepFailureDetail(ev);
           // A TOLERATED failure paints amber and stops there
           // (stories/step-failure-outcomes.md, decision 6). Each omission below is
-          // load-bearing: the frame did NOT fail, so the `[skill:]` invocation line
+          // load-bearing: the frame did NOT fail, so the `[macro:]` invocation line
           // must not go red and `frame:pop` must still paint it ✓; the Variables
           // panel must not offer "re-run from the failed step", there being no
           // parked failure; and nothing may park a breakpoint stop, because a
@@ -1317,9 +1317,9 @@ class RunControllerRegistry implements vscode.Disposable {
             break;
           }
           this.tracker.setStatus(target, ev.line, 'fail', failureDetail);
-          // Propagate the failure to the originating test-file `[skill:]` line
+          // Propagate the failure to the originating test-file `[macro:]` line
           // so the user sees the red icon on the line they actually authored,
-          // not just on the skill's body line they may not even have open.
+          // not just on the macro's body line they may not even have open.
           let root: { testUri: vscode.Uri; testLine: number } | null = null;
           if (ev.frame) {
             const controller = this.controllers.get(uri.toString());
@@ -1328,19 +1328,19 @@ class RunControllerRegistry implements vscode.Disposable {
             // line it descends to — the user may only have the test file open.
             if (root) this.tracker.setStatus(root.testUri, root.testLine, 'fail', failureDetail);
             // Park the failure context so the Variables panel can offer
-            // "re-run this skill step with its variables". No-ops on the
-            // controller for nested frames (v1 is top-level skills only), in
+            // "re-run this macro step with its variables". No-ops on the
+            // controller for nested frames (v1 is top-level macros only), in
             // which case the payload is null and the panel offers nothing.
-            controller?.recordSkillFailure(ev.frame, ev.line);
+            controller?.recordMacroFailure(ev.frame, ev.line);
             this.view.post({
-              type: 'skillRerunAvailable',
-              failure: controller?.skillRerunPayload() ?? null,
+              type: 'macroRerunAvailable',
+              failure: controller?.macroRerunPayload() ?? null,
             });
           }
           // Paused-on-error: park a breakpointStop on the failed step so the
           // user can edit the line and hit Continue to retry against the
           // still-alive server session. Routed to the same spot the fail
-          // icon went — the test-file [skill: ...] line for in-skill
+          // icon went — the test-file [macro: ...] line for in-macro
           // failures, otherwise the failed step's own line. The existing
           // run-start clear wipes it before any fresh run, and Stop clears
           // it explicitly. If the user does nothing, it stays parked but
@@ -1352,7 +1352,7 @@ class RunControllerRegistry implements vscode.Disposable {
           // user already watched pass. Park on the failed BODY line instead,
           // carrying the invocation as the resume context.
           const failure = ev.frame
-            ? this.controllers.get(uri.toString())?.lastSkillFailure
+            ? this.controllers.get(uri.toString())?.lastMacroFailure
             : null;
           const sectionFailure =
             failure && failure.kind === 'section' && failure.frameId === ev.frame?.id
@@ -1361,7 +1361,7 @@ class RunControllerRegistry implements vscode.Disposable {
           if (sectionFailure) {
             this.tracker.setBreakpointStop(
               sectionFailure.testUri,
-              sectionFailure.skillLine,
+              sectionFailure.macroLine,
               { kind: 'section-body', callLine: sectionFailure.testLine },
             );
           } else if (root) {
@@ -1374,13 +1374,13 @@ class RunControllerRegistry implements vscode.Disposable {
         case 'frame:push': {
           const controller = this.controllers.get(uri.toString());
           controller?.handleFramePush(ev.frame);
-          // First descent into a skill file this run: wipe any statuses a
-          // PREVIOUS run left on it. Skill state is keyed only by the skill
+          // First descent into a macro file this run: wipe any statuses a
+          // PREVIOUS run left on it. Macro state is keyed only by the macro
           // file's URI, shared across every test, and the run-start clear
-          // only wipes skills THIS controller descended into before. So
-          // Test B stepping into a skill Test A had fully passed would
+          // only wipes macros THIS controller descended into before. So
+          // Test B stepping into a macro Test A had fully passed would
           // otherwise show B's ✗ on the failing step plus A's stale ✓ on the
-          // steps B never reaches. Clearing on descent makes a shared skill
+          // steps B never reaches. Clearing on descent makes a shared macro
           // always reflect the most recent run. Suppressed for continuations
           // (shouldClearDescentStatuses returns false) so Resume keeps its
           // pre-pause marks.
@@ -1392,10 +1392,10 @@ class RunControllerRegistry implements vscode.Disposable {
           ) {
             this.clearStatusesFor(frameUri);
           }
-          // Aggregate test-file status: a top-level skill (parentId === null)
-          // is the one anchored on the test's `[skill:]` line. Mark it
+          // Aggregate test-file status: a top-level macro (parentId === null)
+          // is the one anchored on the test's `[macro:]` line. Mark it
           // `running` so the user sees activity on that line even though
-          // the step events for the descent will land on the skill file.
+          // the step events for the descent will land on the macro file.
           if (ev.frame.parentId === null && ev.frame.line > 0) {
             this.tracker.setStatus(uri, ev.frame.line, 'running');
           }
@@ -1495,7 +1495,7 @@ class RunControllerRegistry implements vscode.Disposable {
     // A compile's runs paint the gutter the way a run does
     // (stories/codebehind-compile-as-a-run.md §Every run is on the stream):
     // ▶ while a step runs, then ✓ / </> / ⚠ / ✗ by how it ended. What they
-    // do NOT do is park a breakpoint stop on a failure or capture a skill
+    // do NOT do is park a breakpoint stop on a failure or capture a macro
     // failure for re-run: a Replay's session is the compile's own and is
     // closed after the round, so there is nothing to continue into. The
     // compile's own Record runs pre-expanded, so its events carry no frames
@@ -1569,7 +1569,7 @@ class RunControllerRegistry implements vscode.Disposable {
   /**
    * Resolve the URI a step event's status should be written against. When
    * the server supplies a `frame`, the step lives in that frame's source
-   * file (a skill `.md` for skill-body steps; the test file for inline
+   * file (a macro `.md` for macro-body steps; the test file for inline
    * steps). Otherwise the legacy assumption holds — everything lives in
    * the controller's own document.
    */
@@ -1581,7 +1581,7 @@ class RunControllerRegistry implements vscode.Disposable {
    * The resume context for a pause reported inside `frame`, or null when the
    * frame is not a top-level section body of this test file.
    *
-   * Same gate as the failure path (`recordSkillFailure`): top-level only, so
+   * Same gate as the failure path (`recordMacroFailure`): top-level only, so
    * a nested section — where a line anchor cannot be resolved unambiguously —
    * keeps the invocation-line resume it has today.
    */
@@ -1629,7 +1629,7 @@ class RunControllerRegistry implements vscode.Disposable {
    *
    * The first-time-per-run gate lives on the controller (not on the
    * registry) so two controllers running back-to-back can both reveal
-   * the same skill — the previous controller's reveal set doesn't bleed
+   * the same macro — the previous controller's reveal set doesn't bleed
    * into the next run.
    */
   private maybeRevealFrame(
@@ -1637,12 +1637,12 @@ class RunControllerRegistry implements vscode.Disposable {
     frame: import('steptix-runner-core').FrameInfo,
     line: number,
   ): void {
-    if (frame.kind !== 'skill' && frame.kind !== 'section') return;
+    if (frame.kind !== 'macro' && frame.kind !== 'section') return;
     const controller = this.controllers.get(controllerUri.toString());
     if (!controller) return;
 
     // A section body lives in the test file the user already has open. The
-    // skill behaviour — open the defining file in a column BESIDE — would
+    // macro behaviour — open the defining file in a column BESIDE — would
     // split the editor to show a second copy of the document they are
     // looking at, and steal the column their other work is in. Reveal in
     // place instead.
@@ -1664,8 +1664,8 @@ class RunControllerRegistry implements vscode.Disposable {
       return;
     }
 
-    // A section declared inside a SKILL file lands here too, and wants the
-    // skill treatment: its defining file is not the one on screen.
+    // A section declared inside a MACRO file lands here too, and wants the
+    // macro treatment: its defining file is not the one on screen.
     if (!controller.shouldRevealFrameUri(frame.uri)) return;
     void vscode.window.showTextDocument(vscode.Uri.file(frame.uri), {
       preserveFocus: true,
@@ -2109,28 +2109,28 @@ export interface SteptixTestHooks {
    *  test URI. A Stop must leave nothing behind for a later caller to
    *  inherit; nothing else makes that observable. */
   rememberedCompileMode: (uri: vscode.Uri) => 'run' | 'steps' | undefined;
-  /** Whether that document's run is parked at a breakpoint. The skill-step
+  /** Whether that document's run is parked at a breakpoint. The macro-step
    *  picker filters parked sessions out, so a value left stale by Stop makes
    *  the session permanently invisible there. */
   isParkedAtPause: (uri: vscode.Uri) => boolean;
-  /** True when any controller has a parked skill-step failure (the Variables
+  /** True when any controller has a parked macro-step failure (the Variables
    *  re-run panel would be offered). Used to assert a refused dead-session
    *  re-run does NOT wipe the parked failure. */
-  skillFailureParked: () => boolean;
-  /** True when a "debug a skill after Stop" context is parked (the "Run on
+  macroFailureParked: () => boolean;
+  /** True when a "debug a macro after Stop" context is parked (the "Run on
    *  stopped session" command + status-bar banner are offered). */
-  skillDebugActive: () => boolean;
-  /** The parked skill-debug context as plain data (or null) — lets tests assert
-   *  which test/skill/frame it points at and that it clears on Close/fresh-run. */
-  skillDebugContext: () =>
-    | { testUri: string; testLine: number; skillUri: string; skillName: string; frameId: string }
+  macroDebugActive: () => boolean;
+  /** The parked macro-debug context as plain data (or null) — lets tests assert
+   *  which test/macro/frame it points at and that it clears on Close/fresh-run. */
+  macroDebugContext: () =>
+    | { testUri: string; testLine: number; macroUri: string; macroName: string; frameId: string }
     | null;
-  /** Test-only: resolve the skill-file session picker without a QuickPick —
+  /** Test-only: resolve the macro-file session picker without a QuickPick —
    *  integration tests cannot drive native UI. Pass null to restore the
    *  interactive picker. The callback receives the rows in presentation
    *  order and returns the pick (or undefined to cancel). */
-  setSkillSessionPicker: (
-    fn: ((targets: SkillRunTarget[]) => SkillRunTarget | undefined) | null,
+  setMacroSessionPicker: (
+    fn: ((targets: MacroRunTarget[]) => MacroRunTarget | undefined) | null,
   ) => void;
   /** Drive the webview→host message path directly so tests can verify it
    *  mirrors the registered command behavior (markRunningStopped, etc).
@@ -2160,9 +2160,9 @@ export interface SteptixTestHooks {
     statuses: Array<string | null>;
     summary: string;
   }>;
-  /** The Variables view's current description string. Sections and skills
-   *  both carry `skillName`, so the label has to key on `kind` — this hook
-   *  is how a test proves a paused section reads "section:" not "skill:". */
+  /** The Variables view's current description string. Sections and macros
+   *  both carry `macroName`, so the label has to key on `kind` — this hook
+   *  is how a test proves a paused section reads "section:" not "macro:". */
   variablesDescription: () => string;
   /** Run-state signature for arbitrary text. Statuses are pinned to line
    *  numbers and a section heading decides which body a line belongs to, so
@@ -2176,8 +2176,8 @@ export interface SteptixTestHooks {
   batchOutput: () => string[];
   /** Test-only readback of the most recent failed test's TestMessages and the
    *  file+line each was anchored at. WHERE a failure is anchored is not
-   *  readable back from VS Code, and an in-skill failure must peek at the
-   *  skill file — not at that line number in the test file. */
+   *  readable back from VS Code, and an in-macro failure must peek at the
+   *  macro file — not at that line number in the test file. */
   batchFailureMessages: () => Array<{ text: string; file: string | null; line: number | null }>;
   /** Test-only: run a batch identified by file URIs. Returns the counts
    *  once the TestRun has ended. */
@@ -2206,7 +2206,7 @@ export interface SteptixTestHooks {
    *  call-stack model. */
   runningFrameStack: () => Array<import('steptix-runner-core').FrameInfo>;
   /** Scope of the currently-running controller's top frame (or the test
-   *  frame if no skill frames are active). Used by Phase 4 tests to
+   *  frame if no macro frames are active). Used by Phase 4 tests to
    *  assert that frame:scope events flow from server → controller →
    *  Variables view. */
   runningScope: () => Record<string, string>;
@@ -2544,19 +2544,19 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
     // frame `currentScope` just returned.
     currentMasking: () => registry.inspectedController()?.currentScopeMasking() ?? {},
     // The "current frame" the view is rendering is the controller's top
-    // frame, or the test (root) frame when no skill is active. Used by
-    // the view to (a) update its title to "Variables (skill: name)" /
+    // frame, or the test (root) frame when no macro is active. Used by
+    // the view to (a) update its title to "Variables (macro: name)" /
     // "Variables (test)" and (b) decide whether to hide
-    // skill-internal `__skillN_x` names from the rendered list.
+    // macro-internal `__macroN_x` names from the rendered list.
     currentFrame: () => {
       const controller = registry.inspectedController();
       if (!controller) return null;
       const top = controller.frameStack[controller.frameStack.length - 1];
       if (!top) return { id: '' };
       // `kind` travels alongside the name: a section frame carries
-      // `skillName` too, so the view cannot tell the two apart without it.
-      return top.skillName !== undefined
-        ? { id: top.id, skillName: top.skillName, kind: top.kind }
+      // `macroName` too, so the view cannot tell the two apart without it.
+      return top.macroName !== undefined
+        ? { id: top.id, macroName: top.macroName, kind: top.kind }
         : { id: top.id, kind: top.kind };
     },
   });
@@ -2639,39 +2639,39 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
     await view.attachPanel(panel);
   });
 
-  // "Debug a skill after Stop" banner — a status-bar item naming the stopped
-  // test whose skill the user is iterating on (skill-debug-after-stop.md).
-  // Visible only while a skill-debug context is parked; clicking it runs the
-  // selected skill steps on that stopped session. Also drives a context key
+  // "Debug a macro after Stop" banner — a status-bar item naming the stopped
+  // test whose macro the user is iterating on (stories/specs/skill-debug-after-stop.md).
+  // Visible only while a macro-debug context is parked; clicking it runs the
+  // selected macro steps on that stopped session. Also drives a context key
   // for the command's editor-menu `when` clause.
-  const skillDebugStatus = vscode.window.createStatusBarItem(
+  const macroDebugStatus = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
     0,
   );
-  skillDebugStatus.command = 'steptix.runSkillStepsOnStoppedSession';
-  const refreshSkillDebugBanner = (): void => {
-    const ctx = registry.skillDebug;
+  macroDebugStatus.command = 'steptix.runMacroStepsOnStoppedSession';
+  const refreshMacroDebugBanner = (): void => {
+    const ctx = registry.macroDebug;
     void vscode.commands.executeCommand(
       'setContext',
-      'steptix.skillDebugActive',
+      'steptix.macroDebugActive',
       ctx !== null,
     );
     if (!ctx) {
-      skillDebugStatus.hide();
+      macroDebugStatus.hide();
       return;
     }
     const testName = ctx.testUri.path.split('/').pop() ?? 'test';
-    skillDebugStatus.text = `$(debug-alt) Debugging skill ${ctx.skillName} · ${testName}`;
-    skillDebugStatus.tooltip =
-      `Run selected skill steps on the stopped session of ${testName} ` +
-      '(no selection = the whole skill). The browser stays where the test stopped.';
-    skillDebugStatus.show();
+    macroDebugStatus.text = `$(debug-alt) Debugging macro ${ctx.macroName} · ${testName}`;
+    macroDebugStatus.tooltip =
+      `Run selected macro steps on the stopped session of ${testName} ` +
+      '(no selection = the whole macro). The browser stays where the test stopped.';
+    macroDebugStatus.show();
   };
-  registry.onSkillDebugChange = refreshSkillDebugBanner;
-  refreshSkillDebugBanner();
+  registry.onMacroDebugChange = refreshMacroDebugBanner;
+  refreshMacroDebugBanner();
 
   context.subscriptions.push(
-    skillDebugStatus,
+    macroDebugStatus,
     tracker,
     decorations,
     registry,
@@ -2711,7 +2711,7 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('steptix.lmBridge')) syncLmBridge();
     }),
-    // F12 / Ctrl+Click / Peek on `[skill: ...]` / `[tool: ...]` invocations
+    // F12 / Ctrl+Click / Peek on `[macro: ...]` / `[tool: ...]` invocations
     // and on bare-name section calls / `### Name` headings.
     vscode.languages.registerDefinitionProvider(
       { language: 'markdown', scheme: 'file' },
@@ -2737,7 +2737,7 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
       { language: 'markdown', scheme: 'file' },
       new SectionCompletionProvider(),
       // Re-offer as the author types: after the ordinal's space, at `[` (the
-      // whole-call snippets), after a `[skill` separator (`:` or the space
+      // whole-call snippets), after a `[macro` separator (`:` or the space
       // again — names in place), and at `/` stepping into a subfolder name.
       ' ',
       '[',
@@ -2838,22 +2838,22 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
         registry.controllerForUri(uri.toString())?.rememberedCompileMode,
       isParkedAtPause: (uri) =>
         registry.controllerForUri(uri.toString())?.isParkedAtPause === true,
-      skillFailureParked: () => registry.controllerWithSkillFailure() !== undefined,
-      skillDebugActive: () => registry.skillDebug !== null,
-      skillDebugContext: () => {
-        const c = registry.skillDebug;
+      macroFailureParked: () => registry.controllerWithMacroFailure() !== undefined,
+      macroDebugActive: () => registry.macroDebug !== null,
+      macroDebugContext: () => {
+        const c = registry.macroDebug;
         return c
           ? {
               testUri: c.testUri.toString(),
               testLine: c.testLine,
-              skillUri: c.skillUri,
-              skillName: c.skillName,
+              macroUri: c.macroUri,
+              macroName: c.macroName,
               frameId: c.frameId,
             }
           : null;
       },
-      setSkillSessionPicker: (fn) => {
-        registry.pickSkillSessionForTest = fn;
+      setMacroSessionPicker: (fn) => {
+        registry.pickMacroSessionForTest = fn;
       },
       dispatchWebviewMessage: (msg) => handleWebviewMessage(msg, registry, tracker, serverSetup),
       discoveredTests: () =>
@@ -3265,15 +3265,15 @@ async function handleWebviewMessage(
       registry.recordWebviewState(msg);
       return;
     }
-    case 'rerunSkillStep': {
+    case 'rerunMacroStep': {
       // Route to the controller that owns the DISPLAYED failure by its test
-      // URI. Critical when two tests share a skill and both have a parked
+      // URI. Critical when two tests share a macro and both have a parked
       // failure — `active()` / first-match could pick the wrong one and re-run
       // it with the other test's edits.
       const controller =
-        registry.controllerForUri(msg.testUri) ?? registry.controllerWithSkillFailure();
-      if (!controller || !controller.lastSkillFailure) {
-        vscode.window.setStatusBarMessage('Steptix: no failed skill step to re-run', 2500);
+        registry.controllerForUri(msg.testUri) ?? registry.controllerWithMacroFailure();
+      if (!controller || !controller.lastMacroFailure) {
+        vscode.window.setStatusBarMessage('Steptix: no failed macro step to re-run', 2500);
         return;
       }
       // Probe liveness BEFORE notifyRunning / resetFrameState, so refusing a
@@ -3289,7 +3289,7 @@ async function handleWebviewMessage(
       }
       registry.notifyRunning(true);
       void controller
-        .rerunSkillStepFromFailure(msg.edits)
+        .rerunMacroStepFromFailure(msg.edits)
         .finally(() => registry.notifyRunning(false));
       return;
     }

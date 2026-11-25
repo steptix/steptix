@@ -30,7 +30,7 @@ function fakeProject(overrides: Partial<ProjectContext> = {}): ProjectContext {
     envName: null,
     serverUrl: 'http://127.0.0.1:3100',
     apiKey: 'server-key',
-    skillsDir: null,
+    macrosDir: null,
     toolsDir: null,
     envFilesConsulted: [`${PROJECT_ROOT}/.env`],
     cdpPermissions: { allowUnowned: false, ports: null },

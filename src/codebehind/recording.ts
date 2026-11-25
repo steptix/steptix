@@ -135,9 +135,9 @@ export interface RecordedStep {
   occurrence?: number;
   /**
    * The entry's target `.steps.ts` (the binding's `file`) — the fourth part
-   * of the splice identity. A skill-body step and a test-frame step can share
+   * of the splice identity. A macro-body step and a test-frame step can share
    * authored text, an empty section and occurrence 0; only the file they bind
-   * into tells them apart, and without it a skill-step splice would claim the
+   * into tells them apart, and without it a macro-step splice would claim the
    * test step's slot (first in file order) and overwrite its evidence.
    * Optional so recordings written before the field still read and splice.
    */
@@ -194,7 +194,7 @@ export interface RecordedStep {
    * The surface this step ran on (SPEC-use-computer.md §9).
    *
    * The one fact the compile cannot read off the FILE: a shared `### Section`
-   * or a skill body runs on whatever surface its caller was on, so whether a
+   * or a macro body runs on whatever surface its caller was on, so whether a
    * given step's coordinates came from a screen or from a DOM is a fact about
    * the RUN. Recorded here so `computer` can be answered with `ai: true` and
    * the reason "coordinates are not portable".
@@ -589,9 +589,9 @@ function fileKey(file: string | undefined): string | undefined {
  * The slot an incoming step may claim from its identity bucket, or undefined
  * when it must open a new one. Removes the claimed slot from the bucket.
  *
- * The bucket key carries no file, so a skill-body step and a test-frame step
+ * The bucket key carries no file, so a macro-body step and a test-frame step
  * with the same text, empty section and occurrence 0 share a bucket — and
- * the first slot in file order used to win, letting a skill-step splice
+ * the first slot in file order used to win, letting a macro-step splice
  * overwrite the test step's evidence. The file settles it: a filed incoming
  * step claims its own file's slot first, then an unfiled (pre-field) slot,
  * and NEVER a slot recorded for a different file. An unfiled incoming step —

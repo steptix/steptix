@@ -8,7 +8,7 @@ import type { Config } from '../src/config/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { buildStepCodePrompt, contentBlocksToText, offersSelfCheck } from '../src/ai/prompts.js';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import { buildCodeBehindRegistry, type CodeBehindBinding } from '../src/codebehind/loader.js';
 import { buildFileReviewPrompt } from '../src/codebehind/review.js';
 import {
@@ -59,7 +59,7 @@ beforeAll(async () => {
   tmpBase = await makeScratchBase('self-check');
 });
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });

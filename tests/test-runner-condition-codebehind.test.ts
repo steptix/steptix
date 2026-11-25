@@ -81,7 +81,7 @@ vi.mock('../src/runner/hooks.js', () => ({
   resolveHooks: vi.fn(async () => ({
     before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
     toolCalls: { before: [], beforeEach: [], afterEach: [], after: [] },
-    sourceSkills: { before: [], beforeEach: [], afterEach: [], after: [] },
+    sourceMacros: { before: [], beforeEach: [], afterEach: [], after: [] },
   })),
 }));
 vi.mock('../src/ai/diagnose.js', () => ({ diagnoseFailure: vi.fn(async () => null) }));

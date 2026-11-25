@@ -28,10 +28,10 @@ const WHOLE_STEP_BRACKET_RE = /^\[[^\]]*\]$/;
 const NO_HOOKS_PREFIX = /^\[no-hooks\]\s*/i;
 
 /** The tokens that ARE directives. `use` admits `]` so the bare `[use]` falls
- *  to `useStepError`, which names the family; `skill` / `tool` / `input`
- *  do not, so a bare `[skill]` is told what the form is. */
+ *  to `useStepError`, which names the family; `macro` / `tool` / `input`
+ *  do not, so a bare `[macro]` is told what the form is. */
 const KNOWN_DIRECTIVE_RES: readonly RegExp[] = [
-  /^\[(?:skill|tool|input)(?=[ \t:])/i,
+  /^\[(?:macro|tool|input)(?=[ \t:])/i,
   /^\[use(?=[ \t:\]])/i,
   /^\[interactive[ \t]*\]$/i,
   /^\[(?:output|as|store[ \t]+as)[ \t]*:/i,
@@ -44,7 +44,7 @@ export const KNOWN_WHOLE_STEP_DIRECTIVES: readonly string[] = [
   '[use computer]',
   '[use browser]',
   '[interactive]',
-  '[skill: name]',
+  '[macro: name]',
   '[tool: name]',
   '[input: name]',
 ];
@@ -89,7 +89,7 @@ export function closestDirective(token: string): string | null {
  *  form rather than a whole-step token, so it is listed here and is not a
  *  did-you-mean candidate — see the original. */
 const DIRECTIVE_LIST =
-  '`[skill: name]`, `[tool: name]`, `[input: name]`, `[interactive]`, ' +
+  '`[macro: name]`, `[tool: name]`, `[input: name]`, `[interactive]`, ' +
   '`[use computer]`, `[use browser]` and `[use ai] <step>`';
 
 /**

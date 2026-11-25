@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { basename, dirname, join as pathJoin, resolve as pathResolve } from 'node:path';
 import type { Config } from '../config/types.js';
@@ -52,7 +53,7 @@ export interface CompileRequest {
   testFilePath: string;
   /**
    * The editor's steps, for the mismatch guard below. Compile parses the file
-   * from disk (it needs the whole expansion — parameters, skills, sections —
+   * from disk (it needs the whole expansion — parameters, macros, sections —
    * and the replay runs the file itself), so an unsaved buffer would compile
    * against something the author cannot see.
    */
@@ -206,7 +207,7 @@ export class CodeBehindCompiler {
     let test: ParsedTest;
     try {
       test = await parseTestFile(testFilePath, {
-        skillsDir: pathResolve(projectRoot, bundle.config.tests.skillsDir),
+        macrosDir: pathResolve(projectRoot, bundle.config.tests.macrosDir),
         ...(bundle.envBundle && {
           envData: {
             env: bundle.envBundle.env,
@@ -324,7 +325,7 @@ export class CodeBehindCompiler {
    * The steps go out already expanded, with the compiler's own expansion handed
    * over for the code-behind registry and the control flow. Re-expanding
    * server-side would be a second answer to "which `.steps.ts` does step 7 bind
-   * into", and the two only have to disagree once for a skill's entries to land
+   * into", and the two only have to disagree once for a macro's entries to land
    * in the test's file — and for a guard line it is worse than a second answer:
    * its tail is already the next step, so a second expansion doubles it. The
    * server therefore runs the chains and loops of the control records sent
@@ -364,12 +365,19 @@ export class CodeBehindCompiler {
         });
       }
 
+      const toolsDir = pathResolve(bundle.projectRoot ?? process.cwd(), bundle.config.tests.toolsDir);
       const stepRequest: StepRequest = {
         steps: test.steps.slice(0, count),
         // The compile's resolved map, never the parsed test's raw values.
         parameters: { ...run.parameters },
         testFilePath: test.filePath,
         sourceLines: test.stepLines.slice(0, count),
+        // The parse above already expanded the macros, but `[tool:]` lines run
+        // in the session's loop, which refuses one with no catalogue loaded
+        // (docs/specs/SPEC-macros.md §7) — as `steptix compile`, which runs
+        // `runTest` with the project's catalogue, never would. Sent only when
+        // the folder exists, as the extension and MCP send it.
+        ...(existsSync(toolsDir) && { toolsDir }),
         ...(envName && { envName }),
         ...(bundle.envBundle && { env: bundle.envBundle.env }),
         captureStepContext: run.captureContext,

@@ -30,10 +30,10 @@ describe('the six forms parse', () => {
   });
 
   it('If … then with no comma before then', () => {
-    expect(parseControlLine('If {{plan}} is "pro" then [skill: enable_pro_features]')).toEqual({
+    expect(parseControlLine('If {{plan}} is "pro" then [macro: enable_pro_features]')).toEqual({
       kind: 'if',
       condition: '{{plan}} is "pro"',
-      tail: '[skill: enable_pro_features]',
+      tail: '[macro: enable_pro_features]',
     });
   });
 
@@ -134,7 +134,7 @@ describe('what stays prose', () => {
       'Click the Login button',
       'Verify the order confirmation is shown',
       'Set {{x}} to "y"',
-      '[skill: login]',
+      '[macro: login]',
       '[tool: fetch_orders]',
       '[input: pin] Enter your PIN',
       '[interactive]',
@@ -324,7 +324,7 @@ describe('claim and parse agree', () => {
     'For each {{a}} in {{b}} c',
     'For each product in the list, verify it',
     'Click Login',
-    '[skill: login]',
+    '[macro: login]',
   ];
 
   it('an error is produced exactly when a line claims and does not parse', () => {

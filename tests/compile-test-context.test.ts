@@ -7,7 +7,7 @@ import type { Config } from '../src/config/types.js';
 import type { StepResult, TestReport } from '../src/report/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import {
   compileTest,
   type CompileEvent,
@@ -56,7 +56,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   runTestCalls.projectContexts.length = 0;
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });

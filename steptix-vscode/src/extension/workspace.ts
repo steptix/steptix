@@ -13,15 +13,15 @@ export function workspaceFolderFor(uri: vscode.Uri): vscode.WorkspaceFolder | nu
 /**
  * Which FILE a step event's `line` belongs to.
  *
- * A run that descends into a `[skill: ...]` reports its body steps with lines
- * in the SKILL's file, not the test's. Anything that turns one of those lines
+ * A run that descends into a `[macro: ...]` reports its body steps with lines
+ * in the MACRO's file, not the test's. Anything that turns one of those lines
  * into a location — a gutter decoration, a Test Explorer failure peek — has to
- * resolve the frame first, or it anchors a skill's line number onto the test
+ * resolve the frame first, or it anchors a macro's line number onto the test
  * file and points at whatever happens to sit there.
  *
  * `frame.uri` is a plain absolute filesystem path. The protocol's own comment
  * called it "file:// URI form", which is wrong: every producer
- * (`ExpandedFrame.uri` from `skill.filePath` / `ctx.sectionsFilePath`, and the
+ * (`ExpandedFrame.uri` from `macro.filePath` / `ctx.sectionsFilePath`, and the
  * synthesised test frame from `request.testFilePath`) passes an fsPath, and
  * there is no `file://` anywhere in the server's frame code. Hence
  * `Uri.file`, not `Uri.parse` — `Uri.parse` would silently read `C:` as a

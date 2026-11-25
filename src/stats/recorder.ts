@@ -65,8 +65,8 @@ export interface StatsContext {
 /** What a step line needs that the `StepResult` does not carry. */
 export interface StepLineMeta {
   /** The step AS AUTHORED — placeholders intact, never the interpolated
-   *  instruction (§5.7). Masked here before it is written, and a skill
-   *  body's `__skill<N>_` renames are taken back off its placeholders. */
+   *  instruction (§5.7). Masked here before it is written, and a macro
+   *  body's `__macro<N>_` renames are taken back off its placeholders. */
   stepText: string;
   /** This execution's number within the run (`StatsStepFields.exec`), written
    *  on the step line and every one of its action lines. */
@@ -164,15 +164,15 @@ export function recordable(result: StepResult): boolean {
 }
 
 /**
- * A skill body's placeholders as the author wrote them. `applySkillScope`
- * (src/skills/expander.ts) renames a skill-internal `{{name}}` to
- * `{{__skill<N>_name}}` and `[store as: name]` to `[store as:
- * __skill<N>_name]` — a spelling nobody wrote, and a different one per call,
+ * A macro body's placeholders as the author wrote them. `applyMacroScope`
+ * (src/macros/expander.ts) renames a macro-internal `{{name}}` to
+ * `{{__macro<N>_name}}` and `[store as: name]` to `[store as:
+ * __macro<N>_name]` — a spelling nobody wrote, and a different one per call,
  * which would split one authored step into as many groups as it has callers.
  * Only that prefix comes off, as often as nested calls applied it.
  */
 function unscopedStepText(text: string): string {
-  return text.replace(/(\{\{\s*|\[store\s+as:\s*)(?:__skill\d+_)+/gi, '$1');
+  return text.replace(/(\{\{\s*|\[store\s+as:\s*)(?:__macro\d+_)+/gi, '$1');
 }
 
 /** A token count that can be summed: a finite, non-negative number or 0. */

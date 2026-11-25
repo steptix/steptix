@@ -3,13 +3,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { parseTestContent, parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 
 let tmpDir: string;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tool-parser-'));
-  clearSkillCache();
+  clearMacroCache();
 });
 
 afterEach(async () => {
@@ -64,14 +64,14 @@ describe('parseTestContent — tool-call detection', () => {
   });
 });
 
-describe('parseTestFile — tool-call detection survives skill expansion', () => {
-  it('re-derives toolCalls after skill expansion exposes a [tool: ...] inside a skill body', async () => {
-    const skillsDir = path.join(tmpDir, 'skills');
-    await fs.mkdir(skillsDir);
+describe('parseTestFile — tool-call detection survives macro expansion', () => {
+  it('re-derives toolCalls after macro expansion exposes a [tool: ...] inside a macro body', async () => {
+    const macrosDir = path.join(tmpDir, 'macros');
+    await fs.mkdir(macrosDir);
     await fs.writeFile(
-      path.join(skillsDir, 'wrap_tool.md'),
+      path.join(macrosDir, 'wrap_tool.md'),
       `---
-type: skill
+type: macro
 ---
 # wrap_tool
 ## Steps
@@ -82,10 +82,10 @@ type: skill
     const testPath = path.join(tmpDir, 'mytest.md');
     await fs.writeFile(
       testPath,
-      `# T\n## Steps\n1. [skill: wrap_tool]\n2. Done\n`,
+      `# T\n## Steps\n1. [macro: wrap_tool]\n2. Done\n`,
     );
 
-    const parsed = await parseTestFile(testPath, { skillsDir });
+    const parsed = await parseTestFile(testPath, { macrosDir });
     expect(parsed.steps).toEqual([
       'Navigate somewhere',
       '[tool: read_title]',

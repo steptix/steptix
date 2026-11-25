@@ -13,11 +13,11 @@ steptix mcp — drive browsers and run tests from an MCP client over stdio
   you do not normally run it by hand.
 
   A project is optional. Inside one (a directory with steptix.config.json), you
-  get its tests, skills, tools and environments. From anywhere else, the
+  get its tests, macros, tools and environments. From anywhere else, the
   browser verbs, run_steps and run_errand still work against the user root
   (%LOCALAPPDATA%\\steptix, ~/.steptix elsewhere) — your own signed-in CDP browsers,
   reachable from any directory. Results say which via a "scope" field;
-  [skill:]/[tool:] steps and the two test-file tools still need a project.
+  [macro:]/[tool:] steps and the two test-file tools still need a project.
 
 Tools
   run_steps         run ad-hoc natural-language steps in a browser session

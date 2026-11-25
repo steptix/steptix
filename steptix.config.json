@@ -17,7 +17,7 @@
     "dir": "./fixtures/tests",
     "dataDir": "./fixtures/data",
     "contextDir": "./fixtures/context",
-    "skillsDir": "./fixtures/skills",
+    "macrosDir": "./fixtures/macros",
     "toolsDir": "./fixtures/tools/src",
     "pattern": "**/*.md"
   },

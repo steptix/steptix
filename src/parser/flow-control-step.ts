@@ -295,7 +295,7 @@ export function parseFlowControlStep(instruction: string): ParsedFlowControlStep
  * three defensible answers, which is the signature of a rule nobody should
  * have to guess. So it is refused in all three places a hook line can arrive:
  * `## Hooks` at parse, project `defaultHooks` at config load, and — the one
- * neither of those sees — a `[skill: …]` used as a default hook, whose body is
+ * neither of those sees — a `[macro: …]` used as a default hook, whose body is
  * read by the CLI's hook loop at run time.
  *
  * One sentence for all three, so the reader who meets it in a run log and the
@@ -312,6 +312,6 @@ export function flowControlInHookError(instruction: string, where = ''): string 
     `${FLOW_CONTROL_IN_HOOK}: "${instruction.trim()}"${where}. A hook runs ` +
     `around a step rather than inside a flow, so there is nothing for it to ` +
     `return from. Move the line into \`## Steps\`, or into the section or ` +
-    `skill body it should end.`
+    `macro body it should end.`
   );
 }

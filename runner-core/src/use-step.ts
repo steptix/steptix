@@ -12,7 +12,7 @@
  *
  * What the client needs this for is §10.3: paint the line as a directive, show
  * the §4.1 refusals as squiggles before a run, offer the spellings in the
- * bracket completion beside `[skill:`, and classify the line as non-steppable
+ * bracket completion beside `[macro:`, and classify the line as non-steppable
  * for F11 — which a `[use ai]` step is too, since it never has code-behind.
  *
  * `useStepError` IS mirrored here, and that is the one place this file departs

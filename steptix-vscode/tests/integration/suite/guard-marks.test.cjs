@@ -69,13 +69,13 @@ describe('Steptix guard marks — a section tail\'s frame:pop keeps the guard\'s
   /** The tail frame of a guard line: a top-level section frame on the guard's
    *  own line — the collision this suite is about. `id` differs per pass, as
    *  the server clones a loop tail's frames per pass. */
-  const tailFrame = (id, line, skillName) => ({
+  const tailFrame = (id, line, macroName) => ({
     id,
     parentId: null,
     kind: 'section',
     uri: testPath,
     line,
-    skillName,
+    macroName,
   });
 
   before(async () => {

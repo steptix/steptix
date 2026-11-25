@@ -75,7 +75,7 @@ test('reserved name → error', () => {
 
 test('bracket-prefixed and interpolated names → error', () => {
   assert.match(
-    bySeverity(doc('## Steps', '1. C', '', '### [skill: x]', '1. A'), 'error')[0].message,
+    bySeverity(doc('## Steps', '1. C', '', '### [macro: x]', '1. A'), 'error')[0].message,
     /may not begin with/i,
   );
   assert.match(
@@ -207,7 +207,7 @@ test('near-miss ignores casing and whitespace (those are not a "typo")', () => {
 test('a bracket-token line is never a near-miss', () => {
   // `1. [login]` is within edit distance 2 of `### Login` (the brackets are
   // two edits), so the exclusion is LOAD-BEARING here — without it this would
-  // warn. `[skill: login]` would be distance 3 and pass whether or not the
+  // warn. `[macro: login]` would be distance 3 and pass whether or not the
   // exclusion existed, which is why this uses the tighter form.
   assert.ok(editDistance('[login]', 'login') <= 2, 'the fixture must actually be within range');
   const text = doc('## Steps', '1. [login]', '', '### Login', '1. Type', '', '### Other', '1. call Login');

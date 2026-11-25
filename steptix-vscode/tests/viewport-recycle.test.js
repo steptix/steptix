@@ -10,7 +10,7 @@
  * the user's only evidence that the size in effect changed.
  *
  * The controller side of the seam (which runs are eligible at all — never a
- * continuation, a parked skill-step re-run, or a batch run) lives in
+ * continuation, a parked macro-step re-run, or a batch run) lives in
  * run-controller.ts and is covered by the integration suite; `sessionLive`
  * here is the one input that carries it.
  */

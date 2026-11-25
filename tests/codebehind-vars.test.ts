@@ -3,18 +3,18 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Page, BrowserContext, Browser } from 'playwright';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import { buildCodeBehindRegistry, type CodeBehindBinding } from '../src/codebehind/loader.js';
 import { runCodeBehindEntry } from '../src/codebehind/execute.js';
 import type { CodeBehindContext } from '../src/codebehind/types.js';
 import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
 
 /**
- * Frame-aware variables (stories/step-codebehind.md, "Skill variables").
+ * Frame-aware variables (stories/step-codebehind.md, "Macro variables").
  *
- * A skill's code-behind is written ONCE and reused by every invocation, so it
+ * A macro's code-behind is written ONCE and reused by every invocation, so it
  * keeps using the name the author wrote. The runtime maps that name through
- * the invocation's own scope — the `__skill<N>_` renames the expander applied
+ * the invocation's own scope — the `__macro<N>_` renames the expander applied
  * to the step text, the caller's output aliases, and the declared parameters
  * the expander interpolated straight into the text.
  */
@@ -35,7 +35,7 @@ let counter = 0;
 let dir: string;
 
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });
@@ -52,12 +52,12 @@ async function write(rel: string, contents: string): Promise<string> {
 }
 
 /**
- * The skill under test. `username` is a declared parameter (interpolated into
+ * The macro under test. `username` is a declared parameter (interpolated into
  * the text), `token` a declared output (aliased by the caller), `scratch` an
  * internal name (namespaced per invocation).
  */
-const LOGIN_SKILL = [
-  '---', 'type: skill', '---', '# login', '',
+const LOGIN_MACRO = [
+  '---', 'type: macro', '---', '# login', '',
   '## Parameters', '- username: who to sign in as', '',
   '## Outputs', '- token', '',
   '## Steps',
@@ -67,9 +67,9 @@ const LOGIN_SKILL = [
 ].join('\n');
 
 async function bindingsFor(testMd: string): Promise<CodeBehindBinding[]> {
-  await write('skills/login.md', LOGIN_SKILL);
+  await write('macros/login.md', LOGIN_MACRO);
   const testPath = await write('t.md', testMd);
-  const parsed = await parseTestFile(testPath, { skillsDir: path.join(dir, 'skills') });
+  const parsed = await parseTestFile(testPath, { macrosDir: path.join(dir, 'macros') });
   const registry = await buildCodeBehindRegistry(
     {
       steps: parsed.steps,
@@ -98,8 +98,8 @@ async function runEntry(
   });
 }
 
-describe('code-behind variables inside a skill frame', () => {
-  const oneCall = ['# T', '', '## Steps', '1. [skill: login username="alice" out.token="session"]'].join('\n');
+describe('code-behind variables inside a macro frame', () => {
+  const oneCall = ['# T', '', '## Steps', '1. [macro: login username="alice" out.token="session"]'].join('\n');
 
   it('reads a declared parameter by its AUTHORED name', async () => {
     const [first] = await bindingsFor(oneCall);
@@ -109,17 +109,17 @@ describe('code-behind variables inside a skill frame', () => {
     expect(seen).toBe('alice');
   });
 
-  it('reads an internal name through the frame\'s __skill<N>_ namespace', async () => {
+  it('reads an internal name through the frame\'s __macro<N>_ namespace', async () => {
     const bindings = await bindingsFor(oneCall);
     const scratchStep = bindings[2]!;
     const namespaced = scratchStep.scope.renames['scratch']!;
-    expect(namespaced).toMatch(/^__skill\d+_scratch$/);
+    expect(namespaced).toMatch(/^__macro\d+_scratch$/);
 
     const params: Record<string, string> = { [namespaced]: 'namespaced value', scratch: 'bare value' };
     let seen: string | undefined;
     await runEntry(scratchStep, params, ({ step }) => { seen = step.getVar('scratch'); });
     // The frame's namespace wins over the bare name — an outer variable that
-    // happens to share the skill's internal name must not leak in.
+    // happens to share the macro's internal name must not leak in.
     expect(seen).toBe('namespaced value');
   });
 
@@ -149,11 +149,11 @@ describe('code-behind variables inside a skill frame', () => {
     expect(params['scratch']).toBeUndefined();
   });
 
-  it('gives two invocations of one skill their own values from the SAME entry', async () => {
+  it('gives two invocations of one macro their own values from the SAME entry', async () => {
     const bindings = await bindingsFor([
       '# T', '', '## Steps',
-      '1. [skill: login username="alice" out.token="a_session"]',
-      '2. [skill: login username="bob" out.token="b_session"]',
+      '1. [macro: login username="alice" out.token="a_session"]',
+      '2. [macro: login username="bob" out.token="b_session"]',
     ].join('\n'));
 
     // One entry body, reused: exactly what a shared `.steps.ts` would hold.
@@ -173,7 +173,7 @@ describe('code-behind variables inside a skill frame', () => {
 
   it('resolves a caller argument that is itself a {{placeholder}}', async () => {
     const bindings = await bindingsFor([
-      '# T', '', '## Steps', '1. [skill: login username="{{outer_user}}" out.token="session"]',
+      '# T', '', '## Steps', '1. [macro: login username="{{outer_user}}" out.token="session"]',
     ].join('\n'));
     let seen: string | undefined;
     await runEntry(bindings[0]!, { outer_user: 'carol' }, ({ step }) => { seen = step.getVar('username'); });
@@ -181,7 +181,7 @@ describe('code-behind variables inside a skill frame', () => {
   });
 });
 
-describe('code-behind variables outside a skill frame', () => {
+describe('code-behind variables outside a macro frame', () => {
   it('uses bare names for a top-level step', async () => {
     const testPath = await write('plain.md', ['# T', '', '## Steps', '1. Read the balance'].join('\n'));
     const parsed = await parseTestFile(testPath);
@@ -256,7 +256,7 @@ describe('a caller argument that is an env-data reference', () => {
   // runs after expansion and never walks frame inputs — so `getVar` must
   // resolve `${data.*}` itself, against the run's context (the bug found
   // 2026-08-25: it returned the literal placeholder text instead).
-  const dataCall = ['# T', '', '## Steps', '1. [skill: login username="${data.username}"]'].join('\n');
+  const dataCall = ['# T', '', '## Steps', '1. [macro: login username="${data.username}"]'].join('\n');
 
   it('resolves through the run environment at read time', async () => {
     const [first] = await bindingsFor(dataCall);
@@ -361,12 +361,12 @@ describe('a code-behind variable named after a prototype key', () => {
   it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
     'does not resolve a rename TO %s through the prototype either',
     async (name) => {
-      // The caller aliased the skill's declared output onto a variable of
+      // The caller aliased the macro's declared output onto a variable of
       // that name, so the rename is real and its TARGET is the prototype key.
       // Nothing has written it yet, which is the ordinary state of an output
       // before its step runs.
       const bindings = await bindingsFor(
-        ['# T', '', '## Steps', `1. [skill: login username="alice" out.token="${name}"]`].join('\n'),
+        ['# T', '', '## Steps', `1. [macro: login username="alice" out.token="${name}"]`].join('\n'),
       );
       const tokenStep = bindings[1]!;
       expect(tokenStep.scope.renames['token']).toBe(name);

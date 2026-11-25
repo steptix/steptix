@@ -197,7 +197,7 @@ let server: Server;
 let baseUrl: string;
 let tmpDir: string;
 let testFilePath: string;
-let skillsDir: string;
+let macrosDir: string;
 
 beforeAll(async () => {
   const { app } = createApiServer(cfg);
@@ -210,50 +210,50 @@ beforeAll(async () => {
   testFilePath = path.join(tmpDir, 'checkout.md');
   await fs.writeFile(testFilePath, '# placeholder — the server never reads this\n');
 
-  skillsDir = path.join(tmpDir, 'skills');
-  await fs.mkdir(skillsDir, { recursive: true });
+  macrosDir = path.join(tmpDir, 'macros');
+  await fs.mkdir(macrosDir, { recursive: true });
   await fs.writeFile(
-    path.join(skillsDir, 'wave.md'),
-    ['---', 'type: skill', '---', '# wave', '', '## Steps', '1. Wave hello', ''].join('\n'),
+    path.join(macrosDir, 'wave.md'),
+    ['---', 'type: macro', '---', '# wave', '', '## Steps', '1. Wave hello', ''].join('\n'),
   );
-  // A skill that calls another skill from its OWN line 8, so that frame's
+  // A macro that calls another macro from its OWN line 8, so that frame's
   // invocation line collides with a test-file section body line.
   await fs.writeFile(
-    path.join(skillsDir, 'nested.md'),
-    ['---', 'type: skill', '---', '# nested', '', '## Steps', '1. Nested start', '2. [skill: wave]', ''].join('\n'),
+    path.join(macrosDir, 'nested.md'),
+    ['---', 'type: macro', '---', '# nested', '', '## Steps', '1. Nested start', '2. [macro: wave]', ''].join('\n'),
   );
-  // A skill whose steps sit on SKILL-FILE lines 7-9, so they collide with a
+  // A macro whose steps sit on MACRO-FILE lines 7-9, so they collide with a
   // test file's section-body line numbers.
   await fs.writeFile(
-    path.join(skillsDir, 'liner.md'),
-    ['---', 'type: skill', '---', '# liner', '', '## Steps', '1. Liner one', '2. Liner two', '3. Liner three', ''].join('\n'),
+    path.join(macrosDir, 'liner.md'),
+    ['---', 'type: macro', '---', '# liner', '', '## Steps', '1. Liner one', '2. Liner two', '3. Liner three', ''].join('\n'),
   );
-  // A skill with no steps at all: it expands to nothing, so its call line
+  // A macro with no steps at all: it expands to nothing, so its call line
   // never appears in the expansion origins.
   await fs.writeFile(
-    path.join(skillsDir, 'emptyskill.md'),
-    ['---', 'type: skill', '---', '# emptyskill', '', '## Steps', ''].join('\n'),
+    path.join(macrosDir, 'emptymacro.md'),
+    ['---', 'type: macro', '---', '# emptymacro', '', '## Steps', ''].join('\n'),
   );
-  // A skill that defines a section nothing invokes — the skills-only path's
+  // A macro that defines a section nothing invokes — the macros-only path's
   // dead-section diagnostic, which needs no `sections` in the request.
   await fs.writeFile(
-    path.join(skillsDir, 'deadskill.md'),
+    path.join(macrosDir, 'deadmacro.md'),
     [
-      '---', 'type: skill', '---', '# deadskill', '',
+      '---', 'type: macro', '---', '# deadmacro', '',
       '## Steps',
-      '1. Skill start',
+      '1. Macro start',
       '',
       '### Orphan',
       '1. Never runs',
       '',
     ].join('\n'),
   );
-  // A skill that calls a section of its own — skill-private, so never the
+  // A macro that calls a section of its own — macro-private, so never the
   // `sourceSection` tag of the steps inside it.
   await fs.writeFile(
-    path.join(skillsDir, 'tidy.md'),
+    path.join(macrosDir, 'tidy.md'),
     [
-      '---', 'type: skill', '---', '# tidy', '',
+      '---', 'type: macro', '---', '# tidy', '',
       '## Steps',
       '1. Tidy start',
       '2. Clear the basket',
@@ -263,18 +263,18 @@ beforeAll(async () => {
       '',
     ].join('\n'),
   );
-  // A skill that defines AND calls a section named `__proto__` — a legal
+  // A macro that defines AND calls a section named `__proto__` — a legal
   // name that an object literal silently swallows.
   await fs.writeFile(
-    path.join(skillsDir, 'protoskill.md'),
+    path.join(macrosDir, 'protomacro.md'),
     [
-      '---', 'type: skill', '---', '# protoskill', '',
+      '---', 'type: macro', '---', '# protomacro', '',
       '## Steps',
-      '1. Skill start',
+      '1. Macro start',
       '2. __proto__',
       '',
       '### __proto__',
-      '1. Skill body ran',
+      '1. Macro body ran',
       '',
     ].join('\n'),
   );
@@ -392,9 +392,9 @@ describe('sections reach the expander through the HTTP layer', () => {
     ]);
   });
 
-  it('a sections-only project needs no skillsDir', async () => {
-    // `skillsDir` was a required parameter before sections; a project can
-    // define inline sections and own no skills directory at all. The gate
+  it('a sections-only project needs no macrosDir', async () => {
+    // `macrosDir` was a required parameter before sections; a project can
+    // define inline sections and own no macros directory at all. The gate
     // and the expander call both have to tolerate its absence.
     executedSteps.length = 0;
     const res = await postSteps({
@@ -407,18 +407,18 @@ describe('sections reach the expander through the HTTP layer', () => {
     expect(executedSteps).toEqual(['Say hi']);
   });
 
-  it('sections and skills compose', async () => {
+  it('sections and macros compose', async () => {
     executedSteps.length = 0;
     const res = await postSteps({
       steps: ['Do the thing'],
       sourceLines: [3],
       testFilePath,
-      skillsDir,
+      macrosDir,
       sections: {
         'do the thing': {
           name: 'Do the thing',
           headingLine: 5,
-          steps: ['[skill: wave]', 'And finish'],
+          steps: ['[macro: wave]', 'And finish'],
           stepLines: [6, 7],
         },
       },
@@ -590,22 +590,22 @@ describe('malformed sections are refused, not silently dropped', () => {
     expect(executedSteps).toEqual(['Body ran']);
   });
 
-  it('a section named __proto__ inside a SKILL also resolves', async () => {
+  it('a section named __proto__ inside a MACRO also resolves', async () => {
     // Three maps are built from untrusted section names: the parser's, the
     // api-server forwarding copy, and the per-invocation rebuild in
-    // `applySkillScope`. Missing the third meant `### __proto__` worked in a
-    // test file and silently degraded inside a skill — one document, two
+    // `applyMacroScope`. Missing the third meant `### __proto__` worked in a
+    // test file and silently degraded inside a macro — one document, two
     // behaviours — with the dead-section warning staying quiet because it
     // scans the untransformed map where the entry is still present.
     executedSteps.length = 0;
     const res = await postSteps({
-      steps: ['[skill: protoskill]'],
+      steps: ['[macro: protomacro]'],
       sourceLines: [3],
       testFilePath,
-      skillsDir,
+      macrosDir,
     });
     expect(res.status).toBe(200);
-    expect(executedSteps).toEqual(['Skill start', 'Skill body ran']);
+    expect(executedSteps).toEqual(['Macro start', 'Macro body ran']);
   });
 
   it('a step named after an Object.prototype member does not crash the run', async () => {
@@ -654,7 +654,7 @@ describe('breakpoints inside a section body', () => {
     expect(awaiting).toHaveLength(1);
     expect(awaiting[0]!.line).toBe(9);
     expect(awaiting[0]!.frame?.kind).toBe('section');
-    expect(awaiting[0]!.frame?.skillName).toBe('Sign in');
+    expect(awaiting[0]!.frame?.macroName).toBe('Sign in');
   });
 
   it('does NOT pause on a main-flow line — the client already trimmed there', async () => {
@@ -721,14 +721,14 @@ describe('an [input:] step inside a section body', () => {
 // ── Frames ───────────────────────────────────────────────────────────
 
 describe('section frames', () => {
-  it('pushes a section frame whose uri is the test file and skillName the section', async () => {
+  it('pushes a section frame whose uri is the test file and macroName the section', async () => {
     const frames: any[] = [];
     for await (const ev of sseEvents(twoSectionBody())) {
       if (ev.type === 'frame:push') frames.push(ev.frame);
       if (ev.type === 'done') break;
     }
 
-    const names = frames.map((f) => `${f.kind}:${f.skillName}`);
+    const names = frames.map((f) => `${f.kind}:${f.macroName}`);
     expect(names).toContain('section:Sign in');
     expect(names).toContain('section:Type creds');
     for (const frame of frames.filter((f) => f.kind === 'section')) {
@@ -788,7 +788,7 @@ describe('a narrowed section loop keeps the table row numbers', () => {
       [2, 3],
       [3, 3],
     ]);
-    expect(frames.map((f) => f.skillName)).toEqual([
+    expect(frames.map((f) => f.macroName)).toEqual([
       'Upload each statement',
       'Upload each statement',
     ]);
@@ -988,18 +988,18 @@ describe('a narrowed section body runs only the steps it names', () => {
 // ── Reporting ────────────────────────────────────────────────────────
 
 describe('sourceSection attribution', () => {
-  it('tags body steps with the outermost section, and skips skill-private ones', async () => {
+  it('tags body steps with the outermost section, and skips macro-private ones', async () => {
     generatedReports.length = 0;
     const res = await postSteps({
-      steps: ['Open the shop', '[skill: tidy]', 'Do the thing'],
+      steps: ['Open the shop', '[macro: tidy]', 'Do the thing'],
       sourceLines: [3, 4, 5],
       testFilePath,
-      skillsDir,
+      macrosDir,
       sections: {
         'do the thing': {
           name: 'Do the thing',
           headingLine: 7,
-          steps: ['[skill: wave]', '[skill: tidy]'],
+          steps: ['[macro: wave]', '[macro: tidy]'],
           stepLines: [8, 9],
         },
       },
@@ -1014,20 +1014,20 @@ describe('sourceSection attribution', () => {
 
     // A main-flow step carries neither badge.
     expect(byInstruction.get('Open the shop')?.sourceSection).toBeUndefined();
-    expect(byInstruction.get('Open the shop')?.sourceSkill).toBeUndefined();
+    expect(byInstruction.get('Open the shop')?.sourceMacro).toBeUndefined();
 
-    // A step inside `section → skill` carries BOTH: the section is what the
-    // test author wrote, the skill is where the step lives.
+    // A step inside `section → macro` carries BOTH: the section is what the
+    // test author wrote, the macro is where the step lives.
     const inner = byInstruction.get('Wave hello');
     expect(inner?.sourceSection).toBe('Do the thing');
-    expect(inner?.sourceSkill).toBe('wave');
+    expect(inner?.sourceMacro).toBe('wave');
 
-    // `tidy`'s own `### Clear the basket` is skill-private, so it is never the
+    // `tidy`'s own `### Clear the basket` is macro-private, so it is never the
     // tag. Called from the root flow, its body step has no section at all;
-    // called from `Do the thing` (test → section → skill → section), it
-    // reports the TEST's section, the outermost one outside any skill.
+    // called from `Do the thing` (test → section → macro → section), it
+    // reports the TEST's section, the outermost one outside any macro.
     const tidied = (report.steps ?? []).filter((s: any) => s.instruction === 'Empty the basket');
-    expect(tidied.map((s: any) => [s.sourceSection, s.sourceSkill])).toEqual([
+    expect(tidied.map((s: any) => [s.sourceSection, s.sourceMacro])).toEqual([
       [undefined, 'tidy'],
       ['Do the thing', 'tidy'],
     ]);
@@ -1109,17 +1109,17 @@ describe('the dead-section warning is emitted exactly once', () => {
     expect(warnings.filter((w) => /never invoked/i.test(w))).toHaveLength(1);
   });
 
-  it('a skills-only run still reports a dead section in the SKILL', async () => {
-    // A skill file can define sections too, and the expander warns about
+  it('a macros-only run still reports a dead section in the MACRO', async () => {
+    // A macro file can define sections too, and the expander warns about
     // those from a request carrying no sections map at all. Gating the
     // warning on `hasSections(request)` removed the diagnostic from every
-    // skills-only run — which, until a client ships the field, is every run.
+    // macros-only run — which, until a client ships the field, is every run.
     warnings.length = 0;
     const res = await postSteps({
-      steps: ['[skill: deadskill]'],
+      steps: ['[macro: deadmacro]'],
       sourceLines: [3],
       testFilePath,
-      skillsDir,
+      macrosDir,
     });
     expect(res.status).toBe(200);
     const dead = warnings.filter((w) => /never invoked/i.test(w));
@@ -1127,35 +1127,35 @@ describe('the dead-section warning is emitted exactly once', () => {
     expect(dead[0]).toMatch(/Orphan/);
   });
 
-  it('reports a section a SKILL EDIT just orphaned, in the same session', async () => {
-    // The request bytes are identical across both runs — only the skill file
+  it('reports a section a MACRO EDIT just orphaned, in the same session', async () => {
+    // The request bytes are identical across both runs — only the macro file
     // on disk changed. A dedup key built from the request could not see that,
     // so the newly-dead section went unreported for the life of the session,
     // which is exactly when the warning becomes relevant. Deduping on the
     // message has no such blind spot.
     warnings.length = 0;
     const sessionId = nextSession();
-    const skillFile = path.join(skillsDir, 'editable.md');
+    const macroFile = path.join(macrosDir, 'editable.md');
     const body = {
-      steps: ['[skill: editable]'],
+      steps: ['[macro: editable]'],
       sourceLines: [3],
       testFilePath,
-      skillsDir,
+      macrosDir,
     };
     const dead = () => warnings.filter((w) => /never invoked/i.test(w));
 
-    // v1: the skill body calls its own `### Alpha`, so nothing is dead.
+    // v1: the macro body calls its own `### Alpha`, so nothing is dead.
     await fs.writeFile(
-      skillFile,
-      ['---', 'type: skill', '---', '# editable', '', '## Steps', '1. Start', '2. Alpha', '', '### Alpha', '1. Alpha body', ''].join('\n'),
+      macroFile,
+      ['---', 'type: macro', '---', '# editable', '', '## Steps', '1. Start', '2. Alpha', '', '### Alpha', '1. Alpha body', ''].join('\n'),
     );
     await postSteps(body, sessionId);
     expect(dead()).toEqual([]);
 
     // v2: the author deletes the call. Same request, different file.
     await fs.writeFile(
-      skillFile,
-      ['---', 'type: skill', '---', '# editable', '', '## Steps', '1. Start', '', '### Alpha', '1. Alpha body', ''].join('\n'),
+      macroFile,
+      ['---', 'type: macro', '---', '# editable', '', '## Steps', '1. Start', '', '### Alpha', '1. Alpha body', ''].join('\n'),
     );
     await postSteps(body, sessionId);
     expect(dead()).toHaveLength(1);
@@ -1290,22 +1290,22 @@ describe('startAt on a sectioned document', () => {
     expect(executedSteps).toEqual(['Type the username', 'Press submit', 'Check out']);
   });
 
-  it('anchors on a call line whose body starts with a skill invocation', async () => {
+  it('anchors on a call line whose body starts with a macro invocation', async () => {
     // `stepAtAnchor`'s input-line match must NOT require the expanded step to
-    // live in the test file: a section whose first body step is `[skill: …]`
+    // live in the test file: a section whose first body step is `[macro: …]`
     // — the shape of this repo's showcase fixture — expands to a step in the
-    // SKILL file, and gating on the uri refused the anchor outright.
+    // MACRO file, and gating on the uri refused the anchor outright.
     executedSteps.length = 0;
     const res = await postSteps({
       steps: ['Open', 'Do the thing', 'Close'],
       sourceLines: [3, 4, 5],
       testFilePath,
-      skillsDir,
+      macrosDir,
       sections: {
         'do the thing': {
           name: 'Do the thing',
           headingLine: 7,
-          steps: ['[skill: wave]', 'And finish'],
+          steps: ['[macro: wave]', 'And finish'],
           stepLines: [8, 9],
         },
       },
@@ -1396,7 +1396,7 @@ describe('startAt on a sectioned document', () => {
 
   it('refuses a START line that is no step at all, rather than snapping to one', async () => {
     // Line 6 is blank in this document — neither a step nor a call. On a
-    // skill file the `>=` fallback would snap forward; here that would mean
+    // macro file the `>=` fallback would snap forward; here that would mean
     // running a section body the user never pointed at.
     const res = await postSteps(twoSectionBody({ startAt: { uri: testFilePath, line: 6 } }));
     const body = await res.json();
@@ -1435,23 +1435,23 @@ describe('startAt on a sectioned document', () => {
     ]);
   });
 
-  it('a START anchor on a body line that CALLS a skill runs that skill', async () => {
+  it('a START anchor on a body line that CALLS a macro runs that macro', async () => {
     // The anchored step expands into another frame, so it contributes no
     // step under its own line. Resolving by line alone stepped over the whole
-    // skill and started after it — silently, reporting green. The frame
-    // ancestry is what makes this exact: the skill frame records line 8 as
+    // macro and started after it — silently, reporting green. The frame
+    // ancestry is what makes this exact: the macro frame records line 8 as
     // its invocation line.
     executedSteps.length = 0;
     const res = await postSteps({
       steps: ['Open', 'Do the thing', 'Close'],
       sourceLines: [3, 4, 5],
       testFilePath,
-      skillsDir,
+      macrosDir,
       sections: {
         'do the thing': {
           name: 'Do the thing',
           headingLine: 7,
-          steps: ['[skill: wave]', 'And finish'],
+          steps: ['[macro: wave]', 'And finish'],
           stepLines: [8, 9],
         },
       },
@@ -1476,13 +1476,13 @@ describe('startAt on a sectioned document', () => {
     // calls `wave` from its own line 8; the test file's section body also
     // sits at line 8. Without the guard, an anchor of (test file, 8) matches
     // the wave frame — which executes earlier — and the run starts inside a
-    // skill the anchor had nothing to do with.
+    // macro the anchor had nothing to do with.
     executedSteps.length = 0;
     const res = await postSteps({
-      steps: ['Open', '[skill: nested]', 'Do setup', 'Close'],
+      steps: ['Open', '[macro: nested]', 'Do setup', 'Close'],
       sourceLines: [3, 4, 5, 6],
       testFilePath,
-      skillsDir,
+      macrosDir,
       sections: {
         'do setup': { name: 'Do setup', headingLine: 7, steps: ['Body step'], stepLines: [8] },
       },
@@ -1492,17 +1492,17 @@ describe('startAt on a sectioned document', () => {
     expect(executedSteps).toEqual(['Body step', 'Close']);
   });
 
-  it('a body-line anchor does not match a SKILL-file line of the same number', async () => {
-    // The match must compare against the INVOKING file. A skill's steps
+  it('a body-line anchor does not match a MACRO-file line of the same number', async () => {
+    // The match must compare against the INVOKING file. A macro's steps
     // routinely sit on the same small line numbers as a test file's section
-    // bodies, and an unguarded comparison started the run inside the skill,
+    // bodies, and an unguarded comparison started the run inside the macro,
     // re-running work that precedes the section — green.
     executedSteps.length = 0;
     const res = await postSteps({
-      steps: ['Open', '[skill: liner]', 'Do setup', 'Close'],
+      steps: ['Open', '[macro: liner]', 'Do setup', 'Close'],
       sourceLines: [3, 4, 5, 6],
       testFilePath,
-      skillsDir,
+      macrosDir,
       sections: {
         'do setup': {
           name: 'Do setup',
@@ -1522,8 +1522,8 @@ describe('startAt on a sectioned document', () => {
   });
 
   it('a MAIN-FLOW start anchor on a step that expanded to nothing walks forward', async () => {
-    // A skill with an empty `## Steps` expands to nothing — sections refuse
-    // an empty body, skills do not — so no frame carries its invocation line
+    // A macro with an empty `## Steps` expands to nothing — sections refuse
+    // an empty body, macros do not — so no frame carries its invocation line
     // and the ancestry match cannot see it. The walk-forward covers it.
     //
     // This branch shipped broken through two rounds because nothing
@@ -1531,10 +1531,10 @@ describe('startAt on a sectioned document', () => {
     // whole suite still green.
     executedSteps.length = 0;
     const res = await postSteps({
-      steps: ['Open', '[skill: emptyskill]', 'Close'],
+      steps: ['Open', '[macro: emptymacro]', 'Close'],
       sourceLines: [3, 4, 5],
       testFilePath,
-      skillsDir,
+      macrosDir,
       sections: { unused: { name: 'Unused', headingLine: 8, steps: ['Never'], stepLines: [9] } },
       startAt: { uri: testFilePath, line: 4 },
     });
@@ -1552,12 +1552,12 @@ describe('startAt on a sectioned document', () => {
       steps: ['Open', 'Do setup', 'Close'],
       sourceLines: [3, 4, 5],
       testFilePath,
-      skillsDir,
+      macrosDir,
       sections: {
         'do setup': {
           name: 'Do setup',
           headingLine: 7,
-          steps: ['[skill: emptyskill]', 'Second body step'],
+          steps: ['[macro: emptymacro]', 'Second body step'],
           stepLines: [8, 9],
         },
       },
@@ -1596,16 +1596,16 @@ describe('startAt on a sectioned document', () => {
   });
 
   it('an end anchor on a step that expanded to nothing falls back, not fails', async () => {
-    // Sections refuse an empty body; SKILLS do not, so a skill with an empty
+    // Sections refuse an empty body; MACROS do not, so a macro with an empty
     // `## Steps` contributes no expanded step and its call line has no
     // `inputIndex` at all. Resolving the fallback to it and stopping there
-    // refused the run on a real main-flow step, blaming a stale skill file.
+    // refused the run on a real main-flow step, blaming a stale macro file.
     executedSteps.length = 0;
     const res = await postSteps({
-      steps: ['Open', '[skill: emptyskill]', 'Close'],
+      steps: ['Open', '[macro: emptymacro]', 'Close'],
       sourceLines: [3, 4, 5],
       testFilePath,
-      skillsDir,
+      macrosDir,
       // Present only to turn exact mode on — this is a section-free flow.
       sections: { unused: { name: 'Unused', headingLine: 8, steps: ['Never'], stepLines: [9] } },
       startAt: { uri: testFilePath, line: 3 },

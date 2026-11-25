@@ -826,7 +826,7 @@ describe('contextValueAsVariableComplaint', () => {
 });
 
 describe('chainedAssertionComplaint', () => {
-  // The shape measured live (compile-skill-subfolder.test.cjs): a Jest-style
+  // The shape measured live (compile-macro-subfolder.test.cjs): a Jest-style
   // matcher on `step.expect`, which returns nothing, so every replay threw
   // `Cannot read properties of undefined (reading 'toBe')` and healed.
   const CHAINS_A_MATCHER = `{
@@ -908,7 +908,7 @@ describe('chainedAssertionComplaint', () => {
       resolvedParameters: {},
       aiClient: client,
       contextContent: '',
-      testName: 'compile-skill-subfolder.md',
+      testName: 'compile-macro-subfolder.md',
       baseUrl: 'http://localhost:8787',
     });
     expect(result).toMatchObject({ kind: 'entry', code: COMPARES_IN_THE_CONDITION });
@@ -1386,7 +1386,7 @@ describe('generateStepEntry', () => {
     expect(result.kind).toBe('error');
   });
 
-  it('resolves a skill-frame parameter through the frame scope before guarding it', async () => {
+  it('resolves a macro-frame parameter through the frame scope before guarding it', async () => {
     const { client, calls } = stubClient(JSON.stringify({
       entry: `{ source: 'Sign in as {{username}}', async run({ page, step }) { await page.fill('#u', step.getVar('username')); } }`,
     }));

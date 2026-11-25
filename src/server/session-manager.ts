@@ -42,10 +42,10 @@ import type { StepExecutorOptions } from '../runner/step-executor.js';
 import { identifyStepGroups } from '../runner/step-grouper.js';
 import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import { matchText } from '../parser/section-match.js';
-import { parseSkillCall } from '../skills/skill-call-parser.js';
+import { parseMacroCall } from '../macros/macro-call-parser.js';
 import {
   COMPUTER_DISABLED_MESSAGE,
-  SkillSurfaceStack,
+  MacroSurfaceStack,
   computerContextFor,
   defaultLoadDesktopAdapter,
   defaultProbeComputerCapture,
@@ -60,7 +60,7 @@ import {
   releaseComputerLockForPause,
   restoreCallerSurface,
   revokeComputerMode,
-  skillFrameChain,
+  macroFrameChain,
   stepReadsScreen,
   undispatchedDirectiveError,
   undispatchedDirectiveResult,
@@ -130,11 +130,11 @@ import {
 import { resolveDataSourcePath } from '../parser/markdown.js';
 import { loadDataFromPath, type DataObject } from '../env/data-loader.js';
 import {
-  clearSkillCache,
-  expandSkills,
+  clearMacroCache,
+  expandMacros,
   type ExpandedFrame,
   type ExpandedStepOrigin,
-} from '../skills/expander.js';
+} from '../macros/expander.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry, type NewerCodeBehind } from '../codebehind/loader.js';
 import { newerCompiledNotice, SERVER_UPDATE_WORDS } from '../codebehind/stamp.js';
 import {
@@ -313,14 +313,14 @@ export interface StepRequest {
   breakpoints?: number[];
   /**
    * Per-URI breakpoint sets keyed by absolute file path. The step loop
-   * checks each step's origin frame (test file OR a skill body line) and
+   * checks each step's origin frame (test file OR a macro body line) and
    * pauses via `step:awaiting` before executing a matching step. The
    * client treats the pause as a step-paused state (same yellow ▶ /
    * Continue / StepOver / etc. machinery as the stepMode flow).
    *
    * Entries keyed under `testFilePath` are skipped on the server side —
    * the client already trims at those breakpoints before sending the
-   * request. Skill-file breakpoints (the actual motivation for this
+   * request. Macro-file breakpoints (the actual motivation for this
    * field) reach the server because the client's pre-expansion trim
    * can't see them.
    */
@@ -425,14 +425,15 @@ export interface StepRequest {
    */
   withinCompileRun?: 'run' | 'steps';
   /**
-   * Absolute path to the project's skills directory. When supplied, the
-   * server runs `expandSkills` over `steps`, flattens `[skill: ...]`
+   * Absolute path to the project's macros directory. When supplied, the
+   * server runs `expandMacros` over `steps`, flattens `[macro: ...]`
    * invocations, and emits `frame:push` / `frame:pop` events around each
-   * expanded skill body so step-into-aware clients can render a multi-file
-   * call stack. Omit to keep the legacy behaviour (raw steps fed straight
-   * to the runner — fine when no `[skill: ...]` lines are present).
+   * expanded macro body so step-into-aware clients can render a multi-file
+   * call stack. When omitted, steps are not expanded (unless the batch has
+   * sections or control lines), and a `[macro: ...]` step fails unrun with a
+   * message saying so (docs/specs/SPEC-macros.md §7).
    */
-  skillsDir?: string;
+  macrosDir?: string;
   /**
    * Inline section definitions from the test file, keyed by `matchText(name)`
    * (stories/test-script-sections-contract.md §2). Required whenever `steps`
@@ -487,16 +488,16 @@ export interface StepRequest {
   /**
    * Absolute path of the test file the steps were authored in. Used as the
    * origin `uri` on `frame` payloads attached to step events emitted from
-   * inline (non-skill) lines. Optional.
+   * inline (non-macro) lines. Optional.
    */
   testFilePath?: string;
   /**
    * Absolute path to the project's tools directory. When supplied, the
    * server loads the `ToolCatalogue` once per session and dispatches every
    * `[tool: ...]` step through `executeToolStep` (the same code path the
-   * CLI runner uses). Without `toolsDir` the legacy behaviour applies —
-   * `[tool: ...]` lines reach the LLM as raw text, which it doesn't know
-   * how to execute.
+   * CLI runner uses). Without `toolsDir` no tool is loaded, and a
+   * `[tool: ...]` step fails unrun with a message saying so, on either
+   * surface (docs/specs/SPEC-macros.md §7).
    */
   toolsDir?: string;
   /**
@@ -566,32 +567,32 @@ export interface StepRequest {
    */
   fullSteps?: string[];
   /**
-   * Re-run seed scope (steptix "re-run a skill step with its variables").
+   * Re-run seed scope (steptix "re-run a macro step with its variables").
    * Captured/runtime variables to inject into the session scope BEFORE the
-   * run, so a partial re-run that starts mid-skill (see `startAt`) can resolve
+   * run, so a partial re-run that starts mid-macro (see `startAt`) can resolve
    * values the skipped earlier steps would have produced. Merged over
    * `session.outputs` and `parameters` (seed wins) — these are the values the
    * user saw, and optionally edited, in the Variables panel.
    *
-   * `__skill*`-namespaced names are server-owned internals and are ignored if
+   * `__macro*`-namespaced names are server-owned internals and are ignored if
    * present.
    */
   seedScope?: Record<string, string>;
   /**
    * Start executing partway into the (expanded) step list: skip every expanded
    * step before the first whose origin file === `startAt.uri` AND whose source
-   * line ≥ `startAt.line`. Used by "re-run this skill step" — the client sends
-   * the single failed `[skill: …]` invocation plus the failed body step's
-   * (skill-file) location, and the server runs from there to the end of that
+   * line ≥ `startAt.line`. Used by "re-run this macro step" — the client sends
+   * the single failed `[macro: …]` invocation plus the failed body step's
+   * (macro-file) location, and the server runs from there to the end of that
    * expansion. Qualified by `uri` so a line number that recurs in a different
-   * (e.g. nested) skill file can't false-match. Omit to run from the start.
+   * (e.g. nested) macro file can't false-match. Omit to run from the start.
    */
   startAt?: { uri: string; line: number };
   /**
-   * Upper bound for a bounded partial re-run ("run selected skill steps on a
+   * Upper bound for a bounded partial re-run ("run selected macro steps on a
    * stopped session"): stop after the last expanded step in file `endAt.uri`
    * whose source line ≤ `endAt.line`. Qualified by `uri` like `startAt`. Omit to
-   * run to the end of the expansion (i.e. the end of the skill body) — the
+   * run to the end of the expansion (i.e. the end of the macro body) — the
    * `startAt`-only behaviour. Only meaningful alongside `startAt`.
    */
   endAt?: { uri: string; line: number };
@@ -621,7 +622,7 @@ export interface StepRequest {
    *
    * Absent means "this continues the run the session is in" — a Continue, a
    * step command from a pause, the next block of a split run, a re-run of one
-   * skill step against the paused page — and every client that predates the
+   * macro step against the paused page — and every client that predates the
    * field, and flick, whose every request continues one conversation. Those
    * keep the surface exactly as before.
    */
@@ -643,7 +644,7 @@ export interface StepRequest {
  *    way — so a desktop excursion that ends in `[use browser]` inside a
  *    section puts the step after the call on the browser, where top-level
  *    lines alone answered `computer` and sent that step to the real mouse;
- *  - a skill call changes nothing: a skill hands its caller back the surface
+ *  - a macro call changes nothing: a macro hands its caller back the surface
  *    it called from (§4.5), so the line after the call is on the caller's;
  *  - a control line whose tail switches surface — directly or through a
  *    section — may or may not have run. That is not guessed at: the run starts
@@ -690,7 +691,7 @@ function surfaceEffectOf(
   // Rung 1 — bracket directives.
   const use = parseUseStep(line);
   if (use) return use.surface;
-  if (isSkillCallLine(line)) return 'none';
+  if (isMacroCallLine(line)) return 'none';
   // Rung 2 — the bare-name section match: the body, read backwards.
   const key = matchText(line);
   if (sections && Object.prototype.hasOwnProperty.call(sections, key)) {
@@ -720,11 +721,11 @@ function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
   return true;
 }
 
-/** A `[skill: …]` line, as the expander reads one — a line that names a skill
+/** A `[macro: …]` line, as the expander reads one — a line that names a macro
  *  but does not parse is still one. */
-function isSkillCallLine(line: string): boolean {
+function isMacroCallLine(line: string): boolean {
   try {
-    return parseSkillCall(line) !== null;
+    return parseMacroCall(line) !== null;
   } catch {
     return true;
   }
@@ -739,11 +740,11 @@ export interface FrameInfo {
   id: string;
   parentId: string | null;
   /** `'section'` is an inline `### Name` block. `uri` is the file that
-   *  defines it and `skillName` carries the section name. */
-  kind: 'test' | 'skill' | 'section';
+   *  defines it and `macroName` carries the section name. */
+  kind: 'test' | 'macro' | 'section';
   uri: string;
   line: number;
-  skillName?: string;
+  macroName?: string;
   /** 1-based iteration of a looped section, and how many there are
    *  (stories/data-driven-rows.md, part B). Absent on every other frame. */
   iteration?: number;
@@ -755,8 +756,9 @@ export interface FrameInfo {
  * endpoint converts these to SSE frames; the non-streaming endpoint ignores
  * them.
  *
- * The `frame:*` variants are emitted only when the client asks for skill
- * expansion (via `StepRequest.skillsDir`). Legacy clients can ignore them.
+ * The `frame:*` variants are emitted only when the steps are expanded: when
+ * the client sends `StepRequest.macrosDir`, or the batch has sections or
+ * control lines. Clients that never send those can ignore them.
  */
 /**
  * Which tab a step actually ran in (stories/mcp-cdp-browser.md §11).
@@ -917,7 +919,7 @@ export type RunEvent =
    * runner-core/src/protocol.ts, which is the client's copy of this contract.
    *
    * One per skipped step line, PLUS one per skipped nested call line — a
-   * section or skill invoked inside the returned body, addressed by that
+   * section or macro invoked inside the returned body, addressed by that
    * frame's `invocationLine` in its parent's file. The call line has no step of
    * its own in the expansion, so without an event it would keep whatever glyph
    * the gutter last painted on it.
@@ -1157,9 +1159,9 @@ export interface InternalRunOptions {
      * The expansion the caller has already computed — used to build the
      * code-behind registry instead of the server's own re-expansion.
      *
-     * Compile sends its steps pre-expanded (no `skillsDir`), so the server has
-     * no frames of its own to bind through; without this every skill-body step
-     * would bind into the *test's* `.steps.ts` rather than the skill's.
+     * Compile sends its steps pre-expanded (no `macrosDir`), so the server has
+     * no frames of its own to bind through; without this every macro-body step
+     * would bind into the *test's* `.steps.ts` rather than the macro's.
      */
     expansion?: {
       steps: string[];
@@ -1559,7 +1561,7 @@ interface ManagedSession {
    * the batch there) holds nothing, so it cannot refuse another session's
    * computer-mode run.
    *
-   * A pause that parks INSIDE a batch — a skill-file or section breakpoint,
+   * A pause that parks INSIDE a batch — a macro-file or section breakpoint,
    * step mode, a tool or code-behind debugger attach — releases it too, just
    * before it announces itself. The run is still in flight (`runsInFlight`
    * counts it), but a run waiting for a person must not hold the machine-wide
@@ -1679,7 +1681,7 @@ interface ManagedSession {
   outputs: Record<string, string>;
   /**
    * Provenance label for each key in `outputs`. Written at each variable
-   * write site (parameter seeding, tool/skill output, `[output:]` capture,
+   * write site (parameter seeding, tool/macro output, `[output:]` capture,
    * end-of-step sweep). First-write-wins: once a name is labelled it keeps
    * that label even if a later write overwrites the *value* — so a parameter
    * shadowed by a same-named capture still reads as `'parameter'`, preserving
@@ -1756,8 +1758,8 @@ interface ManagedSession {
    * why this is keyed the way it is. A positional check
    * (`steps[0] === fullSteps[0]`) lost the warning for every run whose first
    * batch starts mid-document, which is any test opening with an `[input:]`
-   * step. A document-shape key could not see skill files, so a section a
-   * skill edit had just orphaned went unreported for the rest of the session.
+   * step. A document-shape key could not see macro files, so a section a
+   * macro edit had just orphaned went unreported for the rest of the session.
    */
   deadSectionsReported: Set<string>;
   /**
@@ -1817,17 +1819,17 @@ export function hasSections(request: {
 
 /**
  * Walk the frame chain rooted at `frameId` and return the name of the
- * outermost **section** frame that sits OUTSIDE any skill frame.
+ * outermost **section** frame that sits OUTSIDE any macro frame.
  *
- * The frame-based twin of the expander's `sourceSections` rule. A skill's own
+ * The frame-based twin of the expander's `sourceSections` rule. A macro's own
  * internal sections are private to it, so they are never the answer: for
- * `test → section A → skill S → section B`, a step in B reports "A", because
- * B is skill-private while A is what the test author actually wrote. Only a
- * skill invoked directly from the root flow yields undefined.
+ * `test → section A → macro S → section B`, a step in B reports "A", because
+ * B is macro-private while A is what the test author actually wrote. Only a
+ * macro invoked directly from the root flow yields undefined.
  *
  * That skip is what keeps the documented both-badges case true — one step can
- * carry skill S and section A at once, which is why this is a separate walk
- * from `outermostSkillName` rather than the same walk with the kind swapped.
+ * carry macro S and section A at once, which is why this is a separate walk
+ * from `outermostMacroName` rather than the same walk with the kind swapped.
  */
 /**
  * The `loop` marker for a step, derived from the nearest enclosing frame that
@@ -1867,7 +1869,7 @@ function loopMarkerFor(
       if (boundIn) inheritLoopBindings(boundIn, values);
       return {
         kind: 'iteration',
-        ...(current.skillName && { label: current.skillName }),
+        ...(current.macroName && { label: current.macroName }),
         index: current.iteration,
         ...(current.iterationCount !== undefined && { count: current.iterationCount }),
         values,
@@ -1931,10 +1933,10 @@ function outermostSectionName(
   if (!frameId || !frames) return undefined;
 
   // Collect the ancestry leaf-to-root, then read it root-first. Scanning
-  // outward-in is what makes "outermost, but only outside every skill" a
-  // single pass with no flags: the first section wins, and a skill
+  // outward-in is what makes "outermost, but only outside every macro" a
+  // single pass with no flags: the first section wins, and a macro
   // encountered first ends the search because everything below it is that
-  // skill's private business.
+  // macro's private business.
   const chain: FrameInfo[] = [];
   const seen = new Set<string>();
   let current: FrameInfo | undefined = frames[frameId];
@@ -1946,22 +1948,22 @@ function outermostSectionName(
 
   for (let i = chain.length - 1; i >= 0; i--) {
     const frame = chain[i]!;
-    if (frame.kind === 'skill') return undefined;
-    if (frame.kind === 'section') return frame.skillName;
+    if (frame.kind === 'macro') return undefined;
+    if (frame.kind === 'section') return frame.macroName;
   }
   return undefined;
 }
 
 /**
  * Walk the frame chain rooted at `frameId` and return the name of the
- * outermost skill encountered. Mirrors the CLI runner's
- * `test.sourceSkills[i]` semantics: for nested `skill_a → skill_b`,
- * every body step (inner or outer) reports `skill_a` so the report's
- * "from skill X" chip reflects the user-visible invocation rather than
+ * outermost macro encountered. Mirrors the CLI runner's
+ * `test.sourceMacros[i]` semantics: for nested `macro_a → macro_b`,
+ * every body step (inner or outer) reports `macro_a` so the report's
+ * "from macro X" chip reflects the user-visible invocation rather than
  * the immediate frame. Returns undefined for top-level inline steps
  * (frameId empty or pointing at the test frame).
  */
-function outermostSkillName(
+function outermostMacroName(
   frameId: string | undefined,
   frames: Record<string, FrameInfo> | null,
 ): string | undefined {
@@ -1969,11 +1971,11 @@ function outermostSkillName(
   let outermost: FrameInfo | undefined;
   let current: FrameInfo | undefined = frames[frameId];
   while (current) {
-    if (current.kind === 'skill') outermost = current;
+    if (current.kind === 'macro') outermost = current;
     if (!current.parentId) break;
     current = frames[current.parentId];
   }
-  return outermost?.skillName;
+  return outermost?.macroName;
 }
 
 // ---------------------------------------------------------------------------
@@ -2659,13 +2661,13 @@ export class SessionManager {
     signal?: AbortSignal,
     internal?: InternalRunOptions,
   ): Promise<StepResponse> {
-    // Clear the module-level skill cache at the start of every request so
-    // disk edits to skill files between batches are picked up. The API
+    // Clear the module-level macro cache at the start of every request so
+    // disk edits to macro files between batches are picked up. The API
     // server is long-lived; without this an edit during a paused run stays
     // masked by the earlier-cached parse. Within a single request the cache
-    // is repopulated by expandSkills and still amortises across nested
-    // invocations of the same skill.
-    clearSkillCache();
+    // is repopulated by expandMacros and still amortises across nested
+    // invocations of the same macro.
+    clearMacroCache();
 
     let session = this.sessions.get(this.sessionKey(sessionId));
 
@@ -2751,7 +2753,7 @@ export class SessionManager {
           } finally {
             session.activeBatches--;
             // Guarantee a FINALIZED last-run record on EVERY run exit — including
-            // early run-setup failures (malformed bundle, missing skill,
+            // early run-setup failures (malformed bundle, missing macro,
             // re-run-anchor-not-found, partial-rerun refusal) that return/throw
             // before recordLastRun runs. Without this a STOP-recovery client
             // polling GET /sessions/:id/last-run "until finalized" hangs. Surfaced
@@ -3683,7 +3685,7 @@ export class SessionManager {
     /** Full StepResult records accumulated across this request — used to
      *  generate the per-run HTML report at the end. */
     const fullStepResults: StepResult[] = [];
-    // stepsTotal mirrors the post-expansion step count once skill expansion
+    // stepsTotal mirrors the post-expansion step count once macro expansion
     // runs (further down). Declared `let` because of that. Status displays
     // and `step N/total` log lines reflect what the runner actually executes,
     // not the pre-expansion length.
@@ -3705,7 +3707,7 @@ export class SessionManager {
     let healedTokens = 0;
     let tokensAtStepStart = 0;
 
-    // Step-execution view of the inbound request. When skill expansion runs
+    // Step-execution view of the inbound request. When macro expansion runs
     // (further down, once envDataCtx is resolved) these get rebound to the
     // flattened arrays; the loop only ever reads from them. Declared up
     // here so the `sourceLineFor` closure binds to the live values.
@@ -3715,8 +3717,8 @@ export class SessionManager {
     // how a run was carved up, so it cannot ask "is this the first batch of a
     // run". Two attempts to infer that from the request shape were both
     // wrong: a positional check lost the warning for every run starting with
-    // an `[input:]` step, and a document-shape key could not see skill files,
-    // so a section that a skill edit had just orphaned went unreported.
+    // an `[input:]` step, and a document-shape key could not see macro files,
+    // so a section that a macro edit had just orphaned went unreported.
     //
     // The message itself names the file, the section and the line, so it
     // changes exactly when the thing being reported changes — no guessing,
@@ -3735,7 +3737,7 @@ export class SessionManager {
     let expansionFrames: Record<string, FrameInfo> | null = null;
     /** The expander's own frame records (not the wire `FrameInfo`), kept for
      *  code-behind: resolving which `.steps.ts` a step binds into needs
-     *  `kind`/`uri` plus the skill scope tables the wire shape doesn't carry. */
+     *  `kind`/`uri` plus the macro scope tables the wire shape doesn't carry. */
     let expandedFrames: Record<string, ExpandedFrame> = {};
     /** Parallel to `effectiveSteps` — each step's authored match-side text.
      *  Absent expansion, the request's steps are already that (contract §2.1). */
@@ -3745,7 +3747,7 @@ export class SessionManager {
      * index range of its body and the end of its chain
      * (stories/control-flow.md §Design).
      *
-     * Obtained from the server's OWN `expandSkills` call rather than from the
+     * Obtained from the server's OWN `expandMacros` call rather than from the
      * wire: a control line is `kind: 'step'` like any other, and the client
      * neither knows nor needs to know which lines are guards. All-null for
      * every batch with no control lines, which is every batch written before
@@ -3753,16 +3755,16 @@ export class SessionManager {
      */
     let expansionControls: (ControlRecord | null)[] = request.steps.map(() => null);
     let codeBehind: CodeBehindRegistry = CodeBehindRegistry.empty();
-    // Per-skill-frame snapshot of the caller-supplied parameter values
+    // Per-macro-frame snapshot of the caller-supplied parameter values
     // recorded by the expander. Merged into `frame:scope` on entry so
-    // a debugger pause inside the skill shows what was passed in.
+    // a debugger pause inside the macro shows what was passed in.
     const frameInputs: Record<string, Record<string, string>> = {};
 
     // Map a 1-based step index to the source-document line. When the client
     // doesn't supply sourceLines we echo the step index — some clients (e.g.
-    // headless runners) don't track source positions. After skill expansion,
-    // `effectiveSourceLines` carries per-expanded-step lines (skill-body
-    // entries point at their skill `.md`, not the test file).
+    // headless runners) don't track source positions. After macro expansion,
+    // `effectiveSourceLines` carries per-expanded-step lines (macro-body
+    // entries point at their macro `.md`, not the test file).
     const sourceLineFor = (stepIndex0: number): number => {
       const explicit = effectiveSourceLines?.[stepIndex0];
       return typeof explicit === 'number' ? explicit : stepIndex0 + 1;
@@ -3840,7 +3842,7 @@ export class SessionManager {
     // minimal record. `index` is 1-based. Marked `interrupted` so the report
     // renders it distinctly and excludes it from the failed count.
     const recordInterruptedStep = (index: number, instruction: string, base?: StepResult): void => {
-      const sourceSkill = outermostSkillName(expansionOrigins?.[index - 1]?.frameId, expansionFrames);
+      const sourceMacro = outermostMacroName(expansionOrigins?.[index - 1]?.frameId, expansionFrames);
       const sourceSection = outermostSectionName(
         expansionOrigins?.[index - 1]?.frameId,
         expansionFrames,
@@ -3855,7 +3857,7 @@ export class SessionManager {
         interrupted: true,
         aiExplanation: 'Stopped by user (run aborted).',
         ...(base?.screenshotBase64 !== undefined && { screenshotBase64: base.screenshotBase64 }),
-        ...(sourceSkill && { sourceSkill }),
+        ...(sourceMacro && { sourceMacro }),
         ...(sourceSection && { sourceSection }),
       });
     };
@@ -3929,12 +3931,12 @@ export class SessionManager {
       : () => {};
 
     // Re-run seed scope: captured/runtime vars to inject before the run so a
-    // partial re-run starting mid-skill (see `startAt`) can resolve values the
-    // skipped earlier steps would have produced. `__skill*` names are
+    // partial re-run starting mid-macro (see `startAt`) can resolve values the
+    // skipped earlier steps would have produced. `__macro*` names are
     // server-owned internals and are never accepted from a seed.
     const seedScope: Record<string, string> = {};
     for (const [k, v] of Object.entries(request.seedScope ?? {})) {
-      if (!k.startsWith('__skill')) seedScope[k] = v;
+      if (!k.startsWith('__macro')) seedScope[k] = v;
     }
 
     // Build the parameter map: session outputs as base, request parameters as
@@ -4167,7 +4169,7 @@ export class SessionManager {
     // section's row is bound as frame `inputs` and interpolated into the step
     // text, so a `password` column would otherwise print in clear in the
     // report's instruction, the console line, the run log and the recording —
-    // and so would a literal `[skill: login password="x"]` argument, which has
+    // and so would a literal `[macro: login password="x"]` argument, which has
     // had the same hole all along (stories/data-driven-rows.md, decision 10).
     //
     // Read fresh on every call, as the parameter half already is: frames are
@@ -4175,7 +4177,7 @@ export class SessionManager {
     //
     // Pooled per frame, not merged into one map: merged, a name kept one
     // value, so the second row of a `password` column evicted the first's,
-    // and `[skill: login password="{{password}}"]` evicted the test's own
+    // and `[macro: login password="{{password}}"]` evicted the test's own
     // password in favour of the placeholder text — for every step of the run
     // (issue 060). `runSecretsWithInputs` also carries the loop marks onto
     // each copy, for the round-2 reason (§7.6).
@@ -4250,7 +4252,7 @@ export class SessionManager {
      * byte what it was.
      *
      * The same pair for a frame whose scope merges `frameInputs`: those
-     * inputs are either a caller's flat skill args or the very pass bindings
+     * inputs are either a caller's flat macro args or the very pass bindings
      * this registry was marked from (`cloneFramesForPass` copies
      * `pass.bindings` into them), so the list already names them.
      */
@@ -4267,8 +4269,8 @@ export class SessionManager {
     // on the session. The step loop later dispatches `[tool: ...]` lines
     // through `executeToolStep` so deterministic tool code runs on the server
     // (parallel to how the CLI runner dispatches them). Without `toolsDir`
-    // `[tool: ...]` lines reach the AI as plain text — same as pre-Phase-5
-    // behaviour.
+    // no catalogue is loaded, and the loop fails a `[tool: ...]` step unrun
+    // (docs/specs/SPEC-macros.md §7).
     //
     // Reload (rather than reuse the cache) when the `toolsDir` changed since
     // the cached catalogue was built, or when that catalogue is empty — a
@@ -4329,11 +4331,12 @@ export class SessionManager {
     }
     // A batch that omits `toolsDir` deliberately KEEPS a catalogue an earlier
     // batch loaded — `session.toolCatalogue` is sticky, matching the
-    // `envBundle`/`sessionConfig` precedent, so Steptix's Continue (which
-    // re-sends steps without re-sending `toolsDir`) still dispatches tools.
+    // `envBundle`/`sessionConfig` precedent, so a later batch from a client
+    // that does not re-send `toolsDir` (a bare Sessions API batch) still
+    // dispatches tools.
     //
     // stories/mcp-no-project.md's "no tools project-less" guarantee is enforced
-    // MCP-side instead (`isCodeStep` in assemble.ts refuses `[skill:]`/
+    // MCP-side instead (`isCodeStep` in assemble.ts refuses `[macro:]`/
     // `[tool:]` before a user-scope run reaches here), not by dropping the
     // catalogue on a bare batch — that would regress Continue to close a hole
     // the client scan already closes. The scan was reviewed to be a strict
@@ -4341,17 +4344,18 @@ export class SessionManager {
     // would dispatch here survives it.
     const toolCatalogue = session.toolCatalogue;
 
-    // Skill expansion — when the caller supplies `skillsDir`, flatten
-    // `[skill: ...]` lines into their bodies before execution and remember
+    // Macro expansion — when the caller supplies `macrosDir`, flatten
+    // `[macro: ...]` lines into their bodies before execution and remember
     // the per-step origin so step-into-aware clients see `frame:push` /
-    // `frame:pop` events around each skill body. Without `skillsDir` the
-    // existing flow is preserved verbatim (raw steps shipped to the runner).
+    // `frame:pop` events around each macro body. Without `macrosDir` the
+    // raw steps go to the loop as they are, where a raw `[macro:]` line fails
+    // unrun (docs/specs/SPEC-macros.md §7).
     // …and when any step is a control line, for the same reason the CLI's
     // parser widened its own gate: the tail is a step the expander has to
     // place, and skipping expansion would ship `While the Next button is
     // enabled, Go to the next page` to the model as one prose instruction
     // (stories/control-flow.md). A file with a chain but no sections and no
-    // skills reaches the server exactly like that.
+    // macros reaches the server exactly like that.
     //
     // Except from `POST /codebehind/compile`, whose steps are ALREADY expanded
     // — each guard line followed by its tail — with the compiler's expansion
@@ -4363,20 +4367,20 @@ export class SessionManager {
     const preExpanded = internal?.codeBehind?.expansion !== undefined;
     const hasControlLines =
       !preExpanded && request.steps.some((step) => parseControlLine(step) !== null);
-    if (request.skillsDir || hasSections(request) || hasControlLines) {
+    if (request.macrosDir || hasSections(request) || hasControlLines) {
       try {
-        const expansion = await expandSkills(
+        const expansion = await expandMacros(
           request.steps,
           // Optional since sections landed: a project can define inline
-          // sections and no skills at all, in which case there is no skills
-          // directory to point at. Passing `request.skillsDir!` here would
+          // sections and no macros at all, in which case there is no macros
+          // directory to point at. Passing `request.macrosDir!` here would
           // typecheck and hand `undefined` to a parameter typed `string`.
-          request.skillsDir,
+          request.macrosDir,
           envDataCtx ?? undefined,
           request.testFilePath,
-          // Thread sourceLines so top-level [skill: ...] invocations
+          // Thread sourceLines so top-level [macro: ...] invocations
           // get a non-zero `frame.line` — the client uses it to paint
-          // running/pass on the test file's `[skill: ...]` step row.
+          // running/pass on the test file's `[macro: ...]` step row.
           // Without this, the row stays blank.
           request.sourceLines,
           {
@@ -4421,7 +4425,7 @@ export class SessionManager {
             kind: f.kind,
             uri: f.uri,
             line: f.invocationLine ?? 0,
-            ...(f.skillName !== undefined && { skillName: f.skillName }),
+            ...(f.macroName !== undefined && { macroName: f.macroName }),
             // Not free: this conversion copies field by field, so an
             // iteration would be dropped here without naming it.
             ...(f.iteration !== undefined && {
@@ -4431,41 +4435,41 @@ export class SessionManager {
           };
           // Parallel input map kept server-side only (not part of the
           // wire FrameInfo). Merged into the `frame:scope` payload on
-          // `frame:push` so a debugger pause inside the skill can see
+          // `frame:push` so a debugger pause inside the macro can see
           // the caller-supplied parameter values, which would
           // otherwise be invisible because the expander inlines them
           // directly into the step text rather than into the
           // resolvedParameters map.
           if (f.inputs) frameInputs[id] = { ...f.inputs };
-          // Tag this skill's declared outputs as 'toolOutput' provenance.
+          // Tag this macro's declared outputs as 'toolOutput' provenance.
           // They reach session scope via a rewritten `[store as: ...]` and
           // would otherwise be swept as plain 'capture' (the runtime can't
-          // tell a skill return from a page capture). Seed the label here —
+          // tell a macro return from a page capture). Seed the label here —
           // before the step loop — using first-write-wins so a name already
-          // claimed by a parameter keeps 'parameter'. Skill-internal
-          // (`__skill*`) names never reach `session.outputs`, so skip them.
+          // claimed by a parameter keeps 'parameter'. Macro-internal
+          // (`__macro*`) names never reach `session.outputs`, so skip them.
           for (const name of f.outputs ?? []) {
-            if (!name.startsWith('__skill') && !(name in session.outputSources)) {
+            if (!name.startsWith('__macro') && !(name in session.outputSources)) {
               session.outputSources[name] = 'toolOutput';
             }
           }
         }
-        // Re-derive sourceLines: skill-body steps point at the skill file's
+        // Re-derive sourceLines: macro-body steps point at the macro file's
         // own line; inline steps keep their original test-file line. Without
-        // this, a status emitted for a skill-body step would land on the
+        // this, a status emitted for a macro-body step would land on the
         // wrong line in the test editor.
         effectiveSourceLines = expansion.origins.map((o) => {
-          if (o.skillLine !== undefined) return o.skillLine;
+          if (o.macroLine !== undefined) return o.macroLine;
           return request.sourceLines?.[o.inputIndex] ?? o.inputIndex + 1;
         });
       } catch (err) {
-        // Skill expansion failures (cycles, missing files, bad args) abort
+        // Macro expansion failures (cycles, missing files, bad args) abort
         // the run before the browser does any work. Mirror the existing
         // executeStep error path so the SSE stream emits a clean `done`.
         const message = err instanceof Error ? err.message : String(err);
-        logger.error(`Session "${sessionId}": skill expansion failed: ${message}`);
-        emit({ type: 'output', msg: `Skill expansion failed: ${message}`, kind: 'error' });
-        await refuseOpenCompile(`Skill expansion failed: ${message}`);
+        logger.error(`Session "${sessionId}": macro expansion failed: ${message}`);
+        emit({ type: 'output', msg: `Macro expansion failed: ${message}`, kind: 'error' });
+        await refuseOpenCompile(`Macro expansion failed: ${message}`);
         emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
         return {
           sessionId,
@@ -4501,7 +4505,7 @@ export class SessionManager {
     // The compile route posts steps that are ALREADY expanded.
     //
     // `POST /codebehind/compile` (src/server/compile-runner.ts, `sessionRunner`)
-    // sends `test.steps` with no `skillsDir` and no `sections`, deliberately —
+    // sends `test.steps` with no `macrosDir` and no `sections`, deliberately —
     // re-expanding server-side would be a second answer to "which `.steps.ts`
     // does step 7 bind into". So the block above never runs, and without this
     // `expansionOrigins` stays null: every step then reads as the ROOT frame.
@@ -4851,20 +4855,20 @@ export class SessionManager {
      */
     const skipStale = new Map<number, { file: string; error: string }>();
     /**
-     * §4.5 — a skill call restores the caller's surface on return.
+     * §4.5 — a macro call restores the caller's surface on return.
      *
      * Per RUN rather than per session, and the corner that costs is named
-     * rather than hidden: a batch boundary INSIDE a skill body (Steptix
+     * rather than hidden: a batch boundary INSIDE a macro body (Steptix
      * splits a batch at an `[input:]` or a breakpoint) starts a new stack, so
      * the surface the second batch reads as "the caller's" is whatever the
-     * skill left it on. Nothing is lost that `[use browser]` cannot restore,
+     * macro left it on. Nothing is lost that `[use browser]` cannot restore,
      * and the alternative — keeping the stack on the session — would key it on
      * frame ids that are only stable while the expansion is.
      */
-    const skillSurfaces = new SkillSurfaceStack();
+    const macroSurfaces = new MacroSurfaceStack();
     /**
      * `[use computer]` for this session, with everything §5.1 reads — written
-     * once, because a `[use computer]` step and a skill returning to a
+     * once, because a `[use computer]` step and a macro returning to a
      * computer-surface caller are the same entry (§4.5).
      */
     const enterComputerSurface = () =>
@@ -4884,7 +4888,7 @@ export class SessionManager {
         ai: runKeyless ? undefined : effectiveAiRoute,
         ...(this.deps.checkVisionRoute && { checkVisionRoute: this.deps.checkVisionRoute }),
       });
-    /** Put the caller back on its surface on return from a skill: `[use
+    /** Put the caller back on its surface on return from a macro: `[use
      *  browser]`'s transition, or `[use computer]`'s through
      *  {@link enterComputerSurface}, which can fail (`restoreCallerSurface`). */
     const restoreSurface = (to: 'browser' | 'computer') =>
@@ -4909,7 +4913,7 @@ export class SessionManager {
     // ─── Frame stack ────────────────────────────────────────────────────────
     //
     // For step-into-aware clients: maintain a stack of currently-pushed
-    // skill frames, emit `frame:push` / `frame:pop` events to transition
+    // macro frames, emit `frame:push` / `frame:pop` events to transition
     // the stack to the frame each step belongs to, and return the FrameInfo
     // payload to attach to `step:start` / `step:pass` / `step:fail`.
     //
@@ -4940,7 +4944,7 @@ export class SessionManager {
       }
       // Push the remainder. Each push is paired with a `frame:scope`
       // snapshot so a client that pauses BEFORE the first step in the
-      // new frame (e.g. via a skill-file breakpoint) can still see
+      // new frame (e.g. via a macro-file breakpoint) can still see
       // the variables the expander has placed into resolvedParameters
       // for that frame — most importantly, the input parameters the
       // caller passed in. Without this scope-on-entry emit, the
@@ -4949,7 +4953,7 @@ export class SessionManager {
       //
       // Merge order matters: `frameInputs[f.id]` (the caller's
       // resolved arg values) overlays `resolvedParameters` so the
-      // skill's declared param names take precedence over any same-
+      // macro's declared param names take precedence over any same-
       // named entries that may already exist in the test scope.
       while (activeFrames.length < desired.length) {
         const nextId = desired[activeFrames.length]!;
@@ -4994,7 +4998,7 @@ export class SessionManager {
 
     /**
      * Walk the frame's ancestry to get the step's depth. Test (root)
-     * frame is depth 0; each nested skill is +1. Used by stepMode pause
+     * frame is depth 0; each nested macro is +1. Used by stepMode pause
      * decisions: 'over' pauses when next depth ≤ current depth; 'out'
      * pauses when next depth < current depth.
      */
@@ -5031,7 +5035,7 @@ export class SessionManager {
       session.pauseAtNextCodeBehind = true;
     }
 
-    // Per-URI breakpoint sets for the server-side pause check. Skill-
+    // Per-URI breakpoint sets for the server-side pause check. Macro-
     // file (and any non-test-file) breakpoints land here; the test file's
     // own breakpoints are skipped because the client already trims at
     // them before sending the request (legacy `trimAtBreakpoint` path).
@@ -5065,15 +5069,15 @@ export class SessionManager {
       ...scopeMasking(),
     });
 
-    // Partial re-run ("re-run this skill step with its variables"): skip every
+    // Partial re-run ("re-run this macro step with its variables"): skip every
     // expanded step before the failed one. Match by (origin file, source line)
     // so a line that recurs in a different frame can't false-match. The single
-    // sent `[skill: …]` invocation expands to just that skill's body, so running
+    // sent `[macro: …]` invocation expands to just that macro's body, so running
     // from here to the end of `effectiveSteps` is exactly "from the failed step
-    // to the end of the skill".
+    // to the end of the macro".
     // Resolve the origin file of an expanded step — used to match both the
     // startAt lower bound and the endAt upper bound. Test-frame steps map to the
-    // test file; skill-body steps map to their skill file.
+    // test file; macro-body steps map to their macro file.
     const uriOfStep = (i: number): string | undefined => {
       const origin = expansionOrigins?.[i];
       if (!origin || origin.frameId === '') return request.testFilePath;
@@ -5086,7 +5090,7 @@ export class SessionManager {
      *
      * The `>=` / `<=` fallbacks exist so a re-run still works when the target
      * file was edited and the exact line moved. They rely on document order
-     * and execution order agreeing within a file — true for a skill body,
+     * and execution order agreeing within a file — true for a macro body,
      * because the whole file is one contiguous run.
      *
      * Sections break that. A section is DEFINED below the main flow but
@@ -5139,13 +5143,13 @@ export class SessionManager {
      * section's `stepLines` to cover calls nested inside a body. That branch
      * could not distinguish "this body step expanded to nothing" from "this
      * body step expanded into another frame", so for a body starting with
-     * `[skill: …]` it stepped over the whole skill and started after it —
+     * `[macro: …]` it stepped over the whole macro and started after it —
      * silently, and reporting green.
      *
      * The ancestry knows. Every frame records the line it was invoked at, so
      * "was any frame enclosing this step invoked at `line`?" is exact at any
      * depth, and comparing against the INVOKING file (the parent frame's, or
-     * the test file at the root) is what keeps a skill-file line number from
+     * the test file at the root) is what keeps a macro-file line number from
      * matching a test-file anchor that happens to share it.
      */
     const stepAtAnchor = (i: number, uri: string, line: number): boolean => {
@@ -5183,9 +5187,9 @@ export class SessionManager {
       });
 
       // `stepAtAnchor` covers every anchor that produced a step, at any
-      // depth. What remains is a MAIN-FLOW step that produced NONE: a skill
+      // depth. What remains is a MAIN-FLOW step that produced NONE: a macro
       // with an empty `## Steps` expands to nothing (sections refuse an empty
-      // body, skills do not), so no frame exists to carry its invocation
+      // body, macros do not), so no frame exists to carry its invocation
       // line. Walk forward to the first step from a later input step.
       //
       // Its body-line twin — a zero-expansion step INSIDE a body — is
@@ -5210,7 +5214,7 @@ export class SessionManager {
       if (startIndex < 0) {
         const message =
           `Re-run anchor not found: no step at or after line ${startLine} in ${startUri}. ` +
-          `The skill may have changed since the failed run.`;
+          `The macro may have changed since the failed run.`;
         logger.error(`Session "${sessionId}": ${message}`);
         emit({ type: 'output', msg: message, kind: 'error' });
         // A refusal must terminate the compile it rides on: the queue is
@@ -5246,9 +5250,9 @@ export class SessionManager {
       );
     }
 
-    // Upper bound for a bounded re-run ("run selected skill steps"). Default: the
-    // end of the expansion — for a single sent [skill:] invocation that IS the end
-    // of the skill body, so omitting endAt preserves the startAt-only behaviour
+    // Upper bound for a bounded re-run ("run selected macro steps"). Default: the
+    // end of the expansion — for a single sent [macro:] invocation that IS the end
+    // of the macro body, so omitting endAt preserves the startAt-only behaviour
     // exactly.
     let endIndex = effectiveSteps.length - 1;
     /**
@@ -5334,12 +5338,12 @@ export class SessionManager {
           const inputLine = request.sourceLines?.[k] ?? k + 1;
           if (inputLine <= endLine) lastInput = k;
         }
-        // Walk back over input steps that expanded to NOTHING. A skill with
+        // Walk back over input steps that expanded to NOTHING. A macro with
         // an empty `## Steps` contributes no expanded step — sections guard
-        // against an empty body, skills do not — so its call line has no
+        // against an empty body, macros do not — so its call line has no
         // `inputIndex` in the origins at all. Resolving to it and stopping
         // there refused the run outright, on a real main-flow step, with a
-        // message blaming a stale skill file.
+        // message blaming a stale macro file.
         for (let k = lastInput; k >= 0 && found < 0; k--) {
           for (let i = startIndex; i < effectiveSteps.length; i++) {
             if (expansionOrigins?.[i]?.inputIndex === k) found = i;
@@ -5349,10 +5353,10 @@ export class SessionManager {
       if (found < 0) {
         // endAt present but no step at/after the start in endAt.uri is ≤ endAt.line
         // (an inverted or stale range). Refuse explicitly rather than silently
-        // running to the end of the skill — symmetric with the startAt guard above.
+        // running to the end of the macro — symmetric with the startAt guard above.
         const message =
           `Re-run end anchor not found: no step in the re-run range at or before ` +
-          `line ${endLine} in ${endUri}. The skill may have changed since the run was stopped.`;
+          `line ${endLine} in ${endUri}. The macro may have changed since the run was stopped.`;
         logger.error(`Session "${sessionId}": ${message}`);
         emit({ type: 'output', msg: message, kind: 'error' });
         // Same contract as the start-anchor refusal: end the compile with the
@@ -5456,7 +5460,7 @@ export class SessionManager {
       // that slot does not exist, so the new entry would land at the wrong
       // occurrence and serve a different step. The client refuses exactly
       // this for test files (`resolveCompileTarget`'s repeated-step gate); a
-      // skill-file slice reaches the server without that gate, so it is
+      // macro-file slice reaches the server without that gate, so it is
       // enforced here — before anything runs or spends a token. An earlier
       // occurrence INSIDE the slice is fine: the queue generates in step
       // order, so its entry exists by the time the later one is placed; and
@@ -5476,7 +5480,7 @@ export class SessionManager {
         if (!b || b.occurrence === 0 || b.entry !== undefined) continue;
         // Occurrence is counted per FRAME INSTANCE (`buildCodeBehindRegistry`
         // keys its counter on the frame id), so a second invocation of the
-        // same skill restarts at 0 and its steps are not siblings of the
+        // same macro restarts at 0 and its steps are not siblings of the
         // first's — comparing across frames refuses a selection that is
         // already complete, with advice the author cannot act on.
         const frameOf = (k: number): string | undefined => expansionOrigins?.[k]?.frameId;
@@ -5629,9 +5633,9 @@ export class SessionManager {
       // The untaken tail's rows show under their section badge, which is what
       // makes a skipped block readable as "the branch that was not taken"
       // rather than as eight loose grey lines.
-      const skill = outermostSkillName(expansionOrigins?.[k]?.frameId, expansionFrames);
+      const macro = outermostMacroName(expansionOrigins?.[k]?.frameId, expansionFrames);
       const section = outermostSectionName(expansionOrigins?.[k]?.frameId, expansionFrames);
-      if (skill) row.sourceSkill = skill;
+      if (macro) row.sourceMacro = macro;
       if (section) row.sourceSection = section;
       fullStepResults.push(row);
       // Offered to the compile, with its CAUSE (issue 053, resolved by
@@ -5699,7 +5703,7 @@ export class SessionManager {
      * back to the guard and re-runs the same indices — so the pass needs its
      * own frame ids or every pass would paint into the previous one's frame.
      * `iteration` goes on the OUTERMOST clone only (the tail's own frame): a
-     * skill invoked from inside the body is not itself an iteration of
+     * macro invoked from inside the body is not itself an iteration of
      * anything. `iterationCount` is omitted while a `While` / `Repeat` runs,
      * which is the case runner-core's `FrameInfo` doc now names.
      */
@@ -5775,7 +5779,7 @@ export class SessionManager {
         // `pauseAtNextTool` inside the tool branch itself (so a run with no
         // tool step never cleared it at all). Neither survived contact with a
         // loop that has four ways out. A flag left set outlives the RUN, and
-        // it lives on the SESSION — which stories/specs/run-and-compile-a-skill-step.md
+        // it lives on the SESSION — which steptix-vscode/stories/specs/run-and-compile-a-skill-step.md
         // then hands to another document via the picker. The result was an F11
         // in one test arming a `debugger;` in an unrelated run of another file;
         // with an inspector attached that freezes the whole server process.
@@ -5802,22 +5806,22 @@ export class SessionManager {
         }
         const originalStep = effectiveSteps[i]!;
 
-        // ── A SKILL RETURNED: restore the caller's surface (§4.5) ─────────
+        // ── A MACRO RETURNED: restore the caller's surface (§4.5) ─────────
         //
         // Ahead of the directive dispatch and the launch gate both, because
-        // the surface it restores is what those two read. Skill frames only:
+        // the surface it restores is what those two read. Macro frames only:
         // an inline section is inline by definition, and a section that
         // switches surface is how an author writes a desktop excursion once
         // and calls it by name.
         //
         // Going back to `computer` is `[use computer]` and can fail — the lock
         // held elsewhere, the opt-in switched off. That fails THIS step, the
-        // caller's first after the skill, before anything runs on it. Skipped
+        // caller's first after the macro, before anything runs on it. Skipped
         // when this step is itself a `[use …]` line: that sets the surface
         // anyway, and a `[use browser]` must not fail over a lock it would
         // release on the spot.
-        const restoreTo = skillSurfaces.enter(
-          skillFrameChain(expansionOrigins?.[i]?.frameId, expandedFrames),
+        const restoreTo = macroSurfaces.enter(
+          macroFrameChain(expansionOrigins?.[i]?.frameId, expandedFrames),
           session.surface,
         );
         if (restoreTo !== null && !(restoreTo === 'computer' && parseUseStep(originalStep))) {
@@ -6045,7 +6049,7 @@ export class SessionManager {
         // conditional form.
         //
         // "Before interpolation" means that substitution and no other. This is
-        // the EXPANDER's output, so a skill call's arguments and a looped
+        // the EXPANDER's output, so a macro call's arguments and a looped
         // section's row values are already in it, and the same is true of the
         // CLI (`test.steps[i]`, whose own comment names it "the same form the
         // server has always held as `originalStep`") and the Runner UI. Three
@@ -6069,7 +6073,7 @@ export class SessionManager {
         // AUTHORED text and for the same reason the claim is
         // (stories/step-failure-outcomes.md, decision 12). Leaf PROSE steps only:
         // a `Set` and a flow-control claim have grammars of their own, a `[tool:]`
-        // step takes its own branch below, and a `### Section` / `[skill:]` call
+        // step takes its own branch below, and a `### Section` / `[macro:]` call
         // line has already been replaced by its body steps. `originalStep` may
         // still carry a `[no-hooks]` prefix, which the parser normalises.
         const failureTail =
@@ -6100,9 +6104,9 @@ export class SessionManager {
           ? originalStep
           : interpolate(envInterpolated, resolvedParameters, controlLineDefines(originalStep));
 
-        // Partial re-run guard: a leftover `{{__skill…}}` after interpolation
+        // Partial re-run guard: a leftover `{{__macro…}}` after interpolation
         // means this tail step needs an internal value that an earlier (skipped)
-        // step in the skill produced. Those are namespaced per-expansion and
+        // step in the macro produced. Those are namespaced per-expansion and
         // can't be seeded, so refuse with a clear message rather than send the
         // AI a step with a literal placeholder baked in. Can't trip on a normal
         // full run — every internal var is produced before it's consumed. The
@@ -6124,16 +6128,16 @@ export class SessionManager {
               resolvedParameters,
             )
           : interpolated;
-        if (isPartialRerun && /\{\{__skill\w*\}\}/.test(partialRerunSubject)) {
+        if (isPartialRerun && /\{\{__macro\w*\}\}/.test(partialRerunSubject)) {
           const frame = frameInfoFor(i);
           // Advice that serves every surface this refusal reaches: the
           // Variables-panel re-run, the Stop-debug selection, and a
-          // skill-file single-step run/compile. The old wording said "Use
+          // macro-file single-step run/compile. The old wording said "Use
           // Continue", which only exists on the first of those.
           const message =
             `Can't re-run from this step on its own — it uses a value an earlier step ` +
-            `in the skill produced, which can't be restored for a partial re-run. ` +
-            `Start the run from the step that produces it, or re-run the whole skill.`;
+            `in the macro produced, which can't be restored for a partial re-run. ` +
+            `Start the run from the step that produces it, or re-run the whole macro.`;
           logger.info(`Session "${sessionId}": partial re-run refused at step ${i + 1}: ${message}`);
           emit({
             type: 'step:fail',
@@ -6510,7 +6514,7 @@ export class SessionManager {
         // the pause as step-paused state; F5 / F11 / F10 / Shift+F11
         // all just work.
         //
-        // Skill-file breakpoints are the primary reason this exists.
+        // Macro-file breakpoints are the primary reason this exists.
         // Test-file breakpoints DO reach the map — a section body line lives
         // in the test file and the client's `trimAtBreakpoint` cannot see it —
         // and are skipped per-step below for root-frame steps only, which are
@@ -6526,7 +6530,7 @@ export class SessionManager {
           // Root-frame steps in the test file are the client's responsibility:
           // it already trimmed the batch at those breakpoints before sending,
           // so pausing here as well would stop twice on one line. Every other
-          // frame — a skill body, or a section body that also lives in the
+          // frame — a macro body, or a section body that also lives in the
           // test file — is invisible to that trim and must pause here.
           const clientAlreadyTrimmed =
             frameForStep.kind === 'test' && frameForStep.uri === request.testFilePath;
@@ -6849,7 +6853,7 @@ export class SessionManager {
                   },
                 }),
             };
-            const guardSkill = outermostSkillName(
+            const guardMacro = outermostMacroName(
               expansionOrigins?.[rows.guard.index]?.frameId,
               expansionFrames,
             );
@@ -6857,7 +6861,7 @@ export class SessionManager {
               expansionOrigins?.[rows.guard.index]?.frameId,
               expansionFrames,
             );
-            if (guardSkill) result.sourceSkill = guardSkill;
+            if (guardMacro) result.sourceMacro = guardMacro;
             if (guardSection) result.sourceSection = guardSection;
             fullStepResults.push(result);
             // The visit, to the compile riding this run: what a `condition`
@@ -6983,7 +6987,7 @@ export class SessionManager {
           // Surface the skip to the user, not just to the server log. For a
           // MAIN-FLOW step this branch is unreachable — the client splits the
           // batch before an `[input:]` and prompts — but a step inside a
-          // skill or section body is invisible to that split, so it lands
+          // macro or section body is invisible to that split, so it lands
           // here and the run finishes green having quietly not done it.
           // Reporting green for work that was skipped is the failure
           // direction worth being loud about.
@@ -7065,30 +7069,26 @@ export class SessionManager {
         // Tool-step branch — when the step is a `[tool: ...]` invocation
         // AND we have a loaded catalogue, dispatch through `executeToolStep`
         // (the same code path the CLI runner uses) and shape the outcome
-        // into a `StepResult` so the rest of the loop is unchanged. Without
-        // a catalogue, fall through to `executeStep` and let the AI loop
-        // see the raw `[tool: ...]` text (legacy behaviour).
+        // into a `StepResult` so the rest of the loop is unchanged.
         const toolCall =
           setStep || useAiStep || unconditionalFlowControl
             ? null
             : toolCatalogue
               ? parseToolCall(originalStep)
               : null;
-        // …except on the computer surface, where that legacy fall-through is
-        // refused (SPEC-use-computer.md §5.4): a model handed `[tool: x]` as
-        // prose acts it out on the real desktop. Same for a raw `[skill: x]`,
-        // which only survives to here when nothing expanded it. Computed for
-        // the steps the branches below would otherwise send to
-        // `executeComputerStep`, and nothing else.
+        // Without a catalogue the line cannot run, and neither can a raw
+        // `[macro: x]`, which only survives to here when nothing expanded it:
+        // the step fails rather than going to a model as prose, where a pass
+        // would be a guess (SPEC-macros.md §7) and, in computer mode, a model
+        // acts it out on the real desktop (SPEC-use-computer.md §5.4).
+        // Computed for the steps the branches below would otherwise send to
+        // `executeComputerStep` or `executeStep`, and nothing else.
         const undispatchedDirective =
-          session.surface === 'computer' &&
-          !toolCall &&
-          !setStep &&
-          !useAiStep &&
-          !unconditionalFlowControl
+          !toolCall && !setStep && !useAiStep && !unconditionalFlowControl
             ? undispatchedDirectiveError(originalStep, {
+                surface: session.surface,
                 toolsLoaded: toolCatalogue !== undefined,
-                skillsDirSupplied: !!request.skillsDir,
+                macrosDirSupplied: !!request.macrosDir,
               })
             : null;
         let stepResult: StepResult;
@@ -7345,13 +7345,14 @@ export class SessionManager {
               });
             }
           } else if (undispatchedDirective !== null) {
-            // A `[tool:]` / `[skill:]` line nothing above dispatched, on the
-            // computer surface: fail it here, before any capture or model call.
+            // A `[tool:]` / `[macro:]` line nothing above dispatched, on
+            // either surface: fail it here, before any capture or model call.
             logger.error(undispatchedDirective);
             stepResult = undispatchedDirectiveResult(
               effectiveSourceLines?.[i] ?? i + 1,
               originalStep,
               undispatchedDirective,
+              session.surface,
             );
           } else if (session.surface === 'computer' && session.computerAdapter) {
             // ── THE COMPUTER SURFACE (SPEC-use-computer.md §5.5) ──────────
@@ -7398,9 +7399,9 @@ export class SessionManager {
             );
           } else {
             // Display/line identity: the source line in this step's own file
-            // (test or skill). Drives StepResult.index and status events. NOT
-            // unique across files — a skill-body step and a test step (or two
-            // invocations of one skill) can share a line number.
+            // (test or macro). Drives StepResult.index and status events. NOT
+            // unique across files — a macro-body step and a test step (or two
+            // invocations of one macro) can share a line number.
             const stepSourceLine = effectiveSourceLines?.[i] ?? i + 1;
             // Code-behind step-into: only a step with a bound entry pauses.
             // Emit the awaiting event, park for the debugger-attach ack,
@@ -7516,7 +7517,7 @@ export class SessionManager {
                 ...(signal && { signal }),
                 stats: statsForStep(i),
               },
-              // The step as WRITTEN — `{{}}` and `${}` intact, skill renames
+              // The step as WRITTEN — `{{}}` and `${}` intact, macro renames
               // applied. The server has held this form all along and threw it
               // away one line before the model saw it; the executor shows it
               // beside a `## Values` block and substitutes at act time
@@ -7691,21 +7692,21 @@ export class SessionManager {
         //                  line, but the report header
         //                  must show "Step 1, Step 2, …" not
         //                  "Step 17, Step 18, …" because the latter
-        //                  leaks the skill-file line number into the
+        //                  leaks the macro-file line number into the
         //                  test author's report.
         //
-        //   sourceSkill  — name of the OUTERMOST skill this step came
-        //                  from (matches `test.sourceSkills[i]` in
+        //   sourceMacro  — name of the OUTERMOST macro this step came
+        //                  from (matches `test.sourceMacros[i]` in
         //                  the CLI's test-runner.ts). For nested
-        //                  `skill_a → skill_b`, both inner and outer
-        //                  body steps surface "skill_a" so the chip
+        //                  `macro_a → macro_b`, both inner and outer
+        //                  body steps surface "macro_a" so the chip
         //                  reflects the user-visible invocation.
         //
         //   sourceSection — name of the outermost inline section this step
-        //                  came from, skipping any that a skill declared
-        //                  privately. Independent of sourceSkill: a step
-        //                  inside `section A → skill S` carries both.
-        const sourceSkill = outermostSkillName(
+        //                  came from, skipping any that a macro declared
+        //                  privately. Independent of sourceMacro: a step
+        //                  inside `section A → macro S` carries both.
+        const sourceMacro = outermostMacroName(
           expansionOrigins?.[i]?.frameId,
           expansionFrames,
         );
@@ -7743,7 +7744,7 @@ export class SessionManager {
           // (stories/placeholder-preserving-actions.md, decision 9).
           instruction: redact(stepInstruction, secretsNow()),
           ...(Object.keys(stepOutputs).length > 0 && { outputs: stepOutputs }),
-          ...(sourceSkill && { sourceSkill }),
+          ...(sourceMacro && { sourceMacro }),
           ...(sourceSection && { sourceSection }),
           ...(loop && { loop }),
           ...tabAfterStep,
@@ -7857,13 +7858,13 @@ export class SessionManager {
           // After every successful step, emit the current scope so the
           // Variables panel can keep up. Phase 4 ships a flat scope —
           // the full `resolvedParameters`, including any namespaced
-          // skill-internal `__skillN_x` entries. Per-frame filtering
-          // (reverse-rename resolution + skill-private vars only) is
+          // macro-internal `__macroN_x` entries. Per-frame filtering
+          // (reverse-rename resolution + macro-private vars only) is
           // tracked as Phase 4.B follow-up; the user gets visibility
           // into the actual runtime state in the meantime.
           //
           // Frame inputs (recorded at expansion time from the caller's
-          // `[skill: foo X=...]` args) overlay resolvedParameters so
+          // `[macro: foo X=...]` args) overlay resolvedParameters so
           // declared parameters stay visible across the frame's
           // lifetime — without this, they'd vanish after step 1 because
           // the expander inlines them into step text rather than into
@@ -7886,7 +7887,7 @@ export class SessionManager {
           // resolvedParameters from session.outputs, which never got the
           // value otherwise).
           for (const [key, value] of Object.entries(resolvedParameters)) {
-            if (!key.startsWith('__skill')) {
+            if (!key.startsWith('__macro')) {
               session.outputs[key] = value;
               // Anything that reaches the sweep unlabelled was set by a
               // `[store as:]` modifier (the other write sites label inline).
@@ -7910,12 +7911,12 @@ export class SessionManager {
             // expanded index the reason's `step N` uses.
             //
             // `expansionRawSteps`, not `originalStep`: the latter is
-            // `effectiveSteps[i]`, which the expander has already put skill
+            // `effectiveSteps[i]`, which the expander has already put macro
             // arguments and row values through, so a body step reading `If
             // {{password}} is remembered then return` would put the literal
             // password on the wire, in the run log, in the report and on a
             // Steptix hover. `rawSteps` is the match side — deliberately
-            // never interpolated (expander.ts, `applySkillScope`) — so it is
+            // never interpolated (expander.ts, `applyMacroScope`) — so it is
             // the line as authored, on every shape the wire can describe. A
             // LOOPED SECTION body used to be the exception: the wire shape
             // carries no `rawSteps` (contract §3.2), so `matchInput` fell back
@@ -7958,7 +7959,7 @@ export class SessionManager {
             // table. Keyed by the PARENT's id it is still announced once per
             // iteration whenever the call sits INSIDE the loop body: the
             // parents are the iteration frames, which are distinct, while the
-            // `[skill: …]` line they all point at is one line in one file.
+            // `[macro: …]` line they all point at is one line in one file.
             // Only the address the client paints is the same in both cases.
             const callLinesEmitted = new Set<string>();
             /**
@@ -7996,8 +7997,8 @@ export class SessionManager {
               for (const id of chain) {
                 const f = expandedFrames[id];
                 // The call line lives in the PARENT's file, not this frame's:
-                // a skill frame's own `uri` is the skill file, while the
-                // `[skill: ...]` line the author sees is in whatever called it.
+                // a macro frame's own `uri` is the macro file, while the
+                // `[macro: ...]` line the author sees is in whatever called it.
                 if (!f || f.invocationLine === null) continue;
                 const parentId = f.parentId ?? '';
                 const parentFrame =
@@ -8057,7 +8058,7 @@ export class SessionManager {
               // the reason on each skipped row rather than losing them
               // (decision 15).
               const skippedResult = skippedByReturn(j, skippedInstruction, i, label, returningText);
-              const skippedSkill = outermostSkillName(skippedFrameId, expansionFrames);
+              const skippedMacro = outermostMacroName(skippedFrameId, expansionFrames);
               const skippedSection = outermostSectionName(skippedFrameId, expansionFrames);
               // The same two-answer expression an executed step's marker uses,
               // and for the same two reasons. `loops.markerFor` answers first
@@ -8073,7 +8074,7 @@ export class SessionManager {
                 loopMarkerFor(emittedFrameId(j), expansionFrames, frameInputs, resolvedParameters);
               const fullSkipped: StepResult = {
                 ...skippedResult,
-                ...(skippedSkill && { sourceSkill: skippedSkill }),
+                ...(skippedMacro && { sourceMacro: skippedMacro }),
                 ...(skippedSection && { sourceSection: skippedSection }),
                 ...(skippedLoop && { loop: skippedLoop }),
               };
@@ -8622,7 +8623,7 @@ export class SessionManager {
           source: binding?.source ?? expansionRawSteps[i] ?? effectiveSteps[i] ?? '',
           ...(binding?.section !== undefined && { section: binding.section }),
           // The entry's target file, so a repair looking this row up cannot
-          // conflate a skill-body step with an identically-worded test step.
+          // conflate a macro-body step with an identically-worded test step.
           ...(binding?.file !== undefined && { file: binding.file }),
           // Which of the identically-worded steps of this frame instance it
           // is. Without it a repair has to find its row by counting, and a
@@ -8698,7 +8699,7 @@ export class SessionManager {
           ...(binding.section !== undefined && { section: binding.section }),
           occurrence: binding.occurrence,
           // The binding's target `.steps.ts` — the discriminator that keeps a
-          // skill-body step from claiming (or clobbering) the recording slot
+          // macro-body step from claiming (or clobbering) the recording slot
           // of a test-frame step with identical authored text.
           file: binding.file,
         };
@@ -8841,7 +8842,7 @@ export class SessionManager {
 
     // Unwind any frames still on the stack — happens on early exit (fail,
     // error, abort) and on a clean finish where the last executed step was
-    // inside a skill body. Clients need the matching pops to keep their
+    // inside a macro body. Clients need the matching pops to keep their
     // call-stack model consistent.
     transitionToFrame('');
 

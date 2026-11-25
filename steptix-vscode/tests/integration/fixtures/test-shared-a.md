@@ -2,8 +2,8 @@
 tags: [shared]
 ---
 
-# Shared Skill Test A
+# Shared Macro Test A
 
 ## Steps
-1. [skill: shared_skill] run the shared skill
+1. [macro: shared_macro] run the shared macro
 2. Confirm the outcome

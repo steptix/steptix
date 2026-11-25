@@ -49,8 +49,8 @@ export function matchText(s: string): string {
  * `rawSteps` is present on the CLI parse path and absent on the server path,
  * where steps already arrive in raw/instruction form. Reading `steps[i]`
  * directly is wrong even where the two happen to be equal: on the CLI path
- * `steps` has been through `extractPlainText` and, inside a skill,
- * `applySkillScope` — so a body line authored as `{{target}}` would resolve
+ * `steps` has been through `extractPlainText` and, inside a macro,
+ * `applyMacroScope` — so a body line authored as `{{target}}` would resolve
  * against its interpolated value rather than the text on the page.
  */
 export function matchInput(
@@ -92,13 +92,13 @@ export function validateSectionName(
   if (trimmed.startsWith('[')) {
     throw new Error(
       `Section "${trimmed}" at ${where} may not begin with "[". Steps starting ` +
-        `with a bracket token are claimed by the \`[skill:]\` / \`[tool:]\` ` +
+        `with a bracket token are claimed by the \`[macro:]\` / \`[tool:]\` ` +
         `parsers first, so this section could never be invoked.`,
     );
   }
   if (trimmed.includes('{{')) {
     throw new Error(
-      `Section "${trimmed}" at ${where} may not contain "{{". Inside a skill, ` +
+      `Section "${trimmed}" at ${where} may not contain "{{". Inside a macro, ` +
         `\`{{...}}\` in a call line is interpolated but the heading is data, so ` +
         `the call would silently stop matching after interpolation.`,
     );

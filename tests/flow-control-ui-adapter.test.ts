@@ -178,17 +178,17 @@ describe('the Electron loop and a return', () => {
     expect(complete?.data['status']).toBe('passed');
   });
 
-  it('quotes the AUTHORED line when a skill argument was interpolated into it', async () => {
+  it('quotes the AUTHORED line when a macro argument was interpolated into it', async () => {
     // `parsedTest.steps` is the EXPANDED list, so by the time the loop reaches
-    // a skill body step the call's arguments are already baked into its text:
+    // a macro body step the call's arguments are already baked into its text:
     // reading the reason off `parsedTest.steps[i]` puts the literal password
     // into the run log, the report and this IPC message. `expansion.rawSteps`
     // is the match side, which the expander never interpolates.
-    mkdirSync(path.join(root, 'skills'), { recursive: true });
+    mkdirSync(path.join(root, 'macros'), { recursive: true });
     writeFileSync(
-      path.join(root, 'skills', 'login.md'),
+      path.join(root, 'macros', 'login.md'),
       `---
-type: skill
+type: macro
 ---
 # login
 
@@ -211,11 +211,11 @@ type: skill
           : passed(index, instruction),
     );
 
-    const file = writeTest(root, 'skill.md', `# t
+    const file = writeTest(root, 'macro.md', `# t
 
 ## Steps
 1. Navigate to /
-2. [skill: login password="hunter2"]
+2. [macro: login password="hunter2"]
 3. Click "Sign out"
 `);
     const events = await runAdapter(file);

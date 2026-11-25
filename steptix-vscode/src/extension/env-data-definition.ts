@@ -24,7 +24,7 @@ import { DedupedWarnings } from './warnings.js';
 
 /**
  * "Go to Definition" (F12 / Ctrl+Click / Peek) for `${...}` references in
- * test and skill Markdown — the navigation side of the completion provider
+ * test and macro Markdown — the navigation side of the completion provider
  * next door (env-data-completion.ts), resolving WHICH files through the same
  * helpers (env-data-resolve.ts) so the two can't disagree:
  *
@@ -80,12 +80,12 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
     if (text === null) return undefined;
 
     const fm = parseFrontmatter(text);
-    const isSkill = fm.type === 'skill';
-    // In frontmatter, `${...}` only occurs inside a skill's dataSources path,
+    const isMacro = fm.type === 'macro';
+    // In frontmatter, `${...}` only occurs inside a macro's dataSources path,
     // where the runtime accepts `${env.X}` and `${envName}` alone. A test's
     // frontmatter interpolates nothing.
     const pathPosition = inFrontmatter(text, position.line);
-    if (pathPosition && !isSkill) return undefined;
+    if (pathPosition && !isMacro) return undefined;
     if (pathPosition && ref.namespace !== 'env') return undefined;
 
     // A namespace that is neither built-in nor declared passes through a run
@@ -98,11 +98,11 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
 
     // Refusals that no environment could satisfy come BEFORE the env gate:
     // telling the author to pick an environment has to be advice that would
-    // actually work. A skill never reads the caller's data file, whatever is
+    // actually work. A macro never reads the caller's data file, whatever is
     // selected.
-    if (ref.namespace === 'data' && isSkill) {
+    if (ref.namespace === 'data' && isMacro) {
       this.warnings.warn(
-        'Steptix: ${data...} does not resolve inside a skill — skills read ' +
+        'Steptix: ${data...} does not resolve inside a macro — macros read ' +
           "their own dataSources:, never the caller environment's data file.",
       );
       return undefined;
@@ -136,7 +136,7 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
     const file = resolveSourcePath(
       declaredSource!,
       document.uri.fsPath,
-      isSkill,
+      isMacro,
       composedEnv(baseEnvPath, overlayPath),
       envName,
     );
@@ -176,7 +176,7 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
   ): vscode.Definition | undefined {
     // One classification serves the frontmatter gate and the scope walk.
     const classified = classifyLines(text);
-    // `{{}}` interpolates nowhere in frontmatter (a skill's dataSources path
+    // `{{}}` interpolates nowhere in frontmatter (a macro's dataSources path
     // takes `${env.X}` / `${envName}` only).
     if (inFrontmatter(text, position.line, classified)) return undefined;
 
