@@ -174,8 +174,8 @@ test("DEFAULT_MACROS_DIR / DEFAULT_TOOLS_DIR match the loader's defaults in src/
     path.join(import.meta.dirname, "..", "..", "src", "config", "defaults.ts"),
     "utf8",
   );
-  assert.match(defaults, new RegExp(`macrosDir: '${DEFAULT_MACROS_DIR.replace(/[.*+?^${}()|[\]\/]/g, "\$&")}'`));
-  assert.match(defaults, new RegExp(`toolsDir: '${DEFAULT_TOOLS_DIR.replace(/[.*+?^${}()|[\]\/]/g, "\$&")}'`));
+  assert.ok(defaults.includes(`macrosDir: '${DEFAULT_MACROS_DIR}'`), `defaults.ts has no macrosDir: '${DEFAULT_MACROS_DIR}'`);
+  assert.ok(defaults.includes(`toolsDir: '${DEFAULT_TOOLS_DIR}'`), `defaults.ts has no toolsDir: '${DEFAULT_TOOLS_DIR}'`);
 });
 
 test("readProjectDirs: undeclared macrosDir/toolsDir → the default folders beside the config, when they exist", (t) => {

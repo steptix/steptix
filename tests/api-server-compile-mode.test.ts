@@ -1375,7 +1375,7 @@ describe('recompiling a step whose entry broke', () => {
   });
 
   describe('compile:"steps" riding a startAt/endAt slice — a macro-file single-step compile', () => {
-    // stories/specs/run-and-compile-a-skill-step.md: the picker's compile pick
+    // steptix-vscode/stories/specs/run-and-compile-a-skill-step.md: the picker's compile pick
     // sends the test's `[macro:]` call line with a slice bounding execution to
     // the clicked macro step. `compile` + `startAt` was a combination nothing
     // could send before that feature, so every seam here is new: the sliced

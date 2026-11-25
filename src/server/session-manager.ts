@@ -5775,7 +5775,7 @@ export class SessionManager {
         // `pauseAtNextTool` inside the tool branch itself (so a run with no
         // tool step never cleared it at all). Neither survived contact with a
         // loop that has four ways out. A flag left set outlives the RUN, and
-        // it lives on the SESSION — which stories/specs/run-and-compile-a-skill-step.md
+        // it lives on the SESSION — which steptix-vscode/stories/specs/run-and-compile-a-skill-step.md
         // then hands to another document via the picker. The result was an F11
         // in one test arming a `debugger;` in an unrelated run of another file;
         // with an inspector attached that freezes the whole server process.

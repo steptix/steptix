@@ -25,12 +25,20 @@ own standard. The old names are gone, not deprecated:
 | the report's `skill:` chip | `macro:` |
 | `skillsDir` in a Sessions API step request | `macrosDir` |
 | `steptix.runSkillStepsOnStoppedSession` | `steptix.runMacroStepsOnStoppedSession` |
+| MCP's `frameKind: 'skill'` | `frameKind: 'macro'` |
 
 A step that still says `[skill: …]` is no longer a call: on its own it is
 refused as an unknown bracket, whose message lists `[macro: name]`, and after
 other text it is prose for the model. To move a project:
 rename the folder, the config key, `type: skill` and every `[skill:` (see
 [SPEC-macros.md](docs/specs/SPEC-macros.md) §4).
+
+The VS Code extension now finds the default `macros/` and `tools/src`
+folders beside `steptix.config.json` when the config doesn't name them, as
+the CLI and MCP already did. Before, a project relying on the defaults sent
+no folder from the editor. On the page surface its `[macro:]` lines went to
+the model as prose, and completion and Go to Definition found nothing
+(SPEC-macros.md §6).
 
 ### Added — accessibility snapshots are the default
 

@@ -1397,8 +1397,9 @@ async function expandRecursive(
     if (ctx.macrosDir === undefined) {
       throw new Error(
         `Step "${step}" invokes a macro, but no macros directory is ` +
-          `configured. Set \`tests.macrosDir\` in steptix.config.json (or pass ` +
-          `\`macrosDir\`) so \`[macro: ...]\` references can be resolved.`,
+          `configured. Set \`tests.macrosDir\` in steptix.config.json, keep the ` +
+          `macros in a macros folder beside it, or pass \`macrosDir\`, so ` +
+          `\`[macro: ...]\` references can be resolved.`,
       );
     }
 

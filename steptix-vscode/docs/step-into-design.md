@@ -33,10 +33,11 @@ Plus: a **Variables panel** that shows the current frame's variable scope
 
 ## User stories
 
-1. **Step into a macro, run to completion.** Author hits F9 on line 12 of
-   [fixtures/tests/macro-demo.md](../../fixtures/tests/macro-demo.md), hits F5
+1. **Step into a macro, run to completion.** The stories use an example test,
+   `macro-demo.md`, that calls a `duckduckgo_search` macro; neither file is in
+   the repo. Author hits F9 on line 12 of `macro-demo.md`, hits F5
    to run. Pauses at the `[macro: duckduckgo_search ...]` line. Hits F11.
-   `fixtures/macros/duckduckgo_search.md` opens, arrow on step 1. F10 walks
+   `macros/duckduckgo_search.md` opens, arrow on step 1. F10 walks
    through the macro's steps. After the last macro step, the arrow returns
    to line 13 of the test (`Navigate to {{target_url}}`) and `target_url` is
    visible in the Variables panel.

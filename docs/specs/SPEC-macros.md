@@ -67,8 +67,17 @@ rules, with no code added for it:
   lists the file as a test.
 - **`tests.skillsDir`** is an unknown key: the runner ignores it, and the
   schema's `additionalProperties: false` makes the editor flag it.
-- **A `./skills` folder** is just a folder. A call to a macro still in it
-  fails with `Macro "login" not found at <root>/macros/login.md`.
+- **A `./skills` folder** is just a folder. What a call to a macro still in
+  it does depends on whether a `./macros` folder exists:
+  - **With a `./macros` folder**, from any client, the call fails with
+    `Macro "login" not found at <root>/macros/login.md`.
+  - **On the CLI**, `./macros` is always sent, so the same message appears
+    even with no such folder.
+  - **In VS Code and MCP with no `./macros` folder**, no macros directory is
+    sent (§6). A file with sections or control lines fails with the
+    expander's `no macros directory is configured` message. On the computer
+    surface, the line is refused unrun. On the page surface, the line goes to
+    the model as prose; that gap predates the rename (§6).
 
 ## 4. Moving a project
 
@@ -111,12 +120,13 @@ and on the browser surface a `[macro: x]` line went to the model as prose;
 completion and Go to Definition offered nothing. That gap predates the
 rename. It is closed here because the rename puts the default in every doc.
 
-The rule, the same as MCP's:
+The rule:
 
 - A declared, non-empty `tests.macrosDir` / `tests.toolsDir` is used as
   written, resolved against the folder holding `steptix.config.json`, whether
   or not it exists. A wrong path then fails loudly at the call:
-  `Macro "x" not found at …`.
+  `Macro "x" not found at …`. MCP differs here: `resolveProjectDir` drops a
+  declared folder that does not exist, as it drops a missing default.
 - An undeclared one (absent, empty, or not a string) is the default,
   `./macros` / `./tools/src` beside the config, **when that folder exists**,
   and otherwise none.

@@ -2640,7 +2640,7 @@ export function activate(context: vscode.ExtensionContext): SteptixExports {
   });
 
   // "Debug a macro after Stop" banner — a status-bar item naming the stopped
-  // test whose macro the user is iterating on (macro-debug-after-stop.md).
+  // test whose macro the user is iterating on (stories/specs/skill-debug-after-stop.md).
   // Visible only while a macro-debug context is parked; clicking it runs the
   // selected macro steps on that stopped session. Also drives a context key
   // for the command's editor-menu `when` clause.
