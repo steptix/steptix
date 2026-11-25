@@ -10,7 +10,7 @@ import { isCodeStep } from '../parser/invocation-parser.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseControlLine } from '../parser/control-line.js';
 import { parseSetStep } from '../parser/set-step.js';
-import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
+import { parseUseAgentStep, parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import { logger } from '../utils/logger.js';
 import {
   actionsOf,
@@ -37,6 +37,7 @@ import {
   SET_STEP_NOT_COMPILED,
   SURFACE_SWITCH_NOT_COMPILED,
   USE_AI_NOT_COMPILED,
+  USE_AGENT_NOT_COMPILED,
   stepEnvRefs,
   stepParameters,
   stepSubstitution,
@@ -478,6 +479,10 @@ export function staticGenerationRefusal(text: string): string | undefined {
   if (parseUseAiStep(text)) {
     return USE_AI_NOT_COMPILED;
   }
+  // An agent step, for `[use ai]`'s reason (docs/specs/SPEC-use-agent.md §9).
+  if (parseUseAgentStep(text)) {
+    return USE_AGENT_NOT_COMPILED;
+  }
   // …and `Set`, which was missing here and is the same missing check. The
   // boxed classifier (`describeSteps`) has always refused it; this one let a
   // passed Set step through to generation, where the transcript's empty
@@ -563,9 +568,14 @@ export function generationRefusal(input: {
   skipped?: 'return' | 'decision' | undefined;
   /** `unprovenListRead` of the step's result. */
   unprovenListRead?: UnprovenListRead | undefined;
+  /** The step ran as an agent step (`StepResult.agent`), whether by its own
+   *  prefix or by its scope, which the text alone cannot show
+   *  (docs/specs/SPEC-use-agent.md §9). */
+  agent?: boolean | undefined;
 }): string | undefined {
   const fixed = staticGenerationRefusal(input.text);
   if (fixed !== undefined) return fixed;
+  if (input.agent) return USE_AGENT_NOT_COMPILED;
   // …and the other half of §9 (the surface switch itself is refused above): an
   // ORDINARY step that ran while the surface was
   // `computer`. Ahead of the binding check, because the answer does not depend
@@ -1120,6 +1130,7 @@ export class LiveCompiler {
       surface: input.result.surface,
       skipped: input.skipped,
       unprovenListRead: unproven,
+      agent: input.result.agent !== undefined,
     });
     if (refusal !== undefined) {
       // Both "ran as code" reasons: the entry ran, so the step is one this

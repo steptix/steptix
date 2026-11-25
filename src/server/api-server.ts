@@ -638,6 +638,12 @@ export function createApiServer(
           // warns and falls back rather than refusing, so there is nothing
           // for this layer to reject.
           tableStructure?: string;
+          // Raw `## Config: agentMaxTurns:` / `agentTimeout:`
+          // (docs/specs/SPEC-use-agent.md §10). Cast like `viewport`:
+          // `withTestAgentLimits` is the one reader, and it warns rather than
+          // refuses. The extension sends them per batch as `agentLimits`.
+          agentMaxTurns?: string;
+          agentTimeout?: string;
           // `profile` is a descriptive label only — `port` selects the browser.
           // Retained so `GET /sessions` can say which browser a session drives.
           cdp?: { port: number; tab?: string; profile?: string };
@@ -1058,6 +1064,39 @@ export function createApiServer(
           request.runStart = {};
         }
       }
+      // Which steps are agent steps because of their file
+      // (docs/specs/SPEC-use-agent.md §5.7). Malformed parts are dropped rather
+      // than refused: a step that should have been an agent step then runs as
+      // an ordinary one, which its `[use agent]`-less text already asks for.
+      if (body.agent !== undefined && body.agent !== null && typeof body.agent === 'object') {
+        const ag = body.agent as { file?: unknown; steps?: unknown; optedOut?: unknown };
+        const agent: { file?: boolean; steps?: number[]; optedOut?: number[] } = {};
+        const positions = (v: unknown): number[] | undefined =>
+          Array.isArray(v) ? v.filter((n): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0) : undefined;
+        if (ag.file === true) agent.file = true;
+        const steps = positions(ag.steps);
+        if (steps) agent.steps = steps;
+        const optedOut = positions(ag.optedOut);
+        if (optedOut) agent.optedOut = optedOut;
+        request.agent = agent;
+      }
+      // Only `true` lets an agent step ask a person (§6.3).
+      if (body.canApprove === true) request.canApprove = true;
+      // The logical run, the same on every batch of it (§6.2, §6.3).
+      if (typeof body.agentRunId === 'string' && body.agentRunId.length > 0 && body.agentRunId.length <= 200) {
+        request.agentRunId = body.agentRunId;
+      }
+      if (typeof body.agentRunEnds === 'string' && body.agentRunEnds.length > 0 && body.agentRunEnds.length <= 200) {
+        request.agentRunEnds = body.agentRunEnds;
+      }
+      // A test's lowering of the agent limits, per batch (§10).
+      if (body.agentLimits !== undefined && body.agentLimits !== null && typeof body.agentLimits === 'object') {
+        const al = body.agentLimits as { maxTurns?: unknown; timeout?: unknown };
+        const limits: { maxTurns?: string; timeout?: string } = {};
+        if (typeof al.maxTurns === 'string') limits.maxTurns = al.maxTurns;
+        if (typeof al.timeout === 'string') limits.timeout = al.timeout;
+        request.agentLimits = limits;
+      }
       if (body.logging !== undefined && body.logging !== null && typeof body.logging === 'object') {
         const lg = body.logging as { consoleLogLevel?: unknown; serverFileLogLevel?: unknown };
         const validLevels = new Set(['silent', 'error', 'warn', 'info', 'debug']);
@@ -1443,6 +1482,35 @@ export function createApiServer(
     const delivered = sessionManager.submitDebuggerAck(sessionId);
     if (!delivered) {
       res.status(409).json({ error: 'No run awaiting debugger for this session' });
+      return;
+    }
+    res.status(200).json({ ok: true });
+  });
+
+  // POST /sessions/:id/agent-approval — the answer to an agent step's
+  // Allow/Deny question (docs/specs/SPEC-use-agent.md §6.3), with the
+  // `requestId` of the `agent:awaiting-approval` event it answers.
+  //
+  // 409 when that question is no longer open: it timed out, the run stopped,
+  // or it was answered already. The client has been told it closed
+  // (`agent:approval-closed`), so a late answer changes nothing.
+  app.post('/sessions/:id/agent-approval', (req: Request, res: Response) => {
+    const sessionId = String(req.params.id);
+    const body = (req.body ?? {}) as { requestId?: unknown; answer?: unknown };
+    const answers = ['allow-once', 'allow-run', 'deny-once', 'deny-run'] as const;
+    if (typeof body.requestId !== 'string' || !answers.includes(body.answer as (typeof answers)[number])) {
+      res.status(400).json({
+        error: `Expected { requestId, answer } with answer one of ${answers.join(', ')}.`,
+      });
+      return;
+    }
+    const delivered = sessionManager.submitAgentApproval(
+      sessionId,
+      body.requestId,
+      body.answer as (typeof answers)[number],
+    );
+    if (!delivered) {
+      res.status(409).json({ error: 'That question is no longer open.' });
       return;
     }
     res.status(200).json({ ok: true });

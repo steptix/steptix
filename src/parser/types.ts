@@ -23,6 +23,9 @@ export interface TestFrontmatter {
    * stories/data-sources-namespaces.md.
    */
   dataSources?: Record<string, string>;
+  /** `agent: on` runs every plain step of the file as an agent step
+   *  (docs/specs/SPEC-use-agent.md §5.6). */
+  agent?: boolean;
 }
 
 /**
@@ -114,6 +117,12 @@ export interface TestConfig {
    *  the Sessions API and MCP, so an unrecognised value produces one sentence
    *  rather than three. */
   tableStructure?: string;
+  /** `agentMaxTurns:` and `agentTimeout:` LOWER the project's `agent.maxTurns`
+   *  and `agent.timeout` for this test, and can do nothing else
+   *  (docs/specs/SPEC-use-agent.md §10). Raw strings; `withTestAgentLimits`
+   *  (src/agent/host.ts) is the one reader. */
+  agentMaxTurns?: string;
+  agentTimeout?: string;
 }
 
 /**

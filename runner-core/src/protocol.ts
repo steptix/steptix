@@ -438,6 +438,55 @@ export interface StepAwaitingEvent {
   frame?: FrameInfo;
 }
 
+/** The four answers to an agent step's Allow/Deny question
+ *  (docs/specs/SPEC-use-agent.md §6.3). */
+export type AgentApprovalAnswer = 'allow-once' | 'allow-run' | 'deny-once' | 'deny-run';
+
+/**
+ * An agent step asks whether a command may run (docs/specs/SPEC-use-agent.md
+ * §6.3). Sent only on a batch that carried `canApprove`. Answered with
+ * `POST /sessions/:id/agent-approval` and the same `requestId`.
+ */
+export interface AgentAwaitingApprovalEvent {
+  type: 'agent:awaiting-approval';
+  requestId: string;
+  /** 1-based source line of the agent step. */
+  line: number;
+  /** The command being asked about, masked. */
+  command: string;
+  /** Its folder, relative to the project when inside it. */
+  folder: string;
+  /** The step as a person knows it, e.g. `step 2 of month-end.md`. */
+  step: string;
+  /** What a "for the rest of this run" answer covers. */
+  pattern: string;
+  /** When the question closes unanswered, ISO 8601. */
+  expiresAt: string;
+  frame?: FrameInfo;
+}
+
+/** The question closed (§6.3): answered, timed out, or the run stopped. The
+ *  client hides it; a later answer gets 409. */
+export interface AgentApprovalClosedEvent {
+  type: 'agent:approval-closed';
+  requestId: string;
+  reason: 'answered' | 'timeout' | 'stopped';
+  answer?: AgentApprovalAnswer;
+}
+
+/** One agent turn ended (§8.8): a *What it did* line for the run panel. */
+export interface AgentTurnEvent {
+  type: 'agent:turn';
+  line: number;
+  turn: number;
+  maxTurns: number;
+  summary: string;
+  result: string;
+  ok: boolean;
+  durationMs: number;
+  frame?: FrameInfo;
+}
+
 /**
  * Emitted right before the server hits its `debugger;` pause at the tool
  * dispatcher's call site (Phase 5 — tool step-into). The client takes this
@@ -503,6 +552,9 @@ export type RunEvent =
   | StepAwaitingEvent
   | ToolAwaitingDebuggerEvent
   | CodeBehindAwaitingDebuggerEvent
+  | AgentAwaitingApprovalEvent
+  | AgentApprovalClosedEvent
+  | AgentTurnEvent
   // A compile-mode run's own frames (stories/compile-as-you-go.md §On the
   // wire). Deliberately the SAME shapes the compile stream carries, so a
   // client's folding code works on either stream: `compile:step` as each

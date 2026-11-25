@@ -40,7 +40,7 @@ import {
 import { executeStep, executeBranchedStep } from '../runner/step-executor.js';
 import type { StepExecutorOptions } from '../runner/step-executor.js';
 import { identifyStepGroups } from '../runner/step-grouper.js';
-import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
+import { hasNoAgentMarker, parseUseAgentStep, parseUseAiStep, parseUseStep, stripNoAgentMarker } from '../parser/use-step.js';
 import { matchText } from '../parser/section-match.js';
 import { parseMacroCall } from '../macros/macro-call-parser.js';
 import {
@@ -105,12 +105,28 @@ import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { runSetStep } from '../runner/set-step-runner.js';
 import { runUseAiStep } from '../runner/use-ai-step-runner.js';
+import {
+  agentGoalOf,
+  agentScopesForBatch,
+  endAgentRun,
+  ensureAgentRun,
+  newAgentRun,
+  observePage,
+  observeScreen,
+  toolInfosOf,
+  withTestAgentLimits,
+} from '../agent/host.js';
+import { runAgentStep } from '../agent/runner.js';
+import type { ApprovalAsker } from '../agent/approvals.js';
 import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
 import {
   failureTailContradictionError,
   isFailureTailContradiction,
   parseFailureTail,
+  stripFailureTail,
 } from '../parser/failure-tail.js';
+import { applyTailOutcome } from '../runner/failure-tail-outcome.js';
+import { substituteText } from '../runner/placeholder-substitution.js';
 import {
   deliberateFailError,
   deliberateFailResult,
@@ -242,6 +258,12 @@ export interface StepRequest {
      *  project's `tables.structure` per batch is what makes a test's own key
      *  win on a server serving several projects. */
     tableStructure?: string;
+    /** Raw `## Config: agentMaxTurns:` and `agentTimeout:` — a test may LOWER
+     *  the project's `agent.maxTurns` and `agent.timeout`, nothing else
+     *  (docs/specs/SPEC-use-agent.md §10). Raw strings, like `viewport`:
+     *  `withTestAgentLimits` is the one reader. */
+    agentMaxTurns?: string;
+    agentTimeout?: string;
     cdp?: { port: number; tab?: string; profile?: string };
   };
   steps: string[];
@@ -627,6 +649,45 @@ export interface StepRequest {
    * keep the surface exactly as before.
    */
   runStart?: { stepIndex?: number };
+  /**
+   * Which steps of this batch are agent steps because of their FILE
+   * (docs/specs/SPEC-use-agent.md §5.7): `file` when the frontmatter says
+   * `agent: on`, `steps` the positions in `steps` whose block opens with a
+   * bare `[use agent]`. A section body in `sections` carries its own first
+   * line, so its scope is read from that. A step whose text opens
+   * `[use agent]` needs neither.
+   */
+  agent?: { file?: boolean; steps?: number[]; optedOut?: number[] };
+  /**
+   * A person started this run in VS Code and can answer the agent's
+   * Allow/Deny question (§6.3). Only the extension sends it; every other
+   * caller gets the allow list as the whole answer.
+   */
+  canApprove?: boolean;
+  /**
+   * The logical run this batch belongs to (docs/specs/SPEC-use-agent.md §6.2,
+   * §6.3), the same on every batch of one run: its rows, its Continue batches,
+   * the blocks of a split run. The extension mints one each time a run starts.
+   * With it, the run's agent state — the workspace and the answers given "for
+   * the rest of this run" — is kept on the server by this id, not on the
+   * session, so it survives a row loop that recycles the session between
+   * rows. Without it (CLI-less raw callers, MCP), the state is the session's.
+   */
+  agentRunId?: string;
+  /**
+   * The run this client's new run replaces, which the server ends: its
+   * workspace removed, its answers forgotten (§6.2). Named by the client
+   * because only the client knows which run is its own — the same file can
+   * run in two places at once (the editor and Test Explorer, two windows), and
+   * ending every run of the file would end the other one mid-command.
+   */
+  agentRunEnds?: string;
+  /**
+   * A test's lowering of the agent limits, read from its `## Config` on every
+   * batch (§10). Sent apart from `config`, which travels on a session's first
+   * batch only, so a Continue or a later row keeps the test's limits.
+   */
+  agentLimits?: { maxTurns?: string; timeout?: string };
 }
 
 /**
@@ -1025,6 +1086,42 @@ export type RunEvent =
   | { type: 'step:awaiting'; line: number; frame?: FrameInfo }
   | { type: 'tool:awaiting-debugger'; toolName: string; toolFilePath?: string; line: number; frame?: FrameInfo }
   | { type: 'codebehind:awaiting-debugger'; file: string; line: number; frame?: FrameInfo }
+  /**
+   * An agent step asks whether a command may run (docs/specs/SPEC-use-agent.md
+   * §6.3). Sent only on a batch that carried `canApprove`, and answered with
+   * `POST /sessions/:id/agent-approval` and the same `requestId`.
+   */
+  | {
+      type: 'agent:awaiting-approval';
+      requestId: string;
+      line: number;
+      command: string;
+      folder: string;
+      step: string;
+      pattern: string;
+      expiresAt: string;
+      frame?: FrameInfo;
+    }
+  /** The question closed, however it closed (§6.3's closing table): the
+   *  client hides it, and a later answer gets 409. */
+  | {
+      type: 'agent:approval-closed';
+      requestId: string;
+      reason: 'answered' | 'timeout' | 'stopped';
+      answer?: 'allow-once' | 'allow-run' | 'deny-once' | 'deny-run';
+    }
+  /** One agent turn ended (§8.8): the run panel's *What it did* line. */
+  | {
+      type: 'agent:turn';
+      line: number;
+      turn: number;
+      maxTurns: number;
+      summary: string;
+      result: string;
+      ok: boolean;
+      durationMs: number;
+      frame?: FrameInfo;
+    }
   /**
    * A compile-mode run's own frames (stories/compile-as-you-go.md §On the
    * wire). Shaped like the compile stream's so a client's folding carries
@@ -1729,6 +1826,29 @@ interface ManagedSession {
    */
   pendingDebuggerAck: { resolve: () => void } | null;
   /**
+   * The agent's open Allow/Deny question (docs/specs/SPEC-use-agent.md §6.3).
+   * One at a time; `POST /sessions/:id/agent-approval` resolves it.
+   */
+  pendingAgentApproval?: {
+    requestId: string;
+    resolve: (answer: 'allow-once' | 'allow-run' | 'deny-once' | 'deny-run') => void;
+    /** Close it unanswered, as a Stop does. */
+    cancel: () => void;
+  } | null;
+  /**
+   * The run's agent state (§6.2, §6.3): workspace, remembered answers,
+   * skills. For a batch with `agentRunId` it is the entry
+   * `SessionManager.agentRuns` holds (`agentRunKeyed`), which this session
+   * neither ends nor outlives the need for. Otherwise it is the session's own,
+   * ended at the next `runStart` and when the session closes.
+   */
+  agentRun?: import('../agent/runner.js').AgentRunState;
+  /** The agent settings the run's workspace was made under, for the cleanup. */
+  agentRunConfig?: import('../config/types.js').AgentConfig;
+  /** `agentRun` is the one `SessionManager.agentRuns` holds under the
+   *  batch's `agentRunId`, and is not the session's to end. */
+  agentRunKeyed?: boolean;
+  /**
    * One-shot trigger: when true at the moment the step loop reaches a
    * `[tool: ...]` step, the server emits `tool:awaiting-debugger` and
    * parks on `pendingDebuggerAck` instead of running the tool. The flag
@@ -1984,6 +2104,13 @@ function outermostMacroName(
 
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
+  /** Agent run state by `StepRequest.agentRunId` (docs/specs/SPEC-use-agent.md
+   *  §6.2, §6.3): kept here, not on a session, so a row loop's recycled
+   *  sessions share one run's workspace and answers. */
+  private readonly agentRuns = new Map<
+    string,
+    { run: import('../agent/runner.js').AgentRunState; config: import('../config/types.js').AgentConfig; file: string }
+  >();
   private config: Config;
 
   /**
@@ -2523,6 +2650,59 @@ export class SessionManager {
   }
 
   /**
+   * The agent state of the run a batch belongs to (docs/specs/SPEC-use-agent.md
+   * §6.2, §6.3). With `agentRunId`, the state lives here, keyed by it, so it
+   * survives a session recycled between rows; it ends when the client names it
+   * in `agentRunEnds` (the run that replaced it) or the server stops. Without
+   * one, the state is the session's, and a `runStart` ends it.
+   */
+  private agentRunFor(
+    session: ManagedSession,
+    request: StepRequest,
+    projectRoot: string,
+    config: import('../config/types.js').AgentConfig,
+  ): import('../agent/runner.js').AgentRunState {
+    const id = request.agentRunId;
+    if (id === undefined) {
+      if (!session.agentRun || session.agentRunKeyed) {
+        session.agentRun = newAgentRun(projectRoot, `run-${Date.now()}`);
+        session.agentRunKeyed = false;
+      }
+      session.agentRunConfig = config;
+      return session.agentRun;
+    }
+    const file = request.testFilePath ?? '';
+    let entry = this.agentRuns.get(id);
+    if (!entry) {
+      entry = { run: newAgentRun(projectRoot, `run-${Date.now()}`), config, file };
+      this.agentRuns.set(id, entry);
+    }
+    entry.config = config;
+    session.agentRun = entry.run;
+    session.agentRunConfig = config;
+    session.agentRunKeyed = true;
+    return entry.run;
+  }
+
+  /**
+   * Answer the agent's open Allow/Deny question (docs/specs/SPEC-use-agent.md
+   * §6.3). False when that question is no longer open — it timed out, the run
+   * stopped, or another question replaced it — which the endpoint answers 409.
+   */
+  submitAgentApproval(
+    sessionId: string,
+    requestId: string,
+    answer: 'allow-once' | 'allow-run' | 'deny-once' | 'deny-run',
+  ): boolean {
+    const session = this.sessions.get(this.sessionKey(sessionId));
+    const pending = session?.pendingAgentApproval;
+    if (!pending || pending.requestId !== requestId) return false;
+    session.pendingAgentApproval = null;
+    pending.resolve(answer);
+    return true;
+  }
+
+  /**
    * Resolve the per-session debugger-ack wait. Returns `true` if a run
    * was actually parked on the ack (so the HTTP handler can 200), `false`
    * if no run is awaiting (handler returns 409).
@@ -2534,6 +2714,63 @@ export class SessionManager {
     session.pendingDebuggerAck = null;
     resolve();
     return true;
+  }
+
+  /**
+   * Put the agent's Allow/Deny question to the person who started the run
+   * (docs/specs/SPEC-use-agent.md §6.3), and wait for the answer, the
+   * timeout, or the run stopping — whichever comes first. One question at a
+   * time per session; every way it closes is announced with
+   * `agent:approval-closed`, so the client hides it, and a late answer finds
+   * no open question and gets 409.
+   */
+  private askAgentApproval(
+    session: ManagedSession,
+    emit: (event: RunEvent) => void,
+    question: import('../agent/approvals.js').ApprovalQuestion,
+    signal: AbortSignal | undefined,
+    line: number,
+    frameSpread: { frame?: FrameInfo },
+  ): Promise<{ answer: 'allow-once' | 'allow-run' | 'deny-once' | 'deny-run' } | { closed: 'timeout' | 'stopped' }> {
+    const requestId = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise((resolve) => {
+      let settled = false;
+      const close = (
+        reason: 'answered' | 'timeout' | 'stopped',
+        answer?: 'allow-once' | 'allow-run' | 'deny-once' | 'deny-run',
+      ): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        if (session.pendingAgentApproval?.requestId === requestId) session.pendingAgentApproval = null;
+        emit({ type: 'agent:approval-closed', requestId, reason, ...(answer !== undefined && { answer }) });
+        resolve(answer !== undefined ? { answer } : { closed: reason === 'timeout' ? 'timeout' : 'stopped' });
+      };
+      const onAbort = (): void => close('stopped');
+      const timer = setTimeout(() => close('timeout'), question.timeoutMs);
+      session.pendingAgentApproval = {
+        requestId,
+        resolve: (answer) => close('answered', answer),
+        cancel: () => close('stopped'),
+      };
+      if (signal?.aborted) {
+        close('stopped');
+        return;
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
+      emit({
+        type: 'agent:awaiting-approval',
+        requestId,
+        line,
+        command: question.command,
+        folder: question.folder,
+        step: question.stepLabel,
+        pattern: question.pattern,
+        expiresAt: new Date(Date.now() + question.timeoutMs).toISOString(),
+        ...frameSpread,
+      });
+    });
   }
 
   /**
@@ -3296,6 +3533,13 @@ export class SessionManager {
     // first makes the close the reason (`done: aborted` saying so), and covers
     // a recording whose browser is still launching.
     session.recording?.sessionClosed();
+    // An open Allow/Deny question closes with the session, unanswered — as a
+    // Stop closes it, not as an answer nobody gave (docs/specs/SPEC-use-agent.md
+    // §6.3). The session's own agent state goes with it; a run keyed by
+    // `agentRunId` outlives the session, since a row loop recycles sessions
+    // inside one run, and ends when the next run of its file starts.
+    session.pendingAgentApproval?.cancel();
+    if (!session.agentRunKeyed) endAgentRun(session.agentRun, session.agentRunConfig);
     // Before the browser goes: an open compile has a queue running, and the
     // session is the only thing that still knows about it.
     await this.discardLiveCompile(session, 'the session is closing');
@@ -3378,6 +3622,10 @@ export class SessionManager {
   async closeAll(): Promise<void> {
     const ids = [...this.sessions.keys()];
     await Promise.all(ids.map((id) => this.closeSession(id)));
+    // Runs keyed by `agentRunId` outlive their sessions; the server's end is
+    // theirs too (docs/specs/SPEC-use-agent.md §6.2).
+    for (const entry of this.agentRuns.values()) endAgentRun(entry.run, entry.config);
+    this.agentRuns.clear();
   }
 
   // -------------------------------------------------------------------------
@@ -4004,6 +4252,27 @@ export class SessionManager {
     // the start of a run: a continuation keeps whatever surface the run it
     // continues left it on.
     if (request.runStart) this.applyRunStartSurface(session, sessionId, request);
+    // A new run starts with nothing remembered and an empty workspace
+    // (docs/specs/SPEC-use-agent.md §6.2, §6.3): the last run's workspace is
+    // removed here rather than at its last batch, since only the client knows
+    // which batch was the last. A run keyed by `agentRunId` is ended by the
+    // `agentRunEnds` of the run that replaces it, just above.
+    // The run this client's new run replaces (`agentRunEnds`): its agent
+    // state ends here, at the new run's first batch, whether or not the new run
+    // has an agent step of its own.
+    if (request.agentRunEnds !== undefined && request.agentRunEnds !== request.agentRunId) {
+      const ended = this.agentRuns.get(request.agentRunEnds);
+      if (ended) {
+        endAgentRun(ended.run, ended.config);
+        this.agentRuns.delete(request.agentRunEnds);
+      }
+    }
+    if (request.runStart && session.agentRun) {
+      if (!session.agentRunKeyed) endAgentRun(session.agentRun, session.agentRunConfig);
+      delete session.agentRun;
+      delete session.agentRunConfig;
+      delete session.agentRunKeyed;
+    }
 
     // This batch's run settings: server base → project bundle → the session's
     // retained overrides (stories/run-settings.md §2).
@@ -5769,6 +6038,19 @@ export class SessionManager {
       }
     }
 
+    // Which steps of this batch are agent steps by scope
+    // (docs/specs/SPEC-use-agent.md §5.6, §5.7). A step whose own text opens
+    // `[use agent]` is decided at its dispatch, by the grammar.
+    const agentScopes = agentScopesForBatch({
+      steps: effectiveSteps,
+      origins: expansionOrigins,
+      frames: expandedFrames,
+      controls: expansionControls,
+      wire: request.agent,
+      sections: request.sections,
+      testFilePath: request.testFilePath,
+    });
+
     try {
       for (let i = startIndex; i <= endIndex; i++) {
         // ONE-SHOT DEBUGGER FLAGS — read and cleared here, at the top of the
@@ -5804,7 +6086,12 @@ export class SessionManager {
           logger.info(`Session "${sessionId}": run aborted by client at step ${i + 1}/${stepsTotal}`);
           break;
         }
-        const originalStep = effectiveSteps[i]!;
+        // A `[no-agent]` step (docs/specs/SPEC-use-agent.md §5.1) runs as the
+        // ordinary step it would be outside any scope: the marker is read here,
+        // for the report's *opted out* marker, and taken off the line so no
+        // runner below ever sees it.
+        const agentOptedOut = hasNoAgentMarker(effectiveSteps[i]!);
+        const originalStep = agentOptedOut ? stripNoAgentMarker(effectiveSteps[i]!) : effectiveSteps[i]!;
 
         // ── A MACRO RETURNED: restore the caller's surface (§4.5) ─────────
         //
@@ -6041,6 +6328,18 @@ export class SessionManager {
         // unknown `${…}` out of a loop with no catch instead of failing the
         // step in `Set`'s words.
         const useAiStep = setStep ? null : parseUseAiStep(originalStep);
+        // `[use agent]` (docs/specs/SPEC-use-agent.md): the line's own prefix,
+        // or a plain step inside an agent scope (§5.6), which `agentScopes`
+        // read from the file. Off the AUTHORED step and never interpolated, for
+        // `[use ai]`'s reasons: the goal keeps its `{{…}}` and the runner shows
+        // their values, masked, beside it (§5.5).
+        const useAgentPrefix = setStep || useAiStep ? null : parseUseAgentStep(originalStep);
+        const agentStep: { bare: boolean; scope: import('../report/types.js').AgentStepScope } | null =
+          useAgentPrefix
+            ? { bare: useAgentPrefix.bare, scope: { reason: 'prefix' } }
+            : !setStep && !useAiStep && agentScopes.scope[i]
+              ? { bare: false, scope: agentScopes.scope[i]! }
+              : null;
         // `If … then return` / `… then stop`, read off `originalStep` — before
         // the runtime `{{…}}` and `${…}` substitution two lines down
         // (stories/step-flow-control.md, decision 2). The claim is textual and
@@ -6092,7 +6391,7 @@ export class SessionManager {
         // refusal — which names the reference and fails just that step — the
         // reachable path.
         const envInterpolated =
-          setStep || useAiStep || !envDataCtx
+          setStep || useAiStep || agentStep || !envDataCtx
             ? originalStep
             : interpolateEnvData(originalStep, envDataCtx);
         // This loop interpolates EVERY step before it reaches the control
@@ -6100,7 +6399,7 @@ export class SessionManager {
         // {{payments}}` header asks for the item name it is about to define.
         // `controlLineDefines` is what stops that being warned about
         // (src/parser/control-line.ts).
-        const interpolated = setStep || useAiStep
+        const interpolated = setStep || useAiStep || agentStep
           ? originalStep
           : interpolate(envInterpolated, resolvedParameters, controlLineDefines(originalStep));
 
@@ -6127,7 +6426,9 @@ export class SessionManager {
                   ),
               resolvedParameters,
             )
-          : interpolated;
+          : agentStep
+            ? interpolate(originalStep, resolvedParameters)
+            : interpolated;
         if (isPartialRerun && /\{\{__macro\w*\}\}/.test(partialRerunSubject)) {
           const frame = frameInfoFor(i);
           // Advice that serves every surface this refusal reaches: the
@@ -7236,6 +7537,193 @@ export class SessionManager {
                 source: 'generated',
               });
             }
+          } else if (agentStep?.bare) {
+            // A bare `[use agent]` (docs/specs/SPEC-use-agent.md §5.7): it
+            // opens the scope its block's steps run in, and does nothing of
+            // its own — run alone, it is a no-op that says so.
+            const message =
+              'A bare [use agent] does nothing on its own: as the first step of its block it makes ' +
+          'the plain steps below it agent steps.';
+            logger.info(`Session "${sessionId}": step ${i + 1}: ${message}`);
+            stepResult = {
+              index: i + 1,
+              instruction: originalStep,
+              status: 'passed',
+              turns: [],
+              durationMs: 0,
+              retried: false,
+              aiExplanation: message,
+            };
+          } else if (agentStep) {
+            // An agent step (docs/specs/SPEC-use-agent.md §5): a loop of turns
+            // until the model says done or stuck. Every ordinary step the agent
+            // asks for runs through the same executor a plain step does, on
+            // the surface the session is on now (§3: no switch inside it).
+            const projectRoot = projectBundle.projectRoot ?? process.cwd();
+            const agentRun = this.agentRunFor(session, request, projectRoot, runConfig.agent);
+            const limits = withTestAgentLimits(runConfig.agent, {
+              agentMaxTurns: request.agentLimits?.maxTurns ?? request.config?.agentMaxTurns,
+              agentTimeout: request.agentLimits?.timeout ?? request.config?.agentTimeout,
+            });
+            for (const warning of limits.warnings) logger.warn(`Session "${sessionId}": ${warning}`);
+            for (const warning of ensureAgentRun(agentRun, runConfig.agent)) logger.warn(warning);
+            const onComputer = session.surface === 'computer' && session.computerAdapter !== undefined;
+            const stepLine = effectiveSourceLines?.[i] ?? i + 1;
+            const askFor: ApprovalAsker | undefined = request.canApprove
+              ? { ask: (question, askSignal) => this.askAgentApproval(session, emit, question, askSignal, sourceLineFor(i), frameSpread) }
+              : undefined;
+            const values = { parameters: resolvedParameters, ...(envDataCtx ? { envData: envDataCtx } : {}) };
+            const outcome = await runAgentStep({
+              index: i + 1,
+              instruction: originalStep,
+              goal: stripFailureTail(agentGoalOf(originalStep)),
+              scope: agentStep.scope,
+              vars: resolvedParameters,
+              secrets: secretsNow(),
+              unmask: unmaskNames,
+              config: limits.config,
+              lowered: limits.lowered,
+              retries: runConfig.execution.retries,
+              model: session.aiClient,
+              surface: {
+                kind: onComputer ? 'computer' : 'browser',
+                observe: () =>
+                  onComputer
+                    ? observeScreen(session.computerAdapter!, session.desktopConfig?.maxImageWidth ?? 1600)
+                    : observePage(
+                        session.browserSession?.pageTracker.getActive(),
+                        secretsNow(),
+                        runConfig.browser.domSnapshotCharLimit,
+                      ),
+                step: (instruction, stepSignal) =>
+                  onComputer
+                    ? executeComputerStep(
+                        stepLine,
+                        stepsTotal,
+                        instruction,
+                        {
+                          page: undefined as never,
+                          config: runConfig,
+                          aiClient: session.aiClient,
+                          contextContent: session.contextContent,
+                          testName: `session:${sessionId}`,
+                          ...(session.sessionConfig.baseUrl !== undefined && {
+                            baseUrl: session.sessionConfig.baseUrl,
+                          }),
+                          conversationHistory: [...session.conversationHistory],
+                          apiResponseStore: session.apiResponseStore,
+                          csrfTokens: session.csrfTokens,
+                          resolvedParameters,
+                          browserTracker: session.browserTracker,
+                          ...(envDataCtx && { envData: envDataCtx }),
+                          ...(unmaskNames.size > 0 && { unmask: unmaskNames }),
+                          nonInteractive: true,
+                          ...(stepSignal && { signal: stepSignal }),
+                          computer: computerContextFor(session.desktopConfig, session.computerAdapter!),
+                          stats: statsForStep(i),
+                        },
+                        instruction,
+                      )
+                    : executeStep(
+                        stepLine,
+                        stepsTotal,
+                        instruction,
+                        {
+                          page: session.browserSession!.pageTracker.getActive(),
+                          config: runConfig,
+                          aiClient: session.aiClient,
+                          contextContent: session.contextContent,
+                          testName: `session:${sessionId}`,
+                          ...(session.sessionConfig.baseUrl !== undefined && {
+                            baseUrl: session.sessionConfig.baseUrl,
+                          }),
+                          conversationHistory: [...session.conversationHistory],
+                          apiResponseStore: session.apiResponseStore,
+                          csrfTokens: session.csrfTokens,
+                          uploadPaths: {
+                            ...(request.testFilePath !== undefined && {
+                              baseDir: dirname(request.testFilePath),
+                            }),
+                            projectRoot: projectBundle.projectRoot,
+                          },
+                          resolvedParameters,
+                          pageTracker: session.browserSession!.pageTracker,
+                          browserTracker: session.browserTracker,
+                          structureMemo,
+                          ...(envDataCtx && { envData: envDataCtx }),
+                          nonInteractive: true,
+                          ...(unmaskNames.size > 0 && { unmask: unmaskNames }),
+                          ...(stepSignal && { signal: stepSignal }),
+                          stats: statsForStep(i),
+                        },
+                        instruction,
+                      ),
+              },
+              tools: toolCatalogue
+                ? {
+                    list: () => toolInfosOf(toolCatalogue),
+                    call: async (name, toolArgs) => {
+                      const toolOutcome = await executeToolStep(
+                        { name, args: toolArgs, outputAliases: {} },
+                        {
+                          page: session.browserSession?.pageTracker.getActive() as Page,
+                          context: session.browserSession?.context as BrowserContext,
+                          browser: session.browserSession?.browser as Browser,
+                          resolvedParameters,
+                          catalogue: toolCatalogue,
+                          ...(session.sessionConfig.baseUrl !== undefined && {
+                            baseUrl: session.sessionConfig.baseUrl,
+                          }),
+                        },
+                      );
+                      return {
+                        ok: toolOutcome.status === 'passed',
+                        outputs: toolOutcome.outputs,
+                        ...(toolOutcome.error !== undefined && { error: toolOutcome.error }),
+                      };
+                    },
+                  }
+                : undefined,
+              run: agentRun,
+              asker: askFor,
+              noAsker: request.canApprove
+                ? 'nobody'
+                : 'only a run a person starts in VS Code can ask: not a batch run, MCP or the Sessions API',
+              stepLabel: `step ${stepLine} of ${request.testFilePath ? basename(request.testFilePath) : 'this run'}`,
+              priorSteps: fullStepResults
+                .slice(-20)
+                .map((r) => formatStepHistoryEntry(r.index, redact(r.instruction, secretsNow()), r.status === 'passed')),
+              signal,
+              onTurn: (record, progress) =>
+                emit({
+                  type: 'agent:turn',
+                  line: sourceLineFor(i),
+                  turn: progress.turn,
+                  maxTurns: progress.maxTurns,
+                  summary: record.summary,
+                  result: record.result,
+                  ok: record.ok,
+                  durationMs: record.durationMs,
+                  ...frameSpread,
+                }),
+            });
+            const tailMessage = failureTail?.message
+              ? redact(substituteText(failureTail.message, values), secretsNow())
+              : undefined;
+            stepResult = applyTailOutcome(outcome.result, failureTail, tailMessage);
+            for (const { name, value } of outcome.stored) {
+              if (name.startsWith('__macro')) continue;
+              // `defineProperty` and first-write-wins, as the `[use ai]` branch
+              // does and for its reasons.
+              Object.defineProperty(session.outputs, name, {
+                value,
+                writable: true,
+                enumerable: true,
+                configurable: true,
+              });
+              if (!(name in session.outputSources)) session.outputSources[name] = 'generated';
+              emit({ type: 'capture', line: sourceLineFor(i), name, value, source: 'generated' });
+            }
           } else if (toolCall && toolCatalogue) {
             // Tool step-into — Phase 5. When the session's one-shot
             // pause-at-next-tool flag is set, surface a
@@ -7525,6 +8013,8 @@ export class SessionManager {
               originalStep,
             );
           }
+          // The *opted out* marker (§8.6): a `[no-agent]` step inside a scope.
+          if (agentOptedOut && agentScopes.inScope[i]) stepResult.agentOptedOut = true;
         } catch (err) {
           // Aborted (client "stop") — a throw escaping the step (e.g. a tool
           // step interrupted) when the run was stopped. Treat as a clean abort,
@@ -8476,6 +8966,12 @@ export class SessionManager {
           // display state the report generator renders as "ABORTED".
           ...(overallStatus === 'aborted' && { aborted: true }),
           ...(session.sessionConfig.baseUrl !== undefined && { baseUrl: session.sessionConfig.baseUrl }),
+          // docs/specs/SPEC-use-agent.md §8.7: the AGENT: ON banner, and the run's
+          // Allow/Deny answers.
+          ...(request.agent?.file && { agentFile: true }),
+          ...(session.agentRun && session.agentRun.approvals.records.length > 0 && {
+            agentApprovals: [...session.agentRun.approvals.records],
+          }),
           ...(Object.keys(resolvedParameters).length > 0 && { parameters: resolvedParameters }),
           ...(codeBehind.newerFiles.length > 0 && !captureStepContext && !cb?.strict && !cb?.candidateFiles && {
             notices: codeBehind.newerFiles.map((newer) => newerCompiledNotice(newer, SERVER_UPDATE_WORDS)),

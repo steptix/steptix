@@ -6,6 +6,7 @@ import type { AIAction } from '../ai/types.js';
 import { getAllAiInteractions, isHealedStep } from './types.js';
 import { stepAnchor } from './anchors.js';
 import { getReportTemplate } from './template.js';
+import { agentBadge, agentRunStats, placeAgentFiles, renderAgentBody, renderAgentRunHeader } from './agent-render.js';
 import { toDataUri } from '../browser/screenshot.js';
 import { uncheckedListRead } from '../runner/list-read-review.js';
 import { logger } from '../utils/logger.js';
@@ -33,6 +34,9 @@ export async function generateReport(
   const fileName = buildFileName(report);
   const filePath = path.resolve(outputDir, fileName);
 
+  // An agent step's file copies and command logs, beside the report
+  // (docs/specs/SPEC-use-agent.md §8.5), before the links to them render.
+  placeAgentFiles(report, filePath);
   const html = renderReport(report);
   await fs.writeFile(filePath, html, 'utf-8');
 
@@ -125,6 +129,12 @@ export function renderReport(report: TestReport): string {
   const diagnosisHtml = report.diagnosis ? renderDiagnosis(report.diagnosis) : '';
   const modelSummary = summarizeModels(report);
   const scriptText = buildScriptText(report.steps);
+  // The agent parts of the header (docs/specs/SPEC-use-agent.md §8.7): empty
+  // for a run with no agent step, so its report is the one it always was.
+  const agentStats = agentRunStats(report.steps);
+  const anchorFor = stepAnchorIds();
+  const anchors = new Map(report.steps.map((s) => [s, anchorFor(s)] as const));
+  const agentHeader = renderAgentRunHeader(report, (s) => anchors.get(s) ?? canonicalStepAnchor(s));
 
   return template({
     codeBehindSteps: origins.code,
@@ -158,6 +168,12 @@ export function renderReport(report: TestReport): string {
     // decision 6): a header counting only passed and failed would silently lose it —
     // "8 steps, 7 passed, 0 failed" with nothing saying where the eighth went.
     toleratedSteps: report.toleratedSteps ?? 0,
+    agentSteps: agentStats.agentSteps,
+    agentTurns: agentStats.agentTurns,
+    agentCommands: agentStats.agentCommands,
+    agentRefused: agentStats.agentRefused,
+    agentBannerHtml: new Handlebars.SafeString(agentHeader.banner),
+    agentTablesHtml: new Handlebars.SafeString(agentHeader.tables),
     totalSubActions: report.totalSubActions,
     tokensUsed,
     inputTokens,
@@ -679,7 +695,12 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
 
   // Render turns chronologically
   const hasMultipleAttempts = new Set(step.turns.map((t) => t.attemptNumber)).size > 1;
-  const turnsHtml = step.turns.length > 0
+  // An agent step shows its turns inside *What it did*, one line per turn
+  // opening to the turn (docs/specs/SPEC-use-agent.md §8.3), not as a list.
+  const agentHtml = step.agent
+    ? renderAgentBody(step, (turn) => renderTurn(turn, true, hasMultipleAttempts))
+    : '';
+  const turnsHtml = !step.agent && step.turns.length > 0
     ? step.turns.map((turn) => renderTurn(turn, step.turns.length > 1, hasMultipleAttempts)).join('\n')
     : '';
 
@@ -743,7 +764,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   // — the only way a tool step's `outputs` is ever non-empty is the same
   // value reaching resolvedParameters under an `[output:]` alias, so a
   // second, green, identically-valued box would be pure duplication.
-  const captureRows = step.toolStep ? [] : Object.entries(step.outputs ?? {});
+  const captureRows = step.toolStep || step.agent ? [] : Object.entries(step.outputs ?? {});
   const capturesHtml = captureRows.length === 0 ? '' : `<div class="captures-block">
         <div class="captures-title">◆ Captured</div>
         <div class="tool-kv">${captureRows
@@ -867,6 +888,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     ${loopBadge}
     ${sourceSectionBadge}
     ${sourceMacroBadge}
+    ${agentBadge(step)}
     ${originBadge}
     ${tabBadge}
     ${retryBadge}
@@ -880,6 +902,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     ${staleHtml}
     ${codeBehindHtml}
     ${toolHtml}
+    ${agentHtml}
     ${turnsHtml}
     ${capturesHtml}
     ${assertionHtml}

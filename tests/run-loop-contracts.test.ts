@@ -266,8 +266,10 @@ describe('every run loop dispatches [use ai] through the one runner', () => {
     const body = source(file);
     expect(body).toMatch(/parseUseAiStep\((raw|original)[A-Za-z]*\)/);
     expect(body).toContain('runUseAiStep({');
-    // Beside `Set`, which is what keeps it out of the interpolation.
-    expect(body).toMatch(/setStep \|\| useAiStep\s*\?\s*(raw|original)[A-Za-z]*/);
+    // Beside `Set`, which is what keeps it out of the interpolation — and,
+    // where the loop runs agent steps, beside `[use agent]`, which stays out
+    // of it for the same reason (docs/specs/SPEC-use-agent.md §5.5).
+    expect(body).toMatch(/setStep \|\| useAiStep(?: \|\| agentStep)?\s*\?\s*(raw|original)[A-Za-z]*/);
   });
 
   it('the CLI dispatches it in the hook scope too', () => {

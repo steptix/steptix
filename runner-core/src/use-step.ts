@@ -40,9 +40,12 @@ export interface ParsedUseStep {
 /** The surfaces in the order every message lists them. */
 export const USE_SURFACES: readonly Surface[] = ['computer', 'browser'];
 
-/** Matches `NO_HOOKS_MARKER` in section-match.ts — duplicated to keep this
- *  module import-free, exactly as the original does. */
-const NO_HOOKS_PREFIX = /^\[no-hooks\]\s*/i;
+/** The leading step markers, `[no-hooks]` (matching `NO_HOOKS_MARKER` in
+ *  section-match.ts) and `[no-agent]` (docs/specs/SPEC-use-agent.md §5.1), in
+ *  either order. Both are stripped before the grammar reads a line, so neither
+ *  turns a directive into prose. Duplicated rather than imported to keep this
+ *  module import-free — see the file docstring. */
+const STEP_MARKERS_PREFIX = /^(?:\[no-(?:hooks|agent)\]\s*)+/i;
 
 /**
  * THE claim: `[use` at the START of the step, followed by `:`, inline
@@ -61,7 +64,7 @@ const CLAIM_RE = /^\[use(?=[ \t:\]])/i;
 const USE_STEP_RE = /^\[use(?:[ \t]*:[ \t]*|[ \t]+)(computer|browser)[ \t]*\]$/i;
 
 function normalise(instruction: string): string {
-  return instruction.trim().replace(NO_HOOKS_PREFIX, '').trim();
+  return instruction.trim().replace(STEP_MARKERS_PREFIX, '').trim();
 }
 
 /** True when the line opens `[use` — whether or not it completes. */
@@ -99,6 +102,12 @@ const NAME_MARKER_SOURCE =
   '[ \\t]*\\[(?:store[ \\t]+as|as|output)[ \\t]*:[ \\t]*(\\w+(?:[ \\t]*,[ \\t]*\\w+)*)[ \\t]*\\]';
 
 const PROSE_NAME_SOURCE = '\\b(?:store|save)\\s+(?:it\\s+)?as\\s+\\{\\{\\s*(\\w+)\\s*\\}\\}';
+
+/** The `[use agent]` token (docs/specs/SPEC-use-agent.md §5.1), spelled as
+ *  `[use ai]`'s is: the claim's separator class, the name, optional space. */
+const USE_AGENT_TOKEN_SOURCE = '\\[use(?:[ \\t]*:[ \\t]*|[ \\t]+)agent[ \\t]*\\]';
+const USE_AGENT_PREFIX_RE = new RegExp(`^${USE_AGENT_TOKEN_SOURCE}`, 'i');
+const USE_AGENT_ANYWHERE_RE = new RegExp(USE_AGENT_TOKEN_SOURCE, 'i');
 
 const CONTROL_HEAD_RE = /^(?:if|else[ \t]+if|otherwise|while|repeat|for[ \t]+each)\b/i;
 
@@ -166,6 +175,8 @@ function useAiStepShapeError(source: string, lead: string): string | null {
 }
 
 function misplacedUseAiError(source: string, lead: string): string | null {
+  const agentToken = USE_AGENT_ANYWHERE_RE.exec(source);
+  if (agentToken) return misplacedUseAgentError(source, lead, agentToken);
   const token = USE_AI_ANYWHERE_RE.exec(source);
   if (!token) return null;
   if (CONTROL_HEAD_RE.test(source)) {
@@ -182,6 +193,30 @@ function misplacedUseAiError(source: string, lead: string): string | null {
   return withCaret(
     `${lead}. Put \`[use ai]\` at the start of the step — it says the whole step is ` +
       `a question for the model: \`[use ai] ${without}\`.`,
+    source,
+    token.index,
+  );
+}
+
+/**
+ * The refusal for a `[use agent]` token that does not open the step, with a
+ * control line's tail named apart, as for `[use ai]`.
+ */
+function misplacedUseAgentError(source: string, lead: string, token: RegExpExecArray): string {
+  if (CONTROL_HEAD_RE.test(source)) {
+    return withCaret(
+      `${lead}. A \`[use agent]\` step cannot be the step a control line runs. ` +
+        'Put it in a `### Section` and name that section as the step to run instead.',
+      source,
+      token.index,
+    );
+  }
+  const without = (source.slice(0, token.index) + ' ' + source.slice(token.index + token[0].length))
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+  return withCaret(
+    `${lead}. Put \`[use agent]\` at the start of the step — it says the whole step is ` +
+      `a goal for the agent: \`[use agent] ${without}\`.`,
     source,
     token.index,
   );
@@ -204,7 +239,7 @@ function withCaret(reason: string, source: string, column: number): string {
 const THE_FAMILY =
   '`[use computer]` (the operating system\'s screen) and `[use browser]` (the ' +
   'page) switch the surface as whole steps, and `[use ai] <step>` asks the ' +
-  'model for a value';
+  'model for a value, and `[use agent] <goal>` works towards a goal over many turns';
 
 /**
  * The parse error for a line that claims the form and does not complete it,
@@ -219,6 +254,10 @@ export function useStepError(instruction: string, where = ''): string | null {
   if (!CLAIM_RE.test(source)) return misplacedUseAiError(source, lead);
   if (parseUseStep(source) !== null) return null;
   if (USE_AI_PREFIX_RE.test(source)) return useAiStepShapeError(source, lead);
+  // `[use agent]`, bare or with a goal, is a well-formed LINE. Where a bare
+  // one may sit (only first in its block) is a block rule: `agentScopeOf`
+  // and the markdown parser apply it, since one line cannot see its block.
+  if (USE_AGENT_PREFIX_RE.test(source)) return null;
 
   let i = skipInlineSpace(source, '[use'.length);
   if (source[i] === ':') i = skipInlineSpace(source, i + 1);
@@ -231,7 +270,8 @@ export function useStepError(instruction: string, where = ''): string | null {
     return withCaret(`${lead}. \`[use]\` names no surface — ${THE_FAMILY}.`, source, nameStart);
   }
   const isAi = name.toLowerCase() === 'ai';
-  if (!isAi && !USE_SURFACES.includes(name.toLowerCase() as Surface)) {
+  const isAgent = name.toLowerCase() === 'agent';
+  if (!isAi && !isAgent && !USE_SURFACES.includes(name.toLowerCase() as Surface)) {
     return withCaret(
       `${lead}. \`${name}\` is not a surface this framework drives — ${THE_FAMILY}.`,
       source,
@@ -250,7 +290,10 @@ export function useStepError(instruction: string, where = ''): string | null {
   if (source[afterName] !== ']') {
     const argument = source.slice(afterName).split(/[\s\]]/)[0];
     return withCaret(
-      isAi
+      isAgent
+        ? `${lead}. \`[use agent]\` takes no arguments — the goal goes after the \`]\`, ` +
+            `so remove \`${argument}\`.`
+        : isAi
         ? `${lead}. \`[use ai]\` takes no arguments — the step goes after the \`]\`, ` +
             `so remove \`${argument}\`.`
         : `${lead}. \`[use ${name}]\` takes no arguments — the surface is the whole ` +
@@ -272,4 +315,47 @@ export function useStepError(instruction: string, where = ''): string | null {
   }
 
   return withCaret(`${lead}. ${THE_FAMILY[0]!.toUpperCase()}${THE_FAMILY.slice(1)}.`, source, 0);
+}
+
+// ---------------------------------------------------------------------------
+// `[use agent] <goal>` and `[no-agent]` (docs/specs/SPEC-use-agent.md §5.1)
+// ---------------------------------------------------------------------------
+
+/** A `[use agent]` line, as every runtime reads it. */
+export interface ParsedUseAgentStep {
+  /** The goal after the token, trimmed. Empty on the bare form. */
+  goal: string;
+  /** True for the bare `[use agent]`, which opens a scope (§5.6) rather than
+   *  being a step of its own. */
+  bare: boolean;
+}
+
+/** `{ goal, bare }` when the step opens `[use agent]`, or null. Matched
+ *  against the step as AUTHORED, like `[use ai]`. */
+export function parseUseAgentStep(instruction: string): ParsedUseAgentStep | null {
+  const source = normalise(instruction);
+  const prefix = USE_AGENT_PREFIX_RE.exec(source);
+  if (!prefix) return null;
+  const goal = source.slice(prefix[0].length).trim();
+  return { goal, bare: goal === '' };
+}
+
+/** The leading markers alone, so the `[no-agent]` test below cannot match a
+ *  marker written later in the line. */
+const LEADING_MARKERS_RE = /^\s*((?:\[no-(?:hooks|agent)\]\s*)+)/i;
+
+/** True when the step carries the `[no-agent]` marker among its leading
+ *  markers, before or after `[no-hooks]`. */
+export function hasNoAgentMarker(instruction: string): boolean {
+  const lead = LEADING_MARKERS_RE.exec(instruction);
+  return lead !== null && /\[no-agent\]/i.test(lead[1]!);
+}
+
+/** The step without its `[no-agent]` marker, a `[no-hooks]` marker kept, so
+ *  an ordinary step's runner sees the line it has always seen. */
+export function stripNoAgentMarker(instruction: string): string {
+  const lead = LEADING_MARKERS_RE.exec(instruction);
+  if (lead === null || !/\[no-agent\]/i.test(lead[1]!)) return instruction;
+  const kept = lead[1]!.replace(/\[no-agent\]\s*/gi, '');
+  return (kept + instruction.slice(lead[0].length)).trim();
 }

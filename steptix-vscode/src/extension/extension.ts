@@ -22,6 +22,7 @@ import { staleHoverMessage } from './failure-hover-core.js';
 import { skipPaintsOver } from './step-skip-core.js';
 import { passPaintsOver, toleratedPaintsOver } from './failure-outcome-core.js';
 import { GuardMarks, passMarkFor } from './guard-mark-core.js';
+import { AgentApprovalPrompt } from './agent-approval.js';
 import { lineStatusFromRowStatus, rowHeaderSummary } from './row-summary-core.js';
 import {
   allRowsOfTable,
@@ -194,6 +195,10 @@ class RunControllerRegistry implements vscode.Disposable {
    * tail's `frame:push` paints ▶ over the mark first — and cleared with it.
    */
   private readonly guardMarks = new GuardMarks<StepFailureDetail>();
+
+  /** The agent's Allow/Deny question (docs/specs/SPEC-use-agent.md §6.3):
+   *  one per window, and only in the window whose run asked it. */
+  private readonly agentApproval = new AgentApprovalPrompt();
 
   /** Test-only readback of the `steptix.running` context key. */
   get runningContextValue(): boolean {
@@ -1453,6 +1458,36 @@ class RunControllerRegistry implements vscode.Disposable {
           void this.handleToolAwaitingDebugger(controller, ev);
           break;
         }
+        case 'agent:awaiting-approval': {
+          // docs/specs/SPEC-use-agent.md §6.3. The server waits on this
+          // answer, so it is shown where it cannot slide out of sight, and
+          // every close the server announces hides it.
+          const controller = this.controllers.get(uri.toString());
+          if (!controller) break;
+          controller.postAgentLine(`  Waiting for your approval: ${ev.command}`, 'warn');
+          this.agentApproval.show(ev, uri.toString(), (answer) => controller.answerAgentApproval(ev.requestId, answer));
+          break;
+        }
+        case 'agent:approval-closed': {
+          this.agentApproval.close(ev.requestId);
+          const controller = this.controllers.get(uri.toString());
+          if (ev.reason === 'timeout') {
+            controller?.postAgentLine(
+              '  Nobody answered in time, so the command was denied and this run asks no more questions.',
+              'warn',
+            );
+          }
+          break;
+        }
+        case 'agent:turn': {
+          // A *What it did* line, as it happens (§8.8).
+          const controller = this.controllers.get(uri.toString());
+          controller?.postAgentLine(
+            `  [agent ${ev.turn}/${ev.maxTurns}] ${ev.summary} → ${ev.result}`,
+            ev.ok ? 'info' : 'warn',
+          );
+          break;
+        }
         case 'codebehind:awaiting-debugger': {
           // Code-behind step-into (stories/codebehind-debugging.md) — the
           // exact sibling of the tool case: attach (or reuse) the Node
@@ -1464,6 +1499,9 @@ class RunControllerRegistry implements vscode.Disposable {
           break;
         }
         case 'done':
+          // The run is over, Stop included: any question it left open is too,
+          // whether or not the server's close reached this window (§6.3).
+          this.agentApproval.closeFor(uri.toString());
           this.lastDoneStatus = ev.status;
           this.refreshRunningContext();
           // The per-controller revealedFrameUris is cleared by
@@ -2046,6 +2084,7 @@ class RunControllerRegistry implements vscode.Disposable {
     this.compileTailSignals.dispose();
     this.trackerSub.dispose();
     this.editSub.dispose();
+    this.agentApproval.dispose();
     for (const sub of this.fileSubs) sub.dispose();
     this.discardControllers();
     for (const sub of this.frameSubs.values()) sub.dispose();

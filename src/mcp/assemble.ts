@@ -25,6 +25,7 @@ import { interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { isCodeStep as isInvocationStep } from '../parser/invocation-parser.js';
 import { parseSetStep, setStepError } from '../parser/set-step.js';
 import { parseUseAiStep, useStepError } from '../parser/use-step.js';
+import { agentWireScopeOf } from '../agent/wire-scope.js';
 import { unknownWholeStepBracketError } from '../parser/whole-step-bracket.js';
 import {
   PLACEHOLDER_SOURCE,
@@ -365,6 +366,9 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
     // the computer surface a previous call failed or stopped on before its
     // `[use browser]` (SPEC-use-computer.md §4.5).
     runStart: { stepIndex: 0 },
+    // Which steps are agent steps because of their file
+    // (docs/specs/SPEC-use-agent.md §5.7), read from the text the run sends.
+    ...agentWireScope(raw, absPath, sourceLines),
   };
 
   return {
@@ -675,6 +679,10 @@ function projectConfig(
   // MCP-run test that asked for `tableStructure: strict` would quietly spend
   // the model call it asked not to spend.
   if (resolved['tableStructure'] !== undefined) out.tableStructure = resolved['tableStructure'];
+  // A test's lowering of the agent limits (docs/specs/SPEC-use-agent.md §10), for
+  // the same reason: off this list, an MCP run would ignore it.
+  if (resolved['agentMaxTurns'] !== undefined) out.agentMaxTurns = resolved['agentMaxTurns'];
+  if (resolved['agentTimeout'] !== undefined) out.agentTimeout = resolved['agentTimeout'];
 
   // A file-declared `cdp` is read from the FILE's config, never the merged
   // map, and that separation is now doing MORE work than when it was written,
@@ -919,4 +927,15 @@ function missingParameters(
     }
   }
   return [...missing];
+}
+
+/** `StepRequest.agent` for a file the MCP run sends whole (§5.7). Empty when
+ *  the file has no agent scope, so a plain run's request is unchanged. */
+function agentWireScope(
+  raw: string,
+  absPath: string,
+  sourceLines: readonly number[] | null,
+): { agent?: { file?: boolean; steps?: number[] } } {
+  const agent = agentWireScopeOf(raw, absPath, sourceLines ?? []);
+  return agent === undefined ? {} : { agent };
 }

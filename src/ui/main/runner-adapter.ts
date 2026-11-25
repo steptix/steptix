@@ -28,7 +28,8 @@ import { withTestContext } from '../../context/test-context.js';
 import { bindVariable, interpolate } from '../../parser/parameters.js';
 import { interpolateEnvData, type EnvDataContext } from '../../parser/interpolate-env-data.js';
 import { parseSetStep } from '../../parser/set-step.js';
-import { parseUseAiStep } from '../../parser/use-step.js';
+import { parseUseAgentStep, parseUseAiStep } from '../../parser/use-step.js';
+import { AGENT_STEP_NOT_HERE } from '../../agent/host.js';
 import { controlLineDefines } from '../../parser/control-line.js';
 import { isReturnClaim, parseFlowControlStep } from '../../parser/flow-control-step.js';
 import {
@@ -972,6 +973,25 @@ export class UIRunnerAdapter {
 
         i = plan.next;
         continue;
+      }
+
+      // --- `[use agent]` is not run by this runner (docs/specs/SPEC-use-agent.md) ---
+      // Refused by name rather than handed to the page model as prose.
+      if (parseUseAgentStep(rawInstruction)) {
+        this.emit('runner:step-start', { stepIndex, instruction: shown(instruction), totalSteps });
+        this.stepResults.push({
+          index: stepIndex,
+          instruction,
+          status: 'failed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          error: AGENT_STEP_NOT_HERE,
+          aiExplanation: AGENT_STEP_NOT_HERE,
+        });
+        this.emit('runner:step-complete', { stepIndex, status: 'failed', durationMs: 0 });
+        this.emit('runner:error', { message: AGENT_STEP_NOT_HERE });
+        break;
       }
 
       // --- Handle `Set {{name}} to "…"` steps ---

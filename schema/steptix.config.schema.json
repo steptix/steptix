@@ -17,6 +17,9 @@
         "desktop": {
           "$ref": "#/definitions/DeepPartial%3CDesktopConfig%3E"
         },
+        "agent": {
+          "$ref": "#/definitions/DeepPartial%3CAgentConfig%3E"
+        },
         "tests": {
           "$ref": "#/definitions/DeepPartial%3CTestsConfig%3E"
         },
@@ -36,7 +39,7 @@
           "$ref": "#/definitions/DeepPartial%3CLoggingConfig%3E"
         },
         "tables": {
-          "$ref": "#/definitions/DeepPartial%3Cdef-interface-src_config_types.ts-21553-22671-src_config_types.ts-0-30872226896703235751837%3E"
+          "$ref": "#/definitions/DeepPartial%3Cdef-interface-src_config_types.ts-23511-24629-src_config_types.ts-0-32852226896703235751837%3E"
         },
         "mcp": {
           "$ref": "#/definitions/McpConfig",
@@ -104,10 +107,10 @@
           "description": "Show browser window (false = headless)"
         },
         "viewport": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6056-6090-src_config_types.ts-5998-6091-src_config_types.ts-5897-14728-src_config_types.ts-0-30872449752545%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6056-6090-src_config_types.ts-5998-6091-src_config_types.ts-5897-14728-src_config_types.ts-0-32852449752545%3E"
         },
         "windowSize": {
-          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6147-6181-src_config_types.ts-6091-6182-src_config_types.ts-5897-14728-src_config_types.ts-0-308721327565221%3E"
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6147-6181-src_config_types.ts-6091-6182-src_config_types.ts-5897-14728-src_config_types.ts-0-328521327565221%3E"
         },
         "fixedViewport": {
           "type": "object",
@@ -225,7 +228,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-6056-6090-src_config_types.ts-5998-6091-src_config_types.ts-5897-14728-src_config_types.ts-0-30872449752545>": {
+    "DeepPartial<structure-src_config_types.ts-6056-6090-src_config_types.ts-5998-6091-src_config_types.ts-5897-14728-src_config_types.ts-0-32852449752545>": {
       "type": "object",
       "properties": {
         "width": {
@@ -238,7 +241,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<structure-src_config_types.ts-6147-6181-src_config_types.ts-6091-6182-src_config_types.ts-5897-14728-src_config_types.ts-0-308721327565221>": {
+    "DeepPartial<structure-src_config_types.ts-6147-6181-src_config_types.ts-6091-6182-src_config_types.ts-5897-14728-src_config_types.ts-0-328521327565221>": {
       "type": "object",
       "properties": {
         "width": {
@@ -318,6 +321,77 @@
         }
       },
       "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<AgentConfig>": {
+      "type": "object",
+      "properties": {
+        "maxTurns": {
+          "type": "number",
+          "description": "Most turns one agent step may take. Default 30."
+        },
+        "timeout": {
+          "type": "number",
+          "description": "Most milliseconds one agent step may take. Default 600000."
+        },
+        "historyTurns": {
+          "type": "number",
+          "description": "How many recent turns keep their full result in the request (§5.5). Default 4."
+        },
+        "resultMaxChars": {
+          "type": "number",
+          "description": "Characters of one result sent back to the model; the rest is cut to a head and a tail (§5.5). Default 8000."
+        },
+        "maxContextTokens": {
+          "type": "number",
+          "description": "The size a request is kept under, in estimated tokens (§5.5). Default 100000."
+        },
+        "shell": {
+          "type": "boolean",
+          "description": "Turn on files and commands (§6.1). Default false."
+        },
+        "allowCommands": {
+          "$ref": "#/definitions/DeepPartial%3Cstring%5B%5D658830911%3E"
+        },
+        "commandTimeoutMs": {
+          "type": "number",
+          "description": "Milliseconds one command may run. Default 120000."
+        },
+        "approvalTimeoutMs": {
+          "type": "number",
+          "description": "Milliseconds an Allow/Deny question waits for an answer (§6.3). Default 60000."
+        },
+        "reportFileMaxBytes": {
+          "type": "number",
+          "description": "Largest file the report keeps a copy of (§8.5). Default 10 MB."
+        },
+        "folders": {
+          "$ref": "#/definitions/DeepPartial%3Cstring%5B%5D763502098%3E"
+        },
+        "keepWorkspace": {
+          "type": "boolean",
+          "description": "Keep the run's workspace after the run ends (§6.2). Default false."
+        },
+        "skillsDir": {
+          "type": "string",
+          "description": "Where agent skills live, relative to the project (§7). Default `.agents/skills`."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<string[]658830911>": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<string[]763502098>": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
       "description": "Deeply partial version of Config for user-provided overrides"
     },
     "DeepPartial<TestsConfig>": {
@@ -521,7 +595,7 @@
       "additionalProperties": false,
       "description": "Deeply partial version of Config for user-provided overrides"
     },
-    "DeepPartial<def-interface-src_config_types.ts-21553-22671-src_config_types.ts-0-30872226896703235751837>": {
+    "DeepPartial<def-interface-src_config_types.ts-23511-24629-src_config_types.ts-0-32852226896703235751837>": {
       "type": "object",
       "properties": {
         "structure": {

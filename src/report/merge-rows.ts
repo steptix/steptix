@@ -164,6 +164,14 @@ export function mergeRowReports(rows: RowReport[], unrun: UnrunRow[] = []): Test
     outputTokens,
     status: anyFailed ? 'failed' : base.status,
     ...(rowLines.length > 0 && { rows: rowLines }),
+    // The run's Allow/Deny answers (docs/specs/SPEC-use-agent.md §8.7): one
+    // run holds them for all its rows, and each row's report snapshots them as
+    // they stood at its end, so the latest snapshot holds every answer — the
+    // first row's would lose any given after it. Listed once, for the run.
+    ...(() => {
+      const approvals = [...rows].reverse().find((r) => r.report.agentApprovals !== undefined)?.report.agentApprovals;
+      return approvals ? { agentApprovals: approvals } : {};
+    })(),
   };
 
   // The parameters block can no longer be a row's values, because there are

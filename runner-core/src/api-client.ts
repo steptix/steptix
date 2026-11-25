@@ -6,7 +6,9 @@
  */
 
 import { SseParser, type SseFrame } from './sse-parser.js';
+import { agentScopeOf } from './agent-scope.js';
 import type {
+  AgentApprovalAnswer,
   CompileEvent,
   CompileRequest,
   RecordControlAnswer,
@@ -339,6 +341,58 @@ export interface StreamStepsRequest {
    * like any other.
    */
   runStart?: { stepIndex?: number };
+  /**
+   * Which steps are agent steps because of their file
+   * (docs/specs/SPEC-use-agent.md §5.7): `file` for `agent: on`, `steps`
+   * the positions in `steps` whose block opens with a bare `[use agent]`,
+   * `optedOut` the positions of `[no-agent]` steps in a scope (§8.6).
+   * Built by `agentWireFor`.
+   */
+  agent?: { file?: boolean; steps?: number[]; optedOut?: number[] };
+  /** A person started this run and can answer the agent's Allow/Deny
+   *  question (§6.3). Only the extension sends it, and not in batch mode. */
+  canApprove?: boolean;
+  /** The logical run, the same on every batch of it — rows, Continue batches,
+   *  split blocks (docs/specs/SPEC-use-agent.md §6.2, §6.3). The server keeps
+   *  the run's agent workspace and answers by it. */
+  agentRunId?: string;
+  /** The run this one replaces, which the server ends (§6.2). Only the client
+   *  knows which run is its own: the same file can run in two places at once. */
+  agentRunEnds?: string;
+  /** The test's `## Config` lowering of the agent limits, sent on every batch
+   *  (§10), since `config` goes on a session's first batch only. */
+  agentLimits?: { maxTurns?: string; timeout?: string };
+}
+
+/** `StreamStepsRequest.agentLimits` from a test's `## Config`, or undefined
+ *  when it lowers nothing. */
+export function agentLimitsFor(config: Readonly<Record<string, string>>): { maxTurns?: string; timeout?: string } | undefined {
+  const maxTurns = config['agentMaxTurns']?.trim();
+  const timeout = config['agentTimeout']?.trim();
+  if (!maxTurns && !timeout) return undefined;
+  return { ...(maxTurns && { maxTurns }), ...(timeout && { timeout }) };
+}
+
+/**
+ * `StreamStepsRequest.agent` for a batch of `text` whose steps sit on
+ * `stepLines` (docs/specs/SPEC-use-agent.md §5.7). Undefined when nothing in
+ * the batch is an agent step by scope, so a plain run's request is unchanged.
+ */
+export function agentWireFor(
+  text: string,
+  stepLines: readonly number[],
+): { file?: boolean; steps?: number[]; optedOut?: number[] } | undefined {
+  const scope = agentScopeOf(text);
+  const byScope = new Set(scope.steps.filter((s) => s.reason !== 'prefix' && s.reason !== 'file').map((s) => s.line));
+  const opted = new Set(scope.optedOut);
+  const steps = stepLines.flatMap((line, position) => (byScope.has(line) ? [position] : []));
+  const optedOut = stepLines.flatMap((line, position) => (opted.has(line) ? [position] : []));
+  if (!scope.file && steps.length === 0 && optedOut.length === 0) return undefined;
+  return {
+    ...(scope.file && { file: true }),
+    ...(steps.length > 0 && { steps }),
+    ...(optedOut.length > 0 && { optedOut }),
+  };
 }
 
 export type ApiErrorKind =
@@ -867,6 +921,37 @@ export class ApiClient {
         ...(body !== undefined && { bodyExcerpt: body }),
       });
     }
+  }
+
+  /**
+   * Answer an agent step's Allow/Deny question (docs/specs/SPEC-use-agent.md
+   * §6.3). Resolves false when the question had already closed (409): it
+   * timed out or the run stopped, and the server has said so.
+   */
+  async answerAgentApproval(sessionId: string, requestId: string, answer: AgentApprovalAnswer): Promise<boolean> {
+    const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}/agent-approval`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: { 'x-api-key': this.apiKey, 'content-type': 'application/json' },
+        body: JSON.stringify({ requestId, answer }),
+      });
+    } catch (err) {
+      throw new ApiClientError('connect-failed', describeFetchError(err));
+    }
+    if (response.status === 401) {
+      throw new ApiClientError('unauthorized', 'Unauthorized', { status: 401 });
+    }
+    if (response.status === 404 || response.status === 409) return false;
+    if (response.status >= 400) {
+      const body = await safeReadBodyExcerpt(response);
+      throw new ApiClientError('server-error', `HTTP ${response.status}`, {
+        status: response.status,
+        ...(body !== undefined && { bodyExcerpt: body }),
+      });
+    }
+    return true;
   }
 
   /**

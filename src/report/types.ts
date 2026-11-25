@@ -624,6 +624,136 @@ export interface StepResult {
    * to: it is the first line of the Steptix hover and the MCP row's reason.
    */
   warning?: string;
+  /**
+   * Present on an agent step (docs/specs/SPEC-use-agent.md §8): what made it
+   * one, how it ended, and one record per turn. The report renders its header,
+   * *Stored*, *What it did*, *Files* and *Commands* from this.
+   */
+  agent?: AgentStepReport;
+  /**
+   * A `[no-agent]` step inside an agent scope (§8.6): the report's *opted
+   * out* marker.
+   */
+  agentOptedOut?: boolean;
+}
+
+/** Why a step ran as an agent step (§8.2): the badge's tooltip. */
+export interface AgentStepScope {
+  reason: 'prefix' | 'section' | 'main-flow' | 'file';
+  /** The section's name, for `section`. */
+  section?: string;
+}
+
+/** How an agent step ended (§5.3). */
+export type AgentEnding = 'done' | 'stuck' | 'max-turns' | 'timeout' | 'stalled' | 'stopped' | 'error';
+
+/** One refusal Steptix made during an agent step (§5.8). */
+export interface AgentRefusal {
+  /** What was refused, in a few words: the command, the path. */
+  what: string;
+  /** Why, naming the setting that decides it. */
+  why: string;
+  /** The setting, or null for a rule with no setting (a global install). */
+  setting: string | null;
+}
+
+/** One file the agent created or changed (§8.3). */
+export interface AgentFileRecord {
+  /** As the report shows it: relative to its root. */
+  path: string;
+  /** `workspace`, or the `agent.folders` entry it is in. */
+  where: string;
+  bytes: number;
+  /** The copy beside the report, relative to the report's folder, when one
+   *  was kept (§8.5). */
+  copy?: string;
+  /** Why no copy was kept, when none was. */
+  notCopied?: string;
+  /** A text file's whole content, masked, for *show*; absent for a binary
+   *  file or one over 64 KB. */
+  preview?: string;
+  /** The step (1-based index) that wrote it — the whole-file list (§8.7). */
+  step?: number;
+}
+
+/** How a command came to run, or not (§8.3). */
+export type AgentCommandAllowance =
+  | { by: 'allow-list'; pattern: string }
+  | { by: 'answer'; answer: 'allow-once' | 'allow-run'; pattern: string; at: string }
+  | { by: 'remembered'; pattern: string }
+  | { by: 'refused'; why: string };
+
+/** One turn of an agent step (§8.4). */
+export interface AgentTurnRecord {
+  turn: number;
+  /** The action's kind: `step`, `tool`, `run`, `read_file`, … */
+  kind: string;
+  /** The action in a few words. */
+  summary: string;
+  /** Its result in a few words. */
+  result: string;
+  durationMs: number;
+  /** False when the action failed or was refused. */
+  ok: boolean;
+  /** The notes the model carried at this turn (§5.5). */
+  notes?: string;
+  /** The detail by kind (§8.4): a command's run, a file's content, a tool's
+   *  outputs, an ordinary step's outcome. Masked. */
+  detail?: {
+    command?: string;
+    folder?: string;
+    exitCode?: number | null;
+    allowance?: AgentCommandAllowance;
+    /** Output as shown inline: whole up to 20 KB, else head and tail (§8.5). */
+    output?: string;
+    outputBytes?: number;
+    /** The full output's copy beside the report. */
+    log?: string;
+    path?: string;
+    content?: string;
+    tool?: { name: string; args: Record<string, unknown>; outputs: Record<string, string>; error?: string };
+    step?: { instruction: string; status: string; explanation?: string; error?: string; actions: string[] };
+    skill?: { name: string; path: string };
+    values?: Array<{ as: string; value: string }>;
+    reason?: string;
+  };
+}
+
+/** Everything the report shows about one agent step (§8). */
+export interface AgentStepReport {
+  /** This run of the step's own folder name under the run's staging folder,
+   *  and beside the report: `step-<index>-<start time>`, so a step that runs
+   *  once per row or loop pass keeps each pass's copies apart (§8.5). */
+  stageKey?: string;
+  scope: AgentStepScope;
+  ending: AgentEnding;
+  goal: string;
+  turns: AgentTurnRecord[];
+  /** Values `done` stored, masked like any stored value. */
+  stored?: Array<{ name: string; value: string }>;
+  /** The model's reason, for `stuck`. */
+  reason?: string;
+  files: AgentFileRecord[];
+  commandsRun: number;
+  commandsRefused: number;
+  skillsLoaded: Array<{ name: string; path: string }>;
+  refusals: AgentRefusal[];
+  tokens: { input: number; output: number; cached?: number; total: number };
+  cost?: number;
+  /** The largest request, in estimated tokens, and any shrinking done
+   *  (§5.5, §8.2's context tooltip). */
+  context: { largestRequestTokens: number; shrinks: string[] };
+  /** The provider route was the Copilot bridge: one premium request a turn. */
+  premiumRequests?: number;
+}
+
+/** A "for the rest of this run" answer, or a question nobody answered (§8.7). */
+export interface AgentApprovalRecord {
+  pattern: string;
+  answer: 'allow-run' | 'deny-run' | 'unanswered';
+  /** 1-based step index it was given at. */
+  step: number;
+  at: string;
 }
 
 /** AI-generated root-cause analysis for a failed test run */
@@ -680,6 +810,12 @@ export interface TestReport {
    * to say.
    */
   notices?: string[];
+  /** The file says `agent: on` (docs/specs/SPEC-use-agent.md §8.7): the
+   *  report shows the AGENT: ON banner. */
+  agentFile?: boolean;
+  /** The run's "for the rest of this run" answers and unanswered questions
+   *  (§8.7, *Approvals this run*). */
+  agentApprovals?: AgentApprovalRecord[];
   testName: string;
   filePath: string;
   tags: string[];

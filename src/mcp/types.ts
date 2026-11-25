@@ -193,6 +193,9 @@ export interface McpStepRequest {
     timeout?: string;
     viewport?: string;
     tableStructure?: string;
+    /** docs/specs/SPEC-use-agent.md §10: a test may lower these two. */
+    agentMaxTurns?: string;
+    agentTimeout?: string;
     cdp?: { port: number; tab?: string };
   };
   parameters?: Record<string, string>;
@@ -220,6 +223,9 @@ export interface McpStepRequest {
    * between calls, surface included, by design.
    */
   runStart?: { stepIndex?: number };
+  /** Which steps are agent steps because of their file
+   *  (docs/specs/SPEC-use-agent.md §5.7; `StepRequest.agent`). */
+  agent?: { file?: boolean; steps?: number[]; optedOut?: number[] };
 }
 
 /**
