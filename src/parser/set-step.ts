@@ -11,7 +11,7 @@
  *    its own value on the second run (§Locked, "Recognised on the authored
  *    line").
  *  - {@link setStepError} is what a PARSE-TIME validator asks. A line that
- *    opens `Set {{name}} to` has claimed the form the way `[skill:` claims
+ *    opens `Set {{name}} to` has claimed the form the way `[macro:` claims
  *    one, so a claim that does not complete is an error naming the line
  *    rather than prose handed to a model — WHERE a validator runs. It runs
  *    over `## Steps` and over MCP-supplied steps; it does NOT run over
@@ -183,7 +183,7 @@ export function setStepError(instruction: string, where = ''): string | null {
  * the variable still holds the previous one's.
  *
  * Six review rounds each found this same defect at the NEXT substitution site
- * along — row bindings, skill arguments, hook baking, skill bodies — because
+ * along — row bindings, macro arguments, hook baking, macro bodies — because
  * each round fixed the instance and asserted closure in prose.
  *
  * This helper does not by itself close that: it guards the sites that CALL it,

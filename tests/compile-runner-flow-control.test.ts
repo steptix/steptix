@@ -1,10 +1,10 @@
 /**
- * A return inside a section or a skill, on the **compile** route
+ * A return inside a section or a macro, on the **compile** route
  * (stories/step-flow-control.md; `POST /codebehind/compile`).
  *
  * This route is the one run path that hands the server steps it has ALREADY
  * expanded: `sessionRunner` (src/server/compile-runner.ts) sends `test.steps`
- * with no `skillsDir` and no `sections`, deliberately, because re-expanding
+ * with no `macrosDir` and no `sections`, deliberately, because re-expanding
  * server-side would be a second answer to "which `.steps.ts` does step 7 bind
  * into". The expansion rides along out-of-band instead, in
  * `internal.codeBehind.expansion`, where until recently only the code-behind
@@ -14,7 +14,7 @@
  * anywhere else is not an option: with `expansionOrigins` left null every step
  * reads as the ROOT frame, so a `### Section` body that returned skipped the
  * rest of the TEST, reported it as *ended the run*, and quoted the interpolated
- * line — which for a skill body is the line with the argument values in it.
+ * line — which for a macro body is the line with the argument values in it.
  *
  * Driven through the real `node:http` entry for the reason
  * `api-server-flow-control.test.ts` gives: the route builds its request from an
@@ -286,26 +286,26 @@ const SECTION_MD = [
 ].join('\n');
 
 /**
- * The same shape through a SKILL, whose body the expander interpolates.
+ * The same shape through a MACRO, whose body the expander interpolates.
  *
  * `test.steps` holds `If hunter2 is already remembered then return`; only
  * `test.expansion.rawSteps` still holds `{{password}}`. Both travel in the
  * out-of-band expansion, and the reason must be built from the second — it is
  * written to a run log, a report cell and a wire event.
  */
-const SKILL_MD = [
+const MACRO_MD = [
   '# Booking',
   '',
   '## Steps',
   '1. Open the shop',
-  '2. [skill: login password="hunter2"]',
+  '2. [macro: login password="hunter2"]',
   '3. Click "Sign out"',
   '',
 ].join('\n');
 
-const LOGIN_SKILL = [
+const LOGIN_MACRO = [
   '---',
-  'type: skill',
+  'type: macro',
   '---',
   '# login',
   '',
@@ -332,10 +332,10 @@ beforeAll(async () => {
 
   projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'compile-flow-control-'));
   await fs.writeFile(path.join(projectRoot, 'steptix.config.json'), JSON.stringify({}));
-  await fs.mkdir(path.join(projectRoot, 'skills'), { recursive: true });
-  await fs.writeFile(path.join(projectRoot, 'skills', 'login.md'), LOGIN_SKILL);
+  await fs.mkdir(path.join(projectRoot, 'macros'), { recursive: true });
+  await fs.writeFile(path.join(projectRoot, 'macros', 'login.md'), LOGIN_MACRO);
   await fs.writeFile(path.join(projectRoot, 'section.md'), SECTION_MD);
-  await fs.writeFile(path.join(projectRoot, 'skill.md'), SKILL_MD);
+  await fs.writeFile(path.join(projectRoot, 'macro.md'), MACRO_MD);
 });
 
 afterAll(async () => {
@@ -436,10 +436,10 @@ describe('a section body that returns, on the compile route', () => {
   });
 });
 
-describe('a skill body that returns, on the compile route', () => {
+describe('a macro body that returns, on the compile route', () => {
   it('quotes the AUTHORED line, so a resolved argument cannot ride out on it', async () => {
     returnOnOccurrence = 1;
-    const events = await compile(path.join(projectRoot, 'skill.md'));
+    const events = await compile(path.join(projectRoot, 'macro.md'));
 
     // What the executor was handed proves the two texts really do differ here
     // — otherwise the assertion below would hold for the wrong reason.

@@ -123,7 +123,7 @@ function makeProject(overrides: Record<string, unknown> = {}): any {
     envName: null,
     serverUrl: 'http://localhost:3100',
     apiKey: 'project-key',
-    skillsDir: null,
+    macrosDir: null,
     toolsDir: null,
     envFilesConsulted: [path.join(root, '.env')],
     ...overrides,

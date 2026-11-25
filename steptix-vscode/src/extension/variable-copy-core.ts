@@ -43,21 +43,21 @@ export type VariableCopyResult =
   | { ok: true; text: string; status: string }
   | { ok: false; status: string };
 
-/** Matches the expander's per-instance rename of a skill's own variables —
+/** Matches the expander's per-instance rename of a macro's own variables —
  *  the same prefix variables-view.ts hides at the test frame. */
-const SKILL_INTERNAL_PREFIX = /^__skill\d+_/;
+const MACRO_INTERNAL_PREFIX = /^__macro\d+_/;
 
 /**
  * The `{{…}}` placeholder that reads `name`, or null when no placeholder can.
  *
- * Inside a skill frame the view lists the skill's own variables under their
- * expanded names (`__skill2_query`); the skill file says `{{query}}`, so that
+ * Inside a macro frame the view lists the macro's own variables under their
+ * expanded names (`__macro2_query`); the macro file says `{{query}}`, so that
  * is what pasting there needs. A name the runtime grammar cannot reference —
  * a record column with a space or a dash in it, a second dot — gets null
  * rather than a placeholder that would be typed into the page as text.
  */
 export function placeholderFor(name: string): string | null {
-  const local = name.replace(SKILL_INTERNAL_PREFIX, '');
+  const local = name.replace(MACRO_INTERNAL_PREFIX, '');
   const text = `{{${local}}}`;
   const matches = [...text.matchAll(PARAM_REF_RE)];
   return matches.length === 1 && matches[0]![0] === text ? text : null;

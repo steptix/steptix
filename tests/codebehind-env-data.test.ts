@@ -219,7 +219,7 @@ describe('resolveEnvDataRef', () => {
     expect(resolveEnvDataRef('secrets.x', UAT)).toBeUndefined();
     expect(resolveEnvDataRef('data', UAT)).toBeUndefined();
     expect(resolveEnvDataRef('data.', UAT)).toBeUndefined();
-    // A skill-level context has no `data`; `${data.X}` passes through there.
+    // A macro-level context has no `data`; `${data.X}` passes through there.
     expect(resolveEnvDataRef('data.url', { env: UAT.env })).toBeUndefined();
     expect(resolveEnvDataRef('envName', { env: UAT.env })).toBeUndefined();
   });
@@ -458,7 +458,7 @@ describe('generateStepEntry with an environment', () => {
     expect(prompts).toHaveLength(0);
     expect(result.kind).toBe('declined');
     expect(result.kind === 'declined' && result.reason).toContain('${endpoints.api.url}');
-    expect(result.kind === 'declined' && result.reason).toContain('skill-private data source');
+    expect(result.kind === 'declined' && result.reason).toContain('macro-private data source');
   });
 
   it('declines every reference when the compile ran without an environment, and says so', async () => {

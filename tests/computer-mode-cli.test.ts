@@ -18,7 +18,7 @@ import path from 'node:path';
 import type { Config } from '../src/config/types.js';
 import type { ParsedTest, TestConfig, TestInstance } from '../src/parser/types.js';
 import type { StepResult, TestReport } from '../src/report/types.js';
-import type { ExpandedFrame, ExpandedStepOrigin } from '../src/skills/expander.js';
+import type { ExpandedFrame, ExpandedStepOrigin } from '../src/macros/expander.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 
 const launchBrowserMock = vi.fn();
@@ -137,7 +137,7 @@ import {
   releaseComputerLock,
 } from '../src/desktop/lock.js';
 import { parseTestContent } from '../src/parser/markdown.js';
-import { COMPUTER_DISABLED_MESSAGE, SkillSurfaceStack } from '../src/runner/computer-step.js';
+import { COMPUTER_DISABLED_MESSAGE, MacroSurfaceStack } from '../src/runner/computer-step.js';
 import { parseToolCall } from '../src/tools/tool-call-parser.js';
 
 // ---------------------------------------------------------------------------
@@ -163,13 +163,13 @@ function makeInstance(
     stepLines: steps.map((_, i) => i + 1),
     skipHooks: steps.map(() => false),
     toolCalls: steps.map(() => null),
-    sourceSkills: steps.map(() => null),
+    sourceMacros: steps.map(() => null),
     sourceSections: steps.map(() => null),
     sections: {},
     rawSteps: [...steps],
     hooks: { before: [], beforeEach: [], afterEach: [], after: [] },
     hookToolCalls: { before: [], beforeEach: [], afterEach: [], after: [] },
-    hookSourceSkills: { before: [], beforeEach: [], afterEach: [], after: [] },
+    hookSourceMacros: { before: [], beforeEach: [], afterEach: [], after: [] },
     ...(expansion && { expansion }),
   };
   return { test, resolvedParameters: {} };
@@ -773,7 +773,7 @@ describe('a [use …] line in a hook is refused (§4.4)', () => {
       after: [],
       hasAny: true,
       toolCalls: { before: [null], beforeEach: [], afterEach: [], after: [] },
-      sourceSkills: { before: [null], beforeEach: [], afterEach: [], after: [] },
+      sourceMacros: { before: [null], beforeEach: [], afterEach: [], after: [] },
     });
 
     const report = await runTest(
@@ -792,13 +792,13 @@ describe('a [use …] line in a hook is refused (§4.4)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// §4.5 — a skill restores the caller's surface, a section does not
+// §4.5 — a macro restores the caller's surface, a section does not
 // ---------------------------------------------------------------------------
 
-/** Frames for a test whose step 2 is a one-step skill body. */
-function skillExpansion(steps: string[], bodyIndexes: number[], kind: 'skill' | 'section'): ParsedTest['expansion'] {
+/** Frames for a test whose step 2 is a one-step macro body. */
+function macroExpansion(steps: string[], bodyIndexes: number[], kind: 'macro' | 'section'): ParsedTest['expansion'] {
   const frames: Record<string, ExpandedFrame> = {
-    f1: { id: 'f1', parentId: null, kind, uri: '/tmp/x', invocationLine: 2, skillName: 'excursion' },
+    f1: { id: 'f1', parentId: null, kind, uri: '/tmp/x', invocationLine: 2, macroName: 'excursion' },
   };
   const origins: ExpandedStepOrigin[] = steps.map((_, i) => ({
     inputIndex: i,
@@ -807,25 +807,25 @@ function skillExpansion(steps: string[], bodyIndexes: number[], kind: 'skill' | 
   return { rawSteps: [...steps], origins, frames, controls: steps.map(() => null) };
 }
 
-describe('a skill call restores the caller\'s surface (acceptance 6)', () => {
-  it('a browser caller is back on the browser after a skill that switched', async () => {
+describe('a macro call restores the caller\'s surface (acceptance 6)', () => {
+  it('a browser caller is back on the browser after a macro that switched', async () => {
     const steps = ['Click the heading', '[use computer]', 'Press Ctrl+S', 'Click the footer'];
     const report = await runTest(
-      makeInstance(steps, {}, skillExpansion(steps, [1, 2], 'skill')),
+      makeInstance(steps, {}, macroExpansion(steps, [1, 2], 'macro')),
       makeConfig(),
       '',
       extras(),
     );
 
     expect(report.status).toBe('passed');
-    // Step 3 ran in the skill body, on the computer; step 4 is the caller's
+    // Step 3 ran in the macro body, on the computer; step 4 is the caller's
     // and must be back on the page.
     expect(executeComputerStepMock).toHaveBeenCalledTimes(1);
     expect(executeStepMock).toHaveBeenCalledTimes(2);
     expect(existsSync(lockPath)).toBe(false);
   });
 
-  it('a COMPUTER caller is back on the computer after a skill that went to the browser', async () => {
+  it('a COMPUTER caller is back on the computer after a macro that went to the browser', async () => {
     // Review finding: this restore was a no-op, and step 4 went to the page.
     const holders: Array<string | undefined> = [];
     executeComputerStepMock.mockImplementation(async (_i: number, _n: number, instruction: string) => {
@@ -836,7 +836,7 @@ describe('a skill call restores the caller\'s surface (acceptance 6)', () => {
     const steps = ['[use computer]', '[use browser]', 'Click the heading', 'Click Save in the dialog'];
 
     const report = await runTest(
-      makeInstance(steps, {}, skillExpansion(steps, [1, 2], 'skill')),
+      makeInstance(steps, {}, macroExpansion(steps, [1, 2], 'macro')),
       makeConfig(),
       '',
       extras({
@@ -864,7 +864,7 @@ describe('a skill call restores the caller\'s surface (acceptance 6)', () => {
     const steps = ['[use computer]', '[use browser]', 'Click the heading', 'Click Save in the dialog'];
 
     const report = await runTest(
-      makeInstance(steps, {}, skillExpansion(steps, [1, 2], 'skill')),
+      makeInstance(steps, {}, macroExpansion(steps, [1, 2], 'macro')),
       makeConfig(),
       '',
       extras(),
@@ -875,7 +875,7 @@ describe('a skill call restores the caller\'s surface (acceptance 6)', () => {
     expect(report.steps).toHaveLength(4);
     expect(report.steps[3]!.status).toBe('failed');
     expect(report.steps[3]!.error).toContain(inUse);
-    expect(report.steps[3]!.error).toContain('returned from a skill');
+    expect(report.steps[3]!.error).toContain('returned from a macro');
     expect(executeComputerStepMock).not.toHaveBeenCalled();
     expect(executeStepMock).toHaveBeenCalledTimes(1);
     expect(readComputerLock({ lockPath })!.sessionId).toBe('mcp:another-session');
@@ -884,7 +884,7 @@ describe('a skill call restores the caller\'s surface (acceptance 6)', () => {
   it('an inline SECTION does not restore — that is how a desktop excursion is written once', async () => {
     const steps = ['Click the heading', '[use computer]', 'Press Ctrl+S', 'Click the dialog'];
     const report = await runTest(
-      makeInstance(steps, {}, skillExpansion(steps, [1, 2], 'section')),
+      makeInstance(steps, {}, macroExpansion(steps, [1, 2], 'section')),
       makeConfig(),
       '',
       extras(),
@@ -897,36 +897,36 @@ describe('a skill call restores the caller\'s surface (acceptance 6)', () => {
   });
 });
 
-describe('SkillSurfaceStack — the shared push/pop both loops use', () => {
-  it('answers the surface in force when the skill was entered', () => {
-    const stack = new SkillSurfaceStack();
+describe('MacroSurfaceStack — the shared push/pop both loops use', () => {
+  it('answers the surface in force when the macro was entered', () => {
+    const stack = new MacroSurfaceStack();
 
     expect(stack.enter([], 'browser')).toBeNull();        // caller, on the page
-    expect(stack.enter(['f1'], 'browser')).toBeNull();    // into the skill
-    expect(stack.enter(['f1'], 'computer')).toBeNull();   // the skill switched
+    expect(stack.enter(['f1'], 'browser')).toBeNull();    // into the macro
+    expect(stack.enter(['f1'], 'computer')).toBeNull();   // the macro switched
     expect(stack.enter([], 'computer')).toBe('browser');  // back out
   });
 
   it('asks nothing of a caller already on the surface it called from', () => {
-    const stack = new SkillSurfaceStack();
+    const stack = new MacroSurfaceStack();
 
     expect(stack.enter(['f1'], 'computer')).toBeNull();
     expect(stack.enter([], 'computer')).toBeNull();
   });
 
-  it('answers computer for a computer caller whose skill went to the browser', () => {
-    const stack = new SkillSurfaceStack();
+  it('answers computer for a computer caller whose macro went to the browser', () => {
+    const stack = new MacroSurfaceStack();
 
     expect(stack.enter(['f1'], 'computer')).toBeNull();
     expect(stack.enter(['f1'], 'browser')).toBeNull();
     expect(stack.enter([], 'browser')).toBe('computer');
   });
 
-  it('unwinds nested skills to the OUTERMOST caller in one answer', () => {
-    const stack = new SkillSurfaceStack();
+  it('unwinds nested macros to the OUTERMOST caller in one answer', () => {
+    const stack = new MacroSurfaceStack();
 
     expect(stack.enter(['outer'], 'browser')).toBeNull();
-    // The outer skill went to the computer, then called the inner one.
+    // The outer macro went to the computer, then called the inner one.
     expect(stack.enter(['outer', 'inner'], 'computer')).toBeNull();
     expect(stack.enter(['outer', 'inner'], 'browser')).toBeNull();
     // Out of both at once: the inner caller's `computer` is skipped — it would
@@ -936,11 +936,11 @@ describe('SkillSurfaceStack — the shared push/pop both loops use', () => {
   });
 
   it('a frame entered on the step a restore is for is entered from the restored surface', () => {
-    const stack = new SkillSurfaceStack();
+    const stack = new MacroSurfaceStack();
 
     stack.enter(['a'], 'computer');
     stack.enter(['a'], 'browser');
-    // Straight from skill A into skill B: the caller goes back to `computer`,
+    // Straight from macro A into macro B: the caller goes back to `computer`,
     // and B's caller surface is that one, not the browser A left behind.
     expect(stack.enter(['b'], 'browser')).toBe('computer');
     expect(stack.enter(['b'], 'browser')).toBeNull();
@@ -952,7 +952,7 @@ describe('SkillSurfaceStack — the shared push/pop both loops use', () => {
 // §5.4 — a bracket directive nobody dispatched never reaches the model
 // ---------------------------------------------------------------------------
 
-describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surface (§5.4)', () => {
+describe('an undispatched [tool:] / [macro:] line fails on the CLI computer surface (§5.4)', () => {
   const ACTED_OUT =
     'In computer mode a tool line is never handed to the model, because it would act it out on the real screen.';
 
@@ -1009,9 +1009,9 @@ describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surf
     expect(launchBrowserMock).not.toHaveBeenCalled();
   });
 
-  it('a raw [skill:] line fails the same way', async () => {
+  it('a raw [macro:] line fails the same way', async () => {
     const report = await runTest(
-      makeInstance(['[use computer]', '[skill: open-calculator]']),
+      makeInstance(['[use computer]', '[macro: open-calculator]']),
       configWithTools(),
       '',
       extras(),
@@ -1019,9 +1019,9 @@ describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surf
 
     expect(report.status).toBe('failed');
     expect(report.steps[1]!.error).toContain(
-      '[skill: open-calculator] was not run: skills are expanded into their steps before the run starts',
+      '[macro: open-calculator] was not run: macros are expanded into their steps before the run starts',
     );
-    expect(report.steps[1]!.error).toContain('In computer mode a skill line is never handed to the model');
+    expect(report.steps[1]!.error).toContain('In computer mode a macro line is never handed to the model');
     expect(executeComputerStepMock).not.toHaveBeenCalled();
   });
 

@@ -531,7 +531,7 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
       sentSteps,
       sourceLines: request.sourceLines,
       testFilePath: request.testFilePath ?? project.projectRoot,
-      expansionPossible: request.skillsDir !== undefined || request.sections !== undefined,
+      expansionPossible: request.macrosDir !== undefined || request.sections !== undefined,
       screenshotsReturn: ctx.screenshotsReturn,
       // A computer-mode capture is the whole desktop; the project's privacy
       // switch decides whether one may come back here (SPEC-use-computer.md §10.1).
@@ -877,7 +877,7 @@ function summarize(outcome: RunOutcome): string {
   // Rule 7 of stories/mcp-no-project.md, on the line a host that ignores
   // structured output will show: a run that landed on the user root because
   // no project resolved must say so, or a typo'd config filename becomes a
-  // working run with the project's skills mysteriously absent.
+  // working run with the project's macros mysteriously absent.
   if (outcome.scope === 'user') {
     lines.push(`Ran project-less against the user root (${outcome.projectRoot}).`);
   }
@@ -1801,7 +1801,7 @@ function summarizeErrand(
  *  — the AI executes it, so the failure is a wrong run rather than an error. */
 const STEP_SYNTAX = `
 Step syntax: plain English, one action per step. Also supported:
-  [skill: name arg=value]   run a reusable skill from the project's skills dir
+  [macro: name arg=value]   run a reusable macro from the project's macros dir
                             (sub/name for one kept in a subfolder of it)
   [tool: name arg=value]    call a project tool (JS/TS) directly
   [input: label]            needs a human — SKIPPED in an unattended run
@@ -1860,8 +1860,8 @@ somewhere else.`.trim();
 /**
  * The syntax crib, minus what an errand cannot do.
  *
- * `STEP_SYNTAX` teaches `[skill:]` and `[tool:]`, which `run_errand` refuses —
- * an errand carries no skills or tools directory — so handing it the same text
+ * `STEP_SYNTAX` teaches `[macro:]` and `[tool:]`, which `run_errand` refuses —
+ * an errand carries no macros or tools directory — so handing it the same text
  * would teach the one thing the handler then rejects.
  */
 const ERRAND_STEP_SYNTAX = `
@@ -1878,8 +1878,8 @@ Step syntax: plain English, one action per step. Also supported:
                             date: put what it needs in the step. Asked on
                             every run; for a fixed value, use a tool.
   Upload file attachments/x.png   a file path is relative to the project root
-[skill: ...] and [tool: ...] are refused here — those need run_steps in a
-project, which is what carries the skills and tools directories.`.trim();
+[macro: ...] and [tool: ...] are refused here — those need run_steps in a
+project, which is what carries the macros and tools directories.`.trim();
 
 /**
  * The two couplings between the settings, on the tools themselves.
@@ -2068,7 +2068,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'share page state and captured variables. Calls on one session run one at a time.\n' +
         'Works without a project too: from a directory with no steptix.config.json, steps run ' +
         'against the machine-wide user root (the result says scope: "user") — but ' +
-        '[skill:]/[tool:] steps are refused there, since skills and tools belong to a ' +
+        '[macro:]/[tool:] steps are refused there, since macros and tools belong to a ' +
         'project.\n\n' +
         CDP_NOTE +
         '\n\n' +
@@ -2220,7 +2220,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       title: 'List test files',
       description:
         "List the project's test files (absolute paths, sorted). Not filtered by type, so " +
-        'a skill file may appear here; run_test_file refuses those.',
+        'a macro file may appear here; run_test_file refuses those.',
       inputSchema: schemas.listTestFilesInput,
       outputSchema: schemas.listTestFilesOutput,
     },
@@ -3430,7 +3430,7 @@ function progressReporter(
   // same length. Server-side expansion breaks that, so it is omitted rather
   // than reported wrong.
   const expansionPossible =
-    assembled.request.skillsDir !== undefined || assembled.request.sections !== undefined;
+    assembled.request.macrosDir !== undefined || assembled.request.sections !== undefined;
   const total = expansionPossible ? undefined : assembled.sentSteps.length;
 
   return (completed, message) => {

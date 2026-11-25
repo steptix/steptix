@@ -74,14 +74,14 @@ describe('§4.1 what is not a surface switch at all', () => {
     // bracket INSIDE a longer step prose (§4.2's other half).
     'Verify the [use of cookies] banner is shown',
     'Read the terms on [use browser] and confirm',
-    // `[use` with no separator is not the token, the same rule `[skillful]`
+    // `[use` with no separator is not the token, the same rule `[macroscopic]`
     // gets from `invocationTokenPattern`.
     '[used]',
     '[user guide]',
     '[useful]',
     '[use-computer]',
     // Other directives.
-    '[skill: login]',
+    '[macro: login]',
     '[tool: echo value="hi"]',
     '[input: pin] Enter your PIN',
     '[interactive]',
@@ -182,14 +182,14 @@ describe('§4.1 the four refusals, each with a caret at the offending word', () 
 // ---------------------------------------------------------------------------
 
 describe('§4.2 a whole-step bracket that names no directive is an error', () => {
-  const REFUSED = ['[computer]', '[dekstop]', '[computer-use]', '[desktop mode]', '[skill]'];
+  const REFUSED = ['[computer]', '[dekstop]', '[computer-use]', '[desktop mode]', '[macro]'];
 
   it.each(REFUSED)('%s is refused', (line) => {
     expect(isWholeStepBracket(line)).toBe(true);
     expect(isKnownWholeStepDirective(line)).toBe(false);
     const message = unknownWholeStepBracketError(line, ' in tests/t.md at line 3')!;
     expect(message).toContain(`Cannot parse the step "${line}" in tests/t.md at line 3`);
-    expect(message).toContain('`[skill: name]`');
+    expect(message).toContain('`[macro: name]`');
     expect(message).toContain('`[interactive]`');
     expect(message).toContain('`[use computer]`');
   });
@@ -200,7 +200,7 @@ describe('§4.2 a whole-step bracket that names no directive is an error', () =>
       'Did you mean `[use computer]`?',
     );
     expect(closestDirective('[interactve]')).toBe('[interactive]');
-    expect(closestDirective('[skil: login]')).toBe('[skill: name]');
+    expect(closestDirective('[macr: login]')).toBe('[macro: name]');
   });
 
   it('stays silent rather than guessing when nothing is near', () => {
@@ -212,7 +212,7 @@ describe('§4.2 a whole-step bracket that names no directive is an error', () =>
 
   it('a bracket INSIDE a longer step is untouched — the rule judges whole steps only', () => {
     for (const line of [
-      '[skillful] navigation is expected',
+      '[macroscopic] navigation is expected',
       'Verify the [optional] banner',
       'Check that [computer] appears in the glossary',
       // Two tokens is not one token.
@@ -227,8 +227,8 @@ describe('§4.2 a whole-step bracket that names no directive is an error', () =>
 
   it('the known directives pass, case included', () => {
     for (const line of [
-      '[skill: login]',
-      '[skill login]',
+      '[macro: login]',
+      '[macro login]',
       '[tool: echo]',
       '[input: pin]',
       '[interactive]',

@@ -105,12 +105,12 @@ export function testsNeedProject(userRoot: string): McpToolError {
 }
 
 /**
- * `run_steps` in project-less mode with `[skill:]` / `[tool:]` steps.
+ * `run_steps` in project-less mode with `[macro:]` / `[tool:]` steps.
  *
- * Refused up front rather than sent: without a `skillsDir`/`toolsDir` on the
+ * Refused up front rather than sent: without a `macrosDir`/`toolsDir` on the
  * wire the server ships these lines to the AI as prose — a silent, expensive
  * wrong answer three layers down. And they cannot be given a directory,
- * deliberately: a machine-global skills or tools directory would mean any
+ * deliberately: a machine-global macros or tools directory would mean any
  * conversation, in any directory, executes code from a path no repo owns and
  * no review covers (stories/mcp-no-project.md, locked).
  */
@@ -121,14 +121,14 @@ export function projectlessCodeSteps(
   const where =
     searched.length > 0
       ? `No steptix.config.json was found (searched: ${searched.join(', ')}).`
-      : 'This call resolved to the machine-wide user root, which never holds skills or tools.';
+      : 'This call resolved to the machine-wide user root, which never holds macros or tools.';
   return preflightError(
-    `${offending.length} step(s) invoke a skill or tool, but no project resolved — ` +
-      'and skills and tools are code, code belongs to a project, so ' +
+    `${offending.length} step(s) invoke a macro or tool, but no project resolved — ` +
+      'and macros and tools are code, code belongs to a project, so ' +
       'project-less runs refuse them rather than sending them to the AI as prose.\n' +
       `${where}\n` +
       `Steps: ${offending.map((step) => JSON.stringify(step)).join(', ')}\n` +
-      'Run from inside the project (or pass project_root) to use its skills ' +
+      'Run from inside the project (or pass project_root) to use its macros ' +
       'and tools. Plain-English steps work fine without a project.',
   );
 }
@@ -671,18 +671,18 @@ export function errandsHaveNoSessions(sessionId: string): McpToolError {
 }
 
 /**
- * `[skill:]` / `[tool:]` in an errand's steps.
+ * `[macro:]` / `[tool:]` in an errand's steps.
  *
  * The same token rule `run_steps` refuses in user scope, and for the same
- * reason: an errand deliberately carries no `skillsDir`/`toolsDir`, and the
+ * reason: an errand deliberately carries no `macrosDir`/`toolsDir`, and the
  * server's behaviour for such a line with no directory on the wire is to hand
  * it to the AI as prose — a silent, expensive wrong answer three layers down.
  */
 export function errandCodeSteps(offending: readonly string[]): McpToolError {
   return preflightError(
-    `${offending.length} step(s) invoke a skill or tool, but an errand carries ` +
+    `${offending.length} step(s) invoke a macro or tool, but an errand carries ` +
       'neither: it borrows a tab and runs plain steps in it, with no project ' +
-      'skills or tools directory on the wire — so these would reach the AI as ' +
+      'macros or tools directory on the wire — so these would reach the AI as ' +
       'prose rather than executing.\n' +
       `Steps: ${offending.map((step) => JSON.stringify(step)).join(', ')}\n` +
       'Rewrite them as plain-English steps, or use run_steps in the project, ' +

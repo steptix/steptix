@@ -319,7 +319,7 @@ describe('project_root selection (§4a)', () => {
 
   it('stops the steptix.config.json walk at the allowed root', async () => {
     // The config lives one level ABOVE the allowed root: an unbounded walk
-    // would find it and pull skillsDir/toolsDir/.env from outside confinement.
+    // would find it and pull macrosDir/toolsDir/.env from outside confinement.
     const outer = seedProject(makeTmp());
     const root = path.join(outer, 'child');
     mkdirSync(path.join(root, 'tests'), { recursive: true });
@@ -369,30 +369,30 @@ describe('project_root selection (§4a)', () => {
 });
 
 describe('steptix.config.json', () => {
-  it('resolves declared skillsDir/toolsDir absolute, and omits ones that are absent', async () => {
+  it('resolves declared macrosDir/toolsDir absolute, and omits ones that are absent', async () => {
     const root = seedProject(makeTmp(), {
-      config: { tests: { skillsDir: './macros', toolsDir: './code/tools' } },
+      config: { tests: { macrosDir: './macros', toolsDir: './code/tools' } },
       dirs: ['macros'],
     });
     process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const project = await resolveProject({ projectRoot: root });
-    expect(project.skillsDir).toBe(path.join(root, 'macros'));
+    expect(project.macrosDir).toBe(path.join(root, 'macros'));
     expect(project.toolsDir).toBeNull();
   });
 
   it('falls back to the defaults.ts literals when the config omits them', async () => {
-    // The case the fallback exists for: a project with ./skills on disk that
-    // never mentions it. Without the literal every [skill: x] would ship to
+    // The case the fallback exists for: a project with ./macros on disk that
+    // never mentions it. Without the literal every [macro: x] would ship to
     // the AI as prose.
     const root = seedProject(makeTmp(), {
       config: { tests: { dir: './tests' } },
-      dirs: ['skills', 'tools/src'],
+      dirs: ['macros', 'tools/src'],
     });
     process.env['STEPTIX_MCP_ROOTS'] = root;
 
     const project = await resolveProject({ projectRoot: root });
-    expect(project.skillsDir).toBe(path.join(root, 'skills'));
+    expect(project.macrosDir).toBe(path.join(root, 'macros'));
     expect(project.toolsDir).toBe(path.join(root, 'tools', 'src'));
   });
 
@@ -654,8 +654,8 @@ describe('user scope (stories/mcp-no-project.md)', () => {
     expect(project.configPath).toBe(path.join(testUserRoot(), 'steptix.config.json'));
     // Rule 7's raw material: the walk that found nothing is on the result.
     expect(project.configSearch).toContain(root);
-    // Rule 6's floor: never a skills or tools directory.
-    expect(project.skillsDir).toBeNull();
+    // Rule 6's floor: never a macros or tools directory.
+    expect(project.macrosDir).toBeNull();
     expect(project.toolsDir).toBeNull();
   });
 
@@ -726,17 +726,17 @@ describe('user scope (stories/mcp-no-project.md)', () => {
 
   it('an explicit project_root naming the user root is user scope, whatever it contains', async () => {
     const userRoot = seedUserRoot({
-      config: { tests: { skillsDir: './skills' } },
+      config: { tests: { macrosDir: './macros' } },
       env: { STEPTIX_SERVER_URL: 'http://127.0.0.1:4444' },
     });
-    mkdirSync(path.join(userRoot, 'skills'), { recursive: true });
+    mkdirSync(path.join(userRoot, 'macros'), { recursive: true });
     process.env['STEPTIX_MCP_ROOTS'] = seedProject(makeTmp());
 
     const project = await resolveProject({ projectRoot: userRoot });
     expect(project.scope).toBe('user');
-    // Someone dropping a skills/ directory into the user root must not turn
+    // Someone dropping a macros/ directory into the user root must not turn
     // project-less conversations into ones that execute it (rule 6).
-    expect(project.skillsDir).toBeNull();
+    expect(project.macrosDir).toBeNull();
     expect(project.toolsDir).toBeNull();
     expect(project.serverUrl).toBe('http://127.0.0.1:4444');
   });
@@ -811,16 +811,16 @@ describe('user root joins the allow-list for ADDRESSING only, never project file
     expect(() => resolveTestsGlob(project)).toThrow(PreflightFailure);
   });
 
-  it('a project skillsDir or toolsDir pointing into the user root is refused, not loaded', async () => {
+  it('a project macrosDir or toolsDir pointing into the user root is refused, not loaded', async () => {
     // resolveProjectDir confines against the CONFIGURED roots before it looks
-    // for the directory — so a config aiming skills or tools at the user root,
+    // for the directory — so a config aiming macros or tools at the user root,
     // which `allowedRoots()` does list, is refused rather than handed a
     // directory that executes user-root code. The directory exists, so it is
     // the confinement that refuses it, not a missing path.
-    const target = path.join(testUserRoot(), 'skills');
+    const target = path.join(testUserRoot(), 'macros');
     mkdirSync(target, { recursive: true });
 
-    for (const key of ['skillsDir', 'toolsDir']) {
+    for (const key of ['macrosDir', 'toolsDir']) {
       const root = seedProject(makeTmp(), { config: { tests: { [key]: target } } });
       process.env['STEPTIX_MCP_ROOTS'] = root;
 
@@ -847,10 +847,10 @@ describe('user root joins the allow-list for ADDRESSING only, never project file
     // it, named explicitly. It must not become a real project loading code
     // from under %LOCALAPPDATA%\steptix.
     const sub = path.join(testUserRoot(), 'planted');
-    mkdirSync(path.join(sub, 'skills'), { recursive: true });
+    mkdirSync(path.join(sub, 'macros'), { recursive: true });
     writeFileSync(
       path.join(sub, 'steptix.config.json'),
-      JSON.stringify({ tests: { skillsDir: './skills' } }),
+      JSON.stringify({ tests: { macrosDir: './macros' } }),
     );
     writeEnvFile(path.join(sub, '.env'), { STEPTIX_SERVER_URL: 'http://127.0.0.1:3100' });
     process.env['STEPTIX_MCP_ROOTS'] = seedProject(makeTmp());
@@ -867,7 +867,7 @@ describe('user root joins the allow-list for ADDRESSING only, never project file
 
     await expect(resolveProject({ projectRoot: testUserRoot() })).resolves.toMatchObject({
       scope: 'user',
-      skillsDir: null,
+      macrosDir: null,
     });
   });
 });

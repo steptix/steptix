@@ -4,16 +4,16 @@ Use this document as context for an AI that generates tests for **Steptix** (the
 
 This is the rule-by-rule reference. For the mental model of how a step is executed and the phrasing that is known to work, read [test-writing-handbook.md](test-writing-handbook.md) first.
 
-The output is a Markdown test file, optionally accompanied by reusable Markdown skills, TypeScript tools, and fixture data. Ordinary steps are interpreted by AI against the live browser and executed through Playwright. Special forms such as skill calls, tool calls, and variable assignments are handled by the framework. Natural language is flexible; the surrounding file and invocation syntax is not.
+The output is a Markdown test file, optionally accompanied by reusable Markdown macros, TypeScript tools, and fixture data. Ordinary steps are interpreted by AI against the live browser and executed through Playwright. Special forms such as macro calls, tool calls, and variable assignments are handled by the framework. Natural language is flexible; the surrounding file and invocation syntax is not.
 
 ## Instructions for the test-writing AI
 
-1. Read the target project's `steptix.config.json`, relevant `context/**/*.md`, existing tests, skills, and tools before writing a test. Directory names below are defaults and can be configured.
-2. Use observed UI labels, supplied requirements, and existing application context. Do not invent URLs, selectors, API endpoints, accounts, expected values, skill names, or tool signatures.
+1. Read the target project's `steptix.config.json`, relevant `context/**/*.md`, existing tests, macros, and tools before writing a test. Directory names below are defaults and can be configured.
+2. Use observed UI labels, supplied requirements, and existing application context. Do not invent URLs, selectors, API endpoints, accounts, expected values, macro names, or tool signatures.
 3. Write one bounded instruction per numbered step. An action plus its completion condition is a useful single step: `Click Save and wait for the Saved message`.
 4. Make the expected result explicit. A successful click is not evidence that the business requirement passed. Add a `Verify` or `Assert` step with a concrete expected value or state.
 5. Supply every referenced input before use, and explicitly name every captured value that later steps need. Use placeholders for values that change between runs.
-6. Reuse an existing skill or tool only after reading its file. If a required helper does not exist, create it within the requested scope or identify it as a missing dependency. Calling a plausible name does not create a helper.
+6. Reuse an existing macro or tool only after reading its file. If a required helper does not exist, create it within the requested scope or identify it as a missing dependency. Calling a plausible name does not create a helper.
 7. For unattended runs, resolve all parameters and avoid `[input: ...]`, `[interactive]`, and instructions that require a human answer. `[use computer]` is a different case: nobody types, but the run drives the real mouse on a visible desktop nobody may touch, and the project must have opted in — see "Leaving the browser" below before writing one.
 8. Return the test and any required supporting files separately. Keep explanations and assumptions outside executable step text. Report whether you actually ran the test; a parser check alone does not establish that the application flow passes.
 
@@ -22,15 +22,15 @@ The output is a Markdown test file, optionally accompanied by reusable Markdown 
 | Default location | Purpose |
 | --- | --- |
 | `tests/**/*.md` | Runnable tests. |
-| `skills/**/*.md` | Reusable parameterised step sequences invoked explicitly with `[skill: ...]`. |
+| `macros/**/*.md` | Reusable parameterised step sequences invoked explicitly with `[macro: ...]`. |
 | `tools/src/` | Project tool modules invoked explicitly with `[tool: ...]`. |
-| `context/**/*.md` | Application knowledge supplied to the execution AI: terminology, page descriptions, workflows, and constraints. These files do not execute as skills. |
+| `context/**/*.md` | Application knowledge supplied to the execution AI: terminology, page descriptions, workflows, and constraints. These files do not execute as macros. |
 | `.env`, `.env.<name>` | Environment settings and secret values. |
 | `data/<name>.json` | Structured data selected by the environment name. |
 | `steptix.config.json` | Browser, AI, execution, directory, and reporting settings. |
 | `reports/` | Generated HTML reports by default. |
 
-Framework skills and tools are project files. They are separate from skills/plugins installed in the authoring AI's host. A host tool such as an email connector is not automatically available inside a `steptix` test.
+Framework macros and tools are project files. They are separate from the skills, plugins and connectors installed in the authoring AI's host (Agent Skills, for example). A host tool such as an email connector is not automatically available inside a `steptix` test.
 
 ## File format
 
@@ -77,7 +77,7 @@ Later examples illustrate individual features. Supply their application-specific
 
 | Location | Supported settings relevant to authors |
 | --- | --- |
-| YAML frontmatter | `tags: [smoke, login]`, `timeout: 90s`, `env: staging`, `dataFile: data/cases.json`, `dataSources:` mapping, and `type: skill` for library files. |
+| YAML frontmatter | `tags: [smoke, login]`, `timeout: 90s`, `env: staging`, `dataFile: data/cases.json`, `dataSources:` mapping, and `type: macro` for library files. |
 | `## Config` bullet list | `baseUrl`, `timeout`, `viewport`, `cdp`, `cdpTab`, `consoleLogLevel`, `serverFileLogLevel`, and `unmask`. Unrecognised keys are kept and never read, with no warning. |
 | `## Parameters` bullet list | `- name: value`, referenced in steps as `{{name}}`. |
 | `## Context` free text | Sent word for word to the AI with every step of the test, after the project's `context/**/*.md` files: how the app behaves, what may appear (ads, overlays, toasts), and any selectors or frame ids to use. `{{placeholders}}` in it are not substituted. |
@@ -121,7 +121,7 @@ Text entry normally replaces a field's contents; say explicitly when you need a 
 
 Tabs share their browser session. A separately opened browser supports independent actors/logins. `main` is the original tab label; `default` is the original browser label. Use explicit names for new tabs and browsers instead of guessing generated tab numbers. The standard close-page action does not close the main tab.
 
-Upload paths are resolved relative to the **test file's directory**, including upload steps expanded from a skill. Prefer forward slashes. Create or supply the fixture files; a path in prose does not generate a file. The upload action handles file inputs and file-chooser controls, not arbitrary operating-system UI.
+Upload paths are resolved relative to the **test file's directory**, including upload steps expanded from a macro. Prefer forward slashes. Create or supply the fixture files; a path in prose does not generate a file. The upload action handles file inputs and file-chooser controls, not arbitrary operating-system UI.
 
 The engine uses the DOM and can also use screenshots when configured. Do not promise pixel-perfect visual regression, accessibility audits, or arbitrary JavaScript execution as built-in natural-language test assertions. Implement specialised checks in tools when appropriate. Downloads and drag-and-drop choreography should use a verified project tool when the standard action vocabulary is insufficient. Native dialogs and other operating-system windows are not in this table because they are not in the page; they are reached by switching surface — see "Leaving the browser: `[use computer]` and `[use browser]`" below.
 
@@ -210,7 +210,7 @@ Use an explicit capture target:
 7. Assert that "{{summary}}" contains "{{order_id}}"
 ```
 
-The framework also supports a prefix such as `[output: order_id] Read the order number`, and natural-language `store as {{order_id}}`. `[as: name]` is **not** a framework marker: nothing parses it, and it works in some shipped examples only because the model happens to derive the same name from it. Do not use it in new files. For reusable skills, use **`[store as: name]`**: the skill expander rewrites that form (and the prose `store as {{name}}` form, through its braces) for output aliases and internal scope, but does not rewrite `[as: name]` or `[output: name]`. An aliased skill output written with those markers can retain the wrong name.
+The framework also supports a prefix such as `[output: order_id] Read the order number`, and natural-language `store as {{order_id}}`. `[as: name]` is **not** a framework marker: nothing parses it, and it works in some shipped examples only because the model happens to derive the same name from it. Do not use it in new files. For reusable macros, use **`[store as: name]`**: the macro expander rewrites that form (and the prose `store as {{name}}` form, through its braces) for output aliases and internal scope, but does not rewrite `[as: name]` or `[output: name]`. An aliased macro output written with those markers can retain the wrong name.
 
 Placeholders reach the model as tokens, not values: the step is shown as written, with a `## Values` block listing what each `{{name}}` and `${ref}` holds on this run (secret-named ones as `***`), and the real value is substituted when the action executes. An unresolved `{{name}}` stays literal in the step text, is listed as not yet captured, and fails the step if the model uses it in an action.
 
@@ -227,7 +227,7 @@ Reading link text and reading its `href` are different operations. Say which one
 3. Type "{{random_name}}" into the Name field
 ```
 
-Generate these knowing four things. **The model is asked on every run** — the step is never compiled. **It sees only the step text**, placeholders filled in: no page, no earlier steps, no date, so put today's date (or anything else it needs) in the step from a parameter or a tool. **It is a poor source of randomness**: "random" can repeat between runs. **For a value that must be the same every time, write a tool.** Name the value with `[store as: name]`, which is authoritative; without an explicit name the model's name must appear in the step as a whole word, or the step fails. That only rules out invented names: a step that never names its value can be stored under any word of its sentence, so always name it. In a skill the name must be `[store as: name]` or `store as {{name}}`. The step fails, rather than storing anything, when the model says the step cannot be done (for example it needs a date it was not given), when its answer is empty, or when a `{{name}}` / `${…}` in the step does not resolve. Secret-named values reach the model as `***`, and so does a secret that a skill argument or a looped section's row writes into the step's text. A step that needs one fails: the model is told `***` is a value hidden from it, and an answer that still contains the mask, in any spelling, is refused rather than stored. The error names what was hidden, never its value; a variable hidden only by its name (`{{keyword}}` contains `key`) is sent as itself once renamed. `[use ai]` must open the step, and it cannot be a control line's tail.
+Generate these knowing four things. **The model is asked on every run** — the step is never compiled. **It sees only the step text**, placeholders filled in: no page, no earlier steps, no date, so put today's date (or anything else it needs) in the step from a parameter or a tool. **It is a poor source of randomness**: "random" can repeat between runs. **For a value that must be the same every time, write a tool.** Name the value with `[store as: name]`, which is authoritative; without an explicit name the model's name must appear in the step as a whole word, or the step fails. That only rules out invented names: a step that never names its value can be stored under any word of its sentence, so always name it. In a macro the name must be `[store as: name]` or `store as {{name}}`. The step fails, rather than storing anything, when the model says the step cannot be done (for example it needs a date it was not given), when its answer is empty, or when a `{{name}}` / `${…}` in the step does not resolve. Secret-named values reach the model as `***`, and so does a secret that a macro argument or a looped section's row writes into the step's text. A step that needs one fails: the model is told `***` is a value hidden from it, and an answer that still contains the mask, in any spelling, is refused rather than stored. The error names what was hidden, never its value; a variable hidden only by its name (`{{keyword}}` contains `key`) is sent as itself once renamed. `[use ai]` must open the step, and it cannot be a control line's tail.
 
 ### Reading a table into row records
 
@@ -274,7 +274,7 @@ Whole-table assertions are not available yet. Do not write `Assert that {{paymen
 
 | Syntax | Meaning |
 | --- | --- |
-| `{{email}}` | Runtime parameter, data-row column, captured value, or tool/skill output. |
+| `{{email}}` | Runtime parameter, data-row column, captured value, or tool/macro output. |
 | `- password: $TEST_PASSWORD` in Parameters | Resolve a parameter from an environment variable. This is not shell execution or a general inline `$VAR` substitution language. |
 | `${env.BASE_URL}` | A setting from the selected environment bundle. |
 | `${data.users.admin.email}` | A nested value from the environment's `data/<name>.json`. |
@@ -289,7 +289,7 @@ dataSources:
   catalog: ../data/catalog.json
 ```
 
-Those paths resolve relative to the test file. `env` and `data` are reserved source names. JSON string leaves such as `"$TEST_PASSWORD"` can refer to environment values. A skill may declare its own `dataSources`; those namespaces belong to the skill, and its source paths resolve relative to the skill file. Do not assume a caller's named source is visible inside a skill; pass the needed value as a parameter.
+Those paths resolve relative to the test file. `env` and `data` are reserved source names. JSON string leaves such as `"$TEST_PASSWORD"` can refer to environment values. A macro may declare its own `dataSources`; those namespaces belong to the macro, and its source paths resolve relative to the macro file. Do not assume a caller's named source is visible inside a macro; pass the needed value as a parameter.
 
 Keep real credentials in the environment, not in generated Markdown or fixtures. Never type `***` as a password: it is a redaction marker. `unmask` is for a deliberately nonsecret value whose name was mistakenly classified as secret, not for exposing credentials. It governs what is shown live — the `## Values` block the model reads and Steptix's Variables surfaces — and never the report, the run log or the console line, which star an unmasked name regardless. So `unmask` cannot put a value into a file that leaves the machine, and it is not a way to make a credential visible in a report. It currently takes effect on the `steptix` CLI and the MCP tools only: a run started from Steptix does not send the list to the server.
 
@@ -349,15 +349,15 @@ Alternatively use frontmatter `dataFile: data/cases.json` or a simple CSV. `data
 
 The entire step text `Search each product` calls the section. Matching is trimmed and case-insensitive, but punctuation and Markdown formatting matter: `Search each product.` and `**Search each product**` are not that call. `{{section_name}}` does not dynamically dispatch a section.
 
-All main-flow steps must precede the first `###` section. A section body runs only when called; it shares the caller's variables. Sections can call other sections or skills, but recursion/cycles are rejected. Use unique, descriptive names; reserved headings such as `Steps`, `Config`, and `Parameters` cannot be section names. Use the CLI or Steptix Native for sections; the legacy Monaco client refuses sectioned files.
+All main-flow steps must precede the first `###` section. A section body runs only when called; it shares the caller's variables. Sections can call other sections or macros, but recursion/cycles are rejected. Use unique, descriptive names; reserved headings such as `Steps`, `Config`, and `Parameters` cannot be section names. Use the CLI or Steptix Native for sections; the legacy Monaco client refuses sectioned files.
 
-## Skills: reuse across tests
+## Macros: reuse across tests
 
-Create `skills/auth/sign_in.md`:
+Create `macros/auth/sign_in.md`:
 
 ```markdown
 ---
-type: skill
+type: macro
 ---
 
 # sign_in
@@ -391,20 +391,20 @@ Call it from a test with all inputs supplied:
 - expected_name: Test User
 
 ## Steps
-1. [skill: auth/sign_in login_url email password out.display_name="signed_in_name"]
+1. [macro: auth/sign_in login_url email password out.display_name="signed_in_name"]
 2. Assert that "{{signed_in_name}}" equals "{{expected_name}}"
 ```
 
-Skill rules:
+Macro rules:
 
-- The path selects the file: `auth/sign_in` means `<skillsDir>/auth/sign_in.md`. Match the file's case and omit `.md`. A leading `/` is optional for skill references.
-- Every declared parameter is required at the call site. Text after `- parameter:` in a skill is descriptive; it does **not** supply an optional default. An undeclared extra argument is only warned about, and it still overwrites a same-named `{{name}}` in the body.
+- The path selects the file: `auth/sign_in` means `<macrosDir>/auth/sign_in.md`. Match the file's case and omit `.md`. A leading `/` is optional for macro references.
+- Every declared parameter is required at the call site. Text after `- parameter:` in a macro is descriptive; it does **not** supply an optional default. An undeclared extra argument is only warned about, and it still overwrites a same-named `{{name}}` in the body.
 - Bare `email` is shorthand for `email="{{email}}"`. Explicit `email="${data.users.admin.email}"` is also useful when an environment bundle is selected.
-- Skills expand before execution. Their parameters are substituted and internal variables are namespaced per invocation. Declare anything the caller needs under `## Outputs` and actually capture or assign it in the body.
+- Macros expand before execution. Their parameters are substituted and internal variables are namespaced per invocation. Declare anything the caller needs under `## Outputs` and actually capture or assign it in the body.
 - Declared outputs use their declared names in the caller unless aliased. `out.display_name="signed_in_name"` maps the declared output to a caller variable. Use different aliases for repeated calls whose outputs must both survive.
-- A skill's `Set` step may assign internal variables or declared outputs, but cannot assign to its own input parameters.
-- A nested `[skill: auth/mfa ...]` is still resolved from the skills root, not from the calling skill's subfolder. Cycles are errors.
-- Prefer explicit parameters over accidental access to a caller's variables. Put setup needed by a skill in its steps; do not assume test-only metadata or hooks in a skill establish a new test run.
+- A macro's `Set` step may assign internal variables or declared outputs, but cannot assign to its own input parameters.
+- A nested `[macro: auth/mfa ...]` is still resolved from the macros root, not from the calling macro's subfolder. Cycles are errors.
+- Prefer explicit parameters over accidental access to a caller's variables. Put setup needed by a macro in its steps; do not assume test-only metadata or hooks in a macro establish a new test run.
 
 ## Tools: deterministic code and external work
 
@@ -461,7 +461,7 @@ export default defineTool({
 
 Ensure `tests.toolsDir` points to the module directory (default `./tools/src`) and the tools project has its dependencies installed. The [README tool setup](../README.md#one-time-setup) gives a standalone TypeScript project layout.
 
-### Invocation grammar for skills and tools
+### Invocation grammar for macros and tools
 
 | Form | Meaning |
 | --- | --- |
@@ -475,9 +475,9 @@ Ensure `tests.toolsDir` points to the module directory (default `./tools/src`) a
 
 `[use ai]` is not an invocation and takes no arguments: `[use ai timeout=30] …` is a parse error. The step it asks goes after the `]`, and the name it stores under goes in `[store as: name]`.
 
-Use lowercase `[skill: ...]` and `[tool: ...]` (the keyword is case-sensitive), one invocation per step. The colon is optional for these two forms, but including it makes malformed calls fail clearly; without it, a malformed call silently becomes prose for the model. Separate arguments with spaces, not commas. String values require double quotes; `email=alice`, `email='alice'`, and `email={{email}}` are not supported string forms. There is no embedded-double-quote escape mechanism for the quoted scalar form; pass complex values through a variable or fixture instead. Do not append another action after the closing bracket. A leading descriptive label is allowed but is metadata, not an extra executable instruction.
+Use lowercase `[macro: ...]` and `[tool: ...]` (the keyword is case-sensitive), one invocation per step. The colon is optional for these two forms, but including it makes malformed calls fail clearly; without it, a malformed call silently becomes prose for the model. Separate arguments with spaces, not commas. String values require double quotes; `email=alice`, `email='alice'`, and `email={{email}}` are not supported string forms. There is no embedded-double-quote escape mechanism for the quoted scalar form; pass complex values through a variable or fixture instead. Do not append another action after the closing bracket. A leading descriptive label is allowed but is metadata, not an extra executable instruction.
 
-Tool paths differ from skill paths:
+Tool paths differ from macro paths:
 
 - `[tool: check_health]` selects the tool `check_health` in `tools/src/check_health.ts`.
 - `[tool: strings/upper text="hello"]` selects the exported tool `upper` in `tools/src/strings.ts`.
@@ -497,9 +497,9 @@ The CLI file runner supports hooks before `## Steps`. Do not assume equivalent h
 - after: Sign out if the account menu is available
 ```
 
-`before` runs once before the flow; `beforeEach` and `afterEach` wrap steps; `after` is best-effort teardown. Tools and skills can be called from hooks. Keep essential outcome assertions in the main flow: an `after` failure is logged and does not flip a passing test to failed. An `afterEach` failure, by contrast, aborts the test.
+`before` runs once before the flow; `beforeEach` and `afterEach` wrap steps; `after` is best-effort teardown. Tools and macros can be called from hooks. Keep essential outcome assertions in the main flow: an `after` failure is logged and does not flip a passing test to failed. An `afterEach` failure, by contrast, aborts the test.
 
-`[no-hooks]` skips the per-step hooks, not the once-per-test hooks. For expanded sections/skills, put it on the **invocation** to cover the body, for example `1. [no-hooks] Inspect warning dialog`. A marker inside a section body is stripped and does not independently disable its hooks.
+`[no-hooks]` skips the per-step hooks, not the once-per-test hooks. For expanded sections/macros, put it on the **invocation** to cover the body, for example `1. [no-hooks] Inspect warning dialog`. A marker inside a section body is stripped and does not independently disable its hooks.
 
 Implementation caveat: older hook documentation mentions `hooks: replace` and `- beforeEach: none` as overrides. The current Markdown frontmatter parser does not preserve `hooks`, and `none` adds no hook rather than clearing project defaults. Do not rely on those forms to disable configured defaults; use verified project configuration and invocation-level `[no-hooks]` as appropriate.
 
@@ -519,9 +519,9 @@ For example, after submitting a sign-in form:
 4. Verify the Dashboard heading is visible
 ```
 
-Keep watch bodies to self-contained browser instructions and use a normal browser wait or assertion as continuation. A `[tool: ...]`, `[skill: ...]` or section name inside a watch clause is still not conditional dispatch: the line is prose and the model performs what it can of it.
+Keep watch bodies to self-contained browser instructions and use a normal browser wait or assertion as continuation. A `[tool: ...]`, `[macro: ...]` or section name inside a watch clause is still not conditional dispatch: the line is prose and the model performs what it can of it.
 
-The decision and loop forms are six numbered-line kinds, each ending in a **tail** that is exactly one step — a `### Section` name, a `[skill: ...]`, a `[tool: ...]`, a `Set {{x}} to "..."`, or a plain browser instruction. A body of more than one step goes in a section, and that is also the only way to nest one decision inside another. Nothing is indented; indented sub-lists are not steps.
+The decision and loop forms are six numbered-line kinds, each ending in a **tail** that is exactly one step — a `### Section` name, a `[macro: ...]`, a `[tool: ...]`, a `Set {{x}} to "..."`, or a plain browser instruction. A body of more than one step goes in a section, and that is also the only way to nest one decision inside another. Nothing is indented; indented sub-lists are not steps.
 
 ```markdown
 ## Steps
@@ -557,7 +557,7 @@ Rules that decide whether a line parses and what it does:
 - Splitting is positional, so reword rather than fight it: the condition of an `If` or `Else if` ends at the first ` then `, a `While` condition ends at the first comma, and a `Repeat` tail ends at the first ` until `.
 - Each evaluation costs one model call — unless every condition in it is literal (see "Conditions in the body are cheap" under "Reading a table into row records" above), when it costs none — so a three-pass `While` costs four, and a plain-instruction tail costs a further call to perform it. `If a cookie banner appears, reject it` is cheaper as a watch.
 
-So embedding a skill or tool in an `If` clause is no longer the thing to avoid — it is the point of the `then` form. Reach for a tool when the branching is arithmetic, string parsing, or anything the page cannot be asked about in a `Verify` sentence, and for a table under a section when the list of cases is fixed and authored rather than read off the page.
+So embedding a macro or tool in an `If` clause is no longer the thing to avoid — it is the point of the `then` form. Reach for a tool when the branching is arithmetic, string parsing, or anything the page cannot be asked about in a `Verify` sentence, and for a table under a section when the list of cases is fixed and authored rather than read off the page.
 
 For an explicitly attended test, `1. [input: otp] Enter the one-time code` captures the person's answer as `{{otp}}`; `1. [interactive] Complete the manual setup` opens interactive steering. These require a compatible interactive runner. They are not suitable substitutes for automated setup in CI. An `[input: ...]` line placed *between* members of a chain is refused at parse time, because the batch split would put the halves of one decision in different requests; put it inside the tail's section body instead.
 
@@ -591,10 +591,10 @@ The framework's `steptix mcp` server exposes tools to an external AI host. Read 
 | `list_sessions`, `close_session` | Manage the sessions created for exploration. |
 | `start_cdp_browser`, `list_cdp_browsers` | Discover or start a persistent test browser when an existing sign-in is required. Use returned profiles/ports, not guessed identifiers. |
 | `peek_tab` | Inspect an existing tab before deciding what to drive. |
-| `run_errand` | Perform a temporary task in an existing tab. It refuses skill/tool invocations and a `session_id`, leaves no session or variable scope behind, and is not a replacement for validating a saved test. |
+| `run_errand` | Perform a temporary task in an existing tab. It refuses macro/tool invocations and a `session_id`, leaves no session or variable scope behind, and is not a replacement for validating a saved test. |
 | `navigate_tab`, `focus_cdp_tab`, `close_cdp_tab`, `log_into_site`, `server_status` | Also available: open a URL in a tab with no model turn, bring a CDP tab to the front or close it, run a sign-in flow, and check the server. |
 
-Only use a real, permitted project root; omit `project_root` when the server already has the correct project. A projectless session has no project skills/tools catalogue. Ad-hoc steps also do not automatically import a saved test's section definitions, tables, and hooks: validate the actual file afterwards.
+Only use a real, permitted project root; omit `project_root` when the server already has the correct project. A projectless session has no project macros/tools catalogue. Ad-hoc steps also do not automatically import a saved test's section definitions, tables, and hooks: validate the actual file afterwards.
 
 Current MCP limits matter when assessing a green result: `run_test_file` runs only the **first row** of a top-level inline table and returns a warning; it does not expand external `dataFile` rows or execute file hooks. Use the CLI to validate the full file when those features matter, and the CLI or Steptix Native for all inline-table rows. Explicit `[input:]` and `[interactive]` steps are reported as skipped in unattended execution; other requests for clarification can fail. Read warnings and skipped steps, not just the aggregate status.
 
@@ -606,7 +606,7 @@ CDP uses persistent browser state. Configure `cdp` and an appropriate `cdpTab` (
 - Main flow appears before section definitions, and every intended section is actually called.
 - Targets and expected outcomes come from the real application or supplied requirements.
 - Every placeholder has a parameter, fixture, capture, loop binding, or declared output that supplies it before use, and every dotted `{{item.property}}` names a column its table read actually asked for, or is `_row`.
-- Every referenced skill/tool exists, all required inputs are passed, and output aliases name real outputs.
+- Every referenced macro/tool exists, all required inputs are passed, and output aliases name real outputs.
 - Environment selection, relative file paths, and fixture contents are correct for the execution project.
 - Waits name observable states; assertions can fail when the requirement is violated.
 - Unattended tests contain no unresolved human dependencies. A `[use computer]` test says in its prose what the machine must look like — visible unlocked desktop, mouse untouched, `desktop.enabled: true` — and brings its target window forward itself.
@@ -622,7 +622,7 @@ Use these when extending or checking this guide. Source and tests take precedenc
 | --- | --- |
 | Markdown, metadata, sections, and tables | [markdown.ts](../src/parser/markdown.ts), [frontmatter.ts](../src/parser/frontmatter.ts), [data-rows.ts](../src/parser/data-rows.ts), [step-lines.ts](../runner-core/src/step-lines.ts) |
 | Variables and assignments | [parameters.ts](../src/parser/parameters.ts), [set-step.ts](../src/parser/set-step.ts), [interpolate-env-data.ts](../src/parser/interpolate-env-data.ts) |
-| Skill scope and invocation grammar | [expander.ts](../src/skills/expander.ts), [invocation-parser.ts](../src/parser/invocation-parser.ts) |
+| Macro scope and invocation grammar | [expander.ts](../src/macros/expander.ts), [invocation-parser.ts](../src/parser/invocation-parser.ts) |
 | Tool signatures, lookup, and execution | [types.ts](../src/tools/types.ts), [registry.ts](../src/tools/registry.ts), [executor.ts](../src/tools/executor.ts), [finalise.ts](../src/tools/finalise.ts) |
 | Supported AI actions and interpretation | [types.ts](../src/ai/types.ts), [prompts.ts](../src/ai/prompts.ts), [step-executor.ts](../src/runner/step-executor.ts) |
 | Table reads: action validation and extraction | [action-parser.ts](../src/ai/action-parser.ts), [actions.ts](../src/browser/actions.ts), [SPEC-structured-table-reads.md](specs/SPEC-structured-table-reads.md) |

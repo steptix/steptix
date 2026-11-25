@@ -7,8 +7,8 @@ describe('parseToolCall — non-matches', () => {
     expect(parseToolCall('Verify the page has loaded')).toBeNull();
   });
 
-  it('returns null for skill calls (different prefix)', () => {
-    expect(parseToolCall('[skill: login]')).toBeNull();
+  it('returns null for macro calls (different prefix)', () => {
+    expect(parseToolCall('[macro: login]')).toBeNull();
   });
 
   it('returns null for empty / whitespace-only lines', () => {
@@ -17,7 +17,7 @@ describe('parseToolCall — non-matches', () => {
   });
 });
 
-describe('parseToolCall — optional colon (parity with skill calls)', () => {
+describe('parseToolCall — optional colon (parity with macro calls)', () => {
   it('parses `[tool name]` identically to `[tool: name]`', () => {
     const bare = parseToolCall('[tool seed_cart items=2]');
     expect(bare).toEqual(parseToolCall('[tool: seed_cart items=2]'));
@@ -36,7 +36,7 @@ describe('parseToolCall — optional colon (parity with skill calls)', () => {
 });
 
 // The grammar below is the shared `parseInvocation` (src/parser/invocation-parser.ts),
-// which tests/skill-call-parser.test.ts covers case by case. Here: one
+// which tests/macro-call-parser.test.ts covers case by case. Here: one
 // representative per area, so a tool grammar that forked from the shared one
 // would still be caught, plus what is the tool's own — slash-qualified refs
 // (`allowSlashInName`) and the ToolCall shape the wrapper builds.
@@ -89,7 +89,7 @@ describe('parseToolCall — happy path', () => {
   });
 });
 
-describe('parseToolCall — bare-identifier shorthand (parity with skill calls)', () => {
+describe('parseToolCall — bare-identifier shorthand (parity with macro calls)', () => {
   it('mixes shorthand and explicit args in one call', () => {
     const result = parseToolCall(
       '[tool: do_thing username password role="admin" out.session_id]',
@@ -146,7 +146,7 @@ describe('parseToolCall — syntax errors', () => {
     }
   });
 
-  it('error class name is ToolCallSyntaxError (distinct from skill error)', () => {
+  it('error class name is ToolCallSyntaxError (distinct from macro error)', () => {
     try {
       parseToolCall('[tool: foo bar=baz]');
       throw new Error('expected throw');

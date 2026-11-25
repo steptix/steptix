@@ -1,5 +1,5 @@
 /**
- * `toolFileFor` / `canonicalSkillName` / `collectSkillNames` — where an
+ * `toolFileFor` / `canonicalMacroName` / `collectMacroNames` — where an
  * invocation name points, and what completion may offer.
  *
  * These were extracted from `definition-provider.ts` and `section-providers.ts`
@@ -7,11 +7,11 @@
  * Every one of them MIRRORS a canonical implementation in the root package:
  *
  *   toolFileFor        ← parseToolRef       (src/tools/registry.ts)
- *   canonicalSkillName ← parseSkillCall     (src/skills/skill-call-parser.ts)
- *   collectSkillNames  ← loadSkill's layout + listToolFiles' walk rules
+ *   canonicalMacroName ← parseMacroCall     (src/macros/macro-call-parser.ts)
+ *   collectMacroNames  ← loadMacro's layout + listToolFiles' walk rules
  *
  * The parity rows below are copied verbatim from the canonical implementations'
- * own tests (tests/tool-ref-parser.test.ts, tests/skill-call-parser.test.ts) and
+ * own tests (tests/tool-ref-parser.test.ts, tests/macro-call-parser.test.ts) and
  * hardcode the expected values rather than importing `src/` — the root package
  * is not a dependency of the extension, and a mirror that imports its original
  * proves nothing about drift anyway. If a row here disagrees with the root
@@ -29,13 +29,13 @@ import * as path from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
 import {
   TOOL_FILE_EXTS,
-  canonicalSkillName,
-  collectSkillNames,
-  openSkillArgsContext,
-  openSkillNamePrefix,
+  canonicalMacroName,
+  collectMacroNames,
+  openMacroArgsContext,
+  openMacroNamePrefix,
   parseInvocationLine,
-  skillHeading,
-  skillIoFor,
+  macroHeading,
+  macroIoFor,
   toolFileFor,
 } from '../src/extension/invocation-target-core.ts';
 
@@ -70,7 +70,7 @@ test('toolFileFor resolves a still-typing ref to the file being typed into', () 
 });
 
 test('toolFileFor refuses a leading slash, exactly like parseToolRef', () => {
-  // `[skill: /a/b]` is legal sugar at runtime; `[tool: /a/b]` is not —
+  // `[macro: /a/b]` is legal sugar at runtime; `[tool: /a/b]` is not —
   // parseToolRef throws "empty path segment" on it. Navigating would bless a
   // ref the runner rejects, so the editor warns instead.
   assert.equal(toolFileFor('/check_health'), null);
@@ -102,16 +102,16 @@ test('TOOL_FILE_EXTS is the set of extensions the registry indexes', () => {
   assert.deepEqual([...TOOL_FILE_EXTS].sort(), registryExts.sort());
 });
 
-// ── canonicalSkillName: parity with parseSkillCall ───────────────────────────
+// ── canonicalMacroName: parity with parseMacroCall ───────────────────────────
 
-test('canonicalSkillName canonicalises exactly what parseSkillCall accepts', () => {
+test('canonicalMacroName canonicalises exactly what parseMacroCall accepts', () => {
   const rows = [
     ['auth/login', 'auth/login'],
     ['/auth/login', 'auth/login'],
     ['flat', 'flat'],
     ['/flat', 'flat'],
     ['admin/users/create_user', 'admin/users/create_user'],
-    // Every spelling below throws SkillCallSyntaxError in the runner, so the
+    // Every spelling below throws MacroCallSyntaxError in the runner, so the
     // editor must refuse to navigate rather than let path.join collapse it.
     ['auth//login', null],
     ['auth/', null],
@@ -121,24 +121,24 @@ test('canonicalSkillName canonicalises exactly what parseSkillCall accepts', () 
   ];
   for (const [input, expected] of rows) {
     assert.equal(
-      canonicalSkillName(input),
+      canonicalMacroName(input),
       expected,
-      `canonicalSkillName("${input}") should be ${JSON.stringify(expected)}`,
+      `canonicalMacroName("${input}") should be ${JSON.stringify(expected)}`,
     );
   }
 });
 
-test('skillHeading is the last path segment', () => {
-  assert.equal(skillHeading('auth/login'), 'login');
-  assert.equal(skillHeading('admin/users/create_user'), 'create_user');
-  assert.equal(skillHeading('flat'), 'flat');
+test('macroHeading is the last path segment', () => {
+  assert.equal(macroHeading('auth/login'), 'login');
+  assert.equal(macroHeading('admin/users/create_user'), 'create_user');
+  assert.equal(macroHeading('flat'), 'flat');
 });
 
-// ── collectSkillNames ────────────────────────────────────────────────────────
+// ── collectMacroNames ────────────────────────────────────────────────────────
 
-/** Build a skills tree under a fresh tmp dir. Keys are `/`-separated paths. */
-function makeSkillsDir(files) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-skills-'));
+/** Build a macros tree under a fresh tmp dir. Keys are `/`-separated paths. */
+function makeMacrosDir(files) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-macros-'));
   for (const rel of files) {
     const full = path.join(root, ...rel.split('/'));
     fs.mkdirSync(path.dirname(full), { recursive: true });
@@ -148,36 +148,36 @@ function makeSkillsDir(files) {
 }
 
 /**
- * Remove a tree `makeSkillsDir` built. On Windows, Defender or the indexer can
+ * Remove a tree `makeMacrosDir` built. On Windows, Defender or the indexer can
  * hold a just-written file for a moment, and `force` only forgives ENOENT —
  * without retries an EBUSY/EPERM here would fail a test whose assertions all
  * passed.
  */
-function removeSkillsDir(root) {
+function removeMacrosDir(root) {
   fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
-test('collectSkillNames emits subfolder skills with forward slashes, sorted', () => {
-  const root = makeSkillsDir([
+test('collectMacroNames emits subfolder macros with forward slashes, sorted', () => {
+  const root = makeMacrosDir([
     'capture_url.md',
     'auth/login.md',
     'auth/reset_password.md',
     'admin/users/create_user.md',
   ]);
   try {
-    assert.deepEqual(collectSkillNames(root), [
+    assert.deepEqual(collectMacroNames(root), [
       'admin/users/create_user',
       'auth/login',
       'auth/reset_password',
       'capture_url',
     ]);
   } finally {
-    removeSkillsDir(root);
+    removeMacrosDir(root);
   }
 });
 
-test('collectSkillNames skips dot-dirs, node_modules and non-markdown files', () => {
-  const root = makeSkillsDir([
+test('collectMacroNames skips dot-dirs, node_modules and non-markdown files', () => {
+  const root = makeMacrosDir([
     'login.md',
     '.steptix-codebehind-cache/login.steps.ts.candidate',
     '.steptix-codebehind-cache/notes.md',
@@ -185,31 +185,31 @@ test('collectSkillNames skips dot-dirs, node_modules and non-markdown files', ()
     'auth/login.steps.ts',
   ]);
   try {
-    assert.deepEqual(collectSkillNames(root), ['login']);
+    assert.deepEqual(collectMacroNames(root), ['login']);
   } finally {
-    removeSkillsDir(root);
+    removeMacrosDir(root);
   }
 });
 
-test('collectSkillNames drops names the invocation grammar cannot lex', () => {
-  // `[skill: bad dir/x]` stops lexing at the space and `[skill: v1.2/x]` at the
+test('collectMacroNames drops names the invocation grammar cannot lex', () => {
+  // `[macro: bad dir/x]` stops lexing at the space and `[macro: v1.2/x]` at the
   // dot, so offering either as a completion would insert a step that fails to
   // parse. Same for a file whose basename has a space.
-  const root = makeSkillsDir([
+  const root = makeMacrosDir([
     'bad dir/x.md',
     'v1.2/y.md',
     'ok_dir/z.md',
     'has space.md',
   ]);
   try {
-    assert.deepEqual(collectSkillNames(root), ['ok_dir/z']);
+    assert.deepEqual(collectMacroNames(root), ['ok_dir/z']);
   } finally {
-    removeSkillsDir(root);
+    removeMacrosDir(root);
   }
 });
 
-test('collectSkillNames returns [] for a missing skills dir', () => {
-  assert.deepEqual(collectSkillNames(path.join(os.tmpdir(), 'tb-skills-does-not-exist')), []);
+test('collectMacroNames returns [] for a missing macros dir', () => {
+  assert.deepEqual(collectMacroNames(path.join(os.tmpdir(), 'tb-macros-does-not-exist')), []);
 });
 
 /**
@@ -236,7 +236,7 @@ function countingReaddirs(limit, fn) {
   }
 }
 
-test('collectSkillNames survives self-referential directory links (visited-set, not depth)', (t) => {
+test('collectMacroNames survives self-referential directory links (visited-set, not depth)', (t) => {
   // Two links back into the root: a depth cap alone makes this walk
   // O(links^depth) — measured in MINUTES at depth 16 — and it runs
   // synchronously per completion keystroke. The realpath visited-set means
@@ -244,7 +244,7 @@ test('collectSkillNames survives self-referential directory links (visited-set, 
   // the walk stays proportional to the actual tree. That is asserted as a
   // count of reads rather than a wall-clock budget, which a busy machine can
   // miss for reasons that have nothing to do with the walk.
-  const root = makeSkillsDir(['real/login.md', 'real/deep/nested.md']);
+  const root = makeMacrosDir(['real/login.md', 'real/deep/nested.md']);
   try {
     try {
       fs.symlinkSync(root, path.join(root, 'loop_a'), 'junction');
@@ -253,7 +253,7 @@ test('collectSkillNames survives self-referential directory links (visited-set, 
       t.skip(`cannot create junctions here: ${err.code ?? err.message}`);
       return;
     }
-    const { result: names, reads } = countingReaddirs(50, () => collectSkillNames(root));
+    const { result: names, reads } = countingReaddirs(50, () => collectMacroNames(root));
     // root, real, real/deep — and nothing through either loop.
     assert.equal(
       reads.length,
@@ -264,18 +264,18 @@ test('collectSkillNames survives self-referential directory links (visited-set, 
     // an already-visited directory and are skipped outright.
     assert.deepEqual(names, ['real/deep/nested', 'real/login']);
   } finally {
-    removeSkillsDir(root);
+    removeMacrosDir(root);
   }
 });
 
-test('collectSkillNames offers a junctioned subfolder once, under the first prefix walked', (t) => {
+test('collectMacroNames offers a junctioned subfolder once, under the first prefix walked', (t) => {
   // A junction to a SIBLING directory is the legitimate share case. Each real
   // directory is owned by whichever prefix reaches it first, and both
   // spellings resolve at runtime — the set exists to stop loops and duplicate
   // fan-out, not to pick a canonical alias. Which prefix wins depends on
   // readdir order, which NTFS sorts by name but other filesystems need not,
   // so assert "exactly one of the two spellings" rather than a fixed winner.
-  const root = makeSkillsDir(['real/login.md']);
+  const root = makeMacrosDir(['real/login.md']);
   try {
     try {
       fs.symlinkSync(path.join(root, 'real'), path.join(root, 'linked'), 'junction');
@@ -283,23 +283,23 @@ test('collectSkillNames offers a junctioned subfolder once, under the first pref
       t.skip(`cannot create junctions here: ${err.code ?? err.message}`);
       return;
     }
-    const names = collectSkillNames(root);
+    const names = collectMacroNames(root);
     assert.equal(names.length, 1, `one real dir, one visit: ${JSON.stringify(names)}`);
     assert.ok(
       names[0] === 'linked/login' || names[0] === 'real/login',
       `either spelling resolves at runtime, got ${JSON.stringify(names)}`,
     );
   } finally {
-    removeSkillsDir(root);
+    removeMacrosDir(root);
   }
 });
 
-test('collectSkillNames follows a symlinked skill file', (t) => {
+test('collectMacroNames follows a symlinked macro file', (t) => {
   // `readdir`'s dirents are lstat-flavoured, so a symlink answers false to both
   // isFile() and isDirectory(). Classifying from a following statSync is what
-  // keeps a symlinked skill visible — it was visible under the old flat
+  // keeps a symlinked macro visible — it was visible under the old flat
   // readdir, so dropping it would be a regression.
-  const root = makeSkillsDir(['real/login.md']);
+  const root = makeMacrosDir(['real/login.md']);
   try {
     try {
       fs.symlinkSync(path.join(root, 'real', 'login.md'), path.join(root, 'linked.md'), 'file');
@@ -308,26 +308,26 @@ test('collectSkillNames follows a symlinked skill file', (t) => {
       t.skip(`cannot create symlinks here: ${err.code ?? err.message}`);
       return;
     }
-    assert.deepEqual(collectSkillNames(root), ['linked', 'real/login']);
+    assert.deepEqual(collectMacroNames(root), ['linked', 'real/login']);
   } finally {
-    removeSkillsDir(root);
+    removeMacrosDir(root);
   }
 });
 
 // ── parseInvocationLine: parity with parseInvocation's token finder ──────────
-// One row per shape in tests/skill-call-parser.test.ts ("optional colon") and
+// One row per shape in tests/macro-call-parser.test.ts ("optional colon") and
 // tests/tool-call-parser.test.ts. The editor and the tokenizer must agree on
 // WHICH lines are invocations, or F12 navigates on a line the runner treats
 // as prose (or vice versa).
 
 test('parseInvocationLine accepts both the colon and colon-less spellings', () => {
   const rows = [
-    ['1. [skill: login]', 'skill', 'login'],
-    ['1. [skill login]', 'skill', 'login'],
-    ['1. [skill  auth/login]', 'skill', 'auth/login'],
-    ['1. [skill : login]', 'skill', 'login'],
-    ['1. [skill:login]', 'skill', 'login'],
-    ['1. Sign in [skill login user="x"]', 'skill', 'login'],
+    ['1. [macro: login]', 'macro', 'login'],
+    ['1. [macro login]', 'macro', 'login'],
+    ['1. [macro  auth/login]', 'macro', 'auth/login'],
+    ['1. [macro : login]', 'macro', 'login'],
+    ['1. [macro:login]', 'macro', 'login'],
+    ['1. Sign in [macro login user="x"]', 'macro', 'login'],
     ['1. [tool: seed_cart items=2]', 'tool', 'seed_cart'],
     ['1. [tool seed_cart items=2]', 'tool', 'seed_cart'],
     ['1. [tool auth/login/login]', 'tool', 'auth/login/login'],
@@ -341,19 +341,19 @@ test('parseInvocationLine accepts both the colon and colon-less spellings', () =
 });
 
 test('parseInvocationLine reports the name range under both spellings', () => {
-  // `1. [skill login]` — name starts after `1. [skill ` (10 chars).
-  assert.deepEqual(parseInvocationLine('1. [skill login]').nameRange, [10, 15]);
-  // `1. [skill: login]` — the colon shifts it one to the right.
-  assert.deepEqual(parseInvocationLine('1. [skill: login]').nameRange, [11, 16]);
+  // `1. [macro login]` — name starts after `1. [macro ` (10 chars).
+  assert.deepEqual(parseInvocationLine('1. [macro login]').nameRange, [10, 15]);
+  // `1. [macro: login]` — the colon shifts it one to the right.
+  assert.deepEqual(parseInvocationLine('1. [macro: login]').nameRange, [11, 16]);
 });
 
 test('parseInvocationLine leaves bracketed prose alone', () => {
   // No colon and no whitespace directly after the keyword — never a call.
   for (const line of [
-    '1. Check the [skillful] animation',
-    '1. Open the [skills] page',
+    '1. Check the [macroscopic] animation',
+    '1. Open the [macros] page',
     '1. Open the [toolbox] panel',
-    '1. A bare [skill] token',
+    '1. A bare [macro] token',
     '1. plain prose with no brackets',
   ]) {
     assert.equal(parseInvocationLine(line), null, `"${line}" must stay prose`);
@@ -361,61 +361,61 @@ test('parseInvocationLine leaves bracketed prose alone', () => {
 });
 
 test('parseInvocationLine scans past a near-miss to the real token', () => {
-  const inv = parseInvocationLine('1. see [skillful] then [skill login]');
-  assert.equal(inv?.kind, 'skill');
+  const inv = parseInvocationLine('1. see [macroscopic] then [macro login]');
+  assert.equal(inv?.kind, 'macro');
   assert.equal(inv?.name, 'login');
 });
 
-// ── openSkillNamePrefix: where in-place name completion fires ────────────────
+// ── openMacroNamePrefix: where in-place name completion fires ────────────────
 // Anchored to the cursor (the argument is the text BEFORE it). Separator rule
-// matches the tokenizer's finder: colon optional, `[skillful]` never opens.
+// matches the tokenizer's finder: colon optional, `[macroscopic]` never opens.
 
-test('openSkillNamePrefix matches every open-token spelling', () => {
+test('openMacroNamePrefix matches every open-token spelling', () => {
   const rows = [
     // [linePrefix, partial, start]
-    ['1. [skill ', '', 10],
-    ['1. [skill: ', '', 11],
-    ['1. [skill:', '', 10],
-    ['1. [skill : ', '', 12],
-    ['1. [skill au', 'au', 10],
-    ['1. [skill: auth/lo', 'auth/lo', 11],
-    ['1. [skill auth/', 'auth/', 10],
-    ['1. Log in [skill au', 'au', 17],
+    ['1. [macro ', '', 10],
+    ['1. [macro: ', '', 11],
+    ['1. [macro:', '', 10],
+    ['1. [macro : ', '', 12],
+    ['1. [macro au', 'au', 10],
+    ['1. [macro: auth/lo', 'auth/lo', 11],
+    ['1. [macro auth/', 'auth/', 10],
+    ['1. Log in [macro au', 'au', 17],
     // A closed call earlier on the line does not confuse the anchor.
-    ['1. [skill: x] then [skill au', 'au', 26],
+    ['1. [macro: x] then [macro au', 'au', 26],
   ];
   for (const [prefix, partial, replaceStart] of rows) {
     assert.deepEqual(
-      openSkillNamePrefix(prefix),
+      openMacroNamePrefix(prefix),
       { partial, replaceStart },
-      `openSkillNamePrefix(${JSON.stringify(prefix)})`,
+      `openMacroNamePrefix(${JSON.stringify(prefix)})`,
     );
   }
 });
 
-test('openSkillNamePrefix stays quiet outside an open token', () => {
+test('openMacroNamePrefix stays quiet outside an open token', () => {
   for (const prefix of [
-    '1. [skill: login]', // call is closed
-    '1. [skill: login] then more prose',
-    '1. see [skillful] anim', // no separator — bracketed prose
-    '1. [skills ', // wrong keyword: `[skills` is not `[skill`+separator
-    '1. [skill', // separator not typed yet — the step-start path owns this
-    '1. [skill: login arg=', // author moved on to args
+    '1. [macro: login]', // call is closed
+    '1. [macro: login] then more prose',
+    '1. see [macroscopic] anim', // no separator — bracketed prose
+    '1. [macros ', // wrong keyword: `[macros` is not `[macro`+separator
+    '1. [macro', // separator not typed yet — the step-start path owns this
+    '1. [macro: login arg=', // author moved on to args
     '1. plain prose',
     '',
   ]) {
-    assert.equal(openSkillNamePrefix(prefix), null, `${JSON.stringify(prefix)} must not match`);
+    assert.equal(openMacroNamePrefix(prefix), null, `${JSON.stringify(prefix)} must not match`);
   }
 });
 
 test('parseInvocationLine declines links and non-grammar text, like the parser', () => {
   // The mirror is a regex and cannot parse, but it must not CLAIM what the
   // parser declines: a markdown link, or a name followed by something the
-  // grammar never allows there (`[skill level: expert]` is English).
+  // grammar never allows there (`[macro level: expert]` is English).
   for (const line of [
-    '1. Read the [skill guide](./docs/guide.md) before running',
+    '1. Read the [macro guide](./docs/guide.md) before running',
     '1. Open the [tool docs](https://x.com) page',
-    '1. Verify the [skill level: expert] badge',
+    '1. Verify the [macro level: expert] badge',
     '1. Confirm the [tool tip: hover] text',
   ]) {
     assert.equal(parseInvocationLine(line), null, `${JSON.stringify(line)} must stay prose`);
@@ -424,16 +424,16 @@ test('parseInvocationLine declines links and non-grammar text, like the parser',
 
 test('parseInvocationLine resumes past a declined candidate to a real call', () => {
   // F12 has to land on the call the runner actually runs. Taking only the
-  // first candidate resolved `guide` here — a skill that does not exist.
-  const inv = parseInvocationLine('1. See the [skill guide](./g.md) and then [skill: login]');
-  assert.equal(inv?.kind, 'skill');
+  // first candidate resolved `guide` here — a macro that does not exist.
+  const inv = parseInvocationLine('1. See the [macro guide](./g.md) and then [macro: login]');
+  assert.equal(inv?.kind, 'macro');
   assert.equal(inv?.name, 'login');
   // The range must point at THAT occurrence, not the declined one.
-  const line = '1. See the [skill guide](./g.md) and then [skill: login]';
+  const line = '1. See the [macro guide](./g.md) and then [macro: login]';
   assert.equal(line.slice(inv.nameRange[0], inv.nameRange[1]), 'login');
 });
 
-// ── openSkillArgsContext: the argument-position walker ───────────────────────
+// ── openMacroArgsContext: the argument-position walker ───────────────────────
 // `|` marks the cursor in every row; the helper splits it out. Rows compose
 // deliberately — a value containing `]`/`[`, a closed call before an open one,
 // used args on BOTH sides of the cursor — because testing shapes only in
@@ -443,36 +443,36 @@ function argsAt(marked) {
   const cursor = marked.indexOf('|');
   assert.ok(cursor !== -1, `row needs a | cursor marker: ${marked}`);
   const line = marked.slice(0, cursor) + marked.slice(cursor + 1);
-  return { line, ctx: openSkillArgsContext(line, cursor), cursor };
+  return { line, ctx: openMacroArgsContext(line, cursor), cursor };
 }
 
-test('openSkillArgsContext: fresh and partial argument positions', () => {
-  // [marked, skillName, partial]
+test('openMacroArgsContext: fresh and partial argument positions', () => {
+  // [marked, macroName, partial]
   const rows = [
-    ['1. [skill login |', 'login', ''],
-    ['1. [skill: login |', 'login', ''],
-    ['1. [skill login user|', 'login', 'user'],
-    ['1. [skill auth/login user|', 'auth/login', 'user'],
-    ['1. Log in [skill: login  us|', 'login', 'us'],
-    ['1. [skill login username="x" |', 'login', ''],
-    ['1. [skill login username="x" pass|', 'login', 'pass'],
-    ['1. [skill login out.|', 'login', 'out.'],
-    ['1. [skill login out.ses|', 'login', 'out.ses'],
-    ['1. [skill login count=3 |', 'login', ''],
-    ['1. [skill login ids=[1, 2] |', 'login', ''],
+    ['1. [macro login |', 'login', ''],
+    ['1. [macro: login |', 'login', ''],
+    ['1. [macro login user|', 'login', 'user'],
+    ['1. [macro auth/login user|', 'auth/login', 'user'],
+    ['1. Log in [macro: login  us|', 'login', 'us'],
+    ['1. [macro login username="x" |', 'login', ''],
+    ['1. [macro login username="x" pass|', 'login', 'pass'],
+    ['1. [macro login out.|', 'login', 'out.'],
+    ['1. [macro login out.ses|', 'login', 'out.ses'],
+    ['1. [macro login count=3 |', 'login', ''],
+    ['1. [macro login ids=[1, 2] |', 'login', ''],
     // A quoted value CONTAINING a `]` does not close the call.
-    ['1. [skill login msg="a ] b" |', 'login', ''],
+    ['1. [macro login msg="a ] b" |', 'login', ''],
     // …nor does one inside an array literal string.
-    ['1. [skill login ids=["a ]", 2] |', 'login', ''],
+    ['1. [macro login ids=["a ]", 2] |', 'login', ''],
     // Editing the middle of a complete call is an argument position too.
-    ['1. [skill login | role="admin"]', 'login', ''],
+    ['1. [macro login | role="admin"]', 'login', ''],
     // A closed call earlier on the line, then an open one.
-    ['1. [skill: a] then [skill login |', 'login', ''],
+    ['1. [macro: a] then [macro login |', 'login', ''],
   ];
-  for (const [marked, skillName, partial] of rows) {
+  for (const [marked, macroName, partial] of rows) {
     const { ctx, cursor } = argsAt(marked);
     assert.ok(ctx, `${JSON.stringify(marked)} should be an argument position`);
-    assert.equal(ctx.skillName, skillName, `skillName of ${JSON.stringify(marked)}`);
+    assert.equal(ctx.macroName, macroName, `macroName of ${JSON.stringify(marked)}`);
     assert.equal(ctx.partial, partial, `partial of ${JSON.stringify(marked)}`);
     assert.equal(
       ctx.replaceStart,
@@ -482,24 +482,24 @@ test('openSkillArgsContext: fresh and partial argument positions', () => {
   }
 });
 
-test('openSkillArgsContext: quiet everywhere else', () => {
+test('openMacroArgsContext: quiet everywhere else', () => {
   const rows = [
     // Still the name — the name-completion surface owns these.
-    '1. [skill |',
-    '1. [skill login|',
+    '1. [macro |',
+    '1. [macro login|',
     // Value territory.
-    '1. [skill login count=|',
-    '1. [skill login count=3|',
-    '1. [skill login role="ad|min"',
-    '1. [skill login msg="unterminated |',
-    '1. [skill login ids=[1, |',
+    '1. [macro login count=|',
+    '1. [macro login count=3|',
+    '1. [macro login role="ad|min"',
+    '1. [macro login msg="unterminated |',
+    '1. [macro login ids=[1, |',
     // Glued to a finished value or name=value — the scanner demands
     // whitespace before the next argument.
-    '1. [skill login role="admin"|',
-    '1. [skill login ids=[1]|',
+    '1. [macro login role="admin"|',
+    '1. [macro login ids=[1]|',
     // The call is closed.
-    '1. [skill: login] |',
-    '1. [skill: login role="x"] then |',
+    '1. [macro: login] |',
+    '1. [macro: login role="x"] then |',
     // No call at all / a tool call (different story).
     '1. plain prose |',
     '1. [tool seed_cart |',
@@ -510,26 +510,26 @@ test('openSkillArgsContext: quiet everywhere else', () => {
   }
 });
 
-test('openSkillArgsContext: used args collected from BOTH sides of the cursor', () => {
+test('openMacroArgsContext: used args collected from BOTH sides of the cursor', () => {
   const { ctx } = argsAt(
-    '1. [skill login username="x" bare | role="admin" out.session_id="sid"]',
+    '1. [macro login username="x" bare | role="admin" out.session_id="sid"]',
   );
   assert.ok(ctx);
   assert.deepEqual([...ctx.usedParams].sort(), ['bare', 'role', 'username']);
   assert.deepEqual([...ctx.usedOuts], ['session_id']);
 });
 
-test('openSkillArgsContext: the partial being typed is not counted as used', () => {
-  const { ctx } = argsAt('1. [skill login username="x" pass|');
+test('openMacroArgsContext: the partial being typed is not counted as used', () => {
+  const { ctx } = argsAt('1. [macro login username="x" pass|');
   assert.ok(ctx);
   assert.deepEqual([...ctx.usedParams], ['username']);
   assert.equal(ctx.partial, 'pass');
 });
 
-// ── skillIoFor / parseOutputs: what a call site may pass ─────────────────────
+// ── macroIoFor / parseOutputs: what a call site may pass ─────────────────────
 
-test('skillIoFor reads parameters (with literal values) and outputs', () => {
-  const root = makeSkillsDir([]);
+test('macroIoFor reads parameters (with literal values) and outputs', () => {
+  const root = makeMacrosDir([]);
   try {
     fs.mkdirSync(path.join(root, 'auth'), { recursive: true });
     fs.writeFileSync(
@@ -551,7 +551,7 @@ test('skillIoFor reads parameters (with literal values) and outputs', () => {
         '',
       ].join('\n'),
     );
-    const io = skillIoFor(root, 'auth/login');
+    const io = macroIoFor(root, 'auth/login');
     assert.ok(io);
     assert.deepEqual(io.params, [
       { name: 'username', value: 'the account to sign in as' },
@@ -560,42 +560,42 @@ test('skillIoFor reads parameters (with literal values) and outputs', () => {
     ]);
     assert.deepEqual(io.outputs, ['session_id', 'bare_output']);
     // Leading-slash sugar canonicalises to the same file.
-    assert.deepEqual(skillIoFor(root, '/auth/login'), io);
+    assert.deepEqual(macroIoFor(root, '/auth/login'), io);
   } finally {
-    removeSkillsDir(root);
+    removeMacrosDir(root);
   }
 });
 
-test('skillIoFor is null for a missing file or malformed name, empty for a bare skill', () => {
-  const root = makeSkillsDir(['plain.md']);
+test('macroIoFor is null for a missing file or malformed name, empty for a bare macro', () => {
+  const root = makeMacrosDir(['plain.md']);
   try {
-    assert.equal(skillIoFor(root, 'nope'), null);
-    assert.equal(skillIoFor(root, 'a//b'), null);
-    const io = skillIoFor(root, 'plain');
+    assert.equal(macroIoFor(root, 'nope'), null);
+    assert.equal(macroIoFor(root, 'a//b'), null);
+    const io = macroIoFor(root, 'plain');
     assert.ok(io);
     assert.deepEqual(io.params, []);
     assert.deepEqual(io.outputs, []);
   } finally {
-    removeSkillsDir(root);
+    removeMacrosDir(root);
   }
 });
 
-test('skillIoFor re-reads when the file changes on disk', () => {
-  const root = makeSkillsDir([]);
+test('macroIoFor re-reads when the file changes on disk', () => {
+  const root = makeMacrosDir([]);
   try {
     const file = path.join(root, 'login.md');
     fs.writeFileSync(file, '## Parameters\n- username: a\n');
     assert.deepEqual(
-      skillIoFor(root, 'login')?.params.map((p) => p.name),
+      macroIoFor(root, 'login')?.params.map((p) => p.name),
       ['username'],
     );
     fs.writeFileSync(file, '## Parameters\n- username: a\n- password: b\n');
     // A same-mtime rewrite is defeated by the size half of the cache key.
     assert.deepEqual(
-      skillIoFor(root, 'login')?.params.map((p) => p.name),
+      macroIoFor(root, 'login')?.params.map((p) => p.name),
       ['username', 'password'],
     );
   } finally {
-    removeSkillsDir(root);
+    removeMacrosDir(root);
   }
 });

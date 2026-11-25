@@ -6,7 +6,7 @@
  * Nothing new is parsed to know where a section ends. A test is expanded at
  * parse time into one flat list, each step carries the id of the FRAME it runs
  * in, and every frame records its parent (`ExpandedStepOrigin` / `ExpandedFrame`
- * in src/skills/expander.ts). So from step `i` in frame `F`, the steps a return
+ * in src/macros/expander.ts). So from step `i` in frame `F`, the steps a return
  * leaves behind are every later step whose frame is `F` or a descendant of it,
  * up to the first step that is not.
  *
@@ -17,7 +17,7 @@
  * describing the same skipped step in different words is a bug nobody would
  * notice until they were compared.
  */
-import type { ExpandedFrame, ExpandedStepOrigin } from '../skills/expander.js';
+import type { ExpandedFrame, ExpandedStepOrigin } from '../macros/expander.js';
 import type { StepResult } from '../report/types.js';
 import {
   parseFlowControlStep,
@@ -103,10 +103,10 @@ export function frameExitIndex(
 }
 
 /**
- * What to call the flow in a reason string: the section or skill name, or
+ * What to call the flow in a reason string: the section or macro name, or
  * null when the step is in the main flow.
  *
- * `ExpandedFrame.skillName` carries the section name for a `section` frame —
+ * `ExpandedFrame.macroName` carries the section name for a `section` frame —
  * the field is reused, see its doc comment in expander.ts — so one read
  * answers for both kinds. A looped iteration is NOT labelled `(2/3)` here:
  * the reason says which step returned, and the iteration is already visible
@@ -120,7 +120,7 @@ export function frameLabel(
   if (!origins || !frames) return null;
   const frameId = origins[i]?.frameId ?? ROOT;
   if (frameId === ROOT) return null;
-  return frames[frameId]?.skillName ?? null;
+  return frames[frameId]?.macroName ?? null;
 }
 
 /**
@@ -203,7 +203,7 @@ function clip(text: string): string {
  * text is appended, and that is findable anywhere — in the file, in the log,
  * in the report.
  *
- * AUTHORED, never interpolated: a `[skill: …]` argument or a `{{password}}`
+ * AUTHORED, never interpolated: a `[macro: …]` argument or a `{{password}}`
  * resolves to a literal value, and a reason string is written to a run log, an
  * HTML report and a wire event. The authored form cannot leak one.
  */

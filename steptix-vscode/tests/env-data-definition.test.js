@@ -419,7 +419,7 @@ const STEPS = [
   '## Steps',
   '1. Read the balance [store as: balance]',
   '2. [input: user] sign in',
-  '3. [skill: checkout out.total="grand"]',
+  '3. [macro: checkout out.total="grand"]',
   '4. Verify {{balance}}',
 ].join('\n');
 
@@ -446,7 +446,7 @@ test('a name echoed by an earlier word still locates the real token', () => {
 test('two writes on one line are attributed in POSITION order, both located', () => {
   // The `[as:]` pattern is declared before the out-alias one, so a
   // pattern-ordered scan would pick the wrong token here.
-  const text = '## Steps\n1. [skill: login out.token="tok"] then confirm [as: tok]';
+  const text = '## Steps\n1. [macro: login out.token="tok"] then confirm [as: tok]';
   const line = text.split('\n')[1];
   const all = captureNamesBefore(text, 2, undefined, { dedupe: false }).filter(
     (c) => c.name === 'tok',

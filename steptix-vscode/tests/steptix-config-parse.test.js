@@ -7,6 +7,9 @@ import {
   parseProjectDirs,
   resolveDir,
   readProjectDirs,
+  withDefaultDirs,
+  DEFAULT_MACROS_DIR,
+  DEFAULT_TOOLS_DIR,
 } from "../src/extension/steptix-config-parse.js";
 
 /** A project root for the tests that only need a path: `parseProjectDirs` and
@@ -23,27 +26,27 @@ function tmpDir(t) {
   return dir;
 }
 
-test("parseProjectDirs: tests.skillsDir/toolsDir resolve to absolute paths against the config dir", () => {
+test("parseProjectDirs: tests.macrosDir/toolsDir resolve to absolute paths against the config dir", () => {
   const dir = PROJ;
   const configPath = path.join(dir, "steptix.config.json");
   const text = JSON.stringify({
-    tests: { skillsDir: "./skills", toolsDir: "./tools/src" },
+    tests: { macrosDir: "./macros", toolsDir: "./tools/src" },
   });
 
   const dirs = parseProjectDirs(text, configPath);
   assert.ok(dirs);
   assert.equal(dirs.configPath, configPath);
-  assert.equal(dirs.skillsDir, path.resolve(dir, "./skills"));
+  assert.equal(dirs.macrosDir, path.resolve(dir, "./macros"));
   assert.equal(dirs.toolsDir, path.resolve(dir, "./tools/src"));
-  assert.ok(path.isAbsolute(dirs.skillsDir));
+  assert.ok(path.isAbsolute(dirs.macrosDir));
   assert.ok(path.isAbsolute(dirs.toolsDir));
 });
 
-test("parseProjectDirs: no tests block → both null", () => {
+test("parseProjectDirs: no tests block → both null (the parse reports what is declared; readProjectDirs applies defaults)", () => {
   const configPath = path.join(PROJ, "steptix.config.json");
   const dirs = parseProjectDirs(JSON.stringify({ browser: { headed: true } }), configPath);
   assert.ok(dirs);
-  assert.equal(dirs.skillsDir, null);
+  assert.equal(dirs.macrosDir, null);
   assert.equal(dirs.toolsDir, null);
 });
 
@@ -74,14 +77,14 @@ test("parseProjectDirs: dataDir missing / empty / non-string → null (caller ap
   assert.equal(parseProjectDirs(JSON.stringify({ tests: { dataDir: 42 } }), configPath).dataDir, null);
 });
 
-test("parseProjectDirs: tests present but skillsDir/toolsDir missing or non-string → null", () => {
+test("parseProjectDirs: tests present but macrosDir/toolsDir missing or non-string → null", () => {
   const configPath = path.join(PROJ, "steptix.config.json");
   const dirs = parseProjectDirs(
-    JSON.stringify({ tests: { dir: "./tests", skillsDir: 123, toolsDir: "" } }),
+    JSON.stringify({ tests: { dir: "./tests", macrosDir: 123, toolsDir: "" } }),
     configPath,
   );
   assert.ok(dirs);
-  assert.equal(dirs.skillsDir, null);
+  assert.equal(dirs.macrosDir, null);
   assert.equal(dirs.toolsDir, null);
 });
 
@@ -100,7 +103,7 @@ test("resolveDir: empty / whitespace / non-string → null; non-empty string →
   assert.equal(resolveDir("   ", base), null);
   assert.equal(resolveDir(undefined, base), null);
   assert.equal(resolveDir(42, base), null);
-  assert.equal(resolveDir("./skills", base), path.resolve(base, "./skills"));
+  assert.equal(resolveDir("./macros", base), path.resolve(base, "./macros"));
 });
 
 test("readProjectDirs: reads a file and resolves dirs", (t) => {
@@ -108,12 +111,12 @@ test("readProjectDirs: reads a file and resolves dirs", (t) => {
   const configPath = path.join(dir, "steptix.config.json");
   fs.writeFileSync(
     configPath,
-    JSON.stringify({ tests: { skillsDir: "./skills", toolsDir: "./tools/src" } }),
+    JSON.stringify({ tests: { macrosDir: "./macros", toolsDir: "./tools/src" } }),
   );
 
   const dirs = readProjectDirs(configPath);
   assert.ok(dirs);
-  assert.equal(dirs.skillsDir, path.resolve(dir, "./skills"));
+  assert.equal(dirs.macrosDir, path.resolve(dir, "./macros"));
   assert.equal(dirs.toolsDir, path.resolve(dir, "./tools/src"));
 });
 
@@ -131,7 +134,7 @@ test("readProjectDirs: mtime cache returns the same object on a second call with
   const configPath = path.join(dir, "steptix.config.json");
   fs.writeFileSync(
     configPath,
-    JSON.stringify({ tests: { skillsDir: "./skills", toolsDir: "./tools/src" } }),
+    JSON.stringify({ tests: { macrosDir: "./macros", toolsDir: "./tools/src" } }),
   );
 
   const first = readProjectDirs(configPath);
@@ -144,11 +147,11 @@ test("readProjectDirs: mtime cache returns the same object on a second call with
 test("readProjectDirs: a changed mtime re-reads the file", (t) => {
   const dir = tmpDir(t);
   const configPath = path.join(dir, "steptix.config.json");
-  fs.writeFileSync(configPath, JSON.stringify({ tests: { skillsDir: "./skills" } }));
+  fs.writeFileSync(configPath, JSON.stringify({ tests: { macrosDir: "./macros" } }));
   const first = readProjectDirs(configPath);
-  assert.equal(first?.skillsDir, path.resolve(dir, "./skills"));
+  assert.equal(first?.macrosDir, path.resolve(dir, "./macros"));
 
-  fs.writeFileSync(configPath, JSON.stringify({ tests: { skillsDir: "./other-skills" } }));
+  fs.writeFileSync(configPath, JSON.stringify({ tests: { macrosDir: "./other-macros" } }));
   // The cache is keyed on mtime alone, and two writes inside one mtime tick
   // (coarse on some filesystems) look unchanged to it. Moving the mtime
   // explicitly keeps this a test of the cache rather than of the clock.
@@ -157,5 +160,87 @@ test("readProjectDirs: a changed mtime re-reads the file", (t) => {
 
   const second = readProjectDirs(configPath);
   assert.notEqual(second, first, "a new object, not the cached one");
-  assert.equal(second?.skillsDir, path.resolve(dir, "./other-skills"));
+  assert.equal(second?.macrosDir, path.resolve(dir, "./other-macros"));
+});
+
+// ---------------------------------------------------------------------------
+// Default folders (docs/specs/SPEC-macros.md §6): a project relying on the
+// `./macros` / `./tools/src` defaults gets them in the editor too, as the CLI
+// and MCP always did.
+// ---------------------------------------------------------------------------
+
+test("DEFAULT_MACROS_DIR / DEFAULT_TOOLS_DIR match the loader's defaults in src/config/defaults.ts", () => {
+  const defaults = fs.readFileSync(
+    path.join(import.meta.dirname, "..", "..", "src", "config", "defaults.ts"),
+    "utf8",
+  );
+  assert.match(defaults, new RegExp(`macrosDir: '${DEFAULT_MACROS_DIR.replace(/[.*+?^${}()|[\]\/]/g, "\$&")}'`));
+  assert.match(defaults, new RegExp(`toolsDir: '${DEFAULT_TOOLS_DIR.replace(/[.*+?^${}()|[\]\/]/g, "\$&")}'`));
+});
+
+test("readProjectDirs: undeclared macrosDir/toolsDir → the default folders beside the config, when they exist", (t) => {
+  const dir = tmpDir(t);
+  const configPath = path.join(dir, "steptix.config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ tests: { dir: "./tests" } }));
+  fs.mkdirSync(path.join(dir, "macros"));
+  fs.mkdirSync(path.join(dir, "tools", "src"), { recursive: true });
+
+  const dirs = readProjectDirs(configPath);
+  assert.equal(dirs?.macrosDir, path.resolve(dir, "macros"));
+  assert.equal(dirs?.toolsDir, path.resolve(dir, "tools", "src"));
+});
+
+test("readProjectDirs: undeclared and no default folder → null, so callers say there is none", (t) => {
+  const dir = tmpDir(t);
+  const configPath = path.join(dir, "steptix.config.json");
+  fs.writeFileSync(configPath, JSON.stringify({}));
+
+  const dirs = readProjectDirs(configPath);
+  assert.ok(dirs);
+  assert.equal(dirs.macrosDir, null);
+  assert.equal(dirs.toolsDir, null);
+});
+
+test("readProjectDirs: a macros folder created after the first read is found without a config edit", (t) => {
+  const dir = tmpDir(t);
+  const configPath = path.join(dir, "steptix.config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ tests: { dir: "./tests" } }));
+
+  assert.equal(readProjectDirs(configPath)?.macrosDir, null);
+  fs.mkdirSync(path.join(dir, "macros"));
+  // Same config mtime, so the parse is served from the cache — the default
+  // must still be looked for again.
+  assert.equal(readProjectDirs(configPath)?.macrosDir, path.resolve(dir, "macros"));
+});
+
+test("readProjectDirs: a declared macrosDir is kept even when it is missing and ./macros exists", (t) => {
+  const dir = tmpDir(t);
+  const configPath = path.join(dir, "steptix.config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ tests: { macrosDir: "./shared/macros" } }));
+  fs.mkdirSync(path.join(dir, "macros"));
+
+  // A wrong declared path must fail loudly at the call ("Macro … not found at
+  // <declared>/…"), not be swapped for a folder the config did not name.
+  assert.equal(readProjectDirs(configPath)?.macrosDir, path.resolve(dir, "./shared/macros"));
+});
+
+test("readProjectDirs: an empty or non-string macrosDir counts as undeclared and takes the default", (t) => {
+  const dir = tmpDir(t);
+  const configPath = path.join(dir, "steptix.config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ tests: { macrosDir: "", toolsDir: 42 } }));
+  fs.mkdirSync(path.join(dir, "macros"));
+  fs.mkdirSync(path.join(dir, "tools", "src"), { recursive: true });
+
+  const dirs = readProjectDirs(configPath);
+  assert.equal(dirs?.macrosDir, path.resolve(dir, "macros"));
+  assert.equal(dirs?.toolsDir, path.resolve(dir, "tools", "src"));
+});
+
+test("withDefaultDirs: returns the same object when both directories are declared", () => {
+  const dirs = parseProjectDirs(
+    JSON.stringify({ tests: { macrosDir: "./m", toolsDir: "./t" } }),
+    path.join(PROJ, "steptix.config.json"),
+  );
+  assert.ok(dirs);
+  assert.equal(withDefaultDirs(dirs), dirs);
 });

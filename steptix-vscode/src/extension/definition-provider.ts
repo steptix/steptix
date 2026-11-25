@@ -5,27 +5,27 @@ import { buildSectionIndex, matchText } from 'steptix-runner-core';
 import { resolveProjectDirs } from './steptix-config.js';
 import {
   TOOL_FILE_EXTS,
-  canonicalSkillName,
+  canonicalMacroName,
   parseInvocationLine,
-  skillHeading,
+  macroHeading,
   toolFileFor,
   type InvocationLine,
 } from './invocation-target-core.js';
 import { DedupedWarnings } from './warnings.js';
 
 /**
- * "Go to Definition" (F12 / Ctrl+Click / Peek) for `[skill: ...]` and
+ * "Go to Definition" (F12 / Ctrl+Click / Peek) for `[macro: ...]` and
  * `[tool: ...]` step invocations inside Markdown test files.
  *
  * Three token kinds on an invocation line are jump targets:
- *   - the skill/tool **name** → the skill `.md` / tool `.ts` file
- *   - an `out.<key>` alias **key** → for skills, the `- <key>:` line under
- *     `## Outputs` in the skill file; for tools, the tool file
+ *   - the macro/tool **name** → the macro `.md` / tool `.ts` file
+ *   - an `out.<key>` alias **key** → for macros, the `- <key>:` line under
+ *     `## Outputs` in the macro file; for tools, the tool file
  *
  * The alias *value* (the text after `=`) is a new name the caller is
  * creating, not a reference, so it is deliberately not a jump target.
  *
- * Skill/tool directories come from the project's `steptix.config.json` file,
+ * Macro/tool directories come from the project's `steptix.config.json` file,
  * located by walking up from the test file (see `steptix-config.ts`).
  */
 export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
@@ -39,7 +39,7 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
   ): vscode.Definition | undefined {
     const line = document.lineAt(position.line).text;
     const invocation = parseInvocationLine(line);
-    // `[skill:]` / `[tool:]` are claimed first — they are never section calls,
+    // `[macro:]` / `[tool:]` are claimed first — they are never section calls,
     // mirroring the expander's resolution order. Only when the line is NOT a
     // bracket invocation do we consider a bare-name section call or a heading.
     if (!invocation) {
@@ -53,20 +53,20 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
     if (!dirs) {
       this.warn(
         `Steptix: no steptix.config.json found above ${document.uri.fsPath} — ` +
-          `can't resolve skills/tools directory.`,
+          `can't resolve macros/tools directory.`,
       );
       return undefined;
     }
 
     if (token.kind === 'name') {
-      return invocation.kind === 'skill'
-        ? this.skillNameTarget(dirs.skillsDir, invocation.name)
+      return invocation.kind === 'macro'
+        ? this.macroNameTarget(dirs.macrosDir, invocation.name)
         : this.toolNameTarget(dirs.toolsDir, invocation.name);
     }
 
     // token.kind === 'outputKey'
-    return invocation.kind === 'skill'
-      ? this.skillOutputTarget(dirs.skillsDir, invocation.name, token.text)
+    return invocation.kind === 'macro'
+      ? this.macroOutputTarget(dirs.macrosDir, invocation.name, token.text)
       : this.toolNameTarget(dirs.toolsDir, invocation.name);
   }
 
@@ -78,7 +78,7 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
    *    several definitions as a peek list, so this is "find usages" for free).
    *
    * Bracket-token lines never reach here — the caller gives `INVOCATION_RE`
-   * first refusal — so `1. [skill: login]` navigates as a skill, never as a
+   * first refusal — so `1. [macro: login]` navigates as a macro, never as a
    * section named "login".
    */
   private sectionDefinition(
@@ -112,53 +112,53 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
     return new vscode.Location(uri, new vscode.Position(target.headingLine - 1, 0));
   }
 
-  private skillNameTarget(
-    skillsDir: string | null,
+  private macroNameTarget(
+    macrosDir: string | null,
     name: string,
   ): vscode.Location | undefined {
-    if (!skillsDir) {
-      this.warn(`Steptix: steptix.config does not declare a skillsDir.`);
+    if (!macrosDir) {
+      this.warn(`Steptix: no macros folder — steptix.config.json sets no tests.macrosDir and has no macros folder beside it.`);
       return undefined;
     }
-    const rel = canonicalSkillName(name);
+    const rel = canonicalMacroName(name);
     if (rel === null) {
-      this.warnBadSkillName(name);
+      this.warnBadMacroName(name);
       return undefined;
     }
-    const file = path.join(skillsDir, `${rel}.md`);
+    const file = path.join(macrosDir, `${rel}.md`);
     if (!fs.existsSync(file)) {
-      this.warn(`Steptix: skill "${rel}" not found — looked for ${file}`);
+      this.warn(`Steptix: macro "${rel}" not found — looked for ${file}`);
       return undefined;
     }
     const lineNo =
-      findLine(file, new RegExp(`^#{1,6}\\s+${escapeRegex(skillHeading(rel))}\\b`)) ?? 0;
+      findLine(file, new RegExp(`^#{1,6}\\s+${escapeRegex(macroHeading(rel))}\\b`)) ?? 0;
     return new vscode.Location(vscode.Uri.file(file), new vscode.Position(lineNo, 0));
   }
 
-  private skillOutputTarget(
-    skillsDir: string | null,
-    skillName: string,
+  private macroOutputTarget(
+    macrosDir: string | null,
+    macroName: string,
     outputKey: string,
   ): vscode.Location | undefined {
-    if (!skillsDir) {
-      this.warn(`Steptix: steptix.config does not declare a skillsDir.`);
+    if (!macrosDir) {
+      this.warn(`Steptix: no macros folder — steptix.config.json sets no tests.macrosDir and has no macros folder beside it.`);
       return undefined;
     }
-    const rel = canonicalSkillName(skillName);
+    const rel = canonicalMacroName(macroName);
     if (rel === null) {
-      this.warnBadSkillName(skillName);
+      this.warnBadMacroName(macroName);
       return undefined;
     }
-    const file = path.join(skillsDir, `${rel}.md`);
+    const file = path.join(macrosDir, `${rel}.md`);
     if (!fs.existsSync(file)) {
-      this.warn(`Steptix: skill "${rel}" not found — looked for ${file}`);
+      this.warn(`Steptix: macro "${rel}" not found — looked for ${file}`);
       return undefined;
     }
     // Prefer the `- <key>:` bullet under an `## Outputs` heading; fall back
-    // to the skill heading, then the top of the file.
+    // to the macro heading, then the top of the file.
     const lineNo =
       findOutputBullet(file, outputKey) ??
-      findLine(file, new RegExp(`^#{1,6}\\s+${escapeRegex(skillHeading(rel))}\\b`)) ??
+      findLine(file, new RegExp(`^#{1,6}\\s+${escapeRegex(macroHeading(rel))}\\b`)) ??
       0;
     return new vscode.Location(vscode.Uri.file(file), new vscode.Position(lineNo, 0));
   }
@@ -168,7 +168,7 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
     name: string,
   ): vscode.Location | undefined {
     if (!toolsDir) {
-      this.warn(`Steptix: steptix.config does not declare a toolsDir.`);
+      this.warn(`Steptix: no tools folder — steptix.config.json sets no tests.toolsDir and has no tools/src folder beside it.`);
       return undefined;
     }
     // A tool reference addresses a file *and* a tool inside it: the last
@@ -199,11 +199,11 @@ export class InvocationDefinitionProvider implements vscode.DefinitionProvider {
   }
 
   /** The editor must not navigate on a name the runner rejects: `path.join`
-   *  collapses `auth//login` into a real file, while `parseSkillCall` throws
-   *  `SkillCallSyntaxError` on it. Same wording as the parser's message. */
-  private warnBadSkillName(name: string): void {
+   *  collapses `auth//login` into a real file, while `parseMacroCall` throws
+   *  `MacroCallSyntaxError` on it. Same wording as the parser's message. */
+  private warnBadMacroName(name: string): void {
     this.warn(
-      `Steptix: invalid skill name "${name}": empty path segment (no trailing or doubled '/')`,
+      `Steptix: invalid macro name "${name}": empty path segment (no trailing or doubled '/')`,
     );
   }
 
@@ -257,7 +257,7 @@ function findLine(file: string, re: RegExp): number | null {
 }
 
 /**
- * Find the `- <key>:` bullet under an `## Outputs` heading in a skill file.
+ * Find the `- <key>:` bullet under an `## Outputs` heading in a macro file.
  * Returns the 0-based line index, or null if not found.
  */
 function findOutputBullet(file: string, key: string): number | null {

@@ -1,6 +1,6 @@
 /**
  * Live end-to-end regression test for the user-reported "Cannot navigate
- * to invalid URL" bug. A skill captures a value via `[store as: X]`,
+ * to invalid URL" bug. A macro captures a value via `[store as: X]`,
  * the test then references `{{X}}` after a breakpoint pause splits the
  * run into two HTTP batches.
  *
@@ -98,11 +98,11 @@ describe('Steptix live — [store as: X] survives a breakpoint pause', function 
     );
 
     // Put a breakpoint on step 2 of the test file. In store-as-survives.md
-    // step 1 is the [skill: capture_url] invocation (1-based line 18),
+    // step 1 is the [macro: capture_url] invocation (1-based line 18),
     // step 2 is "Navigate to {{target_url}}" (1-based line 19). Pausing
     // before step 2 forces the server to split the run into two HTTP
     // batches — exactly the scenario where the pre-fix bug surfaced.
-    const STEP_1_LINE = 18; // [skill: capture_url]
+    const STEP_1_LINE = 18; // [macro: capture_url]
     const STEP_2_LINE = 19; // Navigate to {{target_url}}
     vscode.debug.addBreakpoints([
       new vscode.SourceBreakpoint(
@@ -124,7 +124,7 @@ describe('Steptix live — [store as: X] survives a breakpoint pause', function 
     // Wait for the run to actually start.
     await waitFor('isRunning true', () => hooks.isRunning(), 30_000);
 
-    // The first batch executes the skill (step 1 — [skill: capture_url])
+    // The first batch executes the macro (step 1 — [macro: capture_url])
     // which internally captures target_url. The breakpoint trims the
     // batch BEFORE step 2, so we land in a paused state with step 1 in
     // some pass state.
@@ -136,7 +136,7 @@ describe('Steptix live — [store as: X] survives a breakpoint pause', function 
     await waitFor('isRunning false while paused', () => !hooks.isRunning(), 15_000);
     console.log('[live] Paused at breakpoint after step 1 ✓');
 
-    // Sanity: step 1 should be pass — what matters is that the skill ran
+    // Sanity: step 1 should be pass — what matters is that the macro ran
     // to completion and target_url got captured.
     const pausedStatuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
     const step1Status = pausedStatuses[STEP_1_LINE];

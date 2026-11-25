@@ -22,7 +22,7 @@ export function parseFrontmatter(rawContent: string): {
   const dataFileVal = typeof data['dataFile'] === 'string' ? data['dataFile'] : undefined;
   const envVal = typeof data['env'] === 'string' ? data['env'] : undefined;
   const typeRaw = typeof data['type'] === 'string' ? data['type'] : undefined;
-  const typeVal = typeRaw === 'skill' || typeRaw === 'test' ? typeRaw : undefined;
+  const typeVal = typeRaw === 'macro' || typeRaw === 'test' ? typeRaw : undefined;
   const dataSourcesVal = parseDataSources(data['dataSources']);
 
   const frontmatter: TestFrontmatter = {

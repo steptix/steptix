@@ -1852,7 +1852,7 @@ registry keyed on the server's live map, an object the wire cannot send. So
 Both are read by one client entry point — `maskIfSecret(name, value, {
 bindings, unmask })` in `runner-core/src/repl.ts`, mirrored inline as
 `maskIfSecretInline` for the webview bundle — so the Variables view, the
-Variables panel and the skill re-run rows cannot answer differently. A third
+Variables panel and the macro re-run rows cannot answer differently. A third
 argument rather than a second function, because a surface that keeps calling
 the old one compiles, runs, and quietly answers the pre-wire way.
 
@@ -1879,7 +1879,7 @@ to a file.** It exists because `isSecretName` matches `keyword`, and a column
 the model has to find in the DOM arriving as `***` costs the model its eyes
 rather than merely its logs — so the hatch governs the prompt's `## Values`
 block, and now, over `frame:scope`, Steptix's Variables view, its Variables
-panel and the skill re-run rows. The report, the run log, the console step
+panel and the macro re-run rows. The report, the run log, the console step
 line and the compile recording are deliberately untouched by it
 (`src/parser/types.ts`): they are artefacts that leave the machine, and an
 `unmask` line in a test file must not be able to put a real credential in one.
@@ -2461,7 +2461,7 @@ All copies of the grammar must change together, including at least:
 
 - `src/parser/parameters.ts`;
 - `src/runner/placeholder-substitution.ts`;
-- `src/skills/expander.ts`;
+- `src/macros/expander.ts`;
 - placeholder accounting/leak checks in `src/codebehind/generate.ts`;
 - Steptix completion/definition hit tests in
   `steptix-vscode/src/extension/env-data-completion-core.ts` and
@@ -2890,7 +2890,7 @@ The implementing agent should inspect and update at least these areas:
 - `src/parser/parameters.ts` — dotted interpolation.
 - `src/runner/placeholder-substitution.ts` — dotted reference collection,
   checking, action substitution, and nested action name-field handling.
-- `src/skills/expander.ts` — reference discovery/interpolation parity.
+- `src/macros/expander.ts` — reference discovery/interpolation parity.
 - `runner-core/` mirrors where applicable.
 - `tests/control-flow-planner.test.ts`, `tests/api-server-control-flow.test.ts`,
   and placeholder parity tests.

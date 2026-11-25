@@ -5,7 +5,7 @@ import type { FrameInfo } from 'steptix-runner-core';
  * Read-only TreeView contributed to the Steptix activity-bar container.
  * Renders the active run's frame stack so the user can see which file +
  * frame execution is currently inside when a test descends into a
- * `[skill: ...]` invocation.
+ * `[macro: ...]` invocation.
  *
  * Frames are listed top-down: the outermost (root) frame at the top of
  * the tree, the deepest (currently-executing) frame at the bottom. Phase
@@ -50,8 +50,8 @@ export class CallStackTreeProvider implements vscode.TreeDataProvider<CallStackN
       return item;
     }
     const frame = node.frame;
-    const skillLabel = frame.skillName ?? 'skill';
-    const item = new vscode.TreeItem(skillLabel, vscode.TreeItemCollapsibleState.None);
+    const macroLabel = frame.macroName ?? 'macro';
+    const item = new vscode.TreeItem(macroLabel, vscode.TreeItemCollapsibleState.None);
     item.description = `${shortenPath(frame.uri)}:${frame.line}`;
     item.iconPath = new vscode.ThemeIcon('symbol-method');
     item.tooltip = `${frame.uri}:${frame.line}`;

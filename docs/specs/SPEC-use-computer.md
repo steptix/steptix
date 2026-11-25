@@ -92,7 +92,7 @@ token alone as the step, never a sentence for the model:
 ```
 
 Shape `[<kind> <name>]` with kind `use`, as the invocation tokenizer in
-`src/parser/invocation-parser.ts` reads `[skill login]` and `[tool print_all]`:
+`src/parser/invocation-parser.ts` reads `[macro login]` and `[tool print_all]`:
 case-insensitive, whitespace-tolerant, colon optional (`[use: browser]` is
 the same directive). Exactly one name from the closed set {`computer`,
 `browser`}; no arguments. Refused at parse time, each with a caret at the
@@ -125,20 +125,20 @@ and strips a leading `[no-hooks]` marker itself, for the reason
 New rule, and the reason the bracket form was chosen over a sentence: **a
 step whose ENTIRE text is a single bracket token that matches no directive
 is a parse error**, with the known directives listed and the closest offered
-("did you mean `[use computer]`"). Known: `[skill …]`, `[tool …]`,
+("did you mean `[use computer]`"). Known: `[macro …]`, `[tool …]`,
 `[input …]`, `[interactive]`, `[use …]`. So `[computer]`, `[use the
 computer]`, `[dekstop]` and `[computer-use]` all fail in the editor and at
 run time, and none reaches a model as prose to be answered with a silent
 `noop`.
 
 The existing rule that a bracket INSIDE a longer step stays prose is
-untouched: `[skillful]` and `Verify the [optional] banner` are unchanged.
+untouched: `[macroscopic]` and `Verify the [optional] banner` are unchanged.
 Only a step that is nothing but one bracket token is judged.
 
 ### 4.3 Resolution order
 
 Rung 1 — bracket directives — of the order documented at the head of
-`src/parser/control-line.ts`, beside `[skill:`, `[tool:`, `[input:`,
+`src/parser/control-line.ts`, beside `[macro:`, `[tool:`, `[input:`,
 `[interactive]`. Ahead of the bare-name section match, so a section cannot
 shadow it. As a control-line TAIL it is legal: `If a window titled "Save As"
 is open, then [use computer]`, because unlike `[input:` and `[interactive]`
@@ -161,7 +161,7 @@ runner-core mirror (§10.3).
   `[use browser]` → `surface = 'browser'`, computer lock released if this
   session holds it.
 - **Re-entering the mode you are in is a no-op** with a log line, not an
-  error. Sections and skills will open with `[use computer]` defensively.
+  error. Sections and macros will open with `[use computer]` defensively.
   The one thing a re-entry still does is take the lock (§5.9) when the
   session does not hold it, which is the normal case at the start of a
   later run or after a pause.
@@ -216,13 +216,13 @@ runner-core mirror (§10.3).
     server starts on `browser` without one); a REPL left without a turn
     leaves it owed to the block after.
 
-    The skill-file picker (Run Step Here / Compile This Step in a skill)
+    The macro-file picker (Run Step Here / Compile This Step in a macro)
     sends its slice as `isContinuation` + `rerun`, but its rows are not all
     re-runs. The ⏸ and ⏹ rows re-run the steps of a run that failed or was
-    stopped inside THIS skill, against what it left — surface included, as
+    stopped inside THIS macro, against what it left — surface included, as
     the Variables panel's re-run from the failed step does — and send
     nothing. The ▶ row is an idle session whose last run had nothing to do
-    with the skill, so it is a run the user started: it sends `runStart` at
+    with the macro, so it is a run the user started: it sends `runStart` at
     the test's call line (`startsRun`).
   - **MCP `run_test_file`** sends `{ stepIndex: 0 }` on every call: each one
     runs the whole file from step 1.
@@ -237,8 +237,8 @@ runner-core mirror (§10.3).
   `sections`, read the same way, nested calls included — so a desktop
   excursion that ends in `[use browser]` inside a section puts the step after
   the call on `browser`. (Top-level lines alone answered `computer` there, and
-  Run From Here sent that step to the real mouse.) A skill call changes
-  nothing, because a skill hands its caller back the surface it called from
+  Run From Here sent that step to the real mouse.) A macro call changes
+  nothing, because a macro hands its caller back the surface it called from
   (below). A control line whose tail switches surface, directly or through a
   section, may or may not have run; that is not guessed at, and the run
   starts on `browser` with a WARN naming the line. So every miss errs toward
@@ -251,17 +251,17 @@ runner-core mirror (§10.3).
   drives the screen fails with §5.1's message and the session goes back to
   `browser` (§5.1 item 1).
   `GET /sessions/:id` reports the session's current `surface`.
-- **A skill call restores the caller's surface on return**, whatever the
-  skill's body did. An **inline section does not** — it is inline by
+- **A macro call restores the caller's surface on return**, whatever the
+  macro's body did. An **inline section does not** — it is inline by
   definition, and a section that switches is the way an author writes a
   desktop excursion once and calls it by name. Going back to `browser` is
   `[use browser]`'s transition. Going back to `computer` is `[use computer]`:
-  the skill's `[use browser]` dropped the adapter and the lock, so the caller
+  the macro's `[use browser]` dropped the adapter and the lock, so the caller
   re-enters through §5.1 — opt-in, vision route, adapter, lock, probe — at its
-  first step after the skill, and a refusal fails that step with the entry's
+  first step after the macro, and a refusal fails that step with the entry's
   message before anything runs on it. (An earlier release left the caller on
   `browser` here, and its next desktop step went to the page.) Returning from
-  nested skills at once restores the outermost caller's surface only. Skipped
+  nested macros at once restores the outermost caller's surface only. Skipped
   when that step is itself a `[use …]` line, which sets the surface anyway.
 - **Session close resets** the surface, and releases the lock if the session
   holds it — which, since every run gives it back, it does only when the
@@ -475,7 +475,7 @@ model call.
 surface, a step that is a `[tool: …]` line the loop did not dispatch fails
 with a message naming the cause, without a capture or a model call. That
 happens when a Sessions API request carried no `toolsDir`, so no catalogue is
-loaded. The same goes for a raw `[skill: …]` line (skills are expanded before
+loaded. The same goes for a raw `[macro: …]` line (macros are expanded before
 the loop, so a raw one means nothing expanded it) and for a whole-step
 bracket that §4.2 refuses. The page surface still hands those lines to the
 model as prose. Here that was measured live: handed `[tool: open_calculator]`,
@@ -697,7 +697,7 @@ and a data row is one of each.
   another session's computer-mode run. A tool that waited for a debugger to
   attach takes the lock again after the attach, before it runs. A `Set`, a
   whole-step `Return` / `Stop` / `Fail the test …`, an `[input: …]` or
-  `[interactive]` step, a raw `[skill: …]`, a `[tool: …]` line that does
+  `[interactive]` step, a raw `[macro: …]`, a `[tool: …]` line that does
   not parse, a refused bracket, and a guard visit that decides no condition
   (a `For each` reading its list or revisiting, a `Repeat`'s first pass)
   touch no screen and take nothing. A condition decided from its own values
@@ -715,7 +715,7 @@ and a data row is one of each.
   to `browser` never keeps the lock, and a session kept on `computer` by a
   `runStart` takes it again lazily, like any later batch.
 - **Released whenever a run pauses for a person**, immediately before the
-  wait begins, and again only the lock. On the server: a skill-file or
+  wait begins, and again only the lock. On the server: a macro-file or
   section-body breakpoint, a step-mode (F10/F11) pause, and a tool or
   code-behind debugger attach — released before the `step:awaiting` /
   `*:awaiting-debugger` event, so a client that sees the pause sees the lock
@@ -911,7 +911,7 @@ logged beside the image point on every pointer action:
 runner-core's line classifier recognises `[use …]` so the extension paints
 the line as a directive, shows the §4.1 / §4.2 diagnostics as squiggles
 before a run, offers `[use computer]` and `[use browser]` in the bracket
-completion beside `[skill:`, and classifies it as a non-steppable line for
+completion beside `[macro:`, and classifies it as a non-steppable line for
 F11. Version bump per CLAUDE.md. The mirror gets the paired test the other
 mirrors have.
 
@@ -970,7 +970,7 @@ and measured on.
    pauses for a person, while the session stays on the computer surface.
    The session's next computer step takes it again, or fails with §5.9's
    message if another session took it in between.
-6. Skill calls restore the caller's surface; sections do not; session close
+6. Macro calls restore the caller's surface; sections do not; session close
    resets.
 7. `desktop.enabled: false` refuses `[use computer]` with the §5.1 message.
 8. Both §7 tests pass live on this machine (§13.2).

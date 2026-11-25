@@ -19,7 +19,7 @@ import {
   detachedBodyDrift,
   readDetachedBodies,
   preflightSections,
-  sectionedSkillRefusal,
+  sectionedMacroRefusal,
 } from "../src/extension/sections.ts";
 
 const FIXTURES = path.resolve(
@@ -283,7 +283,7 @@ test("preflight: refuses reserved, bracket-prefixed and interpolated names", () 
     /reserved section keyword/i,
   );
   assert.match(
-    preflightSections(doc("## Steps", "1. C", "", "### [skill: x]", "1. A")),
+    preflightSections(doc("## Steps", "1. C", "", "### [macro: x]", "1. A")),
     /may not begin with/i,
   );
   assert.match(
@@ -321,7 +321,7 @@ test("preflight and payload agree about which files are runnable", () => {
 });
 
 // ---------------------------------------------------------------------------
-// sectionedSkillRefusal
+// sectionedMacroRefusal
 // ---------------------------------------------------------------------------
 
 /** A fresh temp dir, removed when the test ends — pass or fail. The retries
@@ -333,63 +333,63 @@ function refusalDir(t) {
   return dir;
 }
 
-test("refusal: a skill that defines sections cannot be line-anchored", (t) => {
-  // Line anchors into a skill file assume document order matches execution
-  // order there. A skill with its own sections breaks that — its bodies sit
+test("refusal: a macro that defines sections cannot be line-anchored", (t) => {
+  // Line anchors into a macro file assume document order matches execution
+  // order there. A macro with its own sections breaks that — its bodies sit
   // below its main flow but execute wherever called — and the server applies
-  // exact matching only to the TEST file, so a skill anchor falls back to
+  // exact matching only to the TEST file, so a macro anchor falls back to
   // nearest-line and can land inside a body that already ran. Measured: a
-  // re-run from a skill's last step re-executed two passed body steps.
+  // re-run from a macro's last step re-executed two passed body steps.
   const dir = refusalDir(t);
-  const skill = path.join(dir, "sectioned.md");
+  const macro = path.join(dir, "sectioned.md");
   writeFileSync(
-    skill,
-    ["---", "type: skill", "---", "# sectioned", "", "## Steps", "1. First", "2. Helper", "", "### Helper", "1. Body"].join("\n"),
+    macro,
+    ["---", "type: macro", "---", "# sectioned", "", "## Steps", "1. First", "2. Helper", "", "### Helper", "1. Body"].join("\n"),
   );
 
-  const problem = sectionedSkillRefusal({
-    kind: "skill",
-    skillUri: skill,
-    skillName: "sectioned",
+  const problem = sectionedMacroRefusal({
+    kind: "macro",
+    macroUri: macro,
+    macroName: "sectioned",
   });
   assert.match(problem ?? "", /defines inline sections/i);
   assert.match(problem ?? "", /sectioned/);
 });
 
-test("refusal: a plain skill is still re-runnable", (t) => {
+test("refusal: a plain macro is still re-runnable", (t) => {
   const dir = refusalDir(t);
-  const skill = path.join(dir, "plain.md");
+  const macro = path.join(dir, "plain.md");
   writeFileSync(
-    skill,
-    ["---", "type: skill", "---", "# plain", "", "## Steps", "1. First", "2. Second"].join("\n"),
+    macro,
+    ["---", "type: macro", "---", "# plain", "", "## Steps", "1. First", "2. Second"].join("\n"),
   );
   assert.equal(
-    sectionedSkillRefusal({ kind: "skill", skillUri: skill, skillName: "plain" }),
+    sectionedMacroRefusal({ kind: "macro", macroUri: macro, macroName: "plain" }),
     null,
   );
 });
 
 test("refusal: a SECTION failure is never refused by this check", (t) => {
-  // For a section failure `skillUri` IS the test file, which by definition
+  // For a section failure `macroUri` IS the test file, which by definition
   // defines sections. A kind-blind check would refuse every section re-run —
   // the exact flow this feature adds.
   const dir = refusalDir(t);
   const test_ = path.join(dir, "t.md");
   writeFileSync(test_, ["## Steps", "1. Helper", "", "### Helper", "1. Body"].join("\n"));
   assert.equal(
-    sectionedSkillRefusal({ kind: "section", skillUri: test_, skillName: "Helper" }),
+    sectionedMacroRefusal({ kind: "section", macroUri: test_, macroName: "Helper" }),
     null,
   );
 });
 
-test("refusal: an unreadable skill file does not invent an error", () => {
+test("refusal: an unreadable macro file does not invent an error", () => {
   // Let the normal flow fail with its own message rather than blaming
   // sections for a missing file.
   assert.equal(
-    sectionedSkillRefusal({
-      kind: "skill",
-      skillUri: path.join(tmpdir(), "definitely-not-here-9e1f.md"),
-      skillName: "gone",
+    sectionedMacroRefusal({
+      kind: "macro",
+      macroUri: path.join(tmpdir(), "definitely-not-here-9e1f.md"),
+      macroName: "gone",
     }),
     null,
   );

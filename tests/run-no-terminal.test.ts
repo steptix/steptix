@@ -208,7 +208,7 @@ function hooksWith(before: string[] = []): ResolvedHooks {
     after: [],
     hasAny: before.length > 0,
     toolCalls: { before: before.map(() => null), beforeEach: [], afterEach: [], after: [] },
-    sourceSkills: { before: before.map(() => null), beforeEach: [], afterEach: [], after: [] },
+    sourceMacros: { before: before.map(() => null), beforeEach: [], afterEach: [], after: [] },
   } as unknown as ResolvedHooks;
 }
 const hooksState = vi.hoisted(() => ({ current: undefined as unknown }));

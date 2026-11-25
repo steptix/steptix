@@ -71,7 +71,7 @@ import {
   readDetachedBodies,
   type DetachedBodies,
   preflightSections,
-  sectionedSkillRefusal,
+  sectionedMacroRefusal,
   SectionNarrowingError,
 } from './sections.js';
 import { decideViewportRecycle } from './viewport-recycle.js';
@@ -152,7 +152,7 @@ export interface ApiClientLike {
    *  exercise the tool-debugger flow omit it. */
   ackToolDebugger?(sessionId: string): Promise<void>;
   /** Optional liveness probe (`GET /sessions/:id`). Used by the "re-run a
-   *  skill step" path to refuse before reusing a dead session. When absent
+   *  macro step" path to refuse before reusing a dead session. When absent
    *  (older fakes) the re-run treats the session as live. */
   isSessionAlive?(sessionId: string): Promise<boolean>;
   /** Optional (issue 021): the last finalized run's report path + token totals
@@ -411,51 +411,51 @@ export function compileLogLine(event: CompileEvent): string | null {
  */
 export { compileResultLine };
 
-/** Everything the "re-run this skill step with its variables" action needs,
- *  captured when a step inside a TOP-LEVEL skill fails. */
-export interface SkillFailure {
-  /** Server frame id of the failed (top-level) skill invocation. */
+/** Everything the "re-run this macro step with its variables" action needs,
+ *  captured when a step inside a TOP-LEVEL macro fails. */
+export interface MacroFailure {
+  /** Server frame id of the failed (top-level) macro invocation. */
   frameId: string;
   /**
    * What kind of frame failed.
    *
    * A top-level SECTION frame has `parentId === null` — the same shape as a
-   * top-level skill invocation — so it flows through the capture path
-   * unchanged. But everything downstream assumed "skill": for a section,
-   * `skillUri` is the TEST file, so the skill-file-oriented
+   * top-level macro invocation — so it flows through the capture path
+   * unchanged. But everything downstream assumed "macro": for a section,
+   * `macroUri` is the TEST file, so the macro-file-oriented
    * debug-after-Stop flow would half-activate against it, and the "does this
-   * skill define sections?" refusal would reject every section re-run (a test
+   * macro define sections?" refusal would reject every section re-run (a test
    * file with a section by definition defines sections).
    *
    * Nothing to gate on existed before this field.
    */
-  kind: 'skill' | 'section';
-  /** Skill or section name, for the panel heading. */
-  skillName: string;
-  /** Absolute path of the file the failed step lives in — the skill file for
-   *  a skill, the test file itself for a section. */
-  skillUri: string;
-  /** The failed step's 1-based line within the skill file. */
-  skillLine: number;
-  /** The test file that owns the `[skill: …]` invocation. */
+  kind: 'macro' | 'section';
+  /** Macro or section name, for the panel heading. */
+  macroName: string;
+  /** Absolute path of the file the failed step lives in — the macro file for
+   *  a macro, the test file itself for a section. */
+  macroUri: string;
+  /** The failed step's 1-based line within the macro file. */
+  macroLine: number;
+  /** The test file that owns the `[macro: …]` invocation. */
   testUri: vscode.Uri;
-  /** The `[skill: …]` invocation's 1-based line in the test file. */
+  /** The `[macro: …]` invocation's 1-based line in the test file. */
   testLine: number;
 }
 
-/** The single "debug a skill after Stop" context held by the registry — the
- *  stopped test whose skill the user is iterating on. Derived from a
- *  `SkillFailure` at Stop time; at most one at a time (latest Stop wins).
+/** The single "debug a macro after Stop" context held by the registry — the
+ *  stopped test whose macro the user is iterating on. Derived from a
+ *  `MacroFailure` at Stop time; at most one at a time (latest Stop wins).
  *  See stories/specs/skill-debug-after-stop.md. */
-export interface SkillDebugContext {
-  /** The test that owns the `[skill: …]` invocation — session key + routing. */
+export interface MacroDebugContext {
+  /** The test that owns the `[macro: …]` invocation — session key + routing. */
   testUri: vscode.Uri;
-  /** The `[skill: …]` invocation's 1-based line in the test file. */
+  /** The `[macro: …]` invocation's 1-based line in the test file. */
   testLine: number;
-  /** Absolute path of the skill file being debugged. */
-  skillUri: string;
-  /** Skill name, for the status-bar banner. */
-  skillName: string;
+  /** Absolute path of the macro file being debugged. */
+  macroUri: string;
+  /** Macro name, for the status-bar banner. */
+  macroName: string;
   /** Server frame id of the failed top-level invocation. */
   frameId: string;
 }
@@ -512,8 +512,8 @@ interface RowState {
  *
  * `sourceUri` is the fsPath of the file the failing step LIVES in, taken from
  * the event's frame, and it is present only when that is not the test
- * document. Without it a failure inside a `[skill:]` body was described by
- * reading the test file at the skill's line number: a skill-body failure on
+ * document. Without it a failure inside a `[macro:]` body was described by
+ * reading the test file at the macro's line number: a macro-body failure on
  * line 12 read as `Row 3 failed at step 2 — "<whatever the test's line 12
  * says>"`, which is a step the row may never have run.
  */
@@ -575,7 +575,7 @@ export class RunController {
    * Whether this controller PROBABLY has a live server session: a steps
    * stream has answered since the last close/recycle. The truth is the
    * server's — callers that act on a session still run the
-   * `isRerunSessionLive` pre-flight — but enumeration (the skill-file
+   * `isRerunSessionLive` pre-flight — but enumeration (the macro-file
    * session picker) needs a no-network signal for "worth listing".
    * Controller-lifetime only: a session that survived a window reload is
    * invisible here until this window runs the test again.
@@ -861,9 +861,9 @@ export class RunController {
   private _frameStack: FrameInfo[] = [];
   /** Root attribution for each pushed frame — the (uri, line) in the test
    *  file the descent ultimately started from. Inherited from parent on
-   *  nested pushes. Drives the aggregate test-file status on `[skill: ...]`
+   *  nested pushes. Drives the aggregate test-file status on `[macro: ...]`
    *  lines so the user sees pass/fail on those lines even though the actual
-   *  step events for the descent land on the skill file's lines.
+   *  step events for the descent land on the macro file's lines.
    *
    *  Persists across the frame's `frame:pop` until end-of-run — a late
    *  `step:fail` event (out-of-order, or from a server that emits pop
@@ -876,19 +876,19 @@ export class RunController {
    *  reliably even after the frame has been popped off the live stack. */
   private frameParents = new Map<string, string | null>();
   /** Frame ids whose descent has had a step:fail somewhere underneath.
-   *  Propagated to the test-file [skill:] line on `frame:pop`. */
+   *  Propagated to the test-file [macro:] line on `frame:pop`. */
   private failedFrames = new Set<string>();
   /** URIs auto-revealed this run, so we don't keep re-revealing the same
-   *  skill file each time its first step starts. Per-controller (not
+   *  macro file each time its first step starts. Per-controller (not
    *  per-registry) so two test files running in sequence both reveal
-   *  shared skills independently. Cleared by `resetFrameState` at the
+   *  shared macros independently. Cleared by `resetFrameState` at the
    *  start of each run. */
   private readonly revealedFrameUris = new Set<string>();
-  /** Skill-file URIs whose stale statuses have already been wiped on first
+  /** Macro-file URIs whose stale statuses have already been wiped on first
    *  descent THIS run. Distinct from `revealedFrameUris` (which gates the
-   *  editor auto-reveal): a shared skill needs its prior-run marks cleared
+   *  editor auto-reveal): a shared macro needs its prior-run marks cleared
    *  the first time the current run steps into it, so a different test
-   *  reusing the skill doesn't inherit the other test's ✓/✗. Cleared by
+   *  reusing the macro doesn't inherit the other test's ✓/✗. Cleared by
    *  `resetFrameState`. */
   private readonly clearedDescentUris = new Set<string>();
   /** True while the in-flight run is a Continue/Resume continuation. The
@@ -943,7 +943,7 @@ export class RunController {
    * (docs/specs/SPEC-structured-table-reads.md §7.6).
    *
    * Beside `scopesByFrame` rather than inside it, so `scopeFor` keeps handing
-   * back the plain `Record<string, string>` the skill-re-run seed and the
+   * back the plain `Record<string, string>` the macro-re-run seed and the
    * test hooks already read. Per frame for the same reason the scope is:
    * every emit carries both, and a frame that never got one has nothing to
    * say — which the maskers read as "older server", their pre-wire default.
@@ -965,7 +965,7 @@ export class RunController {
     private readonly clientFactory: ApiClientFactory = defaultApiClientFactory,
     /**
      * Optional provider for the full per-URI breakpoint map shipped to
-     * the server on every steps request (Phase 5 follow-up — skill-file
+     * the server on every steps request (Phase 5 follow-up — macro-file
      * breakpoint support). The registry passes a closure over its
      * tracker; tests pass a fixed map or omit entirely.
      */
@@ -974,7 +974,7 @@ export class RunController {
      * Optional sink for clearing tracker statuses on a list of URIs at
      * the start of every run. Without this, statuses from a prior run
      * persist on lines that the new run never reaches — most visible
-     * when a skill failure short-circuits the test: the trailing test
+     * when a macro failure short-circuits the test: the trailing test
      * step's old `pass` tick stays painted even though it didn't
      * execute, which reads as "the test continued past the failure."
      * The registry passes a closure over its tracker; tests can omit.
@@ -982,8 +982,8 @@ export class RunController {
     private readonly clearStatusesForUris?: (uris: vscode.Uri[]) => void,
     /**
      * Optional hook fired at the start of a fresh (non-continuation) run. The
-     * registry uses it to drop a parked skill-debug context owned by this test:
-     * a full re-run from the top supersedes a stopped-skill debug session.
+     * registry uses it to drop a parked macro-debug context owned by this test:
+     * a full re-run from the top supersedes a stopped-macro debug session.
      */
     private readonly onFreshRunStart?: () => void,
     /**
@@ -1152,7 +1152,7 @@ export class RunController {
   }
 
   /**
-   * Every file the current (or parked) run painted: this test, and each skill
+   * Every file the current (or parked) run painted: this test, and each macro
    * file it descended into. What a teardown scoped to THIS run — rather than
    * the whole window — has to reach (Record Steps ending a paused run).
    */
@@ -1188,7 +1188,7 @@ export class RunController {
 
   /**
    * Consume a frame event from the SSE stream. Pushes/pops the frame stack,
-   * tracks root attribution for the aggregate test-file [skill:] status,
+   * tracks root attribution for the aggregate test-file [macro:] status,
    * and fires `onFrameStackChange`. Called by the extension's per-run
    * router (`applyToTracker`) so the controller stays the source of truth
    * for frame state, even though the router does the side-effect work
@@ -1200,9 +1200,9 @@ export class RunController {
    */
   handleFramePush(frame: FrameInfo): void {
     this._frameStack.push(frame);
-    // Root attribution: top-level skills (parentId is the test root, i.e.
-    // null) anchor themselves on the test file. Nested skills inherit the
-    // same root so a deep failure still marks the outermost `[skill:]`
+    // Root attribution: top-level macros (parentId is the test root, i.e.
+    // null) anchor themselves on the test file. Nested macros inherit the
+    // same root so a deep failure still marks the outermost `[macro:]`
     // line in the test.
     const root = frame.parentId
       ? this.frameRoot.get(frame.parentId)
@@ -1225,17 +1225,17 @@ export class RunController {
     const failed = this.failedFrames.has(frameId);
     const root = this.frameRoot.get(frameId) ?? null;
     if (idx >= 0) {
-      // Pop this frame and anything pushed above it. Nested-skill servers
+      // Pop this frame and anything pushed above it. Nested-macro servers
       // emit pops in the right order, but defending against truncated
       // streams keeps the UI from showing a phantom frame after stop/abort.
       this._frameStack.length = idx;
     }
     // Deliberately keep frameRoot / frameParents populated until run end:
     // a late step:fail (after pop) needs ancestry to propagate the failure
-    // to the test file's [skill:] line. resetFrameState clears them.
+    // to the test file's [macro:] line. resetFrameState clears them.
     //
     // The iteration's row is closed out here for the same reason the
-    // aggregate `[skill:]` status is: the pop is the only event that says the
+    // aggregate `[macro:]` status is: the pop is the only event that says the
     // body is done. Pass, or fail with the body step it died at.
     this.endSectionIteration(frameId);
     this.frameStackEmitter.fire();
@@ -1252,7 +1252,7 @@ export class RunController {
 
   /** Mark a frame as having had a failed descendant step. Walks the parent
    *  chain via the persistent `frameParents` map so the root frame (the one
-   *  anchored on the test file's `[skill:]` line) inherits the failure even
+   *  anchored on the test file's `[macro:]` line) inherits the failure even
    *  if the immediate step that failed lives several levels deep AND even
    *  if the frame has already been popped off the live stack. */
   markFrameFailed(frameId: string): { testUri: vscode.Uri; testLine: number } | null {
@@ -1273,10 +1273,10 @@ export class RunController {
    *
    * The pause path is the odd producer out: it reads the live frame stack
    * rather than a parked failure, so it needs its own derivation rather than
-   * reuse of `recordSkillFailure`'s. Both halves of the test are load-bearing:
+   * reuse of `recordMacroFailure`'s. Both halves of the test are load-bearing:
    *
    *  - the frame gate (`section`, top-level, defined by THIS file) keeps
-   *    nested sections and skill-file sections on today's path, where line
+   *    nested sections and macro-file sections on today's path, where line
    *    anchors aren't safe;
    *  - re-checking `lastStepStartLine` against the buffer closes the window
    *    where a frame has been pushed but its first step has not started. In
@@ -1313,10 +1313,10 @@ export class RunController {
     this.lastFailureThisRow = null;
     this.scopesByFrame.clear();
     this.scopeMaskingByFrame.clear();
-    // The parked skill failure's seed scope lives in scopesByFrame, which we
+    // The parked macro failure's seed scope lives in scopesByFrame, which we
     // just wiped — drop the failure too so the re-run affordance can't offer a
     // stale, unseedable retry.
-    this._lastSkillFailure = null;
+    this._lastMacroFailure = null;
     this.frameStackEmitter.fire();
     this.scopeEmitter.fire();
   }
@@ -1359,44 +1359,44 @@ export class RunController {
     return this.scopesByFrame.get(frameId);
   }
 
-  /** Captured when a step inside a TOP-LEVEL skill fails — the context the
-   *  "re-run this skill step with its variables" action needs. null when no
-   *  re-runnable skill failure is parked. Cleared by `resetFrameState` (any new
-   *  run) and `clearSkillFailure` (Stop / Close Session). Nested-skill failures
+  /** Captured when a step inside a TOP-LEVEL macro fails — the context the
+   *  "re-run this macro step with its variables" action needs. null when no
+   *  re-runnable macro failure is parked. Cleared by `resetFrameState` (any new
+   *  run) and `clearMacroFailure` (Stop / Close Session). Nested-macro failures
    *  are out of scope for v1 and are not recorded. */
-  private _lastSkillFailure: SkillFailure | null = null;
+  private _lastMacroFailure: MacroFailure | null = null;
 
-  /** The parked re-runnable skill failure, or null. The Variables view gates
+  /** The parked re-runnable macro failure, or null. The Variables view gates
    *  its edit-and-re-run affordance on this. */
-  get lastSkillFailure(): SkillFailure | null {
-    return this._lastSkillFailure;
+  get lastMacroFailure(): MacroFailure | null {
+    return this._lastMacroFailure;
   }
 
-  /** Record a `step:fail` that occurred inside a skill frame, IF that frame is
+  /** Record a `step:fail` that occurred inside a macro frame, IF that frame is
    *  a top-level invocation (`parentId === null`). `failedLine` is the step's
-   *  1-based line in the skill file. Called by the run-event router.
+   *  1-based line in the macro file. Called by the run-event router.
    *
    *  UNHANDLED KIND: `FrameInfo.kind` now includes `'section'`, and a section
    *  invoked from the main flow has `parentId === null` — the same shape as a
-   *  top-level skill. This function gates on `parentId` alone, so such a
-   *  frame would be parked as a `SkillFailure` whose `skillUri` is the *test*
-   *  file, and the Variables panel would offer "re-run this skill step" for
-   *  something that is not a skill.
+   *  top-level macro. This function gates on `parentId` alone, so such a
+   *  frame would be parked as a `MacroFailure` whose `macroUri` is the *test*
+   *  file, and the Variables panel would offer "re-run this macro step" for
+   *  something that is not a macro.
    *
    *  Deliberately not guarded here. No section frame can reach this yet (the
    *  server has no sections wiring until PR-3), and a blanket
-   *  `kind !== 'skill'` refusal is the wrong fix — it would refuse every
+   *  `kind !== 'macro'` refusal is the wrong fix — it would refuse every
    *  section re-run, which the sections runtime spec wants to work. The
-   *  decision belongs with `SkillFailure.kind` in the native-runtime PR;
-   *  `call-stack-view.ts`'s `?? 'skill'` label and `symbol-method` icon are
+   *  decision belongs with `MacroFailure.kind` in the native-runtime PR;
+   *  `call-stack-view.ts`'s `?? 'macro'` label and `symbol-method` icon are
    *  the same class. */
-  recordSkillFailure(frame: FrameInfo, failedLine: number): void {
-    // v1: top-level frames only — a nested skill or section is out of re-run
+  recordMacroFailure(frame: FrameInfo, failedLine: number): void {
+    // v1: top-level frames only — a nested macro or section is out of re-run
     // scope, same as before sections existed.
     if (frame.parentId !== null) return;
     // The root (test) frame itself is not a re-runnable unit: there is no
-    // enclosing invocation to re-enter, and `skillUri` would be the test file
-    // with no section or skill to name.
+    // enclosing invocation to re-enter, and `macroUri` would be the test file
+    // with no section or macro to name.
     //
     // Today the `!root` guard below already refuses it — the root frame's id
     // is `''`, which is never registered in `frameRoot` (only a `frame:push`
@@ -1404,56 +1404,56 @@ export class RunController {
     // kind gate does not depend on that coupling: it states the intent
     // directly, so a future change to how `frameRoot` is populated can't
     // silently start parking a root-frame failure with the test file as its
-    // `skillUri`.
-    if (frame.kind !== 'skill' && frame.kind !== 'section') return;
+    // `macroUri`.
+    if (frame.kind !== 'macro' && frame.kind !== 'section') return;
     const root = this.frameRoot.get(frame.id);
     if (!root) return;
-    this._lastSkillFailure = {
+    this._lastMacroFailure = {
       frameId: frame.id,
       kind: frame.kind,
-      skillName: frame.skillName ?? frame.kind,
-      skillUri: frame.uri,
-      skillLine: failedLine,
+      macroName: frame.macroName ?? frame.kind,
+      macroUri: frame.uri,
+      macroLine: failedLine,
       testUri: root.testUri,
       testLine: root.testLine,
     };
   }
 
   /**
-   * Variables-panel payload for the parked skill failure, or null if none. The
-   * scope is the captured frame scope minus `__skill*` internals; `paramNames`
-   * are the skill's declared parameters (rendered read-only — they're baked
+   * Variables-panel payload for the parked macro failure, or null if none. The
+   * scope is the captured frame scope minus `__macro*` internals; `paramNames`
+   * are the macro's declared parameters (rendered read-only — they're baked
    * into the step text at expansion, so editing them here wouldn't take
-   * effect). Best-effort: a missing/unreadable skill file just yields no
+   * effect). Best-effort: a missing/unreadable macro file just yields no
    * param names (all rows editable).
    */
-  skillRerunPayload(): { testUri: string; skillName: string; scope: Record<string, string>; paramNames: string[] } | null {
-    const failure = this._lastSkillFailure;
+  macroRerunPayload(): { testUri: string; macroName: string; scope: Record<string, string>; paramNames: string[] } | null {
+    const failure = this._lastMacroFailure;
     if (!failure) return null;
     const captured = this.scopeFor(failure.frameId) ?? {};
     const scope: Record<string, string> = {};
     for (const [k, v] of Object.entries(captured)) {
-      if (!k.startsWith('__skill')) scope[k] = v;
+      if (!k.startsWith('__macro')) scope[k] = v;
     }
     let paramNames: string[] = [];
     try {
-      paramNames = Object.keys(parseParameters(fs.readFileSync(failure.skillUri, 'utf8')));
+      paramNames = Object.keys(parseParameters(fs.readFileSync(failure.macroUri, 'utf8')));
     } catch {
-      // best-effort — skill file unreadable; leave all rows editable
+      // best-effort — macro file unreadable; leave all rows editable
     }
-    return { testUri: failure.testUri.toString(), skillName: failure.skillName, scope, paramNames };
+    return { testUri: failure.testUri.toString(), macroName: failure.macroName, scope, paramNames };
   }
 
-  /** Forget any parked skill failure — its scope is gone (resetFrameState) or
+  /** Forget any parked macro failure — its scope is gone (resetFrameState) or
    *  the user explicitly tore the run down (Stop / Close Session). */
-  clearSkillFailure(): void {
-    this._lastSkillFailure = null;
+  clearMacroFailure(): void {
+    this._lastMacroFailure = null;
   }
 
   /**
-   * Re-run a parked top-level skill failure from the failed step to the end of
-   * the skill, on the live session, seeding the captured scope plus `edits`.
-   * `edits` overrides captured values by their (caller-visible) name; `__skill*`
+   * Re-run a parked top-level macro failure from the failed step to the end of
+   * the macro, on the live session, seeding the captured scope plus `edits`.
+   * `edits` overrides captured values by their (caller-visible) name; `__macro*`
    * internals are never seeded — they're re-minted per expansion and can't be
    * restored, and the server refuses a tail that needs one. Returns the run
    * outcome (a no-op `{ ok: false }` if nothing is parked). The caller runs the
@@ -1461,18 +1461,18 @@ export class RunController {
    * is refused without tearing down the parked failure here. The partial-run
    * request wiring lives in `runLines`'s `rerun` option.
    */
-  async rerunSkillStepFromFailure(edits: Record<string, string> = {}): Promise<RunOutcome> {
-    const failure = this._lastSkillFailure;
+  async rerunMacroStepFromFailure(edits: Record<string, string> = {}): Promise<RunOutcome> {
+    const failure = this._lastMacroFailure;
     if (!failure) {
-      vscode.window.setStatusBarMessage('Steptix: no failed skill step to re-run', 2500);
+      vscode.window.setStatusBarMessage('Steptix: no failed macro step to re-run', 2500);
       return { ok: false };
     }
-    const unsupported = sectionedSkillRefusal(failure);
+    const unsupported = sectionedMacroRefusal(failure);
     if (unsupported) {
       vscode.window.setStatusBarMessage(unsupported, 6000);
       return { ok: false };
     }
-    // Seed = captured frame scope (minus server-owned __skill* internals) with
+    // Seed = captured frame scope (minus server-owned __macro* internals) with
     // the user's edits overlaid. Read it BEFORE runLines, which calls
     // resetFrameState and wipes scopesByFrame + the parked failure.
     // `edits` arrives from an untrusted webview message; tolerate a malformed
@@ -1481,15 +1481,15 @@ export class RunController {
     const captured = this.scopeFor(failure.frameId) ?? {};
     const seedScope: Record<string, string> = {};
     for (const [k, v] of Object.entries(captured)) {
-      if (!k.startsWith('__skill')) seedScope[k] = v;
+      if (!k.startsWith('__macro')) seedScope[k] = v;
     }
     for (const [k, v] of Object.entries(safeEdits)) {
-      if (!k.startsWith('__skill') && typeof v === 'string') seedScope[k] = v;
+      if (!k.startsWith('__macro') && typeof v === 'string') seedScope[k] = v;
     }
     return this.runLines([failure.testLine], {
       isContinuation: true,
       rerun: {
-        startAt: { uri: failure.skillUri, line: failure.skillLine },
+        startAt: { uri: failure.macroUri, line: failure.macroLine },
         seedScope,
       },
     });
@@ -1515,7 +1515,7 @@ export class RunController {
 
   /** Atomic test-and-mark: returns true the first time a URI is seen this
    *  run, false on subsequent calls. Caller uses the return value to gate
-   *  the auto-reveal side-effect so the same skill file isn't re-opened
+   *  the auto-reveal side-effect so the same macro file isn't re-opened
    *  on every `step:start` inside it. */
   shouldRevealFrameUri(uri: string): boolean {
     if (this.revealedFrameUris.has(uri)) return false;
@@ -1525,7 +1525,7 @@ export class RunController {
 
   /** Atomic test-and-mark: returns true the first time the current run
    *  descends into `uri`, so the caller can wipe statuses a PREVIOUS run
-   *  (possibly a different test sharing the skill) left on that file.
+   *  (possibly a different test sharing the macro) left on that file.
    *  Returns false on repeat descents and false for continuation runs,
    *  which must keep the marks painted before the pause. */
   shouldClearDescentStatuses(uri: string): boolean {
@@ -1955,11 +1955,11 @@ export class RunController {
     // A Stop ends the parked run, so the pause marker goes with it. It used to
     // be cleared only at the START of the next `runLines`, which left a
     // Stopped-at-a-breakpoint session flagged `parkedAtPause` forever — and
-    // `skill-run-targets.ts` filters those out of the session picker, so the
-    // most natural setup for that whole feature (park inside a skill, Stop,
-    // then drive that browser from the skill file) was the one state the
+    // `macro-run-targets.ts` filters those out of the session picker, so the
+    // most natural setup for that whole feature (park inside a macro, Stop,
+    // then drive that browser from the macro file) was the one state the
     // picker could not see. A missing row is indistinguishable there from a
-    // test that never calls the skill.
+    // test that never calls the macro.
     this.parkedAtPause = false;
     // Also the disposal path: the registry tears controllers down by calling
     // stop() (see RunControllerRegistry.setApiClientFactory / dispose), so
@@ -2003,10 +2003,10 @@ export class RunController {
    * A `step:fail` as a row failure, remembering which FILE the step is in.
    *
    * A step event's `frame.uri` is an fsPath naming the file the step lives in
-   * — the test document for an inline step, a skill `.md` for a skill-body
+   * — the test document for an inline step, a macro `.md` for a macro-body
    * one. Everything that turns a failure into words (`mainFlowOrdinal`,
    * `sectionBodyOrdinal`, `stepTextAt`) reads the TEST document at
-   * `failure.line`, so a skill-body failure without this described a step of
+   * `failure.line`, so a macro-body failure without this described a step of
    * the test the row may never have run. Same URI check `sectionPauseAt`
    * makes, for the same reason: an fsPath, not a `file://` URI.
    */
@@ -2052,7 +2052,7 @@ export class RunController {
         (event.type === 'step:pass' && !isSkippedPass(event)) ||
         event.type === 'step:fail')
     ) {
-      // The line is a TEST-file line, so a step of the same number in a skill
+      // The line is a TEST-file line, so a step of the same number in a macro
       // must not answer for it — the same fsPath check `sectionPauseAt` and
       // `startSectionIteration` make.
       //
@@ -2078,7 +2078,7 @@ export class RunController {
     // A failure the author told the run to carry on past is not a row failure, a
     // frame failure or a parked failure (stories/step-failure-outcomes.md, decision
     // 6). Asked once, here, because the three collectors below all key on the same
-    // event and would otherwise turn an amber step into a red row, a red `[skill:]`
+    // event and would otherwise turn an amber step into a red row, a red `[macro:]`
     // line, or a "re-run from the failed step" offer for a step already past.
     const failure = event.type === 'step:fail' && !event.tolerated ? event : null;
     // Which rows failed on which line, gathered as the run goes so the gutter
@@ -2108,7 +2108,7 @@ export class RunController {
     // The same question, one level down: which section ITERATION died, and at
     // which body step. Attributed by walking the frame's ancestry, because
     // the failing step can be several frames below the iteration's own —
-    // a skill called from a looped body still fails that iteration.
+    // a macro called from a looped body still fails that iteration.
     if (failure && failure.frame) {
       let cur: string | null = failure.frame.id;
       const seen = new Set<string>();
@@ -2605,7 +2605,7 @@ export class RunController {
    * only ever fire at the wrong target.
    *
    * The rest is shared with the command: drop the server session, forget the
-   * config we sent it, and withdraw the parked skill-step re-run affordance —
+   * config we sent it, and withdraw the parked macro-step re-run affordance —
    * its page is about to be gone. Best-effort throughout: an unreachable
    * server is not a reason to refuse the run, which will report the failure
    * itself moments later with a proper STXxxx code.
@@ -2625,7 +2625,7 @@ export class RunController {
       out.appendLine(`[${ts()}] recycling server session ${resolved.sessionId} (viewport changed)`);
       await resolved.client.closeSession(resolved.sessionId);
       this.forgetSentConfig();
-      this.clearSkillFailure();
+      this.clearMacroFailure();
       out.appendLine(`[${ts()}] session closed — the next request starts a fresh browser`);
     } catch {
       // A failed close leaves the server session in an unknown state, but the
@@ -2703,9 +2703,9 @@ export class RunController {
     this.recording?.ac.abort();
     await resolved.client.closeSession(resolved.sessionId);
     this.forgetSentConfig();
-    // The session (and its live page) is gone — a parked skill-step re-run
+    // The session (and its live page) is gone — a parked macro-step re-run
     // can no longer reuse it, so withdraw the affordance.
-    this.clearSkillFailure();
+    this.clearMacroFailure();
     out.appendLine(`[${ts()}] session closed`);
   }
 
@@ -2803,20 +2803,20 @@ export class RunController {
       /** Code-behind sibling (stories/codebehind-debugging.md): seed the
        *  one-shot pauseAtNextCodeBehind flag so the server pauses into the
        *  first step's code-behind entry, if it has one. Used when F11 is
-       *  hit on a plain (non-tool, non-skill) line from a breakpoint
+       *  hit on a plain (non-tool, non-macro) line from a breakpoint
        *  pause. */
       pauseAtNextCodeBehind?: boolean;
       /** True when this call is a continuation of a breakpoint-paused run
        *  (i.e. Continue / Resume). Skips the status-clear that a fresh run
        *  performs so that pass marks from the first batch are preserved. The
-       *  skill-file URIs revealed in the first batch are carried forward so
+       *  macro-file URIs revealed in the first batch are carried forward so
        *  the NEXT fresh re-run still cleans them up correctly. */
       isContinuation?: boolean;
       /**
        * True ONLY when this call resumes the SAME logical run — Continue /
        * Resume / a step command re-opening a breakpoint-paused run. Distinct
        * from `isContinuation`, which several INJECTED runs also set (the
-       * Variables-panel skill re-run, the Stop-debug slice, the skill-file
+       * Variables-panel macro re-run, the Stop-debug slice, the macro-file
        * session picker) purely for its status-preserving side: those are new
        * logical runs, and riding them into the paused run's compile would
        * silently inherit `compileModeOfRun` (a model spend the caller never
@@ -2830,28 +2830,28 @@ export class RunController {
       isResume?: boolean;
       /**
        * This call STARTS a run, although it is shaped like an injected one
-       * (`isContinuation` + `rerun`). The skill-step picker's ▶ row sends it:
+       * (`isContinuation` + `rerun`). The macro-step picker's ▶ row sends it:
        * a slice run against an IDLE session whose last run had nothing to do
-       * with this skill, so the surface that run left is not one this step
+       * with this macro, so the surface that run left is not one this step
        * should inherit (SPEC-use-computer.md §4.5). Its first block carries
        * `runStart` at the call line, as Run Step Here's would.
        */
       startsRun?: boolean;
       /**
-       * Suppress the server-side breakpoint map for this run. The skill-file
+       * Suppress the server-side breakpoint map for this run. The macro-file
        * single-step flows send it: a one-step slice pausing at its own
        * breakpoint runs (and, with compile, proposes) nothing.
        */
       suppressServerBreakpoints?: boolean;
-      /** "Re-run a skill step with its variables" (see
-       *  `rerunSkillStepFromFailure`). When set, the single step in `lines` is
-       *  the failed `[skill: …]` invocation; the server re-expands it, starts
+      /** "Re-run a macro step with its variables" (see
+       *  `rerunMacroStepFromFailure`). When set, the single step in `lines` is
+       *  the failed `[macro: …]` invocation; the server re-expands it, starts
        *  at `startAt` (the failed body step), and seeds `seedScope` into the
        *  run. Triggers a server liveness pre-flight. */
       rerun?: {
         startAt: { uri: string; line: number };
-        /** Upper bound for a bounded re-run ("run selected skill steps on a
-         *  stopped session"). Omit to run startAt → end of the skill body. */
+        /** Upper bound for a bounded re-run ("run selected macro steps on a
+         *  stopped session"). Omit to run startAt → end of the macro body. */
         endAt?: { uri: string; line: number };
         /** Captured/runtime vars to inject (the merged edit path). Omitted by
          *  the Stop-debug path, which reads vars from the live session. */
@@ -2935,7 +2935,7 @@ export class RunController {
 
     /**
      * Did the user START this run — Run, Run From Here, Run Step Here, a step
-     * selection, Run & Compile, F11 from nothing, the skill picker's ▶ row —
+     * selection, Run & Compile, F11 from nothing, the macro picker's ▶ row —
      * rather than continue one?
      *
      * The server needs to be told, because the session's surface outlives a
@@ -2969,13 +2969,13 @@ export class RunController {
     // keep-alive that was pinning the server through the pause is done.
     this.stopKeepAlive();
 
-    // Snapshot the previous run's skill-file URIs BEFORE resetFrameState
+    // Snapshot the previous run's macro-file URIs BEFORE resetFrameState
     // wipes them — we want to clear those files' statuses too. Without
-    // this, a re-run after a successful run leaves the old skill-body
-    // ✓/✗ marks on the skill file, masking which steps actually ran
+    // this, a re-run after a successful run leaves the old macro-body
+    // ✓/✗ marks on the macro file, masking which steps actually ran
     // this time (and making a failure-short-circuit scenario look like
     // "test continued past the failure").
-    const previousTouchedSkillUris = [...this.revealedFrameUris];
+    const previousTouchedMacroUris = [...this.revealedFrameUris];
 
     // What the table's rows show right now — read BEFORE the fresh-run clear
     // below wipes the file. A run that narrows an axis seeds the rows it did
@@ -2992,29 +2992,29 @@ export class RunController {
     this.currentRunIsContinuation = options.isContinuation === true;
 
     // Wipe any frame state from a previous run so the Call Stack view starts
-    // empty. Pause/resume mid-skill is a Phase 3 concern; in Phase 2 the
+    // empty. Pause/resume mid-macro is a Phase 3 concern; in Phase 2 the
     // stack is always empty at the entry to a run.
     this.resetFrameState();
 
     if (options.isContinuation) {
-      // Carry the first-batch skill-file URIs forward into the new run's
+      // Carry the first-batch macro-file URIs forward into the new run's
       // tracking set. This preserves their pass marks (we don't clear them)
       // AND ensures the NEXT fresh re-run still knows to clean them up.
-      for (const uri of previousTouchedSkillUris) {
+      for (const uri of previousTouchedMacroUris) {
         this.revealedFrameUris.add(uri);
       }
     } else {
       // Fresh run (not a continuation / partial re-run): a full run from the
-      // top supersedes any parked skill-debug context owned by this test.
+      // top supersedes any parked macro-debug context owned by this test.
       this.onFreshRunStart?.();
       if (this.clearStatusesForUris) {
-        // Clear test-file statuses AND every skill file the previous run
+        // Clear test-file statuses AND every macro file the previous run
         // descended into. The new run will repaint as it goes; anything
         // that doesn't run this time stays blank, which matches user intent
         // ("re-run = fresh slate") and prevents stale ✓s from making a
         // short-circuited run look like it continued.
         const uris: vscode.Uri[] = [this.document.uri];
-        for (const fsPath of previousTouchedSkillUris) {
+        for (const fsPath of previousTouchedMacroUris) {
           uris.push(vscode.Uri.file(fsPath));
         }
         this.clearStatusesForUris(uris);
@@ -3222,7 +3222,7 @@ export class RunController {
     // report all say the new one, which defeats the feature outright.
     //
     // Restricted to a FRESH start of an interactive run:
-    //  - a continuation (Continue after a breakpoint) and a parked skill-step
+    //  - a continuation (Continue after a breakpoint) and a parked macro-step
     //    re-run both resume against the live page. Closing it would throw away
     //    the very state the user paused to inspect, and the viewport can only
     //    have "changed" because they edited the file while parked.
@@ -3360,8 +3360,8 @@ export class RunController {
     const resumingNarrowing = options.isResume === true ? this.parkedNarrowing : null;
     // The park belongs to the run that made it, and a new run supersedes it.
     // There is no exception for a run "injected at a pause": nothing can start
-    // one. The skill-step picker excludes parked controllers when it builds
-    // its rows (`collectSkillRunTargets`) and refuses again on the pick
+    // one. The macro-step picker excludes parked controllers when it builds
+    // its rows (`collectMacroRunTargets`) and refuses again on the pick
     // (`isParkedAtPause`, commands/index.ts), and Run and Compile refuse the
     // same way. A guard for that case would only keep a previous run's
     // narrowing alive across every OTHER fresh non-resume run started while
@@ -4048,13 +4048,13 @@ export class RunController {
         if (this.pauseRequested) {
           // Resume point: the line that was executing when pause fired.
           //
-          // Pause-inside-skill: when the active frame stack is non-empty,
-          // the step that was running lives on a skill file — but Resume
-          // can't continue mid-skill (the server doesn't support that
+          // Pause-inside-macro: when the active frame stack is non-empty,
+          // the step that was running lives on a macro file — but Resume
+          // can't continue mid-macro (the server doesn't support that
           // yet). Instead we anchor the resume on the test-file's
-          // `[skill: ...]` invocation line, which `frameRoot` records on
+          // `[macro: ...]` invocation line, which `frameRoot` records on
           // every frame:push. Continue from there re-runs the whole
-          // skill, which is the closest honest semantic.
+          // macro, which is the closest honest semantic.
           //
           // Pause-inside-SECTION is the exception, and the reason
           // `sectionPauseAt` exists: a section body lives in the test file
@@ -4740,9 +4740,9 @@ export class RunController {
       this.rowStartedAt === null ? undefined : Date.now() - this.rowStartedAt;
     this.rowStartedAt = null;
     if (failure) {
-      // A failure in another FILE — a `[skill:]` body this row descended into
+      // A failure in another FILE — a `[macro:]` body this row descended into
       // — has no ordinal and no step text here: both would be read out of the
-      // test document at a line that belongs to the skill. It names the file
+      // test document at a line that belongs to the macro. It names the file
       // instead (§Hovers).
       const sourceName = basenameOfSource(failure.sourceUri);
       const ordinal = sourceName === undefined ? mainFlowOrdinal(text, failure.line) : null;
@@ -4780,20 +4780,20 @@ export class RunController {
    * narrowed run still bands the row the author sees.
    *
    * The frame has to be one of THIS document's sections. A looped section
-   * inside a skill file arrives with that file's `uri` and its own name, and a
-   * name is not unique across files — so a skill with a `### Upload each
+   * inside a macro file arrives with that file's `uri` and its own name, and a
+   * name is not unique across files — so a macro with a `### Upload each
    * statement` would have painted the test file's table of the same name, for
    * iterations of a table that is not on screen. The same fsPath comparison
    * `sectionPauseAt` makes (`frame.uri` is a path, not a `file://` URI).
    */
   private startSectionIteration(frame: FrameInfo): void {
-    if (frame.iteration === undefined || !frame.skillName) return;
+    if (frame.iteration === undefined || !frame.macroName) return;
     if (frame.uri !== this.document.uri.fsPath) return;
-    const table = this.sectionTable(frame.skillName);
+    const table = this.sectionTable(frame.macroName);
     if (!table) return;
     const row = this.rowForIteration(frame);
     this.sectionIterationFrames.set(frame.id, {
-      section: frame.skillName,
+      section: frame.macroName,
       row,
       startedAt: Date.now(),
     });
@@ -4815,16 +4815,16 @@ export class RunController {
    * fixes that.
    */
   private rowForIteration(frame: FrameInfo): number {
-    const requested = frame.skillName ? this.sectionRowsOfRun?.[frame.skillName] : undefined;
+    const requested = frame.macroName ? this.sectionRowsOfRun?.[frame.macroName] : undefined;
     if (!requested) return frame.iteration ?? 1;
-    const k = this.sectionIterationsSeen.get(frame.skillName!) ?? 0;
-    this.sectionIterationsSeen.set(frame.skillName!, k + 1);
+    const k = this.sectionIterationsSeen.get(frame.macroName!) ?? 0;
+    this.sectionIterationsSeen.set(frame.macroName!, k + 1);
     const row = requested[k];
     if (row === undefined) return frame.iteration ?? 1;
     if (frame.iteration !== row && !this.oldServerNumberingWarned) {
       this.oldServerNumberingWarned = true;
       this.postOutput(
-        `${frame.skillName} — the server numbered this iteration ` +
+        `${frame.macroName} — the server numbered this iteration ` +
           `${frame.iteration ?? '?'} of ${frame.iterationCount ?? '?'}; restart or ` +
           'update the Sessions API server for correct row numbering in the report',
         'warn',
@@ -4844,7 +4844,7 @@ export class RunController {
     const durationMs = Date.now() - active.startedAt;
     if (failure) {
       const text = this.document.getText();
-      // As for a run row: a failure that happened in a skill the body called
+      // As for a run row: a failure that happened in a macro the body called
       // is not a body step, and reading `text` at its line would quote one.
       const sourceName = basenameOfSource(failure.sourceUri);
       const ordinal = sourceName === undefined ? sectionBodyOrdinal(text, failure.line) : null;
@@ -5217,7 +5217,7 @@ export class RunController {
      *  so the server pauses into the first step's entry, if any
      *  (stories/codebehind-debugging.md). */
     pauseAtNextCodeBehind?: boolean;
-    /** "Re-run a skill step with its variables": start the (re-expanded)
+    /** "Re-run a macro step with its variables": start the (re-expanded)
      *  invocation partway in at `startAt` and seed `seedScope` before running. */
     rerun?: {
       startAt: { uri: string; line: number };
@@ -5310,13 +5310,13 @@ export class RunController {
       bodyPositions = picks as Array<{ section: string; step: number }>;
     }
 
-    // Resolve the project's skills directory so the server can expand
-    // `[skill: ...]` lines and emit `frame:push` / `frame:pop` events around
-    // their bodies. Without a resolved skillsDir the server falls back to
+    // Resolve the project's macros directory so the server can expand
+    // `[macro: ...]` lines and emit `frame:push` / `frame:pop` events around
+    // their bodies. Without a resolved macrosDir the server falls back to
     // the legacy raw-step path — fine for tests that never reference a
-    // skill, but skill invocations would hit the AI as literal strings.
+    // macro, but macro invocations would hit the AI as literal strings.
     const projectDirs = resolveProjectDirs(this.document.uri);
-    const skillsDir = projectDirs?.skillsDir ?? null;
+    const macrosDir = projectDirs?.macrosDir ?? null;
     const toolsDir = projectDirs?.toolsDir ?? null;
     const testFilePath = this.document.uri.fsPath;
     // The test's frontmatter dataSources (name → path) so the server can
@@ -5340,7 +5340,7 @@ export class RunController {
         }),
         ...(Object.keys(params).length > 0 && { parameters: params }),
         ...(logging && { logging }),
-        ...(skillsDir && { skillsDir }),
+        ...(macrosDir && { macrosDir }),
         ...(toolsDir && { toolsDir }),
         // Omitted entirely when the file defines none: `{}` is truthy, and
         // several server gates would read it as "this run has sections",
@@ -5418,7 +5418,7 @@ export class RunController {
      * document, so the two disagree wherever one line produces more or fewer
      * than one event. Three ways that happens, all of them normal:
      *
-     *  - a skill body's steps each send an event, and none of them is a line
+     *  - a macro body's steps each send an event, and none of them is a line
      *    of the open document (a `### Section` body's steps ARE lines of it —
      *    `classifyLines` marks them `section-step` — so a section tail counts
      *    the same on both surfaces);
@@ -6059,7 +6059,7 @@ export class RunController {
       if (!resolved) return;
       await resolved.client.closeSession(resolved.sessionId);
       this.forgetSentConfig();
-      this.clearSkillFailure();
+      this.clearMacroFailure();
     } catch {
       // Best effort, as the run's own first-use close is.
     }

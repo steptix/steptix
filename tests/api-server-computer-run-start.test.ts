@@ -467,7 +467,7 @@ describe('a run that starts mid-file (Run From Here / Run Step Here)', () => {
 // after the call answered `computer`. §4.5 claimed the miss always erred
 // toward `browser`; here it erred toward the real mouse.
 
-describe('a run that starts below a section call, a control line or a skill call', () => {
+describe('a run that starts below a section call, a control line or a macro call', () => {
   /** A file whose desktop excursion ends inside a section. */
   const STEPS = [
     '[use computer]',
@@ -598,8 +598,8 @@ describe('a run that starts below a section call, a control line or a skill call
     expect(ran).toEqual([expect.objectContaining({ surface: 'computer', instruction: 'Click OK' })]);
   });
 
-  it('a skill call is seen through: a skill hands its caller back the surface it called from (§4.5)', async () => {
-    const steps = ['[use computer]', 'Click Print', '[skill: check-page]', 'Click OK'];
+  it('a macro call is seen through: a macro hands its caller back the surface it called from (§4.5)', async () => {
+    const steps = ['[use computer]', 'Click Print', '[macro: check-page]', 'Click OK'];
     const sessionId = newSessionId();
     await onComputer(sessionId, steps);
 

@@ -160,7 +160,7 @@ const PLAIN_DOC = stepsDoc('Navigate to /', 'Click "Sign out"');
 
 type Scope = 'before' | 'beforeEach' | 'afterEach' | 'after';
 
-/** A hook set, with the `toolCalls` / `sourceSkills` slots the loop indexes by
+/** A hook set, with the `toolCalls` / `sourceMacros` slots the loop indexes by
  *  position: one null per line, since these are all prose hooks. */
 function hooks(over: Partial<Record<Scope, string[]>> = {}): ResolvedHooks {
   const scopes: Record<Scope, string[]> = { before: [], beforeEach: [], afterEach: [], after: [], ...over };
@@ -170,7 +170,7 @@ function hooks(over: Partial<Record<Scope, string[]>> = {}): ResolvedHooks {
     ...scopes,
     hasAny: Object.values(scopes).some((lines) => lines.length > 0),
     toolCalls: slots() as ResolvedHooks['toolCalls'],
-    sourceSkills: slots() as ResolvedHooks['sourceSkills'],
+    sourceMacros: slots() as ResolvedHooks['sourceMacros'],
   };
 }
 

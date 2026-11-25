@@ -1,6 +1,6 @@
 /**
  * Which project an MCP call runs against, and everything that project says
- * about itself: its `steptix.config.json`, its skills/tools directories, its
+ * about itself: its `steptix.config.json`, its macros/tools directories, its
  * composed environment, and the Sessions API it talks to.
  *
  * Confinement (§4a of stories/mcp-server.md) is the security boundary of this
@@ -217,7 +217,7 @@ export function canonicalTestFilePath(target: string): string {
 /** The handful of fields the MCP reads. Everything is `unknown` because this
  *  is a user-authored file, not a validated `Config`. */
 interface RawProjectConfig {
-  tests?: { dir?: unknown; pattern?: unknown; skillsDir?: unknown; toolsDir?: unknown };
+  tests?: { dir?: unknown; pattern?: unknown; macrosDir?: unknown; toolsDir?: unknown };
   mcp?: { cdp?: { allowUnowned?: unknown; ports?: unknown } };
   desktop?: { reportScreenshots?: unknown };
 }
@@ -227,7 +227,7 @@ interface RawProjectConfig {
  *
  * `loadConfig` folds `process.env` (`AI_API_KEY`, `AI_MODEL`,
  * `STEPTIX_SERVER_API_KEY`) into its result and always materialises relative
- * `tests.skillsDir`/`toolsDir`, so "the project's config" would silently
+ * `tests.macrosDir`/`toolsDir`, so "the project's config" would silently
  * include the MCP host process's environment. The ban is on the loader, not
  * on its default literals — those are reused below.
  */
@@ -259,7 +259,7 @@ function stringField(value: unknown): string | null {
  *
  * The bound is §4a rule 4 and it is load-bearing: the server's own
  * `resolveProjectRoot` walks 50 levels to the filesystem root, which here
- * would land *outside* confinement and pull `skillsDir`, `toolsDir` and `.env`
+ * would land *outside* confinement and pull `macrosDir`, `toolsDir` and `.env`
  * from there — a straight bypass of everything above.
  */
 function findConfigUpward(
@@ -281,12 +281,12 @@ function findConfigUpward(
 }
 
 /**
- * `skillsDir` / `toolsDir`: the declared value, else the `defaults.ts`
+ * `macrosDir` / `toolsDir`: the declared value, else the `defaults.ts`
  * literal, resolved absolute, re-confined, and returned only when it exists.
  *
  * The literal fallback is required rather than tidy. A project that omits
- * `tests.skillsDir` but *has* `./skills` would otherwise be sent no skills
- * directory at all, and every `[skill: x]` line would ship to the AI as prose
+ * `tests.macrosDir` but *has* `./macros` would otherwise be sent no macros
+ * directory at all, and every `[macro: x]` line would ship to the AI as prose
  * — a silent, expensive wrong answer. (This repo's own config declares both,
  * so a live smoke test would never catch it.)
  *
@@ -502,7 +502,7 @@ async function layerEnvFile(
  * malformed-config refusal, same `.env.<name>` overlay mechanics. The
  * deliberate differences are exactly the story's locked decisions:
  *
- *  - `skillsDir`/`toolsDir` are null even if directories by those names exist
+ *  - `macrosDir`/`toolsDir` are null even if directories by those names exist
  *    there. A machine-global tools directory would mean any conversation, in
  *    any directory, can execute code from a path no repo owns and no review
  *    covers — so it is never consulted, not merely defaulted away.
@@ -528,7 +528,7 @@ async function resolveUserScope(
     configPath,
     env: readUserRootEnv(),
     envName: null,
-    skillsDir: null,
+    macrosDir: null,
     toolsDir: null,
     envFilesConsulted: [path.join(userRoot, '.env')],
     cdpPermissions: readMcpCdpConfig(config),
@@ -633,7 +633,7 @@ export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectC
   const { configPath, searched } = findConfigUpward(startDir, bound);
   if (configPath === null) {
     // No project. For the project-shaped tools that is still a refusal —
-    // test files, skills and tools have no user-scope meaning. For everything
+    // test files, macros and tools have no user-scope meaning. For everything
     // else it is the fallback the story exists for, with `searched` carried so
     // messages can say why there was no project.
     if (args.requireProject === true) fail(noProjectConfig(searched));
@@ -642,7 +642,7 @@ export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectC
 
   // Where the config sits, canonicalised — `fs.existsSync` follows symlinks,
   // so a symlinked `steptix.config.json` inside a root can name a directory
-  // outside it, and everything below (skills, tools, `.env`) is resolved
+  // outside it, and everything below (macros, tools, `.env`) is resolved
   // relative to this.
   const projectRootReal = canonicalize(path.dirname(configPath));
 
@@ -650,7 +650,7 @@ export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectC
   // inside it, or the caller may pass it as `project_root` (which is how
   // `scope: "user"` addressing arrives here). It then takes the user-scope
   // path REGARDLESS of what the directory contains: someone dropping a
-  // `skills/` directory into the user root must not turn every project-less
+  // `macros/` directory into the user root must not turn every project-less
   // conversation into one that executes it. Checked BEFORE the project
   // confinement below, because the user root is on the addressing allow-list
   // but not among the configured roots that project files load from.
@@ -665,14 +665,14 @@ export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectC
   // scope (above); letting it also widen where a project's own untrusted
   // `steptix.config.json`, `.env` symlink or `dataSources` may reach would hand
   // that config a path into `%LOCALAPPDATA%\steptix` — the machine key, and a
-  // skills/tools directory no repo owns. `selection` restores the pre-story
+  // macros/tools directory no repo owns. `selection` restores the pre-story
   // boundary exactly. A planted config in a user-root SUBDIRECTORY named via
   // `project_root` fails here rather than loading as a project.
   const projectRoot = confinePath(path.dirname(configPath), selection);
   const config = readProjectConfig(configPath);
-  const skillsDir = resolveProjectDir(
-    config.tests?.skillsDir,
-    DEFAULT_CONFIG.tests.skillsDir,
+  const macrosDir = resolveProjectDir(
+    config.tests?.macrosDir,
+    DEFAULT_CONFIG.tests.macrosDir,
     projectRoot,
     selection,
   );
@@ -701,7 +701,7 @@ export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectC
     configPath,
     env: await readDefaultEnvVars(projectRoot),
     envName: null,
-    skillsDir,
+    macrosDir,
     toolsDir,
     envFilesConsulted: [baseEnvPath],
     cdpPermissions: readMcpCdpConfig(config),

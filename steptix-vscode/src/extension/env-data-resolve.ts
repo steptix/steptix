@@ -9,7 +9,7 @@
  * from one implementation. The semantics mirror the SERVER's (the component
  * that actually resolves these references): env files and the data file
  * resolve against the `steptix.config.json` directory with NO walk-up, and
- * `dataSources` paths resolve against the declaring file (skills additionally
+ * `dataSources` paths resolve against the declaring file (macros additionally
  * interpolating `${env.X}` / `${envName}`).
  *
  * That parity extends to the env GRAMMAR, which is easy to get wrong: the
@@ -154,19 +154,19 @@ export function readDataJson(absPath: string, env: Record<string, string>): Data
 
 /**
  * A declared dataSources path → absolute, the way the parser resolves it:
- * `~` expanded, relative against the declaring file's directory. Skill paths
+ * `~` expanded, relative against the declaring file's directory. Macro paths
  * first interpolate `${env.X}` / `${envName}` (test paths are literal); a
  * placeholder that can't resolve makes the source unavailable (null).
  */
 export function resolveSourcePath(
   declared: string,
   declaringFile: string,
-  isSkill: boolean,
+  isMacro: boolean,
   env: Record<string, string>,
   envName: string,
 ): string | null {
   let p = declared;
-  if (isSkill) {
+  if (isMacro) {
     let failed = false;
     p = p
       .replace(/\$\{\s*envName\s*\}/g, () => envName)

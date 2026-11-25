@@ -356,7 +356,7 @@ describe('POST /codebehind/compile — a file with a chain', () => {
 
     // The route expanded the file ONCE. Re-expanded, the `Otherwise` follows a
     // tail step instead of its `If`, and the expander refuses the whole file.
-    // (Measured before the fix: the Record's stream carried `Skill expansion
+    // (Measured before the fix: the Record's stream carried `Macro expansion
     // failed: chain.md:6 — "Otherwise, Pay by card" has no decision to be the
     // alternative of`, and the compile answered `Record stopped at step 1`.)
     expect(

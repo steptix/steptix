@@ -26,7 +26,7 @@ import { lastRunPathFor, readLastRun, writeLastRun } from '../src/codebehind/las
 import { recordingDirFor, spliceRecording } from '../src/codebehind/recording.js';
 import { readProfileMarker } from '../src/browser/cdp-registry.js';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 // runner-core's source, as control-line-parity.test.ts explains.
 import { newerCompiledText, outputText } from '../runner-core/src/newer-compiled.ts';
 import { makeScratchBase, removeScratchBase } from './codebehind-scratch.js';
@@ -130,7 +130,7 @@ describe('reading files a newer version wrote', () => {
     await removeScratchBase(base);
   });
   beforeEach(async () => {
-    clearSkillCache();
+    clearMacroCache();
     dir = path.join(base, `t${n++}`);
     await fs.mkdir(dir, { recursive: true });
   });

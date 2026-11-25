@@ -82,8 +82,8 @@ export class SteptixTestController implements vscode.Disposable {
   /** Test-only mirror of the TestMessages handed to `run.failed`, with each
    *  message's location flattened to `{file, line}`. VS Code does not read
    *  TestMessages back, and WHERE a failure is anchored is the whole point of
-   *  the frame resolution in `runOne` — an in-skill failure must peek at the
-   *  skill file, not at that line number in the test. Reset per runOne. */
+   *  the frame resolution in `runOne` — an in-macro failure must peek at the
+   *  macro file, not at that line number in the test. Reset per runOne. */
   private _lastFailureMessages: Array<{ text: string; file: string | null; line: number | null }> = [];
 
   constructor(
@@ -498,8 +498,8 @@ export class SteptixTestController implements vscode.Disposable {
     // Collect step:fail events so we can attach TestMessages on failure.
     //
     // `uri` is the file the LINE belongs to, which is not always this test:
-    // a run that descends into a `[skill: ...]` reports body steps with lines
-    // in the skill's file. Anchoring those on `item.uri` pointed the failure
+    // a run that descends into a `[macro: ...]` reports body steps with lines
+    // in the macro's file. Anchoring those on `item.uri` pointed the failure
     // peek at whatever sat on that line number in the test — prose, an
     // unrelated step, or past the end of the file.
     const failures: Array<{ uri: vscode.Uri; line: number; error: string }> = [];
@@ -641,8 +641,8 @@ export class SteptixTestController implements vscode.Disposable {
       const messages: vscode.TestMessage[] = [];
       for (const f of failures) {
         const msg = new vscode.TestMessage(f.error);
-        // `f.uri`, not `item.uri`: an in-skill failure's line belongs to the
-        // skill file. VS Code is happy to peek a location outside the test
+        // `f.uri`, not `item.uri`: an in-macro failure's line belongs to the
+        // macro file. VS Code is happy to peek a location outside the test
         // item's own file, and that is the line the user needs to see.
         msg.location = new vscode.Location(f.uri, new vscode.Position(f.line - 1, 0));
         messages.push(msg);

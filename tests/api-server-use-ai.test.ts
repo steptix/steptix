@@ -423,21 +423,21 @@ describe('[use ai] through the real Sessions API entry', () => {
     await api('DELETE', '/sessions/use-ai-rows');
   });
 
-  it('masks a skill argument, which expansion wrote into the skill body\'s text', async () => {
-    const skillsDir = path.join(projectRoot, 'skills-echo');
-    mkdirSync(skillsDir, { recursive: true });
+  it('masks a macro argument, which expansion wrote into the macro body\'s text', async () => {
+    const macrosDir = path.join(projectRoot, 'macros-echo');
+    mkdirSync(macrosDir, { recursive: true });
     writeFileSync(
-      path.join(skillsDir, 'echo.md'),
+      path.join(macrosDir, 'echo.md'),
       [
-        '---', 'type: skill', '---', '# echo', '',
+        '---', 'type: macro', '---', '# echo', '',
         '## Parameters', '- password: the value to repeat', '',
         '## Steps', '1. [use ai] Repeat {{password}} exactly [store as: copy]', '',
       ].join('\n'),
     );
     ai.echo = true;
-    const run = await api('POST', '/sessions/use-ai-skill/steps', {
-      steps: ['[skill: echo password="skill-SECRET-1"]'],
-      skillsDir,
+    const run = await api('POST', '/sessions/use-ai-macro/steps', {
+      steps: ['[macro: echo password="macro-SECRET-1"]'],
+      macrosDir,
     });
     expect(run.status).toBe(200);
     expect(ai.requests).toHaveLength(1);
@@ -451,31 +451,31 @@ describe('[use ai] through the real Sessions API entry', () => {
     // Sent nowhere, and named in no error. Not asserted of the whole body:
     // this JSON response's `results[].step` is the EXPANDED line, argument
     // and all — a Sessions API leak older than this step, and not the model's.
-    expect(JSON.stringify(ai.requests) + JSON.stringify(run.body.error)).not.toContain('skill-SECRET-1');
+    expect(JSON.stringify(ai.requests) + JSON.stringify(run.body.error)).not.toContain('macro-SECRET-1');
 
-    await api('DELETE', '/sessions/use-ai-skill');
+    await api('DELETE', '/sessions/use-ai-macro');
   });
 
-  it('keeps the test\'s own password masked when a skill is handed it as `password="{{password}}"`', async () => {
-    // The ordinary way to give a login skill the password. Its frame input is
+  it('keeps the test\'s own password masked when a macro is handed it as `password="{{password}}"`', async () => {
+    // The ordinary way to give a login macro the password. Its frame input is
     // the TEXT `{{password}}`, and merged over the variable map under the same
     // name it evicted the real value from the mask set, for every step of
     // the run — here a free-text copy of it inside `{{greeting}}`.
-    const skillsDir = path.join(projectRoot, 'skills-login');
-    mkdirSync(skillsDir, { recursive: true });
+    const macrosDir = path.join(projectRoot, 'macros-login');
+    mkdirSync(macrosDir, { recursive: true });
     writeFileSync(
-      path.join(skillsDir, 'login.md'),
+      path.join(macrosDir, 'login.md'),
       [
-        '---', 'type: skill', '---', '# login', '',
+        '---', 'type: macro', '---', '# login', '',
         '## Parameters', '- password: the password', '',
         '## Steps', '1. Type {{password}} into the password field', '',
       ].join('\n'),
     );
     ai.echo = true;
     const run = await api('POST', '/sessions/use-ai-shadow/steps', {
-      steps: ['[use ai] Repeat {{greeting}} exactly [store as: copy]', '[skill: login password="{{password}}"]'],
+      steps: ['[use ai] Repeat {{greeting}} exactly [store as: copy]', '[macro: login password="{{password}}"]'],
       parameters: { password: 'hunter2-real', greeting: 'Hello hunter2-real' },
-      skillsDir,
+      macrosDir,
     });
     expect(run.status).toBe(200);
     expect(ai.requests[0]![1]!.content).toBe('Repeat Hello *** exactly');

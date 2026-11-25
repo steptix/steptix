@@ -43,7 +43,7 @@ import {
   substituteText,
   walkActionStrings,
 } from '../src/runner/placeholder-substitution.js';
-import { referencedVariableNames } from '../src/skills/expander.js';
+import { referencedVariableNames } from '../src/macros/expander.js';
 import { placeholderNamesIn } from '../src/codebehind/generate.js';
 import { controlLineDefines, parseControlLine } from '../src/parser/control-line.js';
 import { logger } from '../src/utils/logger.js';
@@ -66,7 +66,7 @@ import type { AIAction } from '../src/ai/types.js';
 const CORPUS: Array<[string, string | null]> = [
   // ── flat, exactly as before ───────────────────────────────────────────
   ['{{email}}', 'email'],
-  ['{{__skill1_username}}', '__skill1_username'],
+  ['{{__macro1_username}}', '__macro1_username'],
   ['{{a}}', 'a'],
   // `\w+` accepts a leading digit and always has — see the note on
   // `PLACEHOLDER_NAME_SOURCE`. Pinned so a later tightening is a decision
@@ -156,7 +156,7 @@ describe('every module that reads a reference reads the same one', () => {
     ],
     // src/runner/placeholder-substitution.ts — the checker's own reading.
     ['collectReferences', (text) => collectReferences(text).placeholders.map((p) => p.name)],
-    // src/skills/expander.ts — what a step references, for scoping and for
+    // src/macros/expander.ts — what a step references, for scoping and for
     // the step prompt's `## Values` block.
     ['referencedVariableNames', (text) => referencedVariableNames(text).placeholders],
     // src/codebehind/generate.ts — the accounting and leak checks.

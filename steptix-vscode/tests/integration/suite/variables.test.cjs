@@ -90,10 +90,10 @@ describe('Steptix Variables panel (Phase 4)', function () {
     const frame = {
       id: 'f1',
       parentId: null,
-      kind: 'skill',
-      uri: path.resolve(FIXTURES_DIR, 'fake-skill.md'),
+      kind: 'macro',
+      uri: path.resolve(FIXTURES_DIR, 'fake-macro.md'),
       line: 9,
-      skillName: 'fake_skill',
+      macroName: 'fake_macro',
     };
     void vscode.commands.executeCommand('steptix.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
@@ -102,16 +102,16 @@ describe('Steptix Variables panel (Phase 4)', function () {
     fake.push({ type: 'frame:scope', frameId: '', scope: { caller_var: 'outer' } });
     await waitFor('test scope', () => hooks.runningScope().caller_var === 'outer');
 
-    // Descend into skill, push a different scope for it.
+    // Descend into macro, push a different scope for it.
     fake.push({ type: 'frame:push', frame });
     fake.push({
       type: 'frame:scope',
       frameId: 'f1',
-      scope: { __skill1_internal: 'inside', caller_var: 'outer' },
+      scope: { __macro1_internal: 'inside', caller_var: 'outer' },
     });
-    await waitFor('skill scope active', () => {
+    await waitFor('macro scope active', () => {
       const scope = hooks.runningScope();
-      return scope.__skill1_internal === 'inside';
+      return scope.__macro1_internal === 'inside';
     });
 
     // Returning to the test frame: currentScope falls back to test-frame
@@ -119,57 +119,57 @@ describe('Steptix Variables panel (Phase 4)', function () {
     fake.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
     await waitFor('back to test scope', () => {
       const scope = hooks.runningScope();
-      return scope.caller_var === 'outer' && !('__skill1_internal' in scope);
+      return scope.caller_var === 'outer' && !('__macro1_internal' in scope);
     });
 
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('skill input parameter remains visible in the WEBVIEW Variables across MULTIPLE breakpoints inside the skill', async () => {
+  it('macro input parameter remains visible in the WEBVIEW Variables across MULTIPLE breakpoints inside the macro', async () => {
     // Regression test for the bug the previous (TreeView-only) test
     // missed: the Test Runner sidebar webview has its OWN Variables
     // section that renders from the active editor's parsed
     // `## Parameters` declarations overlaid with a `runtimeVariables`
     // map. Before the fix, that map ignored `frame:scope` events, so
-    // when the active editor was the skill `.md` (where
+    // when the active editor was the macro `.md` (where
     // `## Parameters` uses `- name: description` syntax) the webview
     // fell back to the description text — making it look like the
     // caller's value wasn't being passed in.
     //
     // The test:
-    //   - opens fake-skill.md as the active editor (mirroring the
-    //     auto-revealed state when a run pauses inside the skill)
+    //   - opens fake-macro.md as the active editor (mirroring the
+    //     auto-revealed state when a run pauses inside the macro)
     //   - starts a run on test-with-steps.md (controller's document)
     //   - pushes 3 step:awaiting cycles, each preceded by a
     //     `frame:scope` event carrying { query: "OpenAI GPT-5" }
     //   - at EVERY pause, asserts the WEBVIEW's runtimeVariables
     //     map shows `query = "OpenAI GPT-5"` — not the
-    //     "the search term to enter" description text the skill's
+    //     "the search term to enter" description text the macro's
     //     `## Parameters` section literally declares.
     //
     // This proves the fix at the data-flow layer the user actually
     // sees: webview → React state → frame:scope handler → rendered
     // Variables panel.
 
-    const skillUri = fixtureUri('fake-skill.md');
-    const skillPath = skillUri.fsPath;
+    const macroUri = fixtureUri('fake-macro.md');
+    const macroPath = macroUri.fsPath;
     const frame = {
       id: 'f1',
       parentId: null,
-      kind: 'skill',
-      uri: skillPath,
+      kind: 'macro',
+      uri: macroPath,
       line: 8,
-      skillName: 'fake_skill',
+      macroName: 'fake_macro',
     };
 
-    // Confirm the precondition: the skill file declares `query`
+    // Confirm the precondition: the macro file declares `query`
     // with description-as-value. If a future edit to the fixture
     // changes this, the test stops proving what it claims to prove.
     const fs = require('node:fs');
-    const skillText = fs.readFileSync(skillPath, 'utf-8');
+    const macroText = fs.readFileSync(macroPath, 'utf-8');
     assert.match(
-      skillText,
+      macroText,
       /- query:\s*the search term to enter/,
       'fixture must declare `- query: the search term to enter` so the description-text fallback is the failure mode',
     );
@@ -187,14 +187,14 @@ describe('Steptix Variables panel (Phase 4)', function () {
     void vscode.commands.executeCommand('steptix.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
-    // Auto-reveal: switch active editor to the skill file so the
+    // Auto-reveal: switch active editor to the macro file so the
     // webview snapshot reflects it. The bug only fires when the
-    // active file is the skill (because that's what the webview
+    // active file is the macro (because that's what the webview
     // parses for declared parameters).
-    await vscode.commands.executeCommand('vscode.open', skillUri);
+    await vscode.commands.executeCommand('vscode.open', macroUri);
     await waitFor(
-      'skill is active in webview',
-      () => hooks.tracker.snapshot().filePath === skillPath,
+      'macro is active in webview',
+      () => hooks.tracker.snapshot().filePath === macroPath,
     );
 
     // Push the frame:push + initial entry scope (mirrors what the
@@ -218,9 +218,9 @@ describe('Steptix Variables panel (Phase 4)', function () {
       );
     };
 
-    // ── Breakpoint 1: pause before step 1 of the skill body ──
+    // ── Breakpoint 1: pause before step 1 of the macro body ──
     fake.push({ type: 'step:awaiting', line: 8, frame });
-    await waitForWebviewQuery('OpenAI GPT-5', 'pause #1 — before skill step 1');
+    await waitForWebviewQuery('OpenAI GPT-5', 'pause #1 — before macro step 1');
 
     // User "Continues" → server proceeds. Mirror what the server
     // emits: step:start, step:pass, frame:scope (still carrying
@@ -241,7 +241,7 @@ describe('Steptix Variables panel (Phase 4)', function () {
 
     // ── Breakpoint 2: pause before step 2 ──
     fake.push({ type: 'step:awaiting', line: 9, frame });
-    await waitForWebviewQuery('OpenAI GPT-5', 'pause #2 — before skill step 2');
+    await waitForWebviewQuery('OpenAI GPT-5', 'pause #2 — before macro step 2');
 
     fake.push({ type: 'step:start', line: 9, frame });
     fake.push({ type: 'step:pass', line: 9, frame });
@@ -253,7 +253,7 @@ describe('Steptix Variables panel (Phase 4)', function () {
 
     // ── Breakpoint 3: pause before step 3 ──
     fake.push({ type: 'step:awaiting', line: 10, frame });
-    await waitForWebviewQuery('OpenAI GPT-5', 'pause #3 — before skill step 3');
+    await waitForWebviewQuery('OpenAI GPT-5', 'pause #3 — before macro step 3');
 
     // Sanity: NOT the description text at any point. If a future
     // regression dropped frame:scope handling in the webview, this
@@ -269,7 +269,7 @@ describe('Steptix Variables panel (Phase 4)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('skill input parameter remains visible across Step Over commands at every breakpoint', async () => {
+  it('macro input parameter remains visible across Step Over commands at every breakpoint', async () => {
     // Variant of the previous test that exercises the ACTUAL Step
     // Over command at each pause boundary — not just synthetic event
     // pushes that mimic what Continue would produce. Catches a
@@ -282,15 +282,15 @@ describe('Steptix Variables panel (Phase 4)', function () {
     // runControl('over') AND query is STILL visible after the next
     // frame:scope arrives.
 
-    const skillUri = fixtureUri('fake-skill.md');
-    const skillPath = skillUri.fsPath;
+    const macroUri = fixtureUri('fake-macro.md');
+    const macroPath = macroUri.fsPath;
     const frame = {
       id: 'f1',
       parentId: null,
-      kind: 'skill',
-      uri: skillPath,
+      kind: 'macro',
+      uri: macroPath,
       line: 8,
-      skillName: 'fake_skill',
+      macroName: 'fake_macro',
     };
 
     await vscode.commands.executeCommand('steptix.runner.focus');
@@ -303,10 +303,10 @@ describe('Steptix Variables panel (Phase 4)', function () {
     void vscode.commands.executeCommand('steptix.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
-    await vscode.commands.executeCommand('vscode.open', skillUri);
+    await vscode.commands.executeCommand('vscode.open', macroUri);
     await waitFor(
-      'skill is active',
-      () => hooks.tracker.snapshot().filePath === skillPath,
+      'macro is active',
+      () => hooks.tracker.snapshot().filePath === macroPath,
     );
 
     fake.push({ type: 'frame:push', frame });
@@ -386,39 +386,39 @@ describe('Steptix Variables panel (Phase 4)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('Step Out from inside skill unwinds to test frame; captured outputs are visible', async () => {
+  it('Step Out from inside macro unwinds to test frame; captured outputs are visible', async () => {
     // Combines several debug-flow contracts in a single end-to-end
     // scenario:
     //
     //   - Step Out command (Shift+F11) targets the running
     //     controller even when active editor is the side-by-side
-    //     skill file. (Regression for the dispatchStep wrong-
+    //     macro file. (Regression for the dispatchStep wrong-
     //     controller bug.)
     //   - runControl('out') is delivered with no extra opts.
     //   - On frame:pop, the controller's frame stack shrinks back
     //     to the test (root) frame.
     //   - On the subsequent frame:scope (test frame), the
-    //     skill's exposed output — aliased into the caller's scope
+    //     macro's exposed output — aliased into the caller's scope
     //     — is visible in the webview's Variables panel.
     //   - The Call Stack view shows only the test frame after pop.
     //   - The scope-on-test-frame retains the caller-aliased output
-    //     even after the skill's scope entry is no longer the top
+    //     even after the macro's scope entry is no longer the top
     //     of the per-frame map.
     //
     // What this protects: a regression that drops the outputs map
     // on frame:pop, or fails to update the test frame's scope
-    // after the skill returns, or sends Step Out to the wrong
+    // after the macro returns, or sends Step Out to the wrong
     // controller, or stops the test entirely instead of unwinding.
 
-    const skillUri = fixtureUri('fake-skill.md');
-    const skillPath = skillUri.fsPath;
+    const macroUri = fixtureUri('fake-macro.md');
+    const macroPath = macroUri.fsPath;
     const frame = {
       id: 'f1',
       parentId: null,
-      kind: 'skill',
-      uri: skillPath,
+      kind: 'macro',
+      uri: macroPath,
       line: 8,
-      skillName: 'fake_skill',
+      macroName: 'fake_macro',
     };
 
     await vscode.commands.executeCommand('steptix.runner.focus');
@@ -431,16 +431,16 @@ describe('Steptix Variables panel (Phase 4)', function () {
     void vscode.commands.executeCommand('steptix.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
-    // User clicks onto the skill file tab (auto-reveal mimic) —
+    // User clicks onto the macro file tab (auto-reveal mimic) —
     // this is the state where the dispatchStep wrong-controller
     // bug used to fire.
-    await vscode.commands.executeCommand('vscode.open', skillUri);
+    await vscode.commands.executeCommand('vscode.open', macroUri);
     await waitFor(
-      'skill is active',
-      () => hooks.tracker.snapshot().filePath === skillPath,
+      'macro is active',
+      () => hooks.tracker.snapshot().filePath === macroPath,
     );
 
-    // Server emits the descent + skill scope + pause inside skill.
+    // Server emits the descent + macro scope + pause inside macro.
     fake.push({ type: 'frame:push', frame });
     fake.push({
       type: 'frame:scope',
@@ -450,7 +450,7 @@ describe('Steptix Variables panel (Phase 4)', function () {
     fake.push({ type: 'step:awaiting', line: 8, frame });
 
     await waitFor(
-      'paused inside skill — Call Stack shows depth 1',
+      'paused inside macro — Call Stack shows depth 1',
       () => hooks.runningFrameStack().length === 1,
     );
     await waitFor(
@@ -459,7 +459,7 @@ describe('Steptix Variables panel (Phase 4)', function () {
     );
 
     // User presses Shift+F11 (Step Out). Even though the active
-    // editor is the skill file (and registry.active() would return
+    // editor is the macro file (and registry.active() would return
     // its own controller), the unified dispatchStep routes through
     // the running controller and POSTs runControl('out').
     const outBefore = fake.runControlCalls.filter((c) => c.mode === 'out').length;
@@ -473,11 +473,11 @@ describe('Steptix Variables panel (Phase 4)', function () {
     assert.equal(
       outCall.opts === null || outCall.opts.pauseAtNextTool === undefined,
       true,
-      'Step Out from a skill body must not request a tool-debugger pause',
+      'Step Out from a macro body must not request a tool-debugger pause',
     );
 
-    // Server unwinds: finishes the skill's remaining steps, emits
-    // frame:pop with the outputs map the skill produced, then
+    // Server unwinds: finishes the macro's remaining steps, emits
+    // frame:pop with the outputs map the macro produced, then
     // emits a test-frame frame:scope carrying the aliased value,
     // then pauses at the caller's next step.
     fake.push({ type: 'step:start', line: 9, frame });
@@ -485,20 +485,20 @@ describe('Steptix Variables panel (Phase 4)', function () {
     fake.push({
       type: 'frame:pop',
       frameId: 'f1',
-      outputs: { skill_captured: 'returned-from-skill' },
+      outputs: { macro_captured: 'returned-from-macro' },
     });
     fake.push({
       type: 'frame:scope',
       frameId: '',
-      // Test-frame scope now reflects the value the skill returned
+      // Test-frame scope now reflects the value the macro returned
       // through its caller-supplied alias. This is the user-visible
       // "got my output back" moment.
-      scope: { skill_captured: 'returned-from-skill' },
+      scope: { macro_captured: 'returned-from-macro' },
     });
     fake.push({ type: 'step:awaiting', line: 2 }); // back at caller line 2
 
     // Call stack must have shrunk back to the test frame (length 0
-    // since the runController's _frameStack only tracks skill frames,
+    // since the runController's _frameStack only tracks macro frames,
     // not the implicit test root).
     await waitFor(
       'frame stack popped back to root',
@@ -506,11 +506,11 @@ describe('Steptix Variables panel (Phase 4)', function () {
     );
 
     // The webview's runtimeVariables now reflects the caller scope
-    // with the skill's exposed output.
+    // with the macro's exposed output.
     await waitFor(
-      'caller scope shows skill_captured',
+      'caller scope shows macro_captured',
       () =>
-        hooks.webviewRuntimeVariables().skill_captured === 'returned-from-skill',
+        hooks.webviewRuntimeVariables().macro_captured === 'returned-from-macro',
       4_000,
     );
 
@@ -518,13 +518,13 @@ describe('Steptix Variables panel (Phase 4)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('skill input parameters arrive in the Variables view at a breakpoint pause', async () => {
+  it('macro input parameters arrive in the Variables view at a breakpoint pause', async () => {
     // Phase 5 follow-up — end-to-end proof for the
-    // skill-inputs-in-frame-scope fix. Mimics what the server does
-    // when a `[skill: parameterized_skill query="OpenAI GPT-5"]`
-    // call is paused on the skill's first step via a breakpoint:
+    // macro-inputs-in-frame-scope fix. Mimics what the server does
+    // when a `[macro: parameterized_macro query="OpenAI GPT-5"]`
+    // call is paused on the macro's first step via a breakpoint:
     //
-    //   1. frame:push for the skill frame
+    //   1. frame:push for the macro frame
     //   2. frame:scope carrying { query: 'OpenAI GPT-5', ... }
     //   3. step:awaiting (the pause)
     //
@@ -538,10 +538,10 @@ describe('Steptix Variables panel (Phase 4)', function () {
     const frame = {
       id: 'f1',
       parentId: null,
-      kind: 'skill',
-      uri: path.resolve(FIXTURES_DIR, 'fake-skill.md'),
+      kind: 'macro',
+      uri: path.resolve(FIXTURES_DIR, 'fake-macro.md'),
       line: 7,
-      skillName: 'parameterized_skill',
+      macroName: 'parameterized_macro',
     };
     void vscode.commands.executeCommand('steptix.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
@@ -554,7 +554,7 @@ describe('Steptix Variables panel (Phase 4)', function () {
     });
     fake.push({ type: 'step:awaiting', line: 7, frame });
 
-    await waitFor('skill scope active', () => {
+    await waitFor('macro scope active', () => {
       const scope = hooks.runningScope();
       return scope.query === 'OpenAI GPT-5';
     });
@@ -930,12 +930,12 @@ describe('Steptix Variables panel (Phase 4)', function () {
     });
   });
 
-  it('test-frame view hides __skillN_ entries from previous skill descents', async () => {
-    // Phase 4.1.b — after a skill exits, its internal vars survive in
+  it('test-frame view hides __macroN_ entries from previous macro descents', async () => {
+    // Phase 4.1.b — after a macro exits, its internal vars survive in
     // resolvedParameters (the expander never garbage-collects them).
     // The view filters them out when rendering the test (root) frame
-    // so the user doesn't see noise like `__skill1_query` lingering
-    // after the skill returned.
+    // so the user doesn't see noise like `__macro1_query` lingering
+    // after the macro returned.
     void vscode.commands.executeCommand('steptix.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
@@ -945,8 +945,8 @@ describe('Steptix Variables panel (Phase 4)', function () {
       scope: {
         username: 'alice',
         target_url: 'https://example.com',
-        __skill1_query: 'OpenAI GPT-5',
-        __skill1_first_result_url: 'https://example.com',
+        __macro1_query: 'OpenAI GPT-5',
+        __macro1_first_result_url: 'https://example.com',
       },
     });
     await waitFor('scope arrived', () =>
@@ -958,29 +958,29 @@ describe('Steptix Variables panel (Phase 4)', function () {
     assert.ok(names.includes('username'), 'caller vars must be visible');
     assert.ok(names.includes('target_url'), 'caller vars must be visible');
     assert.ok(
-      !names.includes('__skill1_query'),
-      '__skillN_ entries must NOT appear in the test-frame view',
+      !names.includes('__macro1_query'),
+      '__macroN_ entries must NOT appear in the test-frame view',
     );
     assert.ok(
-      !names.includes('__skill1_first_result_url'),
-      '__skillN_ entries must NOT appear in the test-frame view',
+      !names.includes('__macro1_first_result_url'),
+      '__macroN_ entries must NOT appear in the test-frame view',
     );
 
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('skill-frame view shows __skillN_ entries (they are the skill local)', async () => {
-    // Counter-test to 4.1.b — when execution is inside a skill, the
+  it('macro-frame view shows __macroN_ entries (they are the macro local)', async () => {
+    // Counter-test to 4.1.b — when execution is inside a macro, the
     // namespaced names ARE the user's locals (rewritten for isolation)
     // so the view must NOT filter them.
     const frame = {
       id: 'f1',
       parentId: null,
-      kind: 'skill',
-      uri: path.resolve(FIXTURES_DIR, 'fake-skill.md'),
+      kind: 'macro',
+      uri: path.resolve(FIXTURES_DIR, 'fake-macro.md'),
       line: 9,
-      skillName: 'fake_skill',
+      macroName: 'fake_macro',
     };
     void vscode.commands.executeCommand('steptix.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
@@ -990,16 +990,16 @@ describe('Steptix Variables panel (Phase 4)', function () {
       type: 'frame:scope',
       frameId: 'f1',
       scope: {
-        __skill1_query: 'OpenAI GPT-5',
+        __macro1_query: 'OpenAI GPT-5',
         username: 'alice',
       },
     });
-    await waitFor('skill scope', () => hooks.runningScope().__skill1_query === 'OpenAI GPT-5');
+    await waitFor('macro scope', () => hooks.runningScope().__macro1_query === 'OpenAI GPT-5');
 
     const items = hooks.variablesViewItems();
     const names = items.map((i) => i.name);
-    assert.ok(names.includes('__skill1_query'),
-      '__skillN_ entries must be visible when inside a skill frame');
+    assert.ok(names.includes('__macro1_query'),
+      '__macroN_ entries must be visible when inside a macro frame');
 
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());

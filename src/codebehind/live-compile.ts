@@ -189,7 +189,7 @@ export interface PlanEntry {
    * The innermost runtime loop — `While`, `Repeat … until`, `For each` — this
    * step sits in the body of (stories/codebehind-loops-and-conditions.md,
    * decision 2): the loop's AUTHORED guard line, and for a `For each` the item
-   * name the run binds, which a skill body renames (`__skill1_order`). Static,
+   * name the run binds, which a macro body renames (`__macro1_order`). Static,
    * from the expansion's control records; the per-pass names are read off the
    * evidence pass when the step is generated (`loopContextFor`). Absent
    * outside every runtime loop, and for a table-row `### Section` loop, which
@@ -372,7 +372,7 @@ export const TOLERATED_CODE_BEHIND_REFUSAL =
  * becomes an `ai: true` entry carrying this sentence rather than code that
  * would click somewhere plausible and wrong on the next machine.
  *
- * Judged from the RUN, never from the file: a shared `### Section` or a skill
+ * Judged from the RUN, never from the file: a shared `### Section` or a macro
  * body runs on whatever surface its caller was on.
  */
 export const COMPUTER_MODE_STAYS_AI = 'computer-mode step; coordinates are not portable';
@@ -423,19 +423,19 @@ export function endedAsWrittenReason(subject: 'run' | 'replay', step: number): s
  * generation will.
  */
 export function staticGenerationRefusal(text: string): string | undefined {
-  // `[skill` / `[tool` calls only — `[input:]`, `[output:]` and
+  // `[macro` / `[tool` calls only — `[input:]`, `[output:]` and
   // `[interactive]` DO reach generation and are declined there, with the
   // reason, by `refuseReason`; those are still the author's step and deserve
   // an `ai: true` entry saying why.
   //
   // The parser, not a look-alike pattern. The regex this replaces was wrong
-  // in both directions: `\s` claimed `[skill<NBSP>login]`, which the scanner
+  // in both directions: `\s` claimed `[macro<NBSP>login]`, which the scanner
   // calls prose (so the step was refused generation for a reason that wasn't
   // true, permanently), while the `^` anchor missed every LABELLED call —
   // `Seed the cart [tool: seed_cart]` is dispatched to the tool, yet the
   // compiler paid to generate a Playwright entry for it on every run.
   if (isCodeStep(text.trim())) {
-    return 'a [skill:] or [tool:] step is expanded or dispatched, never generated';
+    return 'a [macro:] or [tool:] step is expanded or dispatched, never generated';
   }
   // Flow control is asked BEFORE the control line, because the two grammars
   // overlap on `If <condition>, then return` and flow control owns that line
@@ -505,7 +505,7 @@ export function neverCompiled(text: string): boolean {
  * Mirrors `compileTest`'s selection rules, decided per step from what the run
  * actually did rather than from the file alone:
  *
- * - **no binding** — nothing to write into; `[tool:]` and `[skill:]` markers
+ * - **no binding** — nothing to write into; `[tool:]` and `[macro:]` markers
  *   are expanded or dispatched before the AI loop and are never generated.
  * - **an unconditional `Return` / `Stop` / `Fail`** — dispatched by the loop
  *   with no model call, as `Set` is, so there is nothing to record and nothing
@@ -848,7 +848,7 @@ export class LiveCompiler {
   /** How many steps this compile is FOR, blocks included — the summary's
    *  `totalSteps`. Starts as the plan's countable length and shrinks when a
    *  block is bounded to a slice (`setSlice`): a single-step compile of a
-   *  six-step skill is "1 of 1", not "1 of 6". */
+   *  six-step macro is "1 of 1", not "1 of 6". */
   private scopedTotal: number;
 
   constructor(private readonly options: LiveCompileOptions) {
@@ -885,7 +885,7 @@ export class LiveCompiler {
   /**
    * Bound the CURRENT block to a slice: the request expanded the whole
    * document (occurrence counting and the whole-test prompt need it all) but
-   * executes only `[startIndex, endIndex]` of it — a skill-file single-step
+   * executes only `[startIndex, endIndex]` of it — a macro-file single-step
    * run/compile, or any `startAt`/`endAt` re-run with `compile` riding it.
    *
    * The plan stays full-length — `offer` and `stepEvent` index it by absolute
@@ -1128,7 +1128,7 @@ export class LiveCompiler {
       // the author would be told is missing is in their file.
       if (refusal === 'the step ran as code' || refusal === TOLERATED_CODE_BEHIND_REFUSAL) {
         // The binding is there: every refusal that could reach here without
-        // one (`[skill:]`/`[tool:]`, no binding at all) is decided above this.
+        // one (`[macro:]`/`[tool:]`, no binding at all) is decided above this.
         this.keep(entryKeyOf(input.binding!), at);
       }
       if (refusal === 'the entry is marked `ai: true`') this.keptAiExisting.add(at);
@@ -1261,7 +1261,7 @@ export class LiveCompiler {
    *   through `offerGuard`, never here;
    * - a line the framework dispatches (`Otherwise`, `For each`, a literal
    *   condition, `Set`, `[use …]`, an unconditional `Return`, a `[tool:]` or
-   *   `[skill:]` call) or with no file to bind into: not owed, silently —
+   *   `[macro:]` call) or with no file to bind into: not owed, silently —
    *   `generationRefusal` answers for all of them;
    * - any other step with no entry: owed.
    */
@@ -1484,7 +1484,7 @@ export class LiveCompiler {
    * own `secretsNow()` computes it, with the binding's frame inputs, which
    * `secretsNow` merges in (`compilePromptSecrets`) — for every prompt this
    * compiler builds from that snapshot: a secret inside a value no key names
-   * as secret (`auth: "Bearer <the key>"`, or a skill's `header="Bearer <key>"`
+   * as secret (`auth: "Bearer <the key>"`, or a macro's `header="Bearer <key>"`
    * beside its `token="<key>"`) is masked there as it is in the run's own step
    * prompts. The boxed compile hands its prompts the same set.
    */
@@ -1552,7 +1552,7 @@ export class LiveCompiler {
     // Matched by the identity the binding uses — section scope, authored text,
     // and the occurrence of that pair — because a body that says the same
     // thing twice has two rows and only one of them failed. The target file
-    // joins the match where both sides carry it: a skill-body step and a
+    // joins the match where both sides carry it: a macro-body step and a
     // test-frame step can share text and (empty) section, and without the
     // file the repair could be fed the other one's failure. A row written
     // before the field existed matches as it always did.

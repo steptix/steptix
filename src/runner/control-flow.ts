@@ -654,7 +654,7 @@ export function exitFrom(
  *
  * The two features answer the same question from opposite ends and both are
  * right about their half. `frameExitIndex` (src/runner/flow-control.ts) knows
- * about FRAMES — a section body, a skill body, the main flow — and says which
+ * about FRAMES — a section body, a macro body, the main flow — and says which
  * later steps belong to the flow being left. It knows nothing about the
  * control records, so from inside a loop body it happily hands back the last
  * index of the *test*. The other feature's rule is that "a return never breaks
@@ -678,8 +678,8 @@ export function exitFrom(
  *    read that as "a pass just ended" and jump the run back INTO the loop it
  *    had just declared skipped.
  *
- * A return from a skill called inside a loop body gets `exit` from the frame
- * (the skill's last step, well short of the body's end) and `enclosed: true`,
+ * A return from a macro called inside a loop body gets `exit` from the frame
+ * (the macro's last step, well short of the body's end) and `enclosed: true`,
  * so the run resumes after the call with the pass still going. That falls out
  * of the `Math.min` rather than needing a case of its own.
  */

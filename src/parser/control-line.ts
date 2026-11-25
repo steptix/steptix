@@ -12,10 +12,10 @@
  *    resolution reads, so a body line interpolated with a caller's argument
  *    cannot start or stop being a control line.
  *  - {@link controlLineError} is what a PARSE-TIME validator asks. A line that
- *    opens one of the six forms has CLAIMED it the way `[skill:` claims one,
+ *    opens one of the six forms has CLAIMED it the way `[macro:` claims one,
  *    so a claim that does not complete is an error naming the line rather than
  *    prose handed to a model. It runs where `setStepError` runs — the
- *    `## Steps` main flow and every `### Section` body of a test or skill,
+ *    `## Steps` main flow and every `### Section` body of a test or macro,
  *    plus MCP-supplied steps — and NOT over `## Hooks` entries, project
  *    `defaultHooks`, or steps posted straight to the Sessions API.
  *
@@ -23,7 +23,7 @@
  * and says what the grammar makes of it. It is NOT the whole decision. A
  * caller resolves a step in this order (decision 3 of the story):
  *
- *   1. bracket directives — `[skill:`, `[tool:`, `[input:`, `[interactive]`,
+ *   1. bracket directives — `[macro:`, `[tool:`, `[input:`, `[interactive]`,
  *      `[use computer]` / `[use browser]` (SPEC-use-computer.md §4.3);
  *   2. the bare-name section match (a step that IS a section name is a call
  *      before it is anything else, so a section named `While waiting` still
@@ -621,7 +621,7 @@ export function controlLineError(instruction: string, where = ''): string | null
       const word = /^otherwise/i.test(s) ? 'Otherwise' : 'Else';
       return (
         `${lead}. \`${word}\` must name one step to run — a section name, a ` +
-        `\`[skill: …]\`, a \`[tool: …]\`, a \`Set {{x}} to "…"\`, or a page ` +
+        `\`[macro: …]\`, a \`[tool: …]\`, a \`Set {{x}} to "…"\`, or a page ` +
         `instruction. Write \`${word}, <step>\`; for a body of more than one ` +
         `step, name a \`### Section\`.`
       );

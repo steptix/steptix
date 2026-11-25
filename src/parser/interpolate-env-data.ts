@@ -7,12 +7,12 @@ export interface EnvDataContext {
   /**
    * Parsed `data/<env>.json` object. Optional — when omitted, the
    * interpolation regex won't match `${data.X}` and those references pass
-   * through literally. Skill-level interpolation deliberately leaves `data`
-   * unset so a skill never reaches into the caller's env-default data file.
+   * through literally. Macro-level interpolation deliberately leaves `data`
+   * unset so a macro never reaches into the caller's env-default data file.
    */
   data?: DataObject;
   /**
-   * Additional named JSON namespaces declared by the test's or skill's
+   * Additional named JSON namespaces declared by the test's or macro's
    * `dataSources` frontmatter, keyed by namespace name (e.g. `vip`,
    * `endpoints`). Each value is the parsed-and-secret-resolved JSON tree
    * for that source. References `${<name>.path.to.value}` resolve against
@@ -26,7 +26,7 @@ export interface EnvDataContext {
    * `dataSources` paths like `../data/${envName}-endpoints.json`.
    */
   envName?: string | null;
-  /** File path used in error messages (test or skill markdown path). */
+  /** File path used in error messages (test or macro markdown path). */
   filePath?: string;
 }
 
@@ -99,7 +99,7 @@ export function interpolateEnvData(text: string, ctx: EnvDataContext): string {
  * point a path is being resolved no JSON data file has been loaded yet —
  * referencing one would be a chicken-and-egg loop.
  *
- * Used by skill and test parsers when computing the absolute filesystem
+ * Used by macro and test parsers when computing the absolute filesystem
  * path of each declared `dataSources` entry.
  */
 export function interpolateDataSourcePath(
@@ -173,7 +173,7 @@ export function envDataRefsIn(text: string): string[] {
  * that a miss is `undefined` rather than a throw: at run time the caller is
  * generated code asking for a value, and "not defined" is an answer.
  *
- * `data` resolves only when the context carries it (skill-level contexts
+ * `data` resolves only when the context carries it (macro-level contexts
  * deliberately omit it); any other namespace must be a declared source.
  */
 export function resolveEnvDataRef(name: string, ctx: EnvDataContext): string | undefined {

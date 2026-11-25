@@ -15,10 +15,10 @@ import type { ToolLog } from '../tools/types.js';
  * any name (the test's `[as: x]` capture names are what generated code
  * writes).
  *
- * Both accessors are **frame-aware**. Inside a skill body the author wrote
- * `{{username}}`, but `applySkillScope` rewrote the invocation's step text to
- * the namespaced `{{__skill<N>_username}}`. Generated code is written once per
- * skill, not per invocation, so it keeps using the authored name and the
+ * Both accessors are **frame-aware**. Inside a macro body the author wrote
+ * `{{username}}`, but `applyMacroScope` rewrote the invocation's step text to
+ * the namespaced `{{__macro<N>_username}}`. Generated code is written once per
+ * macro, not per invocation, so it keeps using the authored name and the
  * runtime resolves it through the executing frame's namespace.
  */
 export interface CodeBehindStepApi {
@@ -115,7 +115,7 @@ export interface CodeBehindStepApi {
    *
    * It throws a sentinel, so nothing after it in the entry runs. The runner
    * reads that throw as a passed step carrying `flowControl`, and the run loop
-   * skips the rest of the innermost flow: the `### Section` body, the skill
+   * skips the rest of the innermost flow: the `### Section` body, the macro
    * body, or the test itself. Write it as the branch of the condition the step
    * states, and write the other branch by leaving it out:
    *
@@ -298,7 +298,7 @@ export interface CodeBehindContext {
  * `source` is the step's raw markdown text as authored — everything after the
  * list marker, trimmed, exactly as written in the `.md`, including `{{param}}`
  * placeholders, `[as: x]` markers and any `[no-hooks]` marker — before any
- * interpolation or skill-scope transform. Comparison is case-sensitive exact
+ * interpolation or macro-scope transform. Comparison is case-sensitive exact
  * equality after trimming: an edited step should miss and regenerate, not
  * fuzzily match.
  */
@@ -308,7 +308,7 @@ export interface StepCodeEntry {
    * Name of the `### Section` whose body defines this step, for steps that
    * live in an inline section. Compared with the contract's `matchText`, so
    * casing and a `[no-hooks]` prefix don't matter. Absent for a step in a
-   * file's main flow (test or skill body).
+   * file's main flow (test or macro body).
    */
   section?: string;
   /**

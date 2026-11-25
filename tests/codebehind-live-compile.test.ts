@@ -139,21 +139,21 @@ describe('which steps a compile-mode run generates from', () => {
     );
   });
 
-  it('skips a [skill:] or [tool:] call — those are expanded or dispatched, never generated', () => {
+  it('skips a [macro:] or [tool:] call — those are expanded or dispatched, never generated', () => {
     // Both spellings: the colon after the keyword is optional in the
-    // invocation grammar, so `[skill sign_in]` is as much a call as
-    // `[skill: sign in]`.
+    // invocation grammar, so `[macro sign_in]` is as much a call as
+    // `[macro: sign in]`.
     for (const text of [
-      '[skill: sign in]',
+      '[macro: sign in]',
       '[tool: seedOrder]',
-      '[skill sign_in]',
+      '[macro sign_in]',
       '[tool seedOrder count=2]',
       // Labelled calls too. These used to slip through — the rule was
       // anchored at `^` while labels are a documented feature — so the
       // compiler paid to generate a Playwright entry for a step that is
       // always dispatched to the tool.
       'Seed the cart [tool: seedOrder items=2]',
-      'Log in as admin [skill login role="admin"]',
+      'Log in as admin [macro login role="admin"]',
     ]) {
       expect(generationRefusal({ text, status: 'passed', binding: binding(text) })).toMatch(
         /expanded or dispatched/,
@@ -169,9 +169,9 @@ describe('which steps a compile-mode run generates from', () => {
     // them told the author "expanded or dispatched", which was false, and
     // left the step permanently ineligible for code-behind.
     for (const text of [
-      '  [SKILL: x]',
-      '[ skill: x]',
-      `[skill${String.fromCharCode(160)}login]`,
+      '  [MACRO: x]',
+      '[ macro: x]',
+      `[macro${String.fromCharCode(160)}login]`,
       'Read the [tool reference](./ref.md) page',
     ]) {
       expect(
@@ -1910,7 +1910,7 @@ describe('the live compile’s parameter snapshot keeps the loop marks', () => {
 
 // ── Review round 3: the live prompts mask as the run did (G2, G3) ────────────
 
-describe('the live prompts, inside a skill body (review round 3)', () => {
+describe('the live prompts, inside a macro body (review round 3)', () => {
   /** A transcript that typed `value` — a placeholder, as the model names it. */
   const typing = (index: number, line: string, value: string): StepResult =>
     result(index, line, {
@@ -1925,19 +1925,19 @@ describe('the live prompts, inside a skill body (review round 3)', () => {
       ],
     });
 
-  it("G2: shows a For each's dotted value the pass bound under the skill's scoped name", async () => {
-    // The pass marked `__skill1_row.keyword`; the prompt names the authored
+  it("G2: shows a For each's dotted value the pass bound under the macro's scoped name", async () => {
+    // The pass marked `__macro1_row.keyword`; the prompt names the authored
     // `row.keyword`, and asked about THAT one the author rule masked `AU`
     // (`keyword` holds `key`).
     const LINE = 'Search for {{row.keyword}}';
-    const live: Record<string, string> = { __skill1_row: '{"keyword":"AU"}', '__skill1_row.keyword': 'AU' };
-    markLoopBindings(live, ['__skill1_row.keyword']);
+    const live: Record<string, string> = { __macro1_row: '{"keyword":"AU"}', '__macro1_row.keyword': 'AU' };
+    markLoopBindings(live, ['__macro1_row.keyword']);
     const { client, prompts } = fakeClient();
     const compiler = compilerFor([LINE], { client });
     compiler.offer({
       index: 0,
-      binding: binding(LINE, { scope: { renames: { row: '__skill1_row' }, inputs: {} } }),
-      result: typing(1, LINE, '{{__skill1_row.keyword}}'),
+      binding: binding(LINE, { scope: { renames: { row: '__macro1_row' }, inputs: {} } }),
+      result: typing(1, LINE, '{{__macro1_row.keyword}}'),
       resolvedParameters: liveCompileSnapshot(live),
     });
     await compiler.finish({ tokensUsed: 0 });
@@ -1947,8 +1947,8 @@ describe('the live prompts, inside a skill body (review round 3)', () => {
     expect(generation).toContain('{{row.keyword}} resolved to "AU" on this run');
   });
 
-  it("G3: masks a secret the skill's caller passed, inside another argument", async () => {
-    // `[skill: api token="uk_live_1234" header="Bearer uk_live_1234"]`: the
+  it("G3: masks a secret the macro's caller passed, inside another argument", async () => {
+    // `[macro: api token="uk_live_1234" header="Bearer uk_live_1234"]`: the
     // run's `secretsNow` merges frame inputs into its mask set; the live
     // prompts' set was the parameter map's alone.
     const KEY = 'uk_live_1234';

@@ -6,7 +6,7 @@ import type { ActiveFileTracker } from '../active-file-tracker.js';
 import { STOP_THE_RUN, type RunController } from '../run-controller.js';
 import type { StepRecorder } from '../step-recorder.js';
 import { readProjectDirs } from '../steptix-config-parse.js';
-import { isSkillDocument } from '../skill-run-targets.js';
+import { isMacroDocument } from '../macro-run-targets.js';
 import { resolveProjectDirs } from '../steptix-config.js';
 import {
   findProjectConfigs,
@@ -49,7 +49,7 @@ export function registerRecordCommands(deps: {
 
   /** End `controller`'s paused run, touching nothing of any other test's. */
   const endPausedRun = (controller: RunController): void => {
-    // Read before the reset below forgets which skill files the run entered.
+    // Read before the reset below forgets which macro files the run entered.
     const touched = controller.touchedFileUris;
     controller.stop();
     controller.resetFrameState();
@@ -96,9 +96,9 @@ export function registerRecordCommands(deps: {
       );
     }
     const doc = editor.document;
-    if (isSkillDocument(doc.getText(), doc.uri.fsPath, resolveProjectDirs(doc.uri)?.skillsDir ?? null)) {
+    if (isMacroDocument(doc.getText(), doc.uri.fsPath, resolveProjectDirs(doc.uri)?.macrosDir ?? null)) {
       return recorder.refuse(
-        'Record Steps records into a test, in that test\'s browser. Open a test that calls this skill and record there.',
+        'Record Steps records into a test, in that test\'s browser. Open a test that calls this macro and record there.',
       );
     }
     const controller = registry.active();

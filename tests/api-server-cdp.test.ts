@@ -163,7 +163,7 @@ const testConfig = {
     dir: './tests',
     dataDir: './data',
     contextDir: './context',
-    skillsDir: './skills',
+    macrosDir: './macros',
     toolsDir: './tools',
     pattern: '**/*.md',
   },

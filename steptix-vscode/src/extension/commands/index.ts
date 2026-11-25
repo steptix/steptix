@@ -21,17 +21,17 @@ import {
   splitRowSelection,
   type RowPickEntry,
 } from '../row-selection-core.js';
-import type { CompileOutcome, RunController, SkillDebugContext } from '../run-controller.js';
+import type { CompileOutcome, RunController, MacroDebugContext } from '../run-controller.js';
 import { codeBehindPathFor, findEntryLine, type CodeBehindDiffs } from '../codebehind-diff.js';
 import { getOutputChannel } from '../output-channel.js';
 import { emptyProposalMessage, partialNotes } from '../compile-summary-core.js';
-import { sectionedSkillRefusal } from '../sections.js';
+import { sectionedMacroRefusal } from '../sections.js';
 import { resolveProjectDirs } from '../steptix-config.js';
 import {
-  collectSkillRunTargets,
-  isSkillDocument,
-  type SkillRunTarget,
-} from '../skill-run-targets.js';
+  collectMacroRunTargets,
+  isMacroDocument,
+  type MacroRunTarget,
+} from '../macro-run-targets.js';
 import type { StepRecorder } from '../step-recorder.js';
 import { registerRecordCommands } from './record-steps.js';
 
@@ -50,7 +50,7 @@ interface Registry {
   /** Close the Test Runner's run-error banner on every runner surface. */
   dismissRunError(): void;
   /** Phase 3.1 — drop step-paused yellow ▶ markers across every URI
-   *  they live on (test file AND any skill file the run descended into). */
+   *  they live on (test file AND any macro file the run descended into). */
   clearAllStepPausedMarkers(): void;
   /** Drop ONE controller's step-paused ▶, wherever it is painted — Record
    *  Steps ending the paused run it records from, and nothing else. */
@@ -65,29 +65,29 @@ interface Registry {
   stepPausedEntry(controllerUri: vscode.Uri): { uri: vscode.Uri; line: number } | null;
   /** The controller for a test document URI string, if one exists. */
   controllerForUri(uri: string): RunController | undefined;
-  /** The controller holding a parked skill-step failure, if any (Stop capture). */
-  controllerWithSkillFailure(): RunController | undefined;
-  /** The single active "debug a skill after Stop" context, or null. */
-  readonly skillDebug: SkillDebugContext | null;
-  /** Set/replace the skill-debug context (latest Stop wins). */
-  setSkillDebug(ctx: SkillDebugContext): void;
-  /** Clear the skill-debug context unconditionally (Close Session, dead session). */
-  clearSkillDebug(): void;
-  /** Clear the skill-debug context only if it is owned by `testUri`. */
-  clearSkillDebugIfOwnedBy(testUri: string): void;
+  /** The controller holding a parked macro-step failure, if any (Stop capture). */
+  controllerWithMacroFailure(): RunController | undefined;
+  /** The single active "debug a macro after Stop" context, or null. */
+  readonly macroDebug: MacroDebugContext | null;
+  /** Set/replace the macro-debug context (latest Stop wins). */
+  setMacroDebug(ctx: MacroDebugContext): void;
+  /** Clear the macro-debug context unconditionally (Close Session, dead session). */
+  clearMacroDebug(): void;
+  /** Clear the macro-debug context only if it is owned by `testUri`. */
+  clearMacroDebugIfOwnedBy(testUri: string): void;
   /** Test-only: what the most recent compile failed with, or null when it
    *  did not fail. The notification it went into is not readable from the
    *  extension host. */
   lastCompileError: string | null;
-  /** Editor-attached controllers — the skill-file session picker's
+  /** Editor-attached controllers — the macro-file session picker's
    *  candidate pool (batch controllers have no session to inject into). */
   editorControllers(): RunController[];
-  /** Re-sync the Variables panel's skill re-run affordance with what is still
+  /** Re-sync the Variables panel's macro re-run affordance with what is still
    *  parked — an injected run consumes its host's anchors. */
-  refreshSkillRerunPanel(): void;
-  /** Test-only: resolves the skill session picker without a QuickPick. */
-  pickSkillSessionForTest:
-    | ((targets: SkillRunTarget[]) => SkillRunTarget | undefined)
+  refreshMacroRerunPanel(): void;
+  /** Test-only: resolves the macro session picker without a QuickPick. */
+  pickMacroSessionForTest:
+    | ((targets: MacroRunTarget[]) => MacroRunTarget | undefined)
     | null;
 }
 
@@ -202,8 +202,8 @@ export function registerCommands(
     label: string,
     result: { ok: boolean; error?: { message: string }; compile?: CompileOutcome },
     opts: {
-      /** Where Apply lands the author — a skill-file compile returns to the
-       *  SKILL, not the test whose session recorded it. */
+      /** Where Apply lands the author — a macro-file compile returns to the
+       *  MACRO, not the test whose session recorded it. */
       returnTo?: string;
       /** Put back the proposal the caller parked, if this compile turns out to
        *  produce none. Every early return below is such a case: the author was
@@ -326,41 +326,41 @@ export function registerCommands(
         if (choice === 'Show log') getOutputChannel().show(true);
       });
   };
-  /** Is the active editor a SKILL document — frontmatter `type: skill`, or a
-   *  file under the project's skills directory (the server invokes those with
+  /** Is the active editor a MACRO document — frontmatter `type: macro`, or a
+   *  file under the project's macros directory (the server invokes those with
    *  or without frontmatter, so detection must too)? */
-  const activeDocIsSkill = (editor: vscode.TextEditor): boolean =>
-    isSkillDocument(
+  const activeDocIsMacro = (editor: vscode.TextEditor): boolean =>
+    isMacroDocument(
       editor.document.getText(),
       editor.document.uri.fsPath,
-      resolveProjectDirs(editor.document.uri)?.skillsDir ?? null,
+      resolveProjectDirs(editor.document.uri)?.macrosDir ?? null,
     );
 
   /**
-   * The skill-file fork of Run Step Here / Compile This Step
+   * The macro-file fork of Run Step Here / Compile This Step
    * (stories/specs/run-and-compile-a-skill-step.md).
    *
-   * In a skill file the step commands never act directly: they open a picker
+   * In a macro file the step commands never act directly: they open a picker
    * of the sessions the step could run in — tests paused or stopped inside
-   * this skill first, then other open sessions of tests that call it, then a
+   * this macro first, then other open sessions of tests that call it, then a
    * fresh standalone session (today's behaviour, one click further away).
-   * The answer to "two tests use this skill in two browsers — which one?" is
+   * The answer to "two tests use this macro in two browsers — which one?" is
    * "the one you point at, every time": nothing is ever chosen silently.
    *
-   * A test-session pick routes the test's own `[skill:]` call line through
+   * A test-session pick routes the test's own `[macro:]` call line through
    * that test's controller with a `startAt`/`endAt` slice bounding execution
    * to the chosen step(s) — the merged Stop-debug wiring — plus, for a
    * compile pick, `compile: 'steps'` riding the same request. The run
-   * executes inside the real skill frame, so entries bind into the SKILL's
+   * executes inside the real macro frame, so entries bind into the MACRO's
    * `.steps.ts` exactly where a whole-test compile puts them.
    */
-  const openSkillSessionPicker = async (
+  const openMacroSessionPicker = async (
     mode: 'run' | 'compile',
     editor: vscode.TextEditor,
     clickedLine: number,
   ): Promise<void> => {
     // Save FIRST. Everything downstream reads the file from disk — the
-    // sectioned-skill refusal (`readFileSync`), the server's expansion, the
+    // sectioned-macro refusal (`readFileSync`), the server's expansion, the
     // recording and the diff — and a save can rewrite the buffer (format-on-
     // save reflows markdown and renumbers lists), so line anchors resolved
     // against the unsaved buffer can name a different step by the time the
@@ -405,11 +405,11 @@ export function registerCommands(
     const targetLines = classified
       .map((_, i) => i + 1)
       .filter((line) => line >= startLine && line <= endLine && isStepLine(line));
-    const skillFsPath = editor.document.uri.fsPath;
-    const skillName = path.basename(skillFsPath, path.extname(skillFsPath));
+    const macroFsPath = editor.document.uri.fsPath;
+    const macroName = path.basename(macroFsPath, path.extname(macroFsPath));
 
     const candidates = registry.editorControllers().map((c) => {
-      const f = c.lastSkillFailure;
+      const f = c.lastMacroFailure;
       return {
         id: c.document.uri.toString(),
         testFsPath: c.document.uri.fsPath,
@@ -422,32 +422,32 @@ export function registerCommands(
         isRunning: c.isRunning,
         parkedAtPause: c.isParkedAtPause,
         sessionProbablyOpen: c.sessionProbablyOpen,
-        pausedInSkill:
-          f && f.kind === 'skill'
-            ? { skillFsPath: f.skillUri, skillLine: f.skillLine, callLine: f.testLine }
+        pausedInMacro:
+          f && f.kind === 'macro'
+            ? { macroFsPath: f.macroUri, macroLine: f.macroLine, callLine: f.testLine }
             : null,
       };
     });
-    const ctx = registry.skillDebug;
-    const targets = collectSkillRunTargets({
-      skillFsPath,
+    const ctx = registry.macroDebug;
+    const targets = collectMacroRunTargets({
+      macroFsPath,
       clickedLine,
       candidates,
       stopAnchor: ctx
-        ? { id: ctx.testUri.toString(), skillFsPath: ctx.skillUri, callLine: ctx.testLine }
+        ? { id: ctx.testUri.toString(), macroFsPath: ctx.macroUri, callLine: ctx.testLine }
         : null,
-      skillsDirFor: (testFsPath) =>
-        resolveProjectDirs(vscode.Uri.file(testFsPath))?.skillsDir ?? null,
+      macrosDirFor: (testFsPath) =>
+        resolveProjectDirs(vscode.Uri.file(testFsPath))?.macrosDir ?? null,
     });
 
     const verb = mode === 'compile' ? 'compile' : 'run';
     const what =
       targetLines.length > 1
-        ? `steps ${startLine}–${endLine} of ${skillName}`
-        : `the step on line ${clickedLine} of ${skillName}`;
+        ? `steps ${startLine}–${endLine} of ${macroName}`
+        : `the step on line ${clickedLine} of ${macroName}`;
     const hasSessions = targets.some((t) => t.kind !== 'standalone');
-    const picked = registry.pickSkillSessionForTest
-      ? registry.pickSkillSessionForTest(targets)
+    const picked = registry.pickMacroSessionForTest
+      ? registry.pickMacroSessionForTest(targets)
       : await (async () => {
           const items = targets.map((t) => ({
             label: t.label,
@@ -457,7 +457,7 @@ export function registerCommands(
           const choice = await vscode.window.showQuickPick(items, {
             placeHolder: hasSessions
               ? `Where should Steptix ${verb} ${what}?`
-              : `No open test session calls ${skillName} — run a test first to ${verb} against its browser`,
+              : `No open test session calls ${macroName} — run a test first to ${verb} against its browser`,
           });
           return choice?.target;
         })();
@@ -477,7 +477,7 @@ export function registerCommands(
     };
 
     if (picked.kind === 'standalone') {
-      // The skill file's own controller and its own fresh session — with the
+      // The macro file's own controller and its own fresh session — with the
       // SAME resolved range every other row runs, so one prompt cannot mean
       // two different things.
       if (mode === 'run') return runStepStandalone(targetLines);
@@ -512,17 +512,17 @@ export function registerCommands(
     // up a blank browser.
     const live = await controller.isRerunSessionLive();
     if (!live) {
-      if (picked.kind === 'stopped') registry.clearSkillDebug();
+      if (picked.kind === 'stopped') registry.clearMacroDebug();
       refuse('Steptix: that session is no longer alive — run the test again first');
       return;
     }
-    // Line anchors into a skill that defines inline sections are provably
+    // Line anchors into a macro that defines inline sections are provably
     // unsafe — same refusal as both merged siblings. Reads the file from
     // disk, which the save at the top of this flow has already made current.
-    const unsupported = sectionedSkillRefusal({
-      kind: 'skill',
-      skillUri: skillFsPath,
-      skillName,
+    const unsupported = sectionedMacroRefusal({
+      kind: 'macro',
+      macroUri: macroFsPath,
+      macroName,
     });
     if (unsupported) {
       refuse(unsupported);
@@ -530,21 +530,21 @@ export function registerCommands(
     }
 
     const rerun = {
-      startAt: { uri: skillFsPath, line: startLine },
-      endAt: { uri: skillFsPath, line: endLine },
+      startAt: { uri: macroFsPath, line: startLine },
+      endAt: { uri: macroFsPath, line: endLine },
     };
     // EVERY injected run consumes the host's parked anchors — `resetFrameState`
-    // wipes `lastSkillFailure` regardless of which row was picked — so the
+    // wipes `lastMacroFailure` regardless of which row was picked — so the
     // panel is re-synced after all of them, not just a ⏸ pick. Re-syncing (not
     // blanking) is what keeps another test's still-parked failure on screen.
-    const settleConsumedAnchor = (): void => registry.refreshSkillRerunPanel();
+    const settleConsumedAnchor = (): void => registry.refreshMacroRerunPanel();
     // Does this pick START a run (SPEC-use-computer.md §4.5)? Every row here is
     // an idle session — a parked one is refused above — but two of them are
-    // idle because a run failed (⏸) or was stopped (⏹) inside THIS skill, and
+    // idle because a run failed (⏸) or was stopped (⏹) inside THIS macro, and
     // the pick re-runs its steps against what that run left, surface included,
     // exactly as the Variables panel's re-run from the failed step does. The ▶
-    // row is a session whose last run had nothing to do with this skill: it
-    // may have died inside some other `[use computer]`, and a skill step sent
+    // row is a session whose last run had nothing to do with this macro: it
+    // may have died inside some other `[use computer]`, and a macro step sent
     // there without `runStart` would go to the real mouse. So it starts on the
     // surface the test file says its call line is on.
     const startsRun = picked.kind === 'open';
@@ -567,7 +567,7 @@ export function registerCommands(
     // resolveCompileTarget gates here — occurrence is counted over the full
     // expansion server-side (the client's repeated-step gate would spuriously
     // refuse), and no `detachedBody` is sent: the call line runs as the main
-    // flow, so the run's real skill frame is the binding.
+    // flow, so the run's real macro frame is the binding.
     if (controller.document.isDirty) await controller.document.save();
     // Same reasoning as `runAndCompile`: this path reaches `presentCompile`
     // without going through it, so without parking here a pending proposal
@@ -602,13 +602,13 @@ export function registerCommands(
       controller,
       // The shared-file caveat, visible: this entry will serve every caller,
       // and this is the session whose page state it recorded against.
-      `${path.basename(skillFsPath)} (recorded in ${path.basename(controller.document.uri.fsPath)}'s session)`,
+      `${path.basename(macroFsPath)} (recorded in ${path.basename(controller.document.uri.fsPath)}'s session)`,
       result,
-      { returnTo: skillFsPath, restoreProposal },
+      { returnTo: macroFsPath, restoreProposal },
     );
   };
 
-  /** Run Step Here's standalone body — the skill picker's last row reuses it
+  /** Run Step Here's standalone body — the macro picker's last row reuses it
    *  with the resolved selection range. */
   const runStepStandalone = (lines: number[]): void => {
     const controller = registry.active();
@@ -620,7 +620,7 @@ export function registerCommands(
       .finally(() => registry.notifyRunning(false));
   };
 
-  /** Compile This Step's test-file body — also the skill picker's standalone
+  /** Compile This Step's test-file body — also the macro picker's standalone
    *  row. Resolves the clicked line (selection, scope, occurrence gates) and
    *  compiles in the ACTIVE document's own session. */
   const compileStepOnActive = async (
@@ -651,11 +651,11 @@ export function registerCommands(
    * The body behind BOTH "Compile This Step" and "Repair this step".
    *
    * Compile This Step: the clicked step (or each step in a multi-line
-   * selection, or the body a `### Section` / `[skill:]` call expands to) runs
+   * selection, or the body a `### Section` / `[macro:]` call expands to) runs
    * NOW in the document's live session, from wherever the browser is, and that
    * fresh run is the recording (stories/compile-as-you-go.md §Compile This
    * Step). No step numbers are involved, so the old refusal for a step below a
-   * skill or section call is gone: this binds by what the runtime binds by —
+   * macro or section call is gone: this binds by what the runtime binds by —
    * the step's authored text plus its section scope.
    *
    * Repair this step: the same call, and deliberately so. `mode: 'steps'` is
@@ -685,11 +685,11 @@ export function registerCommands(
       typeof target?.lineNumber === 'number'
         ? target.lineNumber
         : editor.selection.active.line + 1;
-    // The skill-file fork: pick the session (a paused/stopped/open test,
+    // The macro-file fork: pick the session (a paused/stopped/open test,
     // or standalone), then compile the step in it. Test files keep the
     // direct path below, `resolveCompileTarget`'s gates included.
-    if (activeDocIsSkill(editor)) {
-      return openSkillSessionPicker('compile', editor, line);
+    if (activeDocIsMacro(editor)) {
+      return openMacroSessionPicker('compile', editor, line);
     }
     // A multi-line selection that covers the clicked line compiles every
     // step in it, in order — the session advances between them, so a
@@ -771,7 +771,7 @@ export function registerCommands(
    */
   const performStop = (
     opts: {
-      setSkillDebug?: boolean;
+      setMacroDebug?: boolean;
       preferRunning?: boolean;
     } = {},
   ): void => {
@@ -779,46 +779,46 @@ export function registerCommands(
     // function and then closes `registry.active()`, so widening the reach
     // unconditionally made it stop one test and close another.
     //
-    // The Stop COMMAND opts in: with a skill file focused during an injected
+    // The Stop COMMAND opts in: with a macro file focused during an injected
     // run (the session picker's, or the Stop-debug flow's) the active
-    // controller is the skill's own idle one, and stopping that would wipe UI
+    // controller is the macro's own idle one, and stopping that would wipe UI
     // state while the run kept going on the test's controller.
     const active = registry.active();
     const controller =
       opts.preferRunning && !active?.isRunning
         ? (registry.runningController() ?? active)
         : active;
-    // On an explicit Stop (not Close Session), park a skill-debug context for a
-    // parked TOP-LEVEL skill failure — read BEFORE resetFrameState wipes
-    // lastSkillFailure. Latest Stop wins (setSkillDebug replaces any prior).
-    if (opts.setSkillDebug) {
+    // On an explicit Stop (not Close Session), park a macro-debug context for a
+    // parked TOP-LEVEL macro failure — read BEFORE resetFrameState wipes
+    // lastMacroFailure. Latest Stop wins (setMacroDebug replaces any prior).
+    if (opts.setMacroDebug) {
       // The controller we are stopping owns the context. The registry-wide
       // fallback only covers "we could not resolve one at all" — using it when
       // the stopped controller simply has no parked failure would park a
       // context for a test the author never touched (an injected picker run
-      // clears its host's `lastSkillFailure`, so that case is routine).
-      const failed = controller ?? registry.controllerWithSkillFailure();
-      const f = failed?.lastSkillFailure;
-      // Skill failures only. "Debug a skill after Stop" opens the skill file
+      // clears its host's `lastMacroFailure`, so that case is routine).
+      const failed = controller ?? registry.controllerWithMacroFailure();
+      const f = failed?.lastMacroFailure;
+      // Macro failures only. "Debug a macro after Stop" opens the macro file
       // and runs its body against the stopped session — for a SECTION,
-      // `skillUri` is the test file itself, so that flow would activate
-      // against the wrong thing entirely: it would offer to debug "the skill"
+      // `macroUri` is the test file itself, so that flow would activate
+      // against the wrong thing entirely: it would offer to debug "the macro"
       // by reopening the test the user is already looking at. Section re-runs
       // go through the Variables panel path instead, which needs no such
       // context.
-      if (f && f.kind === 'skill') {
-        registry.setSkillDebug({
+      if (f && f.kind === 'macro') {
+        registry.setMacroDebug({
           testUri: f.testUri,
           testLine: f.testLine,
-          skillUri: f.skillUri,
-          skillName: f.skillName,
+          macroUri: f.macroUri,
+          macroName: f.macroName,
           frameId: f.frameId,
         });
       }
     }
     controller?.stop();
-    // Stop must flip running statuses on BOTH the test file and any skill
-    // file the run descended into — otherwise skill-body lines keep
+    // Stop must flip running statuses on BOTH the test file and any macro
+    // file the run descended into — otherwise macro-body lines keep
     // spinning. Frame state on the controller is wiped too so a subsequent
     // run doesn't inherit stale frames.
     controller?.resetFrameState();
@@ -827,7 +827,7 @@ export function registerCommands(
       tracker.setBreakpointStop(editor.document.uri, null);
     }
     tracker.markAllRunningStopped();
-    // A step-paused yellow ▶ may live on a SKILL file the run descended
+    // A step-paused yellow ▶ may live on a MACRO file the run descended
     // into — `setBreakpointStop` above only cleared the test-file marker.
     // Walk every recorded step-paused entry and clear it where painted.
     registry.clearAllStepPausedMarkers();
@@ -970,8 +970,8 @@ export function registerCommands(
     }),
 
     vscode.commands.registerCommand('steptix.pause', () => {
-      // Same routing as Stop: from a skill file during an injected run, the
-      // active controller is the skill's idle one — pause the running one.
+      // Same routing as Stop: from a macro file during an injected run, the
+      // active controller is the macro's idle one — pause the running one.
       const active = registry.active();
       const controller = active?.isRunning ? active : registry.runningController();
       if (!controller || !controller.isRunning) {
@@ -981,7 +981,7 @@ export function registerCommands(
       controller.pause();
       // Pause leaves the in-flight step's status as `running` (blue spinner)
       // unless we flip it. The spinner spins forever on whichever file the
-      // step belonged to — most visibly on a skill body line, where the
+      // step belonged to — most visibly on a macro body line, where the
       // yellow ▶ doesn't even live on the same file. Same wipe Stop uses
       // (running → stopped across every tracked URI) is the right move here:
       // the step was interrupted mid-flight, so it isn't passing, failing,
@@ -998,37 +998,37 @@ export function registerCommands(
         await registry.recorder.stop();
         return;
       }
-      performStop({ setSkillDebug: true, preferRunning: true });
+      performStop({ setMacroDebug: true, preferRunning: true });
     }),
 
-    // "Debug a skill against a stopped session": run the selected skill step(s)
-    // (or the whole skill body if nothing is selected) against the still-live
-    // session of the test that was Stopped inside this skill. Routes through the
+    // "Debug a macro against a stopped session": run the selected macro step(s)
+    // (or the whole macro body if nothing is selected) against the still-live
+    // session of the test that was Stopped inside this macro. Routes through the
     // owning test's controller so the open browser + live variables are reused.
     // See stories/specs/skill-debug-after-stop.md.
-    vscode.commands.registerCommand('steptix.runSkillStepsOnStoppedSession', async () => {
-      const ctx = registry.skillDebug;
+    vscode.commands.registerCommand('steptix.runMacroStepsOnStoppedSession', async () => {
+      const ctx = registry.macroDebug;
       if (!ctx) {
         vscode.window.setStatusBarMessage(
-          'Steptix: no stopped skill to debug — Stop a test that failed inside a skill first',
+          'Steptix: no stopped macro to debug — Stop a test that failed inside a macro first',
           3000,
         );
         return;
       }
       const editor = tracker.activeEditor;
-      if (!editor || vscode.Uri.file(ctx.skillUri).toString() !== editor.document.uri.toString()) {
+      if (!editor || vscode.Uri.file(ctx.macroUri).toString() !== editor.document.uri.toString()) {
         vscode.window.setStatusBarMessage(
-          `Steptix: open the skill being debugged (${ctx.skillName}) to run its steps`,
+          `Steptix: open the macro being debugged (${ctx.macroName}) to run its steps`,
           3000,
         );
         return;
       }
-      // Range = the selected step lines, or the whole skill body when nothing is
-      // selected. `extractSteps` keys on the `## Steps` list, which skills have;
+      // Range = the selected step lines, or the whole macro body when nothing is
+      // selected. `extractSteps` keys on the `## Steps` list, which macros have;
       // its line model matches the server's expanded source lines.
       const steps = extractSteps(editor.document.getText());
       if (steps.length === 0) {
-        vscode.window.setStatusBarMessage('Steptix: no steps found in this skill', 2500);
+        vscode.window.setStatusBarMessage('Steptix: no steps found in this macro', 2500);
         return;
       }
       const bodyLines = steps.map((s) => s.line);
@@ -1040,7 +1040,7 @@ export function registerCommands(
 
       const controller = registry.controllerForUri(ctx.testUri.toString());
       if (!controller) {
-        registry.clearSkillDebug();
+        registry.clearMacroDebug();
         vscode.window.setStatusBarMessage('Steptix: the stopped test is no longer open', 3000);
         return;
       }
@@ -1048,23 +1048,23 @@ export function registerCommands(
       // (and clear the context) rather than silently spin up a blank browser.
       const live = await controller.isRerunSessionLive();
       if (!live) {
-        registry.clearSkillDebug();
+        registry.clearMacroDebug();
         vscode.window.setStatusBarMessage(
           'Steptix: the stopped session is no longer alive — re-run the test to debug again',
           4000,
         );
         return;
       }
-      // Same anchoring hazard as the Variables-panel re-run: a skill that
+      // Same anchoring hazard as the Variables-panel re-run: a macro that
       // defines its own sections cannot be line-anchored safely, because the
       // server applies exact matching only to the test file and falls back to
-      // nearest-line in a skill — landing inside a body that already ran.
-      // This context is skill-kind by construction (it comes from the Stop
-      // gate, which only captures skill failures).
-      const unsupported = sectionedSkillRefusal({
-        kind: 'skill',
-        skillUri: ctx.skillUri,
-        skillName: ctx.skillName,
+      // nearest-line in a macro — landing inside a body that already ran.
+      // This context is macro-kind by construction (it comes from the Stop
+      // gate, which only captures macro failures).
+      const unsupported = sectionedMacroRefusal({
+        kind: 'macro',
+        macroUri: ctx.macroUri,
+        macroName: ctx.macroName,
       });
       if (unsupported) {
         vscode.window.setStatusBarMessage(unsupported, 6000);
@@ -1075,8 +1075,8 @@ export function registerCommands(
         .runLines([ctx.testLine], {
           isContinuation: true,
           rerun: {
-            startAt: { uri: ctx.skillUri, line: startLine },
-            endAt: { uri: ctx.skillUri, line: endLine },
+            startAt: { uri: ctx.macroUri, line: startLine },
+            endAt: { uri: ctx.macroUri, line: endLine },
           },
         })
         .finally(() => registry.notifyRunning(false));
@@ -1117,9 +1117,9 @@ export function registerCommands(
     // that call it by name.
     vscode.commands.registerCommand('steptix.continueRun', async () => {
       // Same routing rule as `dispatchStep`: prefer the running
-      // controller so Continue from a side-by-side skill file
+      // controller so Continue from a side-by-side macro file
       // advances the outer run instead of trying to relaunch the
-      // skill file as a new test.
+      // macro file as a new test.
       const controller = registry.runningController() ?? registry.active();
       const editor = tracker.activeEditor;
       if (!controller || !editor) return notifyNoActive();
@@ -1224,7 +1224,7 @@ export function registerCommands(
       // up a brand-new session against stale UI state.
       performStop();
       // Closing this test's session ends its debug context (page is gone).
-      registry.clearSkillDebugIfOwnedBy(controller.document.uri.toString());
+      registry.clearMacroDebugIfOwnedBy(controller.document.uri.toString());
       await controller.closeSession();
       vscode.window.setStatusBarMessage(
         'Steptix: session closed — next F5 starts a fresh browser',
@@ -1261,15 +1261,15 @@ export function registerCommands(
         typeof target?.lineNumber === 'number'
           ? target.lineNumber
           : editor.selection.active.line + 1;
-      // In a SKILL file the command opens the session picker instead of
+      // In a MACRO file the command opens the session picker instead of
       // acting immediately: the browsers worth running against belong to the
-      // tests that call this skill, and standalone is the picker's last row
+      // tests that call this macro, and standalone is the picker's last row
       // (stories/specs/run-and-compile-a-skill-step.md). Awaited, not floated:
       // the picker saves, probes the session and starts a run, and a rejection
       // from any of those would otherwise be an unhandled rejection the author
       // never sees.
-      if (activeDocIsSkill(editor)) {
-        return openSkillSessionPicker('run', editor, line);
+      if (activeDocIsMacro(editor)) {
+        return openMacroSessionPicker('run', editor, line);
       }
       const inert = inertLineRefusal(editor.document.getText(), line);
       if (inert) {
@@ -1404,8 +1404,8 @@ export function registerCommands(
 
     vscode.commands.registerCommand('steptix.applyCodeBehind', async () => {
       // Read before applying — `apply` consumes the proposal. `returnTo`
-      // wins when set: a skill-file compile lands the author back in the
-      // skill they are iterating on.
+      // wins when set: a macro-file compile lands the author back in the
+      // macro they are iterating on.
       const testFilePath = diffs.pending?.returnTo ?? diffs.pending?.testFilePath;
       const written = await diffs.apply();
       if (written.length === 0) {
@@ -1529,7 +1529,7 @@ function notifyNoActive(): void {
  * What Compile This Step should send for a click at `line`, or why it cannot
  * (stories/compile-as-you-go.md §Compile This Step).
  *
- * What is ALLOWED: a plain step, a `### Section` or `[skill:]` call line, a
+ * What is ALLOWED: a plain step, a `### Section` or `[macro:]` call line, a
  * step below either of those, and steps inside section bodies. A body step
  * runs detached at the root frame, as Run Step Here runs it, but its ENTRY has
  * to bind under its section — that is where the runtime, which reaches the
@@ -1633,7 +1633,7 @@ export function resolveCompileTarget(
  * The main-flow steps that survive expansion as steps of the TEST's own frame
  * — the population an entry's `occurrence` is counted over.
  *
- * A bare section call and a `[skill: ...]` invocation are replaced by their
+ * A bare section call and a `[macro: ...]` invocation are replaced by their
  * bodies, which bind inside their own frames, so neither contributes a
  * root-frame step and neither can collide with one.
  */
@@ -1643,11 +1643,11 @@ function rootFrameSteps(text: string): { line: number; instruction: string }[] {
     .map((s) => ({ line: s.line, instruction: s.instruction.trim() }))
     .filter(
       (s) =>
-        // Not a hand-rolled `\[skill\s*:` — that spelling missed the
-        // colon-less form, so `1. [skill login]` twice in a file was counted
+        // Not a hand-rolled `\[macro\s*:` — that spelling missed the
+        // colon-less form, so `1. [macro login]` twice in a file was counted
         // as two root-frame steps and Compile This Step refused it as an
-        // ambiguous duplicate, while `[skill: login]` compiled fine.
-        parseInvocationLine(s.instruction)?.kind !== 'skill' &&
+        // ambiguous duplicate, while `[macro: login]` compiled fine.
+        parseInvocationLine(s.instruction)?.kind !== 'macro' &&
         !sectionNames.has(s.instruction.toLowerCase()),
     );
 }
@@ -1665,8 +1665,8 @@ function sectionOwningLine(text: string, line: number): string | null {
  * one-shot debugger flag (if any) an F11 sends.
  *
  *  - `tool`  → `pauseAtNextTool` (Phase 5 tool step-into).
- *  - `skill` → neither: F11 on a `[skill:]` line must keep meaning "pause on
- *    the skill's first step in the `.md`", not "jump into whatever
+ *  - `macro` → neither: F11 on a `[macro:]` line must keep meaning "pause on
+ *    the macro's first step in the `.md`", not "jump into whatever
  *    code-behind that first body step has". Descending further is one more
  *    F11 from inside the body.
  *  - `plain` → `pauseAtNextCodeBehind` (stories/codebehind-debugging.md).
@@ -1686,7 +1686,7 @@ function sectionOwningLine(text: string, line: number): string | null {
  *    "into" at all.
  *  - `unknown` → no paused entry / no document; send no flag.
  */
-type PausedLineKind = 'tool' | 'skill' | 'plain' | 'use' | 'unknown';
+type PausedLineKind = 'tool' | 'macro' | 'plain' | 'use' | 'unknown';
 
 function pausedLineKind(registry: Registry, controller: RunController): PausedLineKind {
   const entry = registry.stepPausedEntry(controller.document.uri);
@@ -1742,10 +1742,10 @@ async function dispatchStep(
 ): Promise<void> {
   // Prefer the running controller over the active-editor controller
   // when a run is in flight. Without this, if the user has clicked
-  // onto a side-by-side skill file (auto-revealed when the run paused
-  // inside the skill), `registry.active()` returns the SKILL file's
+  // onto a side-by-side macro file (auto-revealed when the run paused
+  // inside the macro), `registry.active()` returns the MACRO file's
   // controller — which has never run — so Step Over / Step Into try
-  // to launch a NEW run on the skill file instead of advancing the
+  // to launch a NEW run on the macro file instead of advancing the
   // already-running outer test. When no run is in flight, fall back
   // to the active-editor controller so the "from idle" path (F11
   // starts a fresh stepping run) keeps working.
@@ -1782,7 +1782,7 @@ async function dispatchStep(
     // attach; a plain line asks the same for the step's code-behind
     // entry, if it has one (stories/codebehind-debugging.md). Detected
     // by reading the line text at the parked step-pause position; a
-    // `[skill:]` line (and the unknown case) falls back to normal
+    // `[macro:]` line (and the unknown case) falls back to normal
     // `into`.
     if (mode === 'into') {
       const kind = pausedLineKind(registry, controller);
@@ -1855,7 +1855,7 @@ async function dispatchStep(
     // so the server emits `tool:awaiting-debugger` before that step. A
     // plain line seeds `pauseAtNextCodeBehind` the same way — the pause
     // only materialises when the step actually has a code-behind entry
-    // (stories/codebehind-debugging.md); a `[skill:]` line seeds neither.
+    // (stories/codebehind-debugging.md); a `[macro:]` line seeds neither.
     const lineText = editor.document.lineAt(Math.max(0, startLine - 1)).text;
     const lineKind = classifyStepLine(lineText);
     const pauseAtNextTool = mode === 'into' && lineKind === 'tool';

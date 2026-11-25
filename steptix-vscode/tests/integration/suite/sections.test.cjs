@@ -57,7 +57,7 @@ const signInFrame = (id, line, testPath) => ({
   kind: 'section',
   uri: testPath,
   line,
-  skillName: 'Sign in',
+  macroName: 'Sign in',
 });
 
 describe('Steptix inline sections', function () {
@@ -207,7 +207,7 @@ describe('Steptix inline sections', function () {
     fake.push({ type: 'frame:push', frame });
 
     // The invocation line goes running on push — the aggregate treatment a
-    // `[skill:]` line already gets, which sections inherit for free.
+    // `[macro:]` line already gets, which sections inherit for free.
     await waitFor('call line running', () => {
       const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
       return statuses[10] === 'running';
@@ -227,7 +227,7 @@ describe('Steptix inline sections', function () {
       return statuses[10] === 'pass';
     });
 
-    // Body statuses land on the TEST file — sections beat skills here: the
+    // Body statuses land on the TEST file — sections beat macros here: the
     // whole run paints in one editor, no second file to open.
     const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
     assert.equal(statuses[17], 'pass');
@@ -320,7 +320,7 @@ describe('Steptix inline sections', function () {
 
     const [top] = hooks.runningFrameStack();
     assert.equal(top.kind, 'section');
-    assert.equal(top.skillName, 'Sign in');
+    assert.equal(top.macroName, 'Sign in');
     assert.equal(top.uri, testPath, 'a test-file section frame is defined by the test file');
 
     fake.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
@@ -657,10 +657,10 @@ describe('Steptix inline sections — debug parity', function () {
     await waitFor('detected as test file', () => hooks.tracker.snapshot().isTestFile === true);
   });
 
-  it('Stop after a SECTION failure does not arm the skill-debug context', async () => {
-    // "Debug a skill after Stop" opens `skillUri` and runs its body against
+  it('Stop after a SECTION failure does not arm the macro-debug context', async () => {
+    // "Debug a macro after Stop" opens `macroUri` and runs its body against
     // the stopped session. For a section that URI is the TEST file, so the
-    // flow would offer to debug "the skill" by reopening the file the user is
+    // flow would offer to debug "the macro" by reopening the file the user is
     // already looking at.
     void vscode.commands.executeCommand('steptix.runAll');
     await waitFor('stream active', () => fake.hasActiveStream);
@@ -677,9 +677,9 @@ describe('Steptix inline sections — debug parity', function () {
     await waitFor('stopped', () => !hooks.isRunning());
 
     assert.equal(
-      hooks.skillDebugActive(),
+      hooks.macroDebugActive(),
       false,
-      'a section failure must not arm the skill-file debug-after-Stop flow',
+      'a section failure must not arm the macro-file debug-after-Stop flow',
     );
   });
 
@@ -760,7 +760,7 @@ describe('Steptix inline sections — debug parity', function () {
     await waitFor('stream active', () => fake.hasActiveStream);
 
     const outer = signInFrame('f1', 10, testPath);
-    const inner = { ...signInFrame('f2', 17, testPath), parentId: 'f1', skillName: 'Add an item' };
+    const inner = { ...signInFrame('f2', 17, testPath), parentId: 'f1', macroName: 'Add an item' };
     fake.push({ type: 'frame:push', frame: outer });
     fake.push({ type: 'frame:push', frame: inner });
     fake.push({ type: 'step:fail', line: 22, error: 'nope', frame: inner });
@@ -938,10 +938,10 @@ describe('Steptix inline sections — debug parity', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('a section pause labels the Variables panel "section:", not "skill:"', async () => {
-    // The panel keyed its description on `skillName` being present, and a
-    // section frame carries `skillName` (it holds the section name), so every
-    // paused section read "skill: <section name>".
+  it('a section pause labels the Variables panel "section:", not "macro:"', async () => {
+    // The panel keyed its description on `macroName` being present, and a
+    // section frame carries `macroName` (it holds the section name), so every
+    // paused section read "macro: <section name>".
     void vscode.commands.executeCommand('steptix.runAll');
     await waitFor('stream active', () => fake.hasActiveStream);
 
@@ -1024,11 +1024,11 @@ describe('Steptix inline sections — editor surfaces', function () {
     assert.equal(after.passed, 1, 'N counts the main-flow pass only, not the body-line pass');
   });
 
-  it('a root-frame failure does not park a re-runnable skill/section failure', async () => {
+  it('a root-frame failure does not park a re-runnable macro/section failure', async () => {
     // A `step:fail` on the top-level test frame (kind 'test', parentId null)
-    // reaches recordSkillFailure. The root is not a re-runnable unit — there
+    // reaches recordMacroFailure. The root is not a re-runnable unit — there
     // is no enclosing invocation to re-enter — so it must not arm the Stop
-    // debug flow, which would otherwise offer to "re-run the skill" with the
+    // debug flow, which would otherwise offer to "re-run the macro" with the
     // test file as its target.
     //
     // Two guards enforce this — the kind gate and the `!root` lookup (the
@@ -1048,11 +1048,11 @@ describe('Steptix inline sections — editor surfaces', function () {
 
     await vscode.commands.executeCommand('steptix.stop');
     await waitFor('stopped', () => !hooks.isRunning());
-    assert.equal(hooks.skillDebugActive(), false, 'a root-frame failure is not re-runnable');
+    assert.equal(hooks.macroDebugActive(), false, 'a root-frame failure is not re-runnable');
   });
 
   it('a section frame reveals in place, not in a column beside', async () => {
-    // A section body lives in the file already on screen. The skill
+    // A section body lives in the file already on screen. The macro
     // behaviour — open the defining file BESIDE — would split the editor to
     // show a second copy of the same document and steal the user's column.
     const columnsBefore = vscode.window.visibleTextEditors.length;

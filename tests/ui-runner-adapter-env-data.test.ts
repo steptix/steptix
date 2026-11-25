@@ -1,7 +1,7 @@
 /**
  * Regression for issues/resolved/052 — the Electron runner and `${env.X}`.
  *
- * `UIRunnerAdapter` parsed every test with `parseTestFile(filePath, { skillsDir })`
+ * `UIRunnerAdapter` parsed every test with `parseTestFile(filePath, { macrosDir })`
  * and no env context, so the parser never resolved (or validated) a `${env.X}`
  * / `${data.x}` reference for it and never recorded `parsedTest.envData` for
  * the run; the step loop then ran only the `{{…}}` pass. Net effect, for as

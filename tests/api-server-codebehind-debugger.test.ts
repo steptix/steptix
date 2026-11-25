@@ -424,7 +424,7 @@ describe('api-server code-behind step-into', () => {
   // root: the one-shot flags were consumed too far down the step loop (and,
   // for `pauseAtNextTool`, inside the tool branch), so any early `continue`
   // or the abort `break` carried them past their step — and they live on the
-  // SESSION, which the skill-step picker hands to another document.
+  // SESSION, which the macro-step picker hands to another document.
 
   it('a SKIPPED step still consumes the flag — no ambush of the step after it', async () => {
     // `[input: …]` takes the `isSkippableStep` continue, which sat ABOVE the

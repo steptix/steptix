@@ -168,15 +168,15 @@ function matchFailureTail(instruction: string): FailureTailMatch | null {
 export type FailureTailDirective = InvocationKind;
 
 /**
- * The `[tool` / `[skill` token, BUILT FROM the rule `parseInvocation` is built
+ * The `[tool` / `[macro` token, BUILT FROM the rule `parseInvocation` is built
  * from (`invocationTokenPattern`, src/parser/invocation-parser.ts); one pattern
  * per kind, because the refusal has to name the directive it found.
  *
  * Measured trap: the copy this replaced carried an `/i` and the scanner is
- * case-SENSITIVE, so the refusal claimed `[SKILL: x]`, a line the server runs
+ * case-SENSITIVE, so the refusal claimed `[MACRO: x]`, a line the server runs
  * happily as prose.
  *
- * Matched anywhere in the body, because `parseToolCall` and the skill expander
+ * Matched anywhere in the body, because `parseToolCall` and the macro expander
  * both read the text in front of the token as a LABEL — and the TOKEN rather
  * than the parse, because a body this module declines while the validator
  * allows is a tail that evaporates in silence.
@@ -185,7 +185,7 @@ const DIRECTIVE_TOKENS: ReadonlyArray<readonly [FailureTailDirective, RegExp]> =
   INVOCATION_KINDS.map((kind) => [kind, invocationTokenPattern([kind])] as const);
 
 /**
- * Decision 12: a `[tool: …]` or `[skill: …]` step does not take a tail — and
+ * Decision 12: a `[tool: …]` or `[macro: …]` step does not take a tail — and
  * which one it was, because the refusal names it. Answering null leaves the
  * loops exactly as they were, dispatching the call off the raw line; before
  * this, such a line parsed a tail nobody read and gave the author no
@@ -210,7 +210,7 @@ function directiveInBody(core: string): FailureTailDirective | null {
  *  continue` is a contradiction, not a tail. Refused HERE as well as at the
  *  validator so the raw Sessions API path, which runs no validator, cannot
  *  silently get one of the two halves. Asked of the CORE body; a
- *  `[tool: …]`/`[skill: …]` body is refused beside it. */
+ *  `[tool: …]`/`[macro: …]` body is refused beside it. */
 function claimedTail(instruction: string): FailureTailMatch | null {
   const match = matchFailureTail(instruction);
   if (!match) return null;
@@ -220,7 +220,7 @@ function claimedTail(instruction: string): FailureTailMatch | null {
 
 /**
  * `{ body, outcome, message? }` when the line carries a tail, or null — no
- * tail, decision 8's contradiction, or a `[tool: …]`/`[skill: …]` body that
+ * tail, decision 8's contradiction, or a `[tool: …]`/`[macro: …]` body that
  * decision 12 puts out of scope. {@link isFailureTailContradiction} and
  * {@link failureTailDirective} tell the three apart, because one is prose and
  * the other two are refused by name. Matched against the step as AUTHORED,
@@ -275,7 +275,7 @@ export function failureTailContradictionError(instruction: string, where = ''): 
   );
 }
 
-/** Decision 12: a `[tool: …]`/`[skill: …]` line carrying a tail is refused by
+/** Decision 12: a `[tool: …]`/`[macro: …]` line carrying a tail is refused by
  *  name rather than run with the tail ignored, and the answer says WHICH
  *  directive it found. Non-null exactly for that shape;
  *  {@link parseFailureTail} answers null for the same line, so the loops behave
@@ -294,7 +294,7 @@ export function directiveFailureTail(kind: FailureTailDirective): string {
 /**
  * The refusal, naming the line; `where` is appended verbatim.
  *
- * Only the WAY OUT differs between the two: a skill has steps inside it and one
+ * Only the WAY OUT differs between the two: a macro has steps inside it and one
  * of them is the natural home for the tail, a tool call has no body of its own.
  * Measured trap the last review round corrected — advising "wrap the call in a
  * section and put the tail on the calling step" produced prose with a tail on
@@ -307,8 +307,8 @@ export function directiveFailureTailError(
   where = '',
 ): string {
   const wayOut =
-    kind === 'skill'
-      ? `Put the tail on a step inside the skill, or drop the tail.`
+    kind === 'macro'
+      ? `Put the tail on a step inside the macro, or drop the tail.`
       : `The tail cannot be applied to a tool call: write the check as a step ` +
         `after the call, or make the tool tolerate the failure itself, or drop ` +
         `the tail.`;

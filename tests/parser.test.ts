@@ -286,9 +286,9 @@ describe('data rows under ## Steps', () => {
     expect(() => parseTestContent(md)).toThrow(/indented/);
   });
 
-  it('refuses a table in a skill file', () => {
-    const md = '---\ntype: skill\n---\n\n# S\n\n## Steps\n| a |\n|---|\n| 1 |\n\n1. Go\n';
-    expect(() => parseTestContent(md)).toThrow(/skill's own `## Steps`/);
+  it('refuses a table in a macro file', () => {
+    const md = '---\ntype: macro\n---\n\n# S\n\n## Steps\n| a |\n|---|\n| 1 |\n\n1. Go\n';
+    expect(() => parseTestContent(md)).toThrow(/macro's own `## Steps`/);
   });
 
   it('refuses a table alongside dataFile', () => {

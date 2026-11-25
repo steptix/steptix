@@ -485,7 +485,7 @@ const SCOPE_CALL_SITES = [
   [
     resolve(here, '..', 'src', 'webview', 'steptix-runner.jsx'),
     /maskIfSecretInline\(name, value, runtimeMasking\)/,
-    'the skill re-run panel, whose rows are scope entries too',
+    'the macro re-run panel, whose rows are scope entries too',
   ],
 ];
 

@@ -145,7 +145,7 @@ export interface ProjectContext {
    */
   apiKey: string | null;
   /** Absolute, confined, and known to exist — or null to omit from the wire. */
-  skillsDir: string | null;
+  macrosDir: string | null;
   toolsDir: string | null;
   /** Env files actually consulted, for error messages that name them. */
   envFilesConsulted: string[];
@@ -199,7 +199,7 @@ export interface McpStepRequest {
   dataSources?: Record<string, string>;
   /** The test's own `## Context` (SPEC-web-survey-fixes.md §2.46). */
   testContext?: string;
-  skillsDir?: string;
+  macrosDir?: string;
   toolsDir?: string;
   testFilePath?: string;
   /**
@@ -841,7 +841,7 @@ export interface ResolveProjectArgs {
   /**
    * Refuse rather than fall back to the user root when no project resolves.
    *
-   * For `run_test_file` and `list_test_files`: test files, skills and tools
+   * For `run_test_file` and `list_test_files`: test files, macros and tools
    * are project-shaped, and the user root deliberately has none
    * (stories/mcp-no-project.md). Every other tool leaves this unset and gets
    * the user-scope fallback.

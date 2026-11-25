@@ -230,7 +230,7 @@ beforeEach(() => {
   resolveHooksMock.mockResolvedValue({
     before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
     toolCalls: { before: [], beforeEach: [], afterEach: [], after: [] },
-    sourceSkills: { before: [], beforeEach: [], afterEach: [], after: [] },
+    sourceMacros: { before: [], beforeEach: [], afterEach: [], after: [] },
   });
   // Every ordinary step passes, echoing what it was asked to do.
   executeStepMock.mockImplementation(async (index: number, _total: number, instruction: string) => ({
@@ -1297,7 +1297,7 @@ describe('hooks around control flow', () => {
       before: [], beforeEach: ['Dismiss any banner'], afterEach: ['Check for errors'], after: [],
       hasAny: true,
       toolCalls: { before: [], beforeEach: [null], afterEach: [null], after: [] },
-      sourceSkills: { before: [], beforeEach: [null], afterEach: [null], after: [] },
+      sourceMacros: { before: [], beforeEach: [null], afterEach: [null], after: [] },
     });
     judgeAnswers(0);
     const report = await runTest(await instance(CHAIN, {}, 'chain-hooks.md'), makeConfig(), '');

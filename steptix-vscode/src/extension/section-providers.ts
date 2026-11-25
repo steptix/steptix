@@ -26,12 +26,12 @@ import {
 } from 'steptix-runner-core';
 import { resolveProjectDirs } from './steptix-config.js';
 import {
-  collectSkillNames,
-  openSkillArgsContext,
-  openSkillNamePrefix,
-  skillIoFor,
+  collectMacroNames,
+  openMacroArgsContext,
+  openMacroNamePrefix,
+  macroIoFor,
   useDirectiveCompletions,
-  type SkillIo,
+  type MacroIo,
 } from './invocation-target-core.js';
 import {
   computeSectionDiagnostics,
@@ -92,19 +92,19 @@ export class SectionLinkProvider implements vscode.DocumentLinkProvider {
 /**
  * Two completion surfaces on step lines:
  *
- *  1. Inside an open `[skill` token — `1. [skill │`, `1. Log in [skill: au│`
- *     — the project's skill NAMES, each replacing exactly the typed partial.
- *     The author has committed to a skill call there, so sections and
+ *  1. Inside an open `[macro` token — `1. [macro │`, `1. Log in [macro: au│`
+ *     — the project's macro NAMES, each replacing exactly the typed partial.
+ *     The author has committed to a macro call there, so sections and
  *     whole-call snippets stay out of the list.
- *  2. At an ARGUMENT position of an open call — `1. [skill login │` — that
- *     skill's declared parameters (minus those already passed) as
+ *  2. At an ARGUMENT position of an open call — `1. [macro login │` — that
+ *     macro's declared parameters (minus those already passed) as
  *     `name="│"` snippets, then its outputs as `out.<name>`.
  *  3. Right after a step number — `1. │` — the file's section names, then
- *     `[skill: name]` whole-call snippets for the project's skills, then the
+ *     `[macro: name]` whole-call snippets for the project's macros, then the
  *     two surface switches `[use computer]` / `[use browser]`.
  *
- * Sections sort first (they're the file-local reuse mechanism); skills are a
- * cheap walk of `skillsDir` (see `collectSkillNames`) and a bonus; the two
+ * Sections sort first (they're the file-local reuse mechanism); macros are a
+ * cheap walk of `macrosDir` (see `collectMacroNames`) and a bonus; the two
  * surface switches are last, being a fixed pair most files never use.
  */
 export class SectionCompletionProvider implements vscode.CompletionItemProvider {
@@ -123,10 +123,10 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
     // cheap tests changes nothing about which positions get completions.
     const lineText = document.lineAt(position.line).text;
     const prefix = lineText.slice(0, position.character);
-    const open = openSkillNamePrefix(prefix);
+    const open = openMacroNamePrefix(prefix);
     // Argument position of an open call — a line-local walk, so it belongs
     // with the cheap gates. Skipped when the cursor is still in the name.
-    const args = open ? null : openSkillArgsContext(lineText, position.character);
+    const args = open ? null : openMacroArgsContext(lineText, position.character);
     if (!open && !args && !STEP_START_RE.test(prefix)) return [];
 
     const text = document.getText();
@@ -138,8 +138,8 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
     // one isn't a step yet.
     if (!inStepRegion(text, position.line)) return [];
 
-    // Open `[skill` token: complete the name in place. Checked before the
-    // step-start path because `1. [skill:│` satisfies both — and here the
+    // Open `[macro` token: complete the name in place. Checked before the
+    // step-start path because `1. [macro:│` satisfies both — and here the
     // author has already picked the call form, so names alone are right.
     if (open) {
       const range = new vscode.Range(
@@ -148,23 +148,23 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
         position.line,
         position.character,
       );
-      return this.skillNames(document.uri).map((skill) => {
-        const item = new vscode.CompletionItem(skill, vscode.CompletionItemKind.Reference);
-        item.detail = 'skill';
+      return this.macroNames(document.uri).map((macro) => {
+        const item = new vscode.CompletionItem(macro, vscode.CompletionItemKind.Reference);
+        item.detail = 'macro';
         item.range = range;
-        item.sortText = `0_${skill}`;
+        item.sortText = `0_${macro}`;
         return item;
       });
     }
 
-    // Argument position inside an open call: the skill's declared parameters
+    // Argument position inside an open call: the macro's declared parameters
     // (minus those already passed, either side of the cursor), then its
     // outputs as `out.<name>`. Accepting a parameter leaves the caret between
     // the quotes — `username="│"` — and Tab lands past them; inside the
     // quotes the `{{`/`${` completions take over, so a full
     // `username="{{username}}"` composes without hand-typing a name.
     if (args) {
-      const io = this.skillIo(document.uri, args.skillName);
+      const io = this.macroIo(document.uri, args.macroName);
       if (!io) return [];
       const range = new vscode.Range(
         position.line,
@@ -218,7 +218,7 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
           section.stepCount === 1 ? '' : 's'
         }).`,
       );
-      // Sections before skills before whatever markdown offers.
+      // Sections before macros before whatever markdown offers.
       item.sortText = `0_${String(order++).padStart(4, '0')}`;
       items.push(item);
     }
@@ -226,7 +226,7 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
     // The typed token span (`[sk` in `1. [sk│`), so accepting a whole-call
     // snippet REPLACES what was typed. Without an explicit range VS Code
     // replaces only the word at the cursor, which excludes `[` — accepting
-    // at `1. [sk` used to paste a second bracket (`1. [[skill: foo]`).
+    // at `1. [sk` used to paste a second bracket (`1. [[macro: foo]`).
     //
     // Matched as an OPTIONAL `[` plus name characters, not as `\S*$`:
     // `STEP_START_RE` admits any single non-space run, so `\S*$` at
@@ -238,15 +238,15 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
       position.line,
       position.character,
     );
-    for (const skill of this.skillNames(document.uri)) {
+    for (const macro of this.macroNames(document.uri)) {
       const item = new vscode.CompletionItem(
-        `[skill: ${skill}]`,
+        `[macro: ${macro}]`,
         vscode.CompletionItemKind.Reference,
       );
-      item.detail = 'skill invocation';
-      item.insertText = new vscode.SnippetString(`[skill: ${skill}$0]`);
+      item.detail = 'macro invocation';
+      item.insertText = new vscode.SnippetString(`[macro: ${macro}$0]`);
       item.range = tokenRange;
-      item.sortText = `1_${skill}`;
+      item.sortText = `1_${macro}`;
       items.push(item);
     }
 
@@ -256,7 +256,7 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
     // `[computer]` no longer runs as prose, so the list is what stops an
     // author guessing the spelling.
     //
-    // Sorted after skills — a project may have dozens of skills and exactly
+    // Sorted after macros — a project may have dozens of macros and exactly
     // two of these, and a run that never leaves the browser needs neither.
     // They carry no `$0`: the directive is the whole step and takes no
     // arguments, so there is nowhere for a caret to usefully land.
@@ -276,16 +276,16 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
     return items;
   }
 
-  private skillNames(docUri: vscode.Uri): string[] {
+  private macroNames(docUri: vscode.Uri): string[] {
     const dirs = resolveProjectDirs(docUri);
-    if (!dirs?.skillsDir) return [];
-    return collectSkillNames(dirs.skillsDir);
+    if (!dirs?.macrosDir) return [];
+    return collectMacroNames(dirs.macrosDir);
   }
 
-  private skillIo(docUri: vscode.Uri, skillName: string): SkillIo | null {
+  private macroIo(docUri: vscode.Uri, macroName: string): MacroIo | null {
     const dirs = resolveProjectDirs(docUri);
-    if (!dirs?.skillsDir) return null;
-    return skillIoFor(dirs.skillsDir, skillName);
+    if (!dirs?.macrosDir) return null;
+    return macroIoFor(dirs.macrosDir, macroName);
   }
 }
 

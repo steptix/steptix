@@ -301,7 +301,7 @@ function reportSteps(html) {
  * `renderLoopBand` writes `<label> — iteration <n> of <m>` for a
  * `kind: 'iteration'` marker, which is what a control-flow loop emits; the
  * label is the section's name for a section tail and the tail's own text
- * otherwise (`loopLabel`, src/skills/expander.ts).
+ * otherwise (`loopLabel`, src/macros/expander.ts).
  */
 function reportBands(html) {
   const out = [];
@@ -362,10 +362,10 @@ function startRunTap(hooks) {
     try {
       for (const f of hooks.runningFrameStack()) {
         if (f.iteration === undefined) continue;
-        const key = `${f.skillName ?? f.kind}#${f.iteration}/${f.iterationCount ?? '?'}`;
+        const key = `${f.macroName ?? f.kind}#${f.iteration}/${f.iterationCount ?? '?'}`;
         if (!frames.has(key)) {
           frames.set(key, {
-            label: f.skillName ?? f.kind,
+            label: f.macroName ?? f.kind,
             iteration: f.iteration,
             count: f.iterationCount,
           });
@@ -705,7 +705,7 @@ describe('Steptix live — control flow: one branch taken, three loops', functio
     //     when the loop ends, so the RENDERED report must read "of 3" and
     //     never "of ?" or "of undefined".
     //
-    // TODO(run): the labels below are what `loopLabel` (src/skills/expander.ts)
+    // TODO(run): the labels below are what `loopLabel` (src/macros/expander.ts)
     // produces today — the section's name for a section tail, the tail's own
     // text otherwise. If the runtime labels a plain-instruction tail
     // differently, fix the expectation here rather than loosening it: the

@@ -1,5 +1,5 @@
 /**
- * Shared tokenizer for `[<kind>: name ...]` invocations used by both skill
+ * Shared tokenizer for `[<kind>: name ...]` invocations used by both macro
  * and tool calls. Produces precise errors with source-line + caret
  * diagnostics when the input is malformed, and desugars bare-identifier
  * shorthand into the canonical arg form.
@@ -16,10 +16,10 @@
  *   NumberLiteral  := -? digit+ ('.' digit+)?
  *   BooleanLiteral := 'true' | 'false'
  *
- * The colon after the keyword is optional — `[skill login]` and
- * `[skill: login]` are the same call. `[<kind>` opens an invocation only when
+ * The colon after the keyword is optional — `[macro login]` and
+ * `[macro: login]` are the same call. `[<kind>` opens an invocation only when
  * followed by `:` or inline whitespace, so bracketed prose that merely
- * contains the keyword's letters (`[skillful]`, `[skills]`) stays prose.
+ * contains the keyword's letters (`[macroscopic]`, `[macros]`) stays prose.
  *
  * Bare `Param`     desugars to `Identifier="{{Identifier}}"`
  * Bare `OutAlias`  desugars to `out.Identifier="Identifier"`
@@ -51,7 +51,7 @@ export interface ParsedInvocation {
   outputAliases: Record<string, string>;
   /** Text after the closing `]` — preserved for callers that want to log it. */
   trailing: string;
-  /** Human-readable description that appeared *before* the `[skill:` / `[tool:`
+  /** Human-readable description that appeared *before* the `[macro:` / `[tool:`
    *  token on the same line, trimmed of surrounding whitespace. Omitted when
    *  the call appears at the start of the line (no prefix text) or when the
    *  prefix text is whitespace-only. Pure metadata — the parser never feeds
@@ -67,7 +67,7 @@ export class InvocationSyntaxError extends Error {
     public readonly source: string,
     /** Zero-based column in `source` where the problem was detected. */
     public readonly column: number,
-    /** Subclass name (`SkillCallSyntaxError`, `ToolCallSyntaxError`). */
+    /** Subclass name (`MacroCallSyntaxError`, `ToolCallSyntaxError`). */
     name = 'InvocationSyntaxError',
   ) {
     super(formatMessage(reason, source, column));
@@ -151,7 +151,7 @@ const BARE_NUMBER_RE = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
 const BARE_BOOLEAN_RE = /^(?:true|false)$/;
 
 /** The invocation keywords, in the order the code-step scans alternate them. */
-export const INVOCATION_KINDS = ['skill', 'tool'] as const;
+export const INVOCATION_KINDS = ['macro', 'tool'] as const;
 export type InvocationKind = (typeof INVOCATION_KINDS)[number];
 
 /**
@@ -166,7 +166,7 @@ export type InvocationKind = (typeof INVOCATION_KINDS)[number];
  * newline or a non-breaking space here would claim tokens the scanner then
  * refuses to name — a mirror that says "call" where the parser says "prose".
  *
- * Case-SENSITIVE, matching the scanner. `[SKILL: x]` is prose to the runner,
+ * Case-SENSITIVE, matching the scanner. `[MACRO: x]` is prose to the runner,
  * so a mirror that claims it would refuse a step the server runs happily.
  *
  * (steptix-vscode cannot import this — separate package — and mirrors it in
@@ -190,7 +190,7 @@ export function invocationTokenPattern(
  * synchronous.
  */
 const TOKEN_FINDERS: Record<InvocationKind, RegExp> = {
-  skill: invocationTokenPattern(['skill'], 'g'),
+  macro: invocationTokenPattern(['macro'], 'g'),
   tool: invocationTokenPattern(['tool'], 'g'),
 };
 
@@ -207,7 +207,7 @@ const TOKEN_FINDERS: Record<InvocationKind, RegExp> = {
  * to re-implement them to stay honest, so it doesn't mirror, it calls.
  *
  * A line that COMMITS and then fails to parse counts as a call: it is a
- * malformed `[skill:`, and the contexts asking this question exist to keep
+ * malformed `[macro:`, and the contexts asking this question exist to keep
  * such lines out of runs that cannot execute them.
  *
  * Cost is two parses per step, on paths that already parse the file — the
@@ -234,8 +234,8 @@ export interface InvocationParserOptions {
   /**
    * Allow `/` in the name token so callers can use path-qualified references.
    * Tool calls use it to name a file plus the tool inside it
-   * (`auth/login/login`); skill calls use it to reach skills in subfolders
-   * of `skillsDir` (`auth/login`, leading slash tolerated).
+   * (`auth/login/login`); macro calls use it to reach macros in subfolders
+   * of `macrosDir` (`auth/login`, leading slash tolerated).
    */
   allowSlashInName?: boolean;
 }
@@ -244,18 +244,18 @@ export interface InvocationParserOptions {
  * Try to parse `line` as an invocation of the configured kind.
  *
  * Returns `null` if the line does not contain the invocation token — the
- * keyword bracket (`[skill` / `[tool`) followed by `:` or inline whitespace —
+ * keyword bracket (`[macro` / `[tool`) followed by `:` or inline whitespace —
  * at all. Throws the configured error class if the line contains the token
  * but the bracketed call is malformed.
  *
  * Any text that appears before the token is captured as `label` (trimmed)
  * so authors can prefix an invocation with a human-readable description:
  *
- *   `Search with DuckDuckGo [skill: duckduckgo_search query="..."]`
+ *   `Search with DuckDuckGo [macro: duckduckgo_search query="..."]`
  *
  * The label is pure metadata — the parser never threads it into arg
  * resolution. Whitespace-only prefix text produces no label (the canonical
- * `[skill: foo]` form is unchanged).
+ * `[macro: foo]` form is unchanged).
  */
 export function parseInvocation(
   line: string,
@@ -265,7 +265,7 @@ export function parseInvocation(
   // EVERY candidate token on the line, not just the first. A token can be
   // DECLINED — a markdown link, or a colon-less one that does not parse — and
   // a declined candidate must not take the rest of the line with it:
-  // `See the [skill guide](./g.md) and then [skill: login]` really does call
+  // `See the [macro guide](./g.md) and then [macro: login]` really does call
   // `login`. Scanning only the first match made that step prose, and made
   // `isCodeStep` answer "no" for a step carrying a live call, which is
   // exactly the property the project-less no-tools guarantee rests on.
@@ -279,8 +279,8 @@ export function parseInvocation(
     finder.lastIndex = prefixIdx + 1;
 
     // Does the separator include a colon? That is the difference between a
-    // token an author can only have typed deliberately (`[skill:`) and one
-    // that ordinary prose produces by accident (`[skill ` — see COMMITMENT
+    // token an author can only have typed deliberately (`[macro:`) and one
+    // that ordinary prose produces by accident (`[macro ` — see COMMITMENT
     // below). Peeked before parsing so the decision is made before any error.
     const sepEnd = prefixIdx + 1 + kind.length;
     const sawColon = /^[ \t]*:/.test(line.slice(sepEnd));
@@ -290,17 +290,17 @@ export function parseInvocation(
       // `null` here means "declined as a markdown link" — keep looking.
       if (parsed !== null) return parsed;
     } catch (err) {
-      // COMMITMENT. `[skill:` is unambiguous authorial intent, so a malformed
+      // COMMITMENT. `[macro:` is unambiguous authorial intent, so a malformed
       // one throws with a caret rather than silently becoming prose — that is
       // the whole point of the tokenizer (stories/skill-call-syntax.md).
       //
       // The colon-less spelling cannot carry that rule. `[tool "hammer"]` and
-      // `Verify the [skill level: expert] badge` are English, and throwing on
+      // `Select the [macro lens: 100mm] option` are English, and throwing on
       // them fails the ENTIRE test file at parse time (`extractSteps`), not
       // just the step — a prose sentence taking down the suite. So a
       // colon-less token that does not parse is not a call; keep looking.
       //
-      // The cost is a typo'd colon-less call (`[skill login pass=]`) reaching
+      // The cost is a typo'd colon-less call (`[macro login pass=]`) reaching
       // the AI as prose instead of erroring. Authors who want the strict
       // reading have it: write the colon.
       if (sawColon || !(err instanceof InvocationSyntaxError)) throw err;
@@ -323,7 +323,7 @@ function parseFromToken(
   const ErrorCls = options.errorClass ?? InvocationSyntaxError;
   const scanner = new Scanner(line, sepEnd, ErrorCls);
   // Sep := WS? ':' WS? | WS — the lookahead above guarantees at least one
-  // separator character is present, so a bare `[skill]` never gets here.
+  // separator character is present, so a bare `[macro]` never gets here.
   scanner.skipInlineSpace();
   scanner.tryConsume(':');
   scanner.skipInlineSpace();
@@ -348,11 +348,11 @@ function parseFromToken(
       const trailing = scanner.rest();
       // `[text](url)` is a markdown LINK, not an invocation — and in a
       // markdown-authored suite it is the likeliest way for a bracketed
-      // keyword to appear. `[skill guide](./guide.md)` otherwise parses as
-      // a call to a skill named `guide` and fails the whole file when no
-      // such skill exists. Only an IMMEDIATELY adjacent `(` is a link, so
+      // keyword to appear. `[macro guide](./guide.md)` otherwise parses as
+      // a call to a macro named `guide` and fails the whole file when no
+      // such macro exists. Only an IMMEDIATELY adjacent `(` is a link, so
       // a genuine call with a parenthesised comment after it —
-      // `[skill: login] (smoke only)` — still parses.
+      // `[macro: login] (smoke only)` — still parses.
       if (trailing.startsWith('(')) return null;
       return {
         name,
@@ -458,8 +458,8 @@ class Scanner {
   readIdentifier(opts: { allowHyphen?: boolean; allowSlash?: boolean } = {}): string {
     const start = this.pos;
     // `allowSlash` is for path-qualified references — a tool's file plus the
-    // tool inside it (`auth/login/login`), or a skill in a subfolder of
-    // `skillsDir` (`auth/login`): the name token may contain `/` to name a
+    // tool inside it (`auth/login/login`), or a macro in a subfolder of
+    // `macrosDir` (`auth/login`): the name token may contain `/` to name a
     // path. Hyphens are always allowed alongside slashes since each path
     // segment is `[\w-]+`. Note there is deliberately no `.` and no `\` in
     // the class, so no path-qualified name can traverse out of its root.

@@ -133,13 +133,13 @@ function makeInstance(steps: string[], config: TestConfig = {}): TestInstance {
     stepLines: steps.map((_, i) => i + 1),
     skipHooks: steps.map(() => false),
     toolCalls: steps.map(() => null),
-    sourceSkills: steps.map(() => null),
+    sourceMacros: steps.map(() => null),
     sourceSections: steps.map(() => null),
     sections: {},
     rawSteps: [...steps],
     hooks: { before: [], beforeEach: [], afterEach: [], after: [] },
     hookToolCalls: { before: [], beforeEach: [], afterEach: [], after: [] },
-    hookSourceSkills: { before: [], beforeEach: [], afterEach: [], after: [] },
+    hookSourceMacros: { before: [], beforeEach: [], afterEach: [], after: [] },
   };
   return { test, resolvedParameters: {} };
 }

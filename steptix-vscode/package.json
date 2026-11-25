@@ -73,7 +73,7 @@
     "viewsWelcome": [
       {
         "view": "steptix.callStack",
-        "contents": "No active run.\n\nThe call stack populates while a test is running and descends into a `[skill: ...]` invocation.\n\n[Run a Test](command:steptix.runSelected)"
+        "contents": "No active run.\n\nThe call stack populates while a test is running and descends into a `[macro: ...]` invocation.\n\n[Run a Test](command:steptix.runSelected)"
       },
       {
         "view": "steptix.variables",
@@ -120,7 +120,7 @@
         "steptix.testsGlob": {
           "type": "string",
           "default": "**/*.md",
-          "description": "Glob pattern of files to consider as candidate tests in the Test Explorer. Files still must contain '## Steps' and not be marked 'type: skill' or 'disabled: true' in frontmatter. Narrow this (e.g. 'tests/**/*.md') for faster discovery on large repos."
+          "description": "Glob pattern of files to consider as candidate tests in the Test Explorer. Files still must contain '## Steps' and not be marked 'type: macro' or 'disabled: true' in frontmatter. Narrow this (e.g. 'tests/**/*.md') for faster discovery on large repos."
         },
         "steptix.inspectorPort": {
           "type": "number",
@@ -278,8 +278,8 @@
         "icon": "$(debug-disconnect)"
       },
       {
-        "command": "steptix.runSkillStepsOnStoppedSession",
-        "title": "Steptix: Run Selected Skill Steps on Stopped Session",
+        "command": "steptix.runMacroStepsOnStoppedSession",
+        "title": "Steptix: Run Selected Macro Steps on Stopped Session",
         "icon": "$(debug-rerun)"
       },
       {
@@ -647,15 +647,15 @@
       ],
       "editor/context": [
         {
-          "command": "steptix.runSkillStepsOnStoppedSession",
-          "when": "steptix.skillDebugActive && editorLangId == markdown",
+          "command": "steptix.runMacroStepsOnStoppedSession",
+          "when": "steptix.macroDebugActive && editorLangId == markdown",
           "group": "2_run@1"
         }
       ],
       "commandPalette": [
         {
-          "command": "steptix.runSkillStepsOnStoppedSession",
-          "when": "steptix.skillDebugActive"
+          "command": "steptix.runMacroStepsOnStoppedSession",
+          "when": "steptix.macroDebugActive"
         },
         {
           "command": "steptix.repairStep",

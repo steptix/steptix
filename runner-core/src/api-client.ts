@@ -46,7 +46,7 @@ export interface StreamStepsRequest {
   /**
    * Per-URI breakpoint sets keyed by absolute file path. Used by the server
    * to pause execution before any step whose origin (test file OR an
-   * expanded skill/section body line) matches a breakpoint. The pause
+   * expanded macro/section body line) matches a breakpoint. The pause
    * surfaces as a `step:awaiting` event so the client treats it like a
    * step-paused state — same yellow ▶ + Continue / StepOver / StepInto /
    * StepOut machinery as the stepMode flow.
@@ -56,7 +56,7 @@ export interface StreamStepsRequest {
    * again would double-trigger. A breakpoint on a SECTION BODY line is a
    * test-file entry too, but the body doesn't exist until server-side
    * expansion, so the client's `trimAtBreakpoint` can't see it; the server
-   * honours it, along with skill-file breakpoints (also expansion-only).
+   * honours it, along with macro-file breakpoints (also expansion-only).
    * Those non-root cases are the primary motivation for this field.
    */
   breakpointsByUri?: Record<string, number[]>;
@@ -176,14 +176,14 @@ export interface StreamStepsRequest {
    */
   sourceUris?: string[];
   /**
-   * Absolute path to the project's skills directory (`skillsDir` in
-   * `steptix.config.*`). When supplied, the server runs `expandSkills` over the
+   * Absolute path to the project's macros directory (`macrosDir` in
+   * `steptix.config.*`). When supplied, the server runs `expandMacros` over the
    * incoming `steps`, dispatches the flattened result, and emits
-   * `frame:push` / `frame:pop` events around each skill body. Omit to use
+   * `frame:push` / `frame:pop` events around each macro body. Omit to use
    * the legacy behaviour (raw steps shipped straight to the runner — fine
-   * for tests with no `[skill: ...]` lines).
+   * for tests with no `[macro: ...]` lines).
    */
-  skillsDir?: string;
+  macrosDir?: string;
   /**
    * Inline section definitions from the test file, keyed by `matchText(name)`
    * (stories/test-script-sections-contract.md §2). Required whenever `steps`
@@ -299,10 +299,10 @@ export interface StreamStepsRequest {
    */
   fullSteps?: string[];
   /**
-   * Partial / bounded re-run anchors ("re-run a skill step" and "debug a skill
+   * Partial / bounded re-run anchors ("re-run a macro step" and "debug a macro
    * after Stop"). `startAt` skips every expanded step before the first in file
    * `startAt.uri` at/after `startAt.line`; `endAt` stops after the last step in
-   * `endAt.uri` at/before `endAt.line` (omit ⇒ run to the end of the skill body).
+   * `endAt.uri` at/before `endAt.line` (omit ⇒ run to the end of the macro body).
    * Both are qualified by `uri` so a recurring line can't false-match.
    */
   startAt?: { uri: string; line: number };
@@ -310,7 +310,7 @@ export interface StreamStepsRequest {
   /**
    * Captured/runtime vars to inject into the session scope before a partial
    * re-run, so steps that read values a skipped earlier step produced still
-   * resolve. `__skill*`-namespaced internals are ignored server-side.
+   * resolve. `__macro*`-namespaced internals are ignored server-side.
    */
   seedScope?: Record<string, string>;
   /**
@@ -705,7 +705,7 @@ export class ApiClient {
   /**
    * Liveness probe: `GET /sessions/:id`. Returns true if the server still
    * holds a live (non-closed) session under this id, false if it's gone
-   * (404). The steptix "re-run a skill step" path calls this before reusing
+   * (404). The steptix "re-run a macro step" path calls this before reusing
    * a session — the server would otherwise silently replace a dead session
    * with a fresh blank browser and run the tail against `about:blank`.
    * Throws `ApiClientError('connect-failed')` if the server is unreachable so

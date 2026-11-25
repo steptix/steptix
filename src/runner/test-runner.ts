@@ -19,7 +19,7 @@ import { executeStep, executeBranchedStep } from './step-executor.js';
 import type { StepExecutorOptions } from './step-executor.js';
 import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import {
-  SkillSurfaceStack,
+  MacroSurfaceStack,
   computerContextFor,
   defaultLoadDesktopAdapter,
   defaultProbeComputerCapture,
@@ -32,7 +32,7 @@ import {
   releaseComputerLockAtRunEnd,
   releaseComputerLockForPause,
   restoreCallerSurface,
-  skillFrameChain,
+  macroFrameChain,
   stepReadsScreen,
   undispatchedDirectiveError,
   undispatchedDirectiveResult,
@@ -215,7 +215,7 @@ function parseOutputStep(instruction: string): { variable: string; enrichedInstr
  * out rather than risking a stale value from an earlier step under the same
  * name. Restricted to read/count with no error (the only actions that write
  * `as` into resolvedParameters — see step-executor.ts) and never
- * `__skill*`-namespaced (skill-internal names must never reach the report).
+ * `__macro*`-namespaced (macro-internal names must never reach the report).
  * Call at every `stepResults.push` site that carries real turns — a hook
  * step, a resumed-from-interactive step, or a normal step — so the report
  * doesn't depend on which branch produced the result.
@@ -230,7 +230,7 @@ function computeStepCaptures(
       // A structured table read writes its `as` too (SPEC-structured-table-reads.md §9.3).
       || sa.action.action === 'readTable'))
     .map((sa) => sa.action.as)
-    .filter((name): name is string => !!name && !name.startsWith('__skill'))
+    .filter((name): name is string => !!name && !name.startsWith('__macro'))
     .reduce<Record<string, string>>((acc, name) => {
       // `hasOwn`, not `in`: `in` walks the prototype chain, so a step with
       // `[store as: constructor]` whose read found nothing still reported a
@@ -546,7 +546,7 @@ export async function runTest(
   // of its secret-named parameters and of the env/data secrets its `${…}`
   // references resolved against. Read fresh each time — captures add to it.
   //
-  // And the skill arguments and looped-section rows the expander wrote into
+  // And the macro arguments and looped-section rows the expander wrote into
   // step TEXT, which are in no variable map: without them a `password` column
   // printed in clear on the step line, in the report, and — in a `[use ai]`
   // step — in what the model was sent (issue 060). The session loop has held
@@ -640,12 +640,12 @@ export async function runTest(
    * parsed from a string with no file behind it.
    */
   const computerLockId = `cli:${test.filePath || test.title}`;
-  /** §4.5 — a skill call restores the caller's surface on return; an inline
+  /** §4.5 — a macro call restores the caller's surface on return; an inline
    *  section does not. */
-  const skillSurfaces = new SkillSurfaceStack();
+  const macroSurfaces = new MacroSurfaceStack();
   /**
    * `[use computer]` for this run, with everything §5.1 reads — written once,
-   * because a `[use computer]` step and a skill returning to a computer-surface
+   * because a `[use computer]` step and a macro returning to a computer-surface
    * caller are the same entry (§4.5).
    */
   const enterComputerSurface = () =>
@@ -665,7 +665,7 @@ export async function runTest(
       ai: keyless ? undefined : config.ai,
       ...(extras.checkVisionRoute && { checkVisionRoute: extras.checkVisionRoute }),
     });
-  /** Put the caller back on its surface on return from a skill: `[use
+  /** Put the caller back on its surface on return from a macro: `[use
    *  browser]`'s transition, or `[use computer]`'s through
    *  {@link enterComputerSurface}, which can fail (`restoreCallerSurface`). */
   const restoreSurface = (to: 'browser' | 'computer') =>
@@ -978,7 +978,7 @@ export async function runTest(
         source: binding?.source ?? test.expansion?.rawSteps[i] ?? test.steps[i] ?? '',
         ...(binding?.section !== undefined && { section: binding.section }),
         // The entry's target file, so a later repair cannot conflate a
-        // skill-body step with an identically-worded test step. The sidecar is
+        // macro-body step with an identically-worded test step. The sidecar is
         // rewritten wholesale, so omitting it here would make every row unfiled
         // after a CLI run and silently restore the conflation.
         ...(binding?.file !== undefined && { file: binding.file }),
@@ -1083,7 +1083,7 @@ export async function runTest(
       scope: 'before' | 'beforeEach' | 'afterEach' | 'after',
       instructions: string[],
       toolCalls: (ToolCall | null)[],
-      sourceSkills: (string | null)[],
+      sourceMacros: (string | null)[],
       hookIndex: number,
     ): Promise<{ failed: boolean; error?: string }> => {
       // A hook runs on the PAGE surface by definition (SPEC-use-computer.md
@@ -1100,7 +1100,7 @@ export async function runTest(
       for (let idx = 0; idx < instructions.length; idx++) {
         const raw = instructions[idx]!;
         const toolCall = toolCalls[idx] ?? null;
-        const sourceSkill = sourceSkills[idx] ?? null;
+        const sourceMacro = sourceMacros[idx] ?? null;
         // Same authored-line rule as the main flow, and `test.envData` below
         // is load-bearing rather than defensive: `applyEnvDataInterpolation`
         // now SKIPS a hook `Set` (a non-Set hook is still baked, having
@@ -1136,7 +1136,7 @@ export async function runTest(
         //
         // `## Hooks` and project `defaultHooks` are both refused earlier, at
         // parse and at config load — this is the backstop for the third way a
-        // hook line arrives, which neither of those sees: a `[skill: …]` named
+        // hook line arrives, which neither of those sees: a `[macro: …]` named
         // as a default hook, whose body is read at run time and can hold a
         // flow-control line the config check never looked at. There is no flow
         // to leave from inside a hook, so the hook fails rather than guessing
@@ -1145,7 +1145,7 @@ export async function runTest(
           // SPEC-use-computer.md §4.4 — a hook runs on the page surface.
           // Refused at parse for a `## Hooks` entry and at config load for a
           // project default; this is the third way a hook line arrives, which
-          // neither of those sees: a `[skill: …]` named as a hook, whose body
+          // neither of those sees: a `[macro: …]` named as a hook, whose body
           // is read at run time.
           //
           // Read off `raw`, the AUTHORED line: `parseUseStep` normalises the
@@ -1322,7 +1322,7 @@ export async function runTest(
         // Which line of the scope this is: the scope's lines share `index`, and
         // the report's anchors and the scoreboard's lines tell them apart by it.
         result.hookIndex = idx + 1;
-        if (sourceSkill) result.sourceSkill = sourceSkill;
+        if (sourceMacro) result.sourceMacro = sourceMacro;
         const hookCaptures = computeStepCaptures(result, resolvedParameters);
         if (hookCaptures) result.outputs = hookCaptures;
         stepResults.push(result);
@@ -1363,7 +1363,7 @@ export async function runTest(
         'before',
         hooks.before,
         hooks.toolCalls.before,
-        hooks.sourceSkills.before,
+        hooks.sourceMacros.before,
         0,
       );
       if (beforeResult.failed) {
@@ -1388,11 +1388,11 @@ export async function runTest(
     const loops = new LoopRuntime();
     const skipQueue = new SkipQueue();
 
-    /** Tag a result with the skill / section it came from, as the main loop
+    /** Tag a result with the macro / section it came from, as the main loop
      *  does — guard and skipped rows are steps like any other in the report. */
     const tagOrigin = (result: StepResult, index0: number): StepResult => {
-      const skill = test.sourceSkills[index0] ?? null;
-      if (skill) result.sourceSkill = skill;
+      const macro = test.sourceMacros[index0] ?? null;
+      if (macro) result.sourceMacro = macro;
       const section = test.sourceSections[index0] ?? null;
       if (section) result.sourceSection = section;
       return result;
@@ -1450,18 +1450,18 @@ export async function runTest(
         break;
       }
 
-      // ── A SKILL RETURNED: restore the caller's surface (§4.5) ───────────
+      // ── A MACRO RETURNED: restore the caller's surface (§4.5) ───────────
       //
       // Before the dispatch and the launch gate both, because the surface it
       // restores is what those two read. An inline section is deliberately
-      // absent from this: `skillFrameChain` keeps only `kind: 'skill'` frames.
+      // absent from this: `macroFrameChain` keeps only `kind: 'macro'` frames.
       //
       // Going back to `computer` is `[use computer]` and can fail; that fails
-      // THIS step, the caller's first after the skill, before anything runs on
+      // THIS step, the caller's first after the macro, before anything runs on
       // it. Skipped when this step is itself a `[use …]` line, which sets the
       // surface anyway — the server's rule, for the server's reason.
-      const restoreTo = skillSurfaces.enter(
-        skillFrameChain(test.expansion?.origins[i]?.frameId, test.expansion?.frames),
+      const restoreTo = macroSurfaces.enter(
+        macroFrameChain(test.expansion?.origins[i]?.frameId, test.expansion?.frames),
         surfaceState.surface,
       );
       if (restoreTo !== null && !(restoreTo === 'computer' && parseUseStep(test.steps[i] ?? ''))) {
@@ -1862,7 +1862,7 @@ export async function runTest(
           'beforeEach',
           hooks.beforeEach,
           hooks.toolCalls.beforeEach,
-          hooks.sourceSkills.beforeEach,
+          hooks.sourceMacros.beforeEach,
           i + 1,
         );
         if (preResult.failed) {
@@ -2004,8 +2004,8 @@ export async function runTest(
           // array takes `sourceIndex`.
           result.index += 1;
           const sourceIndex = result.index - 1;
-          const branchSourceSkill = test.sourceSkills[sourceIndex] ?? null;
-          if (branchSourceSkill) result.sourceSkill = branchSourceSkill;
+          const branchSourceMacro = test.sourceMacros[sourceIndex] ?? null;
+          if (branchSourceMacro) result.sourceMacro = branchSourceMacro;
           const branchSourceSection = test.sourceSections[sourceIndex] ?? null;
           if (branchSourceSection) result.sourceSection = branchSourceSection;
           // A watch group inside a loop body belongs to the pass that is
@@ -2061,7 +2061,7 @@ export async function runTest(
       // (§4.6), and `getActive()` on an unlaunched tracker throws by design.
       if (browserTracker.hasActive()) session = browserTracker.getActive();
 
-      // The step as AUTHORED: expanded (skill renames applied) with `{{}}` and
+      // The step as AUTHORED: expanded (macro renames applied) with `{{}}` and
       // `${}` tokens intact. `applyEnvDataInterpolation` validates rather than
       // rewrites now, so this is the same form the server has always held as
       // `originalStep` (stories/placeholder-preserving-actions.md §Runner and
@@ -2136,14 +2136,14 @@ export async function runTest(
       // decision 12). Leaf PROSE steps only: a `Set`, a `[tool:]`, an `[input:]`
       // and an `[interactive]` step each have a grammar of their own, and a
       // flow-control claim is a different form entirely. (A `### Section` or
-      // `[skill:]` call never reaches this loop — the expander replaced it.)
+      // `[macro:]` call never reaches this loop — the expander replaced it.)
       const failureTail =
         setStep || flowControlClaim || inputStep || interactiveStep || test.toolCalls[i]
           ? null
           : parseFailureTail(rawInstruction);
       // Decision 8's backstop. The parse-time validator refuses this for a
       // file; this catches the line that reaches the loop without one — a
-      // `[skill: …]` body read at run time, most of all. No model call: the
+      // `[macro: …]` body read at run time, most of all. No model call: the
       // line asks for two endings at once and there is nothing to judge.
       const tailContradiction =
         setStep || flowControlClaim ? false : isFailureTailContradiction(rawInstruction);
@@ -2170,12 +2170,12 @@ export async function runTest(
       // Read only by the branch just ahead of the computer-surface dispatch, so
       // every earlier branch — `Set`, `[input:]`, a dispatched `[tool:]` — has
       // already taken the steps it owns. This runner always loads a catalogue
-      // and always parses with a skills directory, so a directive that reaches
+      // and always parses with a macros directory, so a directive that reaches
       // that branch was dropped by whatever built `test`, and the message says
       // so rather than blaming a missing directory.
       const undispatchedDirective =
         surfaceState.surface === 'computer' && !setStep && !useAiStep && !unconditionalFlowControl
-          ? undispatchedDirectiveError(rawInstruction, { toolsLoaded: true, skillsDirSupplied: true })
+          ? undispatchedDirectiveError(rawInstruction, { toolsLoaded: true, macrosDirSupplied: true })
           : null;
       let stepResult: StepResult;
       let interactiveResults: StepResult[] = [];
@@ -2552,7 +2552,7 @@ export async function runTest(
         // Same path the hook executor uses; see runToolStep above.
         stepResult = await runToolStep(test.toolCalls[i]!, instruction, i + 1);
       } else if (undispatchedDirective !== null) {
-        // SPEC-use-computer.md §5.4: a `[tool:]` / `[skill:]` line that nothing
+        // SPEC-use-computer.md §5.4: a `[tool:]` / `[macro:]` line that nothing
         // above dispatched is never handed to the computer-surface model, which
         // would act it out on the real screen. The server's loop refuses the
         // same, at the same point in its chain.
@@ -2660,11 +2660,11 @@ export async function runTest(
         timedOut = true;
       }
 
-      // Tag the step with its originating skill (if any) so the report can
-      // show a "from skill X" chip even after parse-time expansion has
+      // Tag the step with its originating macro (if any) so the report can
+      // show a "from macro X" chip even after parse-time expansion has
       // flattened the call.
-      const stepSourceSkill = test.sourceSkills[i] ?? null;
-      if (stepSourceSkill) stepResult.sourceSkill = stepSourceSkill;
+      const stepSourceMacro = test.sourceMacros[i] ?? null;
+      if (stepSourceMacro) stepResult.sourceMacro = stepSourceMacro;
       const stepSourceSection = test.sourceSections[i] ?? null;
       if (stepSourceSection) stepResult.sourceSection = stepSourceSection;
 
@@ -2883,7 +2883,7 @@ export async function runTest(
           'afterEach',
           hooks.afterEach,
           hooks.toolCalls.afterEach,
-          hooks.sourceSkills.afterEach,
+          hooks.sourceMacros.afterEach,
           i + 1,
         );
         if (postResult.failed) {
@@ -2926,8 +2926,8 @@ export async function runTest(
         const returningText = test.expansion?.rawSteps[i] ?? test.steps[i] ?? '';
         for (let j = i + 1; j <= exit; j++) {
           const skipped = skippedByReturn(j, test.steps[j] ?? '', i, label, returningText);
-          const skippedSkill = test.sourceSkills[j] ?? null;
-          if (skippedSkill) skipped.sourceSkill = skippedSkill;
+          const skippedMacro = test.sourceMacros[j] ?? null;
+          if (skippedMacro) skipped.sourceMacro = skippedMacro;
           const skippedSection = test.sourceSections[j] ?? null;
           if (skippedSection) skipped.sourceSection = skippedSection;
           // Which pass these rows belong to, stamped exactly as an executed
@@ -2978,7 +2978,7 @@ export async function runTest(
         'after',
         hooks.after,
         hooks.toolCalls.after,
-        hooks.sourceSkills.after,
+        hooks.sourceMacros.after,
         test.steps.length + 1,
       );
       if (afterResult.failed) {

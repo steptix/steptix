@@ -106,18 +106,18 @@ describe('Steptix step-mode commands (Phase 3)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('stepOver / stepOut from step-paused inside a skill POST the matching mode', async () => {
+  it('stepOver / stepOut from step-paused inside a macro POST the matching mode', async () => {
     // Push a frame first so the controller's frameStack has depth > 0;
     // otherwise Phase 3.1.d intercepts Step Out at the root frame and
-    // sends 'continue' instead. This test verifies the inside-a-skill
+    // sends 'continue' instead. This test verifies the inside-a-macro
     // case where 'out' is meaningful.
     const frame = {
       id: 'f1',
       parentId: null,
-      kind: 'skill',
-      uri: path.resolve(FIXTURES_DIR, 'fake-skill.md'),
+      kind: 'macro',
+      uri: path.resolve(FIXTURES_DIR, 'fake-macro.md'),
       line: 9,
-      skillName: 'fake_skill',
+      macroName: 'fake_macro',
     };
     void vscode.commands.executeCommand('steptix.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
@@ -136,8 +136,8 @@ describe('Steptix step-mode commands (Phase 3)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('skill-file breakpoints are sent to the server via breakpointsByUri', async () => {
-    // Bug fix follow-up: breakpoints in a skill .md were ignored
+  it('macro-file breakpoints are sent to the server via breakpointsByUri', async () => {
+    // Bug fix follow-up: breakpoints in a macro .md were ignored
     // because the extension only sent test-file breakpoints. Now the
     // extension ships the full per-URI map; the server checks it
     // before each step and pauses for non-test-file matches.
@@ -146,10 +146,10 @@ describe('Steptix step-mode commands (Phase 3)', function () {
     // `vscode.debug.breakpoints` set on a non-test markdown file
     // reach the request body as `breakpointsByUri`. The server-side
     // pause behaviour is covered in tests/api-server-stepmode.test.ts.
-    const skillUri = fixtureUri('fake-skill.md');
+    const macroUri = fixtureUri('fake-macro.md');
     vscode.debug.addBreakpoints([
       new vscode.SourceBreakpoint(
-        new vscode.Location(skillUri, new vscode.Position(8, 0)),
+        new vscode.Location(macroUri, new vscode.Position(8, 0)),
         true,
       ),
     ]);
@@ -162,11 +162,11 @@ describe('Steptix step-mode commands (Phase 3)', function () {
     const req = fake.requests[0];
     assert.ok(req, 'no request captured');
     assert.ok(req.breakpointsByUri, 'breakpointsByUri must be present on the request');
-    const skillPath = skillUri.fsPath;
+    const macroPath = macroUri.fsPath;
     assert.deepEqual(
-      req.breakpointsByUri[skillPath],
+      req.breakpointsByUri[macroPath],
       [9],
-      'skill-file breakpoint at editor line 8 (1-based line 9) must appear under its file path',
+      'macro-file breakpoint at editor line 8 (1-based line 9) must appear under its file path',
     );
   });
 
@@ -217,46 +217,46 @@ describe('Steptix step-mode commands (Phase 3)', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('Stop while step-paused inside a skill clears the yellow ▶ on the skill file too', async () => {
+  it('Stop while step-paused inside a macro clears the yellow ▶ on the macro file too', async () => {
     // Phase 3.1.a regression guard: pre-fix, Stop only cleared
     // breakpointStop on the active editor (the test file). A step:awaiting
-    // marker painted on a skill file would survive Stop and linger as
+    // marker painted on a macro file would survive Stop and linger as
     // a stale yellow ▶ until the next run launched. With
     // clearAllStepPausedMarkers wired into both Stop paths, the marker
     // gets dropped wherever step:awaiting placed it.
-    const skillPath = path.resolve(FIXTURES_DIR, 'fake-skill.md');
-    const skillUri = vscode.Uri.file(skillPath);
+    const macroPath = path.resolve(FIXTURES_DIR, 'fake-macro.md');
+    const macroUri = vscode.Uri.file(macroPath);
     const frame = {
       id: 'f1',
       parentId: null,
-      kind: 'skill',
-      uri: skillPath,
+      kind: 'macro',
+      uri: macroPath,
       line: 9,
-      skillName: 'fake_skill',
+      macroName: 'fake_macro',
     };
 
     void vscode.commands.executeCommand('steptix.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
-    // Drive the stream into a step-paused state on the skill file.
+    // Drive the stream into a step-paused state on the macro file.
     fake.push({ type: 'frame:push', frame });
     fake.push({ type: 'step:awaiting', line: 3, frame });
-    await waitFor('skill-file breakpointStop set on line 3', () => {
-      const snap = hooks.tracker.snapshotFor(skillUri);
+    await waitFor('macro-file breakpointStop set on line 3', () => {
+      const snap = hooks.tracker.snapshotFor(macroUri);
       return snap?.breakpointStop === 3;
     });
 
     await vscode.commands.executeCommand('steptix.stop');
 
     await waitFor('idle after stop', () => !hooks.isRunning());
-    // The yellow ▶ must be gone from the skill file too — not just the
+    // The yellow ▶ must be gone from the macro file too — not just the
     // test file's active-editor URI.
-    const skillSnap = hooks.tracker.snapshotFor(skillUri);
+    const macroSnap = hooks.tracker.snapshotFor(macroUri);
     // After the marker is cleared the per-URI snapshot may return null
     // (no state left) — either way, breakpointStop must not be 3.
-    if (skillSnap) {
-      assert.notEqual(skillSnap.breakpointStop, 3,
-        'Stop must clear step-paused breakpointStop on the skill file');
+    if (macroSnap) {
+      assert.notEqual(macroSnap.breakpointStop, 3,
+        'Stop must clear step-paused breakpointStop on the macro file');
     }
   });
 

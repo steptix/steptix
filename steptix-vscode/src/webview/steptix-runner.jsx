@@ -74,7 +74,7 @@ const HOST_MSG_TYPES = new Set([
   "breakpointStop",
   "batchBanner",
   "serverSetup",
-  "skillRerunAvailable",
+  "macroRerunAvailable",
   "compileEvent",
   "compileProgress",
   "compileRunEvent",
@@ -1161,7 +1161,7 @@ function SteptixRunner() {
   const [runtimeVariables, setRuntimeVariables] = useState({});
   // Parallel to runtimeVariables: records the `source` discriminator from
   // each `capture` event (runner-core CaptureEvent → 'capture' | 'toolOutput')
-  // keyed by variable name. Lets the Variables panel mark a value a skill or
+  // keyed by variable name. Lets the Variables panel mark a value a macro or
   // tool returned apart from one scraped off the page. frame:scope and
   // parametersResolved carry no such discriminator, so they leave this map
   // untouched — those rows render as parameters / plain captures.
@@ -1186,10 +1186,10 @@ function SteptixRunner() {
    */
   const [runtimeMasking, setRuntimeMasking] = useState({});
   const [variablesCollapsed, setVariablesCollapsed] = useState(false);
-  // "Re-run a skill step with its variables": { skillName, scope, paramNames }
-  // when a top-level skill step fails on a live session, else null.
+  // "Re-run a macro step with its variables": { macroName, scope, paramNames }
+  // when a top-level macro step fails on a live session, else null.
   // `rerunEdits` holds the user's in-progress edits to the editable rows.
-  const [skillRerun, setSkillRerun] = useState(null);
+  const [macroRerun, setMacroRerun] = useState(null);
   const [rerunEdits, setRerunEdits] = useState({});
   const [stepsCollapsed, setStepsCollapsed] = useState(false);
   const [logCollapsed, setLogCollapsed] = useState(false);
@@ -1341,9 +1341,9 @@ function SteptixRunner() {
             setRuntimeVariables({});
             setRuntimeSources({});
             setRuntimeMasking({});
-            // A new run invalidates any parked skill-failure re-run offer (its
+            // A new run invalidates any parked macro-failure re-run offer (its
             // captured scope is wiped on the host side too).
-            setSkillRerun(null);
+            setMacroRerun(null);
             setRerunEdits({});
             // Same reasoning for the `(row N)` prefixes: they describe the
             // last loop, and the run starting now has not failed on any row
@@ -1409,8 +1409,8 @@ function SteptixRunner() {
         case "serverSetup":
           setServerSetup({ state: msg.state, progress: msg.progress });
           break;
-        case "skillRerunAvailable":
-          setSkillRerun(msg.failure);
+        case "macroRerunAvailable":
+          setMacroRerun(msg.failure);
           setRerunEdits({});
           break;
         case "compileEvent":
@@ -1528,11 +1528,11 @@ function SteptixRunner() {
         // (which renders based on the active file's declared
         // parameters + a runtimeValues map) was reading only
         // `parametersResolved` + `capture` events. When the active
-        // editor is on a skill `.md` and we're paused inside that
-        // skill, the skill's declared parameter (e.g. `query`) needs
+        // editor is on a macro `.md` and we're paused inside that
+        // macro, the macro's declared parameter (e.g. `query`) needs
         // the caller-supplied value here — without this merge, the
         // panel falls back to the parameter's DESCRIPTION text from
-        // the skill's `## Parameters` section, which reads as if the
+        // the macro's `## Parameters` section, which reads as if the
         // parameter wasn't passed in at all.
         setRuntimeVariables((prev) => ({ ...prev, ...event.scope }));
         // …and how to read them. Spread conditionally so a field the server
@@ -1598,7 +1598,7 @@ function SteptixRunner() {
     setRuntimeVariables({});
     setRuntimeSources({});
     setRuntimeMasking({});
-    setSkillRerun(null);
+    setMacroRerun(null);
     setRerunEdits({});
   }, [snapshot?.uri]);
 
@@ -2107,16 +2107,16 @@ function SteptixRunner() {
       )}
 
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        {skillRerun && !running && (
+        {macroRerun && !running && (
           <div style={{ flexShrink: 0, borderBottom: "1px solid var(--vscode-sideBarSectionHeader-border, transparent)", padding: "6px 8px" }}>
             <div style={{ fontWeight: 600, marginBottom: 2 }}>
-              Re-run “{skillRerun.skillName}” from the failed step
+              Re-run “{macroRerun.macroName}” from the failed step
             </div>
             <div style={{ opacity: 0.8, fontSize: "0.9em", marginBottom: 6 }}>
-              Edit the captured variables, then re-run from the failed step to the end of the skill on the live page.
+              Edit the captured variables, then re-run from the failed step to the end of the macro on the live page.
             </div>
-            {Object.entries(skillRerun.scope).map(([name, value]) => {
-              const isParam = skillRerun.paramNames.includes(name);
+            {Object.entries(macroRerun.scope).map(([name, value]) => {
+              const isParam = macroRerun.paramNames.includes(name);
               // What this row is allowed to show decides whether it can be
               // edited, rather than a third spelling of the secret rule — the
               // regex that used to sit here knew `password|secret|token|
@@ -2137,7 +2137,7 @@ function SteptixRunner() {
               return (
                 <div key={name} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, fontSize: "0.92em" }}>
                   <span
-                    title={isParam ? `${name} (parameter — read-only; edit the [skill:] line and Continue to change it)` : name}
+                    title={isParam ? `${name} (parameter — read-only; edit the [macro:] line and Continue to change it)` : name}
                     style={{ flex: "0 0 40%", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", opacity: 0.85 }}
                   >
                     {name}{isParam ? " (param)" : ""}
@@ -2161,8 +2161,8 @@ function SteptixRunner() {
               );
             })}
             <button
-              onClick={() => hostBridge.postRerunSkillStep(skillRerun.testUri, rerunEdits)}
-              title="Re-run from the failed step to the end of the skill on the live session"
+              onClick={() => hostBridge.postRerunMacroStep(macroRerun.testUri, rerunEdits)}
+              title="Re-run from the failed step to the end of the macro on the live session"
               style={{ marginTop: 4, padding: "2px 10px", cursor: "pointer", background: "var(--vscode-button-background)", color: "var(--vscode-button-foreground)", border: "none", borderRadius: 2 }}
             >
               ↻ Re-run from failed step
@@ -2292,7 +2292,7 @@ function SteptixRunner() {
             {!variablesCollapsed && (
               <div className="tb-section-body" style={{ maxHeight: 180, overflowY: "auto" }}>
                 {variableRows.map((row) => {
-                  // Mark values a skill/tool returned (capture event with
+                  // Mark values a macro/tool returned (capture event with
                   // source: 'toolOutput') apart from page captures and from
                   // parameters. The badge sits beside the name; absent
                   // captureSource (parameters, plain page captures, legacy
@@ -2336,7 +2336,7 @@ function SteptixRunner() {
                         </span>
                         {isToolOutput && (
                           <span
-                            title="Returned by a [tool:] / [skill:] invocation"
+                            title="Returned by a [tool:] / [macro:] invocation"
                             style={{
                               flexShrink: 0,
                               fontSize: "0.82em",

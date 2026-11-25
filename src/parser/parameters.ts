@@ -265,14 +265,14 @@ export function placeholderRoot(name: string): string {
 }
 
 /**
- * `order.id` → `__skill3_order.id` when a frame renames `order`, or undefined
+ * `order.id` → `__macro3_order.id` when a frame renames `order`, or undefined
  * when the name is flat or its root is not renamed.
  *
- * The one rule a skill body's dotted reference resolves by, asked by the
+ * The one rule a macro body's dotted reference resolves by, asked by the
  * runtime (`step.getVar`, src/codebehind/execute.ts) and by generation
  * (`stepParameters`, src/codebehind/generate.ts) alike — a `For each {{order}}`
- * inside a skill body binds the SCOPED keys, so `{{order.id}}` there means
- * `__skill3_order.id` and never an outer `order.id`
+ * inside a macro body binds the SCOPED keys, so `{{order.id}}` there means
+ * `__macro3_order.id` and never an outer `order.id`
  * (stories/codebehind-loops-and-conditions.md).
  *
  * Own properties only: `constructor.x` must not find `Object.prototype.constructor`

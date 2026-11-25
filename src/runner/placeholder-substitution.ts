@@ -371,7 +371,7 @@ function findDottedRefusal(
 /**
  * The names a step DEFINES by writing `store as {{x}}` / `save as {{x}}` in
  * prose. The bracketed `[store as: x]` form is `referencedVariableNames`'
- * `captures` half (src/skills/expander.ts); this covers the other spelling
+ * `captures` half (src/macros/expander.ts); this covers the other spelling
  * `isExtractionStep` already recognises. A definition is not a reference: it
  * stays out of the values table and is never refused as unknown.
  */
@@ -863,9 +863,9 @@ function unresolvedReferenceError(
  * does not hand the model the value the first pass stored.
  *
  * `literal` is the same idea for everything BETWEEN the references: the
- * step's own words, which are not always the author's. A skill argument and a
+ * step's own words, which are not always the author's. A macro argument and a
  * looped section's row value are written into the body's text at expansion
- * (`src/skills/expander.ts`), so by the time the step runs they are prose, no
+ * (`src/macros/expander.ts`), so by the time the step runs they are prose, no
  * `{{…}}` is left to route them through `show`, and a `password` column would
  * reach the model in clear (issue 060). The runner masks them here. A
  * reference is never handed to `literal`, so masking cannot break a `{{…}}`

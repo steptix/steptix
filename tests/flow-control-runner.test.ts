@@ -153,7 +153,7 @@ function emptyHooks(): ResolvedHooks {
     before: [], beforeEach: [], afterEach: [], after: [],
     hasAny: false,
     toolCalls: { before: [], beforeEach: [], afterEach: [], after: [] },
-    sourceSkills: { before: [], beforeEach: [], afterEach: [], after: [] },
+    sourceMacros: { before: [], beforeEach: [], afterEach: [], after: [] },
   };
 }
 
@@ -427,7 +427,7 @@ describe('hooks around a return', () => {
       afterEach: ['snapshot the page'],
       after: ['log out of the API'],
       toolCalls: { before: [], beforeEach: [null], afterEach: [null], after: [null] },
-      sourceSkills: { before: [], beforeEach: [null], afterEach: [null], after: [null] },
+      sourceMacros: { before: [], beforeEach: [null], afterEach: [null], after: [null] },
     };
     respond({});
 
@@ -460,7 +460,7 @@ describe('hooks around a return', () => {
       before: ['read the holdings grid'],
       afterEach: ['snapshot the page'],
       toolCalls: { before: [null], beforeEach: [], afterEach: [null], after: [] },
-      sourceSkills: { before: [null], beforeEach: [], afterEach: [null], after: [] },
+      sourceMacros: { before: [null], beforeEach: [], afterEach: [null], after: [] },
     };
     respond({});
 
@@ -482,7 +482,7 @@ describe('hooks around a return', () => {
       hasAny: true,
       before: ['If we are already signed in then return'],
       toolCalls: { before: [null], beforeEach: [], afterEach: [], after: [] },
-      sourceSkills: { before: [null], beforeEach: [], afterEach: [], after: [] },
+      sourceMacros: { before: [null], beforeEach: [], afterEach: [], after: [] },
     };
     respond({});
 
@@ -509,7 +509,7 @@ describe('hooks around a return', () => {
       beforeEach: ['dismiss any banner'],
       afterEach: ['snapshot the page'],
       toolCalls: { before: [], beforeEach: [null], afterEach: [null], after: [] },
-      sourceSkills: { before: [], beforeEach: [null], afterEach: [null], after: [] },
+      sourceMacros: { before: [], beforeEach: [null], afterEach: [null], after: [] },
     };
     respond({});
 

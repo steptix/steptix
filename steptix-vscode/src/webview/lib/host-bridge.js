@@ -115,9 +115,9 @@ export const hostBridge = {
   postWebviewState({ runtimeVariables, hostError, hasFocus, running }) {
     post({ type: 'webviewState', runtimeVariables, hostError, hasFocus, running });
   },
-  /** Re-run the failed skill step (identified by its test URI) with the user's
+  /** Re-run the failed macro step (identified by its test URI) with the user's
    *  edited captured vars. */
-  postRerunSkillStep(testUri, edits) { post({ type: 'rerunSkillStep', testUri, edits }); },
+  postRerunMacroStep(testUri, edits) { post({ type: 'rerunMacroStep', testUri, edits }); },
   /** Compile this test's code-behind — from this file's last run when it can
    *  be the recording, recording in this file's session otherwise. */
   postCompile() { post({ type: 'compile' }); },

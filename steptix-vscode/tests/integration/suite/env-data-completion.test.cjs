@@ -5,7 +5,7 @@
  * the wiring — the active env comes from the EnvSelector setting (or a
  * frontmatter pin), env/data files resolve under the `steptix.config.json`
  * project root with NO walk-up (server parity), dataSources paths interpolate
- * for skills, and `{{` completes with or without an env selected.
+ * for macros, and `{{` completes with or without an env selected.
  *
  * The whole project lives in a runtime-generated `dc-project/` subfolder of
  * the fixtures workspace with its OWN `steptix.config.json`: the walk-up must
@@ -25,7 +25,7 @@ const PROJECT_DIR = path.join(FIXTURES_DIR, 'dc-project');
 const STEPS_MD = path.join(PROJECT_DIR, 'dc-steps.md');
 const PINNED_MD = path.join(PROJECT_DIR, 'dc-pinned.md');
 const EMPTY_PIN_MD = path.join(PROJECT_DIR, 'dc-empty-pin.md');
-const SKILL_MD = path.join(PROJECT_DIR, 'dc-skill.md');
+const MACRO_MD = path.join(PROJECT_DIR, 'dc-macro.md');
 const NESTED_MD = path.join(PROJECT_DIR, 'tests', 'dc-nested.md');
 
 const setEnv = (name) =>
@@ -157,15 +157,15 @@ describe('Steptix ${...} env/data completion', function () {
       ['---', 'env:', '---', '', '## Steps', '1. Pinned off ${', ''].join('\n'),
     );
     fs.writeFileSync(
-      SKILL_MD,
+      MACRO_MD,
       [
         '---',
-        'type: skill',
+        'type: macro',
         'dataSources:',
         '  endpoints: ./data/${envName}-endpoints.json',
         '---',
         '',
-        '# dc skill',
+        '# dc macro',
         '',
         '## Steps',
         '1. Open ${',
@@ -250,15 +250,15 @@ describe('Steptix ${...} env/data completion', function () {
     );
   });
 
-  it('skills: no data namespace, and ${envName} interpolates in the source path', async () => {
+  it('macros: no data namespace, and ${envName} interpolates in the source path', async () => {
     await setEnv('dc1');
-    const ns = await completionsAt(SKILL_MD, '1. Open ${', NAMESPACE_KINDS);
+    const ns = await completionsAt(MACRO_MD, '1. Open ${', NAMESPACE_KINDS);
     const labels = ns.map((i) => i.label);
-    assert.ok(!labels.includes('data'), 'skills never see the caller-env data file');
-    assert.ok(labels.includes('endpoints'), 'the skill-private source is offered');
+    assert.ok(!labels.includes('data'), 'macros never see the caller-env data file');
+    assert.ok(labels.includes('endpoints'), 'the macro-private source is offered');
 
     // `./data/${envName}-endpoints.json` → data/dc1-endpoints.json.
-    const keys = await completionsAt(SKILL_MD, '2. Hit ${endpoints.', VALUE_KINDS);
+    const keys = await completionsAt(MACRO_MD, '2. Hit ${endpoints.', VALUE_KINDS);
     assert.deepEqual(
       keys.map((i) => i.label),
       ['api'],

@@ -210,9 +210,9 @@ export function rowSkipHover(
  * The panel's short note on a failed row.
  *
  * `sourceName` is the file the failing step actually lives in, when that is
- * not the test document — a `[skill:]` body, typically. It outranks the
+ * not the test document — a `[macro:]` body, typically. It outranks the
  * ordinal because the ordinal cannot be computed: `mainFlowOrdinal` counts
- * steps of the TEST file, so a skill-body failure on line 12 would be
+ * steps of the TEST file, so a macro-body failure on line 12 would be
  * described as "step 2" and quoted as whatever the test's line 12 says.
  */
 export function rowFailureDetail(
@@ -268,7 +268,7 @@ export function rowFailureError(args: {
   values?: string;
   /**
    * The basename of the file the failing step lives in, when it is not the
-   * test document — a skill body reached from this row. With it, neither the
+   * test document — a macro body reached from this row. With it, neither the
    * ordinal nor the step text is quoted: both would be read out of the test
    * file at a line number that belongs to another file.
    */

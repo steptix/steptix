@@ -171,8 +171,8 @@ export function isBrowserClosed(browserSession: BrowserSession): boolean {
  * extract_value's `as` is currently a documented no-op sub-action; (2) the
  * parameter map persists across steps, so an unfiltered failed action's `as`
  * could still be present from an *earlier* step and wrongly emit a stale value
- * attributed to this one. `__skill*`-namespaced names are always excluded —
- * those are skill-internal (see the `__skill*` invariant in expander.ts) and
+ * attributed to this one. `__macro*`-namespaced names are always excluded —
+ * those are macro-internal (see the `__macro*` invariant in expander.ts) and
  * must never reach session outputs, an errand receipt, or the next batch's seed.
  */
 export function autoCapturedNames(stepResult: StepResult): string[] {
@@ -182,5 +182,5 @@ export function autoCapturedNames(stepResult: StepResult): string[] {
       // A structured table read writes its `as` too (SPEC-structured-table-reads.md §9.3).
       || sa.action.action === 'readTable'))
     .map((sa) => sa.action.as)
-    .filter((name): name is string => !!name && !name.startsWith('__skill'));
+    .filter((name): name is string => !!name && !name.startsWith('__macro'));
 }

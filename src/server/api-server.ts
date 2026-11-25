@@ -767,13 +767,13 @@ export function createApiServer(
           );
         }
       }
-      // Step-into protocol fields. `skillsDir` triggers server-side skill
+      // Step-into protocol fields. `macrosDir` triggers server-side macro
       // expansion + frame:push/pop emission; `testFilePath` anchors frame
       // events on the test file; `stepMode` opts the run into the
       // pause-between-steps state machine. All optional — legacy clients
       // omit them and the run executes as before.
-      if (typeof body.skillsDir === 'string') {
-        request.skillsDir = body.skillsDir;
+      if (typeof body.macrosDir === 'string') {
+        request.macrosDir = body.macrosDir;
       }
       if (typeof body.testFilePath === 'string') {
         request.testFilePath = body.testFilePath;
@@ -990,9 +990,9 @@ export function createApiServer(
         }
         request.withinCompileRun = body.withinCompileRun;
       }
-      // Re-run-with-variables fields (steptix "re-run a skill step"):
+      // Re-run-with-variables fields (steptix "re-run a macro step"):
       // `seedScope` injects captured/runtime vars before the run; `startAt`
-      // starts execution partway into the expanded skill body. Both optional.
+      // starts execution partway into the expanded macro body. Both optional.
       if (
         body.seedScope !== undefined &&
         body.seedScope !== null &&
@@ -1016,7 +1016,7 @@ export function createApiServer(
           request.startAt = { uri: sa.uri, line: sa.line };
         }
       }
-      // `endAt` bounds the partial re-run's upper end ("run selected skill
+      // `endAt` bounds the partial re-run's upper end ("run selected macro
       // steps"); same shape as `startAt`. Optional; meaningful only with startAt.
       if (
         body.endAt !== undefined &&

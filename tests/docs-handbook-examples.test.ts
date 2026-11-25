@@ -6,7 +6,7 @@
  * line is a tool the registry loads. A TypeScript example with no File line
  * must be one compiled-step entry (a `.steps.ts` excerpt), and parses as one.
  * This suite extracts each fenced example, materialises it as a small project
- * (tests/, skills/, tools/src/) and pushes it through the real parser, tool
+ * (tests/, macros/, tools/src/) and pushes it through the real parser, tool
  * registry and tool executor — no AI, no browser, no server.
  *
  * Where the project is materialised matters. The tool examples import the
@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import ts from '@typescript/typescript6';
 import type { Page, BrowserContext, Browser } from 'playwright';
-import { parseTestFile, parseSkillFile } from '../src/parser/markdown.js';
+import { parseTestFile, parseMacroFile } from '../src/parser/markdown.js';
 import type { ParsedTest } from '../src/parser/types.js';
 import { loadToolCatalogue, type ToolCatalogue } from '../src/tools/registry.js';
 import { executeToolStep } from '../src/tools/executor.js';
@@ -113,7 +113,7 @@ interface Example {
 }
 
 let projectDir: string;
-let skillsDir: string;
+let macrosDir: string;
 let toolsDir: string;
 const examples: Example[] = [];
 /** ```ts fences with no File line: excerpts of a compiled `.steps.ts`, one entry each. */
@@ -142,7 +142,7 @@ beforeAll(async () => {
   danglingFileLines = extracted.danglingFileLines;
 
   projectDir = fs.mkdtempSync(path.join(repoRoot, 'tests', '.tmp-handbook-'));
-  skillsDir = path.join(projectDir, 'skills');
+  macrosDir = path.join(projectDir, 'macros');
   toolsDir = path.join(projectDir, 'tools', 'src');
 
   let generated = 0;
@@ -167,9 +167,9 @@ beforeAll(async () => {
       }
       rel = `tests/example-${++generated}-${slugOf(fence)}.md`;
     }
-    if (!/^(tests|skills|tools\/src)\//.test(rel)) {
+    if (!/^(tests|macros|tools\/src)\//.test(rel)) {
       throw new Error(
-        `handbook line ${fence.line}: File \`${rel}\` is outside tests/, skills/ or tools/src/ — extend this suite if the handbook now documents another location`,
+        `handbook line ${fence.line}: File \`${rel}\` is outside tests/, macros/ or tools/src/ — extend this suite if the handbook now documents another location`,
       );
     }
     const abs = path.join(projectDir, rel);
@@ -179,7 +179,7 @@ beforeAll(async () => {
   }
 
   for (const ex of examples.filter((e) => e.rel.startsWith('tests/'))) {
-    const parsed = await parseTestFile(ex.abs, { skillsDir });
+    const parsed = await parseTestFile(ex.abs, { macrosDir });
     parsedByTitle.set(parsed.title, parsed);
   }
 });
@@ -259,10 +259,10 @@ describe('every Markdown test example parses', () => {
     );
   });
 
-  it('greeting.md: the skill call expands and out.<name>="alias" renames the capture', () => {
+  it('greeting.md: the macro call expands and out.<name>="alias" renames the capture', () => {
     const p = byTitle('Sign-in greeting');
-    expect(p.steps.some((s) => s.includes('[skill:'))).toBe(false);
-    expect(p.sourceSkills.filter((s) => s === 'auth/sign_in')).toHaveLength(10);
+    expect(p.steps.some((s) => s.includes('[macro:'))).toBe(false);
+    expect(p.sourceMacros.filter((s) => s === 'auth/sign_in')).toHaveLength(10);
     expect(p.steps).toContain('Read the name shown in the account menu [store as: signed_in_name]');
     expect(p.steps).toContain('Read the name shown in the account menu [store as: second_name]');
     expect(p.steps).toContain('Type "second.user@example.test" into the Email field');
@@ -280,15 +280,15 @@ describe('every Markdown test example parses', () => {
   });
 });
 
-describe('every skill example parses', () => {
+describe('every macro example parses', () => {
   it('sign_in declares the parameters and outputs the handbook shows', async () => {
-    const skills = examples.filter((e) => e.rel.startsWith('skills/'));
-    expect(skills.length).toBeGreaterThan(0);
-    for (const ex of skills) {
-      const skill = await parseSkillFile(ex.abs);
-      expect(skill.steps.length, `${ex.rel}: no steps`).toBeGreaterThan(0);
+    const macros = examples.filter((e) => e.rel.startsWith('macros/'));
+    expect(macros.length).toBeGreaterThan(0);
+    for (const ex of macros) {
+      const macro = await parseMacroFile(ex.abs);
+      expect(macro.steps.length, `${ex.rel}: no steps`).toBeGreaterThan(0);
     }
-    const signIn = await parseSkillFile(path.join(skillsDir, 'auth', 'sign_in.md'));
+    const signIn = await parseMacroFile(path.join(macrosDir, 'auth', 'sign_in.md'));
     expect(signIn.name).toBe('sign_in');
     expect(Object.keys(signIn.parameters)).toEqual(['login_url', 'email', 'password']);
     expect(signIn.outputs).toEqual(['display_name']);
@@ -426,7 +426,7 @@ describe('every step excerpt parses as steps', () => {
       const abs = path.join(projectDir, 'excerpts', `line-${fence.line}.md`);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.writeFileSync(abs, `# Excerpt at handbook line ${fence.line}\n\n## Steps\n\n${fence.body}\n`);
-      const parsed = await parseTestFile(abs, { skillsDir });
+      const parsed = await parseTestFile(abs, { macrosDir });
       const found = parsed.steps.length + Object.keys(parsed.sections).length;
       expect(found, `handbook line ${fence.line}: no step or section parsed`).toBeGreaterThan(0);
     }

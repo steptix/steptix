@@ -77,7 +77,7 @@ test("nothing in the clause gates on where the session is parked", () => {
     "steptix.running",
     "steptix.paused",
     "steptix.stepPaused",
-    "steptix.skillDebugActive",
+    "steptix.macroDebugActive",
     "session",
   ];
   for (const clause of [gutter.when, palette?.when ?? ""]) {

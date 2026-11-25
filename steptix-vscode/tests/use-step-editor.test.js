@@ -89,10 +89,10 @@ test('the well-formed directives are silent, and so is prose with a bracket', ()
     '[use browser]',
     '[use: browser]',
     '[no-hooks] [use computer]',
-    '[skill: login]',
+    '[macro: login]',
     '[interactive]',
     'Verify the [optional] banner',
-    '[skillful] navigation is expected',
+    '[macroscopic] navigation is expected',
     'Click the Save button',
   ]) {
     const text = doc('# T', '', '## Steps', `1. ${instruction}`, '2. Done');
@@ -221,7 +221,7 @@ test('a [use ai] line is non-steppable too — it never has code-behind to step 
 
 test('…and the other three kinds are unchanged', () => {
   assert.equal(classifyDebuggableLine('3. [tool: echo value="hi"]'), 'tool');
-  assert.equal(classifyDebuggableLine('3. [skill: login]'), 'skill');
+  assert.equal(classifyDebuggableLine('3. [macro: login]'), 'macro');
   assert.equal(classifyDebuggableLine('3. Click the Save button'), 'plain');
   // A malformed switch is NOT a switch: it never runs, so it keeps the plain
   // treatment rather than being quietly excused from stepping.

@@ -1,18 +1,18 @@
 /**
- * Where a `[skill: ...]` / `[tool: ...]` name POINTS — the file-resolution half
+ * Where a `[macro: ...]` / `[tool: ...]` name POINTS — the file-resolution half
  * of Go-to-Definition and completion, extracted from the providers so it is
  * vscode-free and testable under `node --test`.
  *
  * Everything here mirrors a rule that already exists server-side:
  *
  *  - `toolFileFor`       mirrors `parseToolRef`   (src/tools/registry.ts)
- *  - `canonicalSkillName` mirrors `parseSkillCall` (src/skills/skill-call-parser.ts)
- *  - `collectSkillNames`  mirrors `loadSkill`'s `<skillsDir>/<name>.md` layout,
+ *  - `canonicalMacroName` mirrors `parseMacroCall` (src/macros/macro-call-parser.ts)
+ *  - `collectMacroNames`  mirrors `loadMacro`'s `<macrosDir>/<name>.md` layout,
  *                         with `listToolFiles`' walk rules (registry.ts)
  *  - `parseInvocationLine` mirrors `parseInvocation`'s token finder
  *                         (src/parser/invocation-parser.ts)
- *  - `openSkillArgsContext` mirrors that parser's argument scanner
- *  - `skillIoFor`        reads `## Parameters` via runner-core's
+ *  - `openMacroArgsContext` mirrors that parser's argument scanner
+ *  - `macroIoFor`        reads `## Parameters` via runner-core's
  *                         `parseParameters` and `## Outputs` mirroring
  *                         `extractOutputs` (src/parser/markdown.ts)
  *
@@ -24,7 +24,7 @@
  * The one place the editor is deliberately MORE lenient than the parser is a
  * half-typed TOOL reference: an author mid-keystroke on `[tool: auth/login/]`
  * has not made an error yet, so navigation still resolves the file they are
- * heading for. Skill names get no such leniency — `canonicalSkillName` refuses
+ * heading for. Macro names get no such leniency — `canonicalMacroName` refuses
  * a trailing slash like every other empty segment. Genuine malformations
  * return `null` and the caller warns — the editor must never bless a name the
  * runner will reject.
@@ -50,12 +50,12 @@ const SEGMENT_RE = /^[\w-]+$/;
 /**
  * Hard ceiling on directories visited per walk. The realpath `visited` set
  * already defeats symlink loops; this bounds the other pathology — a single
- * junction into some huge foreign tree (`skills/lib -> C:\big-repo`), which is
+ * junction into some huge foreign tree (`macros/lib -> C:\big-repo`), which is
  * loop-free and would otherwise be walked in full, synchronously, on every
- * completion keystroke. Two thousand real directories of skills is far beyond
+ * completion keystroke. Two thousand real directories of macros is far beyond
  * any plausible project; past it the walk stops quietly with what it has.
  */
-const MAX_SKILL_DIRS = 2000;
+const MAX_MACRO_DIRS = 2000;
 
 /**
  * The file portion of a tool reference, relative to `toolsDir` and without an
@@ -79,7 +79,7 @@ const MAX_SKILL_DIRS = 2000;
  *
  * Every other empty segment — leading `/` included — is a malformation
  * `parseToolRef` throws on, so it returns `null` and the caller warns. (The
- * skill side legitimately strips a leading slash, because `[skill: /a/b]` IS
+ * macro side legitimately strips a leading slash, because `[macro: /a/b]` IS
  * legal at runtime; `[tool: /a/b]` is not, and navigating on it would bless a
  * ref the runner rejects.)
  */
@@ -94,15 +94,15 @@ export function toolFileFor(ref: string): string | null {
 }
 
 /**
- * The canonical form of a skill name — no leading slash — or `null` when the
+ * The canonical form of a macro name — no leading slash — or `null` when the
  * name has an empty path segment.
  *
- * Mirrors `parseSkillCall` (src/skills/skill-call-parser.ts) exactly, including
+ * Mirrors `parseMacroCall` (src/macros/macro-call-parser.ts) exactly, including
  * the rejection: `path.join` would silently collapse `auth//login` into a real
  * file, so navigating on it would bless a name the runner throws
- * `SkillCallSyntaxError` on. `null` keeps the editor and the runtime agreeing.
+ * `MacroCallSyntaxError` on. `null` keeps the editor and the runtime agreeing.
  */
-export function canonicalSkillName(name: string): string | null {
+export function canonicalMacroName(name: string): string | null {
   const stripped = name.startsWith('/') ? name.slice(1) : name;
   // `''.split('/')` is `['']`, so this also catches an empty name.
   if (stripped.split('/').some((s) => s.length === 0)) return null;
@@ -110,28 +110,28 @@ export function canonicalSkillName(name: string): string | null {
 }
 
 /**
- * The heading text to look for inside a skill file: the name's last path
+ * The heading text to look for inside a macro file: the name's last path
  * segment.
  *
- * A skill's H1 is *conventionally* its unqualified name, but nothing enforces
- * it — `skill.name` comes from the H1 and is independent of the filename. So
+ * A macro's H1 is *conventionally* its unqualified name, but nothing enforces
+ * it — `macro.name` comes from the H1 and is independent of the filename. So
  * this is a best-effort landing spot; callers fall back to line 0 when no
  * matching heading is found.
  */
-export function skillHeading(name: string): string {
+export function macroHeading(name: string): string {
   return name.slice(name.lastIndexOf('/') + 1);
 }
 
 /**
- * Every skill under `skillsDir`, named the way a step must reference it:
- * relative to the skills root, no `.md`, **forward slashes on every platform** —
- * a skill at `skills/auth/login.md` completes as `[skill: auth/login]`, which is
- * exactly what `parseSkillCall` canonicalises to. Sorted.
+ * Every macro under `macrosDir`, named the way a step must reference it:
+ * relative to the macros root, no `.md`, **forward slashes on every platform** —
+ * a macro at `macros/auth/login.md` completes as `[macro: auth/login]`, which is
+ * exactly what `parseMacroCall` canonicalises to. Sorted.
  *
  * Walk rules match `listToolFiles` (src/tools/registry.ts): dot-directories and
- * `node_modules` are skipped. `.steptix-codebehind-cache/` sits beside the skill
+ * `node_modules` are skipped. `.steptix-codebehind-cache/` sits beside the macro
  * files, recordings and all, and a `node_modules` under a mis-configured
- * `skillsDir` is a second-long walk — on every keystroke, since completion
+ * `macrosDir` is a second-long walk — on every keystroke, since completion
  * calls this per request.
  *
  * Names are filtered to segments the grammar can lex (`[\w-]+`), so a folder
@@ -140,14 +140,14 @@ export function skillHeading(name: string): string {
  * Each directory read is guarded independently, so one unreadable subfolder
  * costs its own entries and not the whole list.
  */
-export function collectSkillNames(skillsDir: string): string[] {
+export function collectMacroNames(macrosDir: string): string[] {
   const names: string[] = [];
-  walkSkills(skillsDir, '', new Set(), names);
+  walkMacros(macrosDir, '', new Set(), names);
   names.sort();
   return names;
 }
 
-function walkSkills(dir: string, prefix: string, visited: Set<string>, out: string[]): void {
+function walkMacros(dir: string, prefix: string, visited: Set<string>, out: string[]): void {
   // One visit per REAL directory. Because the walk follows symlinked
   // directories (see entryKind), the same real directory can be reachable
   // under many prefixes — and a link to an ancestor makes that infinite. A
@@ -165,7 +165,7 @@ function walkSkills(dir: string, prefix: string, visited: Set<string>, out: stri
   } catch {
     return;
   }
-  if (visited.has(real) || visited.size >= MAX_SKILL_DIRS) return;
+  if (visited.has(real) || visited.size >= MAX_MACRO_DIRS) return;
   visited.add(real);
 
   let entries: fs.Dirent[];
@@ -175,7 +175,7 @@ function walkSkills(dir: string, prefix: string, visited: Set<string>, out: stri
     return;
   }
   for (const entry of entries) {
-    // Dot-entries are never skills. `node_modules` is checked before the
+    // Dot-entries are never macros. `node_modules` is checked before the
     // symlink stat below, since npm materialises `file:` deps as junctions and
     // following one is the expensive case this skip exists to avoid.
     if (entry.name.startsWith('.')) continue;
@@ -184,7 +184,7 @@ function walkSkills(dir: string, prefix: string, visited: Set<string>, out: stri
     const kind = entryKind(dir, entry);
     if (kind === 'dir') {
       if (!SEGMENT_RE.test(entry.name)) continue;
-      walkSkills(path.join(dir, entry.name), `${prefix}${entry.name}/`, visited, out);
+      walkMacros(path.join(dir, entry.name), `${prefix}${entry.name}/`, visited, out);
     } else if (kind === 'file' && entry.name.endsWith('.md')) {
       const base = entry.name.slice(0, -3);
       if (!SEGMENT_RE.test(base)) continue;
@@ -197,7 +197,7 @@ function walkSkills(dir: string, prefix: string, visited: Set<string>, out: stri
  * Whether a directory entry is a directory, a file, or neither.
  *
  * `readdir`'s dirents are `lstat`-flavoured, so a symlink answers `false` to
- * BOTH `isDirectory()` and `isFile()` — a symlinked skill file would silently
+ * BOTH `isDirectory()` and `isFile()` — a symlinked macro file would silently
  * vanish from completion. Symlinks are therefore resolved with a following
  * `statSync`, guarded because a broken link throws.
  */
@@ -220,9 +220,9 @@ function entryKind(dir: string, entry: fs.Dirent): 'dir' | 'file' | null {
 // definition-provider.ts for the same testability reason as the resolvers.
 // ---------------------------------------------------------------------------
 
-/** A `[skill: ...]` / `[tool: ...]` invocation located on a line. */
+/** A `[macro: ...]` / `[tool: ...]` invocation located on a line. */
 export interface InvocationLine {
-  kind: 'skill' | 'tool';
+  kind: 'macro' | 'tool';
   name: string;
   /** [start, end) char range of the name token on the line. */
   nameRange: [number, number];
@@ -230,13 +230,13 @@ export interface InvocationLine {
   outputKeys: Array<{ text: string; range: [number, number] }>;
 }
 
-// The name class admits `/` because both kinds are path-qualified: skills may
-// live in subfolders of `skillsDir` (`auth/login`, leading slash tolerated) and
+// The name class admits `/` because both kinds are path-qualified: macros may
+// live in subfolders of `macrosDir` (`auth/login`, leading slash tolerated) and
 // a tool ref names a file plus the tool inside it (`auth/login/login`). Keep it
 // in step with `readIdentifier`'s `allowSlash` class in
 // src/parser/invocation-parser.ts. The separator mirrors that parser's finder:
 // a colon with optional inline whitespace around it, or bare whitespace — the
-// colon is optional (`[skill login]` ≡ `[skill: login]`), and `[skillful]`
+// colon is optional (`[macro login]` ≡ `[macro: login]`), and `[macroscopic]`
 // has neither separator so it stays prose.
 /** `Sep := WS? ':' WS? | WS` and the name class, written once — the two
  *  regexes below had them character-identical and 37 lines apart, which is one
@@ -244,39 +244,39 @@ export interface InvocationLine {
 const SEP = String.raw`(?:[ \t]*:[ \t]*|[ \t]+)`;
 const NAME = String.raw`[A-Za-z0-9_/-]`;
 
-const INVOCATION_RE = new RegExp(String.raw`\[(skill|tool)${SEP}(${NAME}+)`, 'g');
+const INVOCATION_RE = new RegExp(String.raw`\[(macro|tool)${SEP}(${NAME}+)`, 'g');
 const OUTPUT_KEY_RE = /\bout\.([A-Za-z0-9_-]+)/g;
 
 /**
  * Parse the invocation prefix + name + any `out.<key>` aliases out of a
  * raw line, recording character ranges so the cursor can be mapped to a
- * token. Returns null if the line is not a skill/tool invocation.
+ * token. Returns null if the line is not a macro/tool invocation.
  */
 export function parseInvocationLine(line: string): InvocationLine | null {
   // Every candidate, not just the first — and each one can be DECLINED, which
   // must not take the rest of the line with it. Mirrors the scan loop in
-  // `parseInvocation`: `See the [skill guide](./g.md) and then [skill: login]`
+  // `parseInvocation`: `See the [macro guide](./g.md) and then [macro: login]`
   // really does call `login`, and F12 has to land on the same one the runner
   // runs.
   INVOCATION_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
-  let kind: 'skill' | 'tool';
+  let kind: 'macro' | 'tool';
   let name: string;
   let nameStart: number;
   for (;;) {
     m = INVOCATION_RE.exec(line);
     if (m === null || m.index === undefined) return null;
     INVOCATION_RE.lastIndex = m.index + 1;
-    kind = m[1] as 'skill' | 'tool';
+    kind = m[1] as 'macro' | 'tool';
     name = m[2]!;
-    // The name starts after the `[skill`/`[tool` keyword and the separator the
+    // The name starts after the `[macro`/`[tool` keyword and the separator the
     // regex consumed; recompute its offset from the full match length.
     nameStart = m.index + m[0].length - name.length;
     const after = line.slice(nameStart + name.length);
     // The parser accepts only whitespace or `]` after a name, and declines a
     // markdown link outright. Without these two the editor claimed prose the
-    // runner does not: `Verify the [skill level: expert] badge` navigated to a
-    // skill named `level`, and `[skill guide](./g.md)` to one named `guide`.
+    // runner does not: `Select the [macro lens: 100mm] option` navigated to a
+    // macro named `lens`, and `[macro guide](./g.md)` to one named `guide`.
     if (!/^[ \t\]]/.test(after)) continue;
     if (after.startsWith('](')) continue;
     break;
@@ -295,19 +295,19 @@ export function parseInvocationLine(line: string): InvocationLine | null {
   return { kind, name, nameRange, outputKeys };
 }
 
-// The cursor sits inside an OPEN `[skill` token: keyword, separator (the
+// The cursor sits inside an OPEN `[macro` token: keyword, separator (the
 // colon is optional, same rule as the tokenizer's finder), then a partial
 // name that is still a valid name prefix — anchored to the cursor, so a
-// closed call earlier on the line (`[skill: x] then [skill au│`) can't
-// satisfy it and a complete call (`[skill: x]│`) no longer does. Once the
+// closed call earlier on the line (`[macro: x] then [macro au│`) can't
+// satisfy it and a complete call (`[macro: x]│`) no longer does. Once the
 // author types anything the name grammar can't lex (a space onto args, the
 // closing `]`), the anchor breaks and completion goes quiet.
-const OPEN_SKILL_NAME_RE = new RegExp(String.raw`\[skill${SEP}(${NAME}*)$`);
+const OPEN_MACRO_NAME_RE = new RegExp(String.raw`\[macro${SEP}(${NAME}*)$`);
 
 /**
- * The partial skill name being typed at the end of `linePrefix` (the text
+ * The partial macro name being typed at the end of `linePrefix` (the text
  * before the cursor), or `null` when the cursor is not inside an open
- * `[skill` token. `replaceStart` is the 0-based column where the partial
+ * `[macro` token. `replaceStart` is the 0-based column where the partial
  * begins — equal to the cursor column while the partial is still empty — so a
  * completion item can replace exactly what was typed.
  *
@@ -316,25 +316,25 @@ const OPEN_SKILL_NAME_RE = new RegExp(String.raw`\[skill${SEP}(${NAME}*)$`);
  * and a third spelling of one concept leaves the next completion surface with
  * two precedents and no canonical one.
  */
-export function openSkillNamePrefix(
+export function openMacroNamePrefix(
   linePrefix: string,
 ): { partial: string; replaceStart: number } | null {
-  const m = OPEN_SKILL_NAME_RE.exec(linePrefix);
+  const m = OPEN_MACRO_NAME_RE.exec(linePrefix);
   if (!m) return null;
   const partial = m[1]!;
   return { partial, replaceStart: linePrefix.length - partial.length };
 }
 
 // ---------------------------------------------------------------------------
-// Argument-position reading — where in an open skill call the cursor sits,
+// Argument-position reading — where in an open macro call the cursor sits,
 // and which parameters the call has already passed. Backs parameter
 // completion (stories/specs/skill-arg-completion.md).
 // ---------------------------------------------------------------------------
 
-/** The cursor sits at an argument-name position of an open `[skill` call. */
-export interface OpenSkillArgs {
-  /** The call's skill name, exactly as written (leading slash and all). */
-  skillName: string;
+/** The cursor sits at an argument-name position of an open `[macro` call. */
+export interface OpenMacroArgs {
+  /** The call's macro name, exactly as written (leading slash and all). */
+  macroName: string;
   /** The partial argument token being typed — possibly starting `out.` —
    *  or `''` at a fresh position after whitespace. */
   partial: string;
@@ -347,9 +347,9 @@ export interface OpenSkillArgs {
   usedOuts: Set<string>;
 }
 
-/** `[skill` + separator + a complete name — the head of a call whose
+/** `[macro` + separator + a complete name — the head of a call whose
  *  argument region the walker below then follows. */
-const CALL_HEAD_RE = new RegExp(String.raw`\[skill${SEP}(${NAME}+)`, 'g');
+const CALL_HEAD_RE = new RegExp(String.raw`\[macro${SEP}(${NAME}+)`, 'g');
 
 type ArgWalk =
   | { kind: 'closed'; at: number; used: string[]; outs: string[] }
@@ -467,19 +467,19 @@ function walkArgs(line: string, i: number, cursor: number): ArgWalk {
 }
 
 /**
- * The argument-name position the cursor occupies in an open `[skill` call on
+ * The argument-name position the cursor occupies in an open `[macro` call on
  * `line`, or `null` when it occupies none: still inside the name (name
  * completion owns that), inside a quoted / array / bare value, right after
  * `=`, glued to a finished value, or in no call at all. Used names are
  * collected from BOTH sides of the cursor, so editing the middle of
- * `[skill login │ role="admin"]` still excludes `role`.
+ * `[macro login │ role="admin"]` still excludes `role`.
  */
-export function openSkillArgsContext(line: string, cursor: number): OpenSkillArgs | null {
+export function openMacroArgsContext(line: string, cursor: number): OpenMacroArgs | null {
   CALL_HEAD_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = CALL_HEAD_RE.exec(line)) !== null && m.index < cursor) {
     CALL_HEAD_RE.lastIndex = m.index + 1;
-    const skillName = m[1]!;
+    const macroName = m[1]!;
     const nameEnd = m.index + m[0].length;
     // Cursor still inside (or at the end of) the name token: the name
     // completion surface owns it.
@@ -497,7 +497,7 @@ export function openSkillArgsContext(line: string, cursor: number): OpenSkillArg
     // so already-passed arguments to the RIGHT of the cursor drop out too.
     const after = walkArgs(line, cursor, Infinity);
     return {
-      skillName,
+      macroName,
       partial: walk.partial,
       replaceStart: walk.replaceStart,
       usedParams: new Set([...walk.used, ...after.used]),
@@ -508,11 +508,11 @@ export function openSkillArgsContext(line: string, cursor: number): OpenSkillArg
 }
 
 // ---------------------------------------------------------------------------
-// Skill parameters/outputs — what a call site may pass, read from the skill
+// Macro parameters/outputs — what a call site may pass, read from the macro
 // file with the same rules the runner uses.
 // ---------------------------------------------------------------------------
 
-export interface SkillIo {
+export interface MacroIo {
   /** Declared parameters, in file order. `value` is the bullet's literal
    *  text after the colon — a default like `$SB_PASSWORD` or a description
    *  — NEVER resolved through the env, so no secret can reach a dropdown. */
@@ -549,32 +549,32 @@ function parseOutputs(text: string): string[] {
     const colon = textPart.indexOf(':');
     const name = (colon === -1 ? textPart : textPart.slice(0, colon)).trim();
     // Only names an `out.<key>` can lex — same never-offer-what-cannot-parse
-    // rule collectSkillNames applies to file names.
+    // rule collectMacroNames applies to file names.
     if (/^\w+$/.test(name)) out.push(name);
   }
   return out;
 }
 
-const skillIoCache = new Map<string, { mtimeMs: number; size: number; io: SkillIo }>();
+const macroIoCache = new Map<string, { mtimeMs: number; size: number; io: MacroIo }>();
 
 /**
- * The parameters and outputs of the skill named `name` under `skillsDir`, or
+ * The parameters and outputs of the macro named `name` under `macrosDir`, or
  * `null` when the name is malformed or the file is missing/unreadable.
  * Parameters come from runner-core's `parseParameters` — the parser the
  * `{{}}` completion already trusts for server parity. Cached on mtime+size:
  * the argument walker runs per keystroke while typing inside a call.
  */
-export function skillIoFor(skillsDir: string, name: string): SkillIo | null {
-  const rel = canonicalSkillName(name);
+export function macroIoFor(macrosDir: string, name: string): MacroIo | null {
+  const rel = canonicalMacroName(name);
   if (rel === null) return null;
-  const file = path.resolve(skillsDir, `${rel}.md`);
+  const file = path.resolve(macrosDir, `${rel}.md`);
   let stat: fs.Stats;
   try {
     stat = fs.statSync(file);
   } catch {
     return null;
   }
-  const cached = skillIoCache.get(file);
+  const cached = macroIoCache.get(file);
   if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
     return cached.io;
   }
@@ -584,11 +584,11 @@ export function skillIoFor(skillsDir: string, name: string): SkillIo | null {
   } catch {
     return null;
   }
-  const io: SkillIo = {
+  const io: MacroIo = {
     params: Object.entries(parseParameters(text)).map(([n, value]) => ({ name: n, value })),
     outputs: parseOutputs(text),
   };
-  skillIoCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, io });
+  macroIoCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, io });
   return io;
 }
 
@@ -669,7 +669,7 @@ export function useDirectiveCompletions(): DirectiveCompletion[] {
  * Delegates to `parseInvocationLine` rather than matching `[tool:` itself:
  * that parser mirrors the runner's grammar, where the colon is OPTIONAL
  * (`[tool echo]` ≡ `[tool: echo]`) and a markdown link or prose like
- * `[skill level: expert]` is declined. A local regex would disagree with the
+ * `[macro lens: 100mm]` is declined. A local regex would disagree with the
  * runner on exactly those lines — and disagreeing here means arming the
  * code-behind flag on a line the server is about to dispatch as a tool.
  *
@@ -697,7 +697,7 @@ export function useDirectiveCompletions(): DirectiveCompletion[] {
  * straight off the editor), so the prefix is stripped here. `parseUseStep`
  * and `parseUseAiStep` normalise the `[no-hooks]` marker themselves.
  */
-export function classifyDebuggableLine(text: string): 'tool' | 'skill' | 'plain' | 'use' {
+export function classifyDebuggableLine(text: string): 'tool' | 'macro' | 'plain' | 'use' {
   const instruction = text.replace(/^\s*\d+\.\s+/, '');
   if (parseUseStep(instruction) || parseUseAiStep(instruction)) return 'use';
   return parseInvocationLine(text)?.kind ?? 'plain';

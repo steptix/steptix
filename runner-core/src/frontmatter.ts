@@ -9,7 +9,7 @@
  */
 
 export interface TestFrontmatter {
-  /** `type: skill` marks the file as a reusable building block, not a test. */
+  /** `type: macro` marks the file as a reusable building block, not a test. */
   type?: string;
   /** `disabled: true` removes the file from discovery (long-term skip). */
   disabled?: boolean;

@@ -1374,50 +1374,50 @@ describe('recompiling a step whose entry broke', () => {
     expect(recordingDirFor(testFilePath)).toContain('.steptix-codebehind-cache');
   });
 
-  describe('compile:"steps" riding a startAt/endAt slice — a skill-file single-step compile', () => {
+  describe('compile:"steps" riding a startAt/endAt slice — a macro-file single-step compile', () => {
     // stories/specs/run-and-compile-a-skill-step.md: the picker's compile pick
-    // sends the test's `[skill:]` call line with a slice bounding execution to
-    // the clicked skill step. `compile` + `startAt` was a combination nothing
+    // sends the test's `[macro:]` call line with a slice bounding execution to
+    // the clicked macro step. `compile` + `startAt` was a combination nothing
     // could send before that feature, so every seam here is new: the sliced
-    // plan, the bounded summary, the skill-frame binding, and the refusals'
+    // plan, the bounded summary, the macro-frame binding, and the refusals'
     // terminal `compile:result`.
     let callerPath: string;
     let capturePath: string;
     let captureCallerPath: string;
     let repeatedPath: string;
     let repeatedCallerPath: string;
-    let skillsDir: string;
-    let skillPath: string;
-    let skillStepsPath: string;
+    let macrosDir: string;
+    let macroPath: string;
+    let macroStepsPath: string;
 
     beforeAll(async () => {
-      skillsDir = path.join(tmpDir, 'skills');
-      await fs.mkdir(skillsDir, { recursive: true });
+      macrosDir = path.join(tmpDir, 'macros');
+      await fs.mkdir(macrosDir, { recursive: true });
 
       callerPath = path.join(tmpDir, 'caller.md');
-      await fs.writeFile(callerPath, '# Caller\n\n## Steps\n1. [skill: login]\n');
-      skillPath = path.join(skillsDir, 'login.md');
-      skillStepsPath = path.join(skillsDir, 'login.steps.ts');
+      await fs.writeFile(callerPath, '# Caller\n\n## Steps\n1. [macro: login]\n');
+      macroPath = path.join(macrosDir, 'login.md');
+      macroStepsPath = path.join(macrosDir, 'login.steps.ts');
       await fs.writeFile(
-        skillPath,
+        macroPath,
         '# login\n\n## Steps\n1. Fill the username box\n2. Press the go button\n3. Open the profile menu\n',
       );
 
-      // A skill whose second step consumes the first step's in-skill capture —
-      // the expander renames those `__skillN_…`, which is what the partial
+      // A macro whose second step consumes the first step's in-macro capture —
+      // the expander renames those `__macroN_…`, which is what the partial
       // re-run guard keys on.
       captureCallerPath = path.join(tmpDir, 'caller-capture.md');
-      await fs.writeFile(captureCallerPath, '# Caller\n\n## Steps\n1. [skill: capture]\n');
-      capturePath = path.join(skillsDir, 'capture.md');
+      await fs.writeFile(captureCallerPath, '# Caller\n\n## Steps\n1. [macro: capture]\n');
+      capturePath = path.join(macrosDir, 'capture.md');
       await fs.writeFile(
         capturePath,
         '# capture\n\n## Steps\n1. Capture the order id [store as: oid]\n2. Open order {{oid}}\n',
       );
 
-      // A skill that says the same thing twice — the occurrence hazard.
+      // A macro that says the same thing twice — the occurrence hazard.
       repeatedCallerPath = path.join(tmpDir, 'caller-repeated.md');
-      await fs.writeFile(repeatedCallerPath, '# Caller\n\n## Steps\n1. [skill: repeated]\n');
-      repeatedPath = path.join(skillsDir, 'repeated.md');
+      await fs.writeFile(repeatedCallerPath, '# Caller\n\n## Steps\n1. [macro: repeated]\n');
+      repeatedPath = path.join(macrosDir, 'repeated.md');
       await fs.writeFile(
         repeatedPath,
         '# repeated\n\n## Steps\n1. Press the go button\n2. Press the go button\n',
@@ -1425,47 +1425,47 @@ describe('recompiling a step whose entry broke', () => {
     });
 
     beforeEach(async () => {
-      await fs.rm(path.join(skillsDir, 'login.steps.ts'), { force: true });
-      await fs.rm(path.join(skillsDir, 'repeated.steps.ts'), { force: true });
-      await fs.rm(path.join(skillsDir, '.steptix-codebehind-cache'), {
+      await fs.rm(path.join(macrosDir, 'login.steps.ts'), { force: true });
+      await fs.rm(path.join(macrosDir, 'repeated.steps.ts'), { force: true });
+      await fs.rm(path.join(macrosDir, '.steptix-codebehind-cache'), {
         recursive: true, force: true, maxRetries: 10, retryDelay: 100,
       });
     });
 
     function sliceBody(line: number, extra: Record<string, unknown> = {}): Record<string, unknown> {
       return {
-        steps: ['[skill: login]'],
+        steps: ['[macro: login]'],
         sourceLines: [4],
         testFilePath: callerPath,
-        skillsDir,
+        macrosDir,
         compile: 'steps',
-        startAt: { uri: skillPath, line },
-        endAt: { uri: skillPath, line },
+        startAt: { uri: macroPath, line },
+        endAt: { uri: macroPath, line },
         ...extra,
       };
     }
 
-    it('runs only the sliced step and binds its entry into the SKILL\'s .steps.ts', async () => {
+    it('runs only the sliced step and binds its entry into the MACRO\'s .steps.ts', async () => {
       const { frames } = await runSteps(sliceBody(5));
 
       // Execution: exactly the clicked step, under AI (code-behind off).
       expect(stepCalls.map((c) => c.instruction)).toEqual(['Press the go button']);
       expect(stepCalls[0]!.opts['codeBehind']).toBeUndefined();
 
-      // Generation: the step's own expanded number and skill-file line.
+      // Generation: the step's own expanded number and macro-file line.
       const generated = frames.filter((f) => f.type === 'compile:step' && f.phase === 'generate');
       expect(generated.map((f) => [f.step, f.line, f.message])).toEqual([
         [2, 5, 'generating…'],
         [2, 5, 'generated'],
       ]);
 
-      // The entry lands where a whole-test compile binds it: the skill's own
-      // file, from the run's real skill frame — no detachedBody involved.
+      // The entry lands where a whole-test compile binds it: the macro's own
+      // file, from the run's real macro frame — no detachedBody involved.
       const result = frames.find((f) => f.type === 'compile:result')!;
       expect(result.status).toBe('partial');
-      expect(Object.keys(result.files)).toEqual([skillStepsPath]);
-      expect(result.files[skillStepsPath]).toContain("source: 'Press the go button'");
-      expect(result.files[skillStepsPath]).not.toContain('Fill the username box');
+      expect(Object.keys(result.files)).toEqual([macroStepsPath]);
+      expect(result.files[macroStepsPath]).toContain("source: 'Press the go button'");
+      expect(result.files[macroStepsPath]).not.toContain('Fill the username box');
       expect(result.summary.unproven).toEqual([2]);
     });
 
@@ -1474,14 +1474,14 @@ describe('recompiling a step whose entry broke', () => {
       const result = frames.find((f) => f.type === 'compile:result')!;
       // The plan spans the whole expansion (occurrence counting needs it);
       // the summary must not: a clean single-step compile is not a partial
-      // sweep of a six-step skill.
+      // sweep of a six-step macro.
       expect(result.summary.totalSteps).toBe(1);
       expect(result.summary.compiled).toBe(1);
       expect(result.summary.notAttempted).toEqual([]);
       expect(result.summary.stoppedAt).toBeUndefined();
     });
 
-    it('splices the recording under the CALLER, stamped with the skill\'s target file', async () => {
+    it('splices the recording under the CALLER, stamped with the macro\'s target file', async () => {
       await runSteps(sliceBody(5));
       const recording = await readRecording(callerPath);
       const recorded = recording!.steps.filter(Boolean);
@@ -1489,7 +1489,7 @@ describe('recompiling a step whose entry broke', () => {
       expect(recorded[0]!.source).toBe('Press the go button');
       // The discriminator that keeps this splice off an identically-worded
       // test-frame step's slot.
-      expect(recorded[0]!.file).toBe(skillStepsPath);
+      expect(recorded[0]!.file).toBe(macroStepsPath);
     });
 
     it('a startAt that matches nothing terminates the compile with the refusal, not silence', async () => {
@@ -1508,12 +1508,12 @@ describe('recompiling a step whose entry broke', () => {
       expect(compileLock.isLocked(callerPath)).toBe(false);
     });
 
-    it('a step needing a skipped step\'s in-skill capture refuses with usable advice', async () => {
+    it('a step needing a skipped step\'s in-macro capture refuses with usable advice', async () => {
       const { frames } = await runSteps({
-        steps: ['[skill: capture]'],
+        steps: ['[macro: capture]'],
         sourceLines: [4],
         testFilePath: captureCallerPath,
-        skillsDir,
+        macrosDir,
         compile: 'steps',
         startAt: { uri: capturePath, line: 5 },
         endAt: { uri: capturePath, line: 5 },
@@ -1521,17 +1521,17 @@ describe('recompiling a step whose entry broke', () => {
       const result = frames.find((f) => f.type === 'compile:result')!;
       expect(result.status).toBe('failed');
       // Not "Use Continue" — that button only exists on the paused-test
-      // surface, and this refusal now reaches the skill-file gutter too.
+      // surface, and this refusal now reaches the macro-file gutter too.
       expect(result.summary.error).toMatch(/Start the run from the step that produces it/);
       expect(compileLock.isLocked(captureCallerPath)).toBe(false);
     });
 
     it('refuses to compile ONE occurrence of a repeated step — the entry would land on the wrong one', async () => {
       const { frames } = await runSteps({
-        steps: ['[skill: repeated]'],
+        steps: ['[macro: repeated]'],
         sourceLines: [4],
         testFilePath: repeatedCallerPath,
-        skillsDir,
+        macrosDir,
         compile: 'steps',
         startAt: { uri: repeatedPath, line: 5 },
         endAt: { uri: repeatedPath, line: 5 },
@@ -1547,10 +1547,10 @@ describe('recompiling a step whose entry broke', () => {
 
     it('compiles a repeated step when every occurrence is inside the slice, in order', async () => {
       const { frames } = await runSteps({
-        steps: ['[skill: repeated]'],
+        steps: ['[macro: repeated]'],
         sourceLines: [4],
         testFilePath: repeatedCallerPath,
-        skillsDir,
+        macrosDir,
         compile: 'steps',
         startAt: { uri: repeatedPath, line: 4 },
         endAt: { uri: repeatedPath, line: 5 },
@@ -1559,7 +1559,7 @@ describe('recompiling a step whose entry broke', () => {
       expect(result.status).toBe('partial');
       expect(result.summary.compiled).toBe(2);
       expect(result.summary.totalSteps).toBe(2);
-      const proposed = result.files[path.join(skillsDir, 'repeated.steps.ts')] as string;
+      const proposed = result.files[path.join(macrosDir, 'repeated.steps.ts')] as string;
       expect((proposed.match(/source: 'Press the go button'/g) ?? []).length).toBe(2);
     });
 
@@ -1586,17 +1586,17 @@ describe('recompiling a step whose entry broke', () => {
       };
 
       await post({
-        steps: ['[skill: repeated]'],
+        steps: ['[macro: repeated]'],
         sourceLines: [4],
         testFilePath: repeatedCallerPath,
-        skillsDir,
+        macrosDir,
         compile: 'run',
       });
       const second = await post({
-        steps: ['[skill: repeated]'],
+        steps: ['[macro: repeated]'],
         sourceLines: [4],
         testFilePath: repeatedCallerPath,
-        skillsDir,
+        macrosDir,
         compile: 'run',
         compileContinues: true,
         startAt: { uri: repeatedPath, line: 5 },
@@ -1612,12 +1612,12 @@ describe('recompiling a step whose entry broke', () => {
 
     it('a plain slice with no compile stays a plain slice — no compile frames, no refusal result', async () => {
       const { frames } = await runSteps({
-        steps: ['[skill: login]'],
+        steps: ['[macro: login]'],
         sourceLines: [4],
         testFilePath: callerPath,
-        skillsDir,
-        startAt: { uri: skillPath, line: 5 },
-        endAt: { uri: skillPath, line: 5 },
+        macrosDir,
+        startAt: { uri: macroPath, line: 5 },
+        endAt: { uri: macroPath, line: 5 },
       });
       expect(stepCalls.map((c) => c.instruction)).toEqual(['Press the go button']);
       expect(frames.some((f) => f.type.startsWith('compile:'))).toBe(false);

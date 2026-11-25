@@ -3,13 +3,13 @@
  *
  * Pre-Phase-5, `[tool: ...]` lines in a `POST /sessions/:id/steps` request
  * went straight to the AI as plain text — the same gap Phase 1 fixed for
- * skills. This test exercises the HTTP route with a real `toolsDir`
+ * macros. This test exercises the HTTP route with a real `toolsDir`
  * pointing at a real tool fixture, and asserts:
  *
  *   - the tool's `run()` actually executes (not just the AI seeing the text);
  *   - the tool's outputs land in `session.outputs` via `capture` events;
  *   - the step:pass payload includes the tool's aiExplanation;
- *   - tools work alongside skills in the same run.
+ *   - tools work alongside macros in the same run.
  *
  * The browser / AI / step-executor are mocked the same way as
  * api-server-stepmode.test.ts. The tool catalogue + `executeToolStep` are

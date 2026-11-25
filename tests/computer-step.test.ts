@@ -1682,8 +1682,8 @@ describe('image_input_unsupported fails the step at once (§15.4)', () => {
 });
 
 describe('undispatchedDirectiveError — what may not reach the computer-surface model (§5.4)', () => {
-  const none = { toolsLoaded: false, skillsDirSupplied: false };
-  const all = { toolsLoaded: true, skillsDirSupplied: true };
+  const none = { toolsLoaded: false, macrosDirSupplied: false };
+  const all = { toolsLoaded: true, macrosDirSupplied: true };
 
   it('names the missing toolsDir, and how to supply one', () => {
     const message = undispatchedDirectiveError('[tool: open_calculator]', none)!;
@@ -1715,14 +1715,14 @@ describe('undispatchedDirectiveError — what may not reach the computer-surface
     expect(undispatchedDirectiveError('[tool: x]', all)).toMatch(
       /^\[tool: x\] was not run: the runner did not dispatch it as a tool call\./,
     );
-    expect(undispatchedDirectiveError('[skill: login]', all)).toMatch(
-      /^\[skill: login\] was not run: skills are expanded into their steps before the run starts/,
+    expect(undispatchedDirectiveError('[macro: login]', all)).toMatch(
+      /^\[macro: login\] was not run: macros are expanded into their steps before the run starts/,
     );
   });
 
-  it('names the missing skillsDir for a raw skill line', () => {
-    expect(undispatchedDirectiveError('[skill: auth/login]', none)).toMatch(
-      /^\[skill: auth\/login\] was not run: this request carried no skills directory \(skillsDir\)/,
+  it('names the missing macrosDir for a raw macro line', () => {
+    expect(undispatchedDirectiveError('[macro: auth/login]', none)).toMatch(
+      /^\[macro: auth\/login\] was not run: this request carried no macros directory \(macrosDir\)/,
     );
   });
 
@@ -1734,7 +1734,7 @@ describe('undispatchedDirectiveError — what may not reach the computer-surface
     for (const step of [
       'Click the equals button',
       'Verify the [optional] banner is gone',
-      'Check the [skillful] label',
+      'Check the [macroscopic] label',
       '[use computer]',
       '[input: code]',
       '[interactive]',
@@ -1778,7 +1778,7 @@ describe('which steps read the screen, and so take the lock (§5.9)', () => {
       'Fail the test with error "no dialog"',
       // Fails with §5.4's parse message before anything runs.
       '[tool: open calculator(]',
-      '[skill: open-calculator]',
+      '[macro: open-calculator]',
       '[calculator]',
       '[use computer]',
       '[use browser]',

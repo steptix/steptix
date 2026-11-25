@@ -88,7 +88,7 @@ function fakeProject(): ProjectContext {
     envName: null,
     serverUrl: DEAD_SERVER,
     apiKey: 'server-key',
-    skillsDir: null,
+    macrosDir: null,
     toolsDir: null,
     envFilesConsulted: [path.join(tmpDir, '.env')],
     cdpPermissions: { allowUnowned: false, ports: null },

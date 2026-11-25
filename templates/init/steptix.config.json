@@ -13,7 +13,7 @@
     "dir": "./tests",
     "dataDir": "./data",
     "contextDir": "./context",
-    "skillsDir": "./skills",
+    "macrosDir": "./macros",
     "toolsDir": "../../fixtures/tools/src"
   },
   "reports": {

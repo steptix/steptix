@@ -188,11 +188,11 @@ describe('loopContextFor', () => {
   it('names a For each item and its dotted bindings under the AUTHORED item', () => {
     expect(
       loopContextFor('For each {{order}} in {{orders}}, Review the order', {
-        __skill1_order: 'x',
-        '__skill1_order.id': 'ORD-1',
+        __macro1_order: 'x',
+        '__macro1_order.id': 'ORD-1',
         'order.status': 'Paid',
         unrelated: 'y',
-      }, '__skill1_order'),
+      }, '__macro1_order'),
     ).toEqual({
       line: 'For each {{order}} in {{orders}}, Review the order',
       kind: 'foreach',
@@ -679,22 +679,22 @@ describe('generateConditionEntry and a hard-rule violation', () => {
   });
 });
 
-// ── A dotted reference inside a skill body (R3b) ─────────────────────────────
+// ── A dotted reference inside a macro body (R3b) ─────────────────────────────
 
 describe('stepParameters on a dotted name whose root the frame renames', () => {
   const binding: CodeBehindBinding = {
     file: '/tmp/review_orders.steps.ts',
     source: 'Open order {{order.id}}',
     occurrence: 0,
-    scope: { renames: { order: '__skill1_order' }, inputs: { orders: '{{all}}' } },
+    scope: { renames: { order: '__macro1_order' }, inputs: { orders: '{{all}}' } },
   };
   const live = {
     all: '[{"id":"ORD-1001"},{"id":"ORD-1002"}]',
     // an outer loop's leftovers under the bare names
     order: '{"id":"OUTER-9"}',
     'order.id': 'OUTER-9',
-    __skill1_order: '{"id":"ORD-1001"}',
-    '__skill1_order.id': 'ORD-1001',
+    __macro1_order: '{"id":"ORD-1001"}',
+    '__macro1_order.id': 'ORD-1001',
   };
 
   it('resolves through the rename, as step.getVar does', () => {
@@ -703,27 +703,27 @@ describe('stepParameters on a dotted name whose root the frame renames', () => {
     // `bound`: the key the value is held under, which a loop mark is keyed by
     // (review round 3, G2).
     expect(stepParameters(binding, live)).toEqual([
-      { name: 'order.id', value: 'ORD-1001', bound: '__skill1_order.id' },
+      { name: 'order.id', value: 'ORD-1001', bound: '__macro1_order.id' },
     ]);
   });
 
   it('is accounted for when the model names the RENAMED dotted token, as a flat rename is (review round 2, F4)', () => {
-    // The model is shown `{{__skill1_order.id}}` — the text the skill body ran
+    // The model is shown `{{__macro1_order.id}}` — the text the macro body ran
     // with — and names it back. Measured before the fix: the accounting looked
     // for the authored `order.id`, declined "{{order.id}} appears in no
     // recorded action", and the step was written `ai: true` before its prompt
     // was built. The flat rename beside it was always accepted.
     const accounted = accountPlaceholders({
       binding,
-      actions: [{ action: 'type', selector: '#q', value: '{{__skill1_order.id}}' }],
+      actions: [{ action: 'type', selector: '#q', value: '{{__macro1_order.id}}' }],
       resolvedParameters: live,
       recordingCarriesPlaceholders: true,
     });
     expect(accounted).toEqual({ recoveredByValue: [], preChangeFallback: false });
     const flat = accountPlaceholders({
-      binding: { ...binding, source: 'Open order {{ref}}', scope: { renames: { ref: '__skill1_ref' }, inputs: {} } },
-      actions: [{ action: 'type', selector: '#q', value: '{{__skill1_ref}}' }],
-      resolvedParameters: { __skill1_ref: 'R-1' },
+      binding: { ...binding, source: 'Open order {{ref}}', scope: { renames: { ref: '__macro1_ref' }, inputs: {} } },
+      actions: [{ action: 'type', selector: '#q', value: '{{__macro1_ref}}' }],
+      resolvedParameters: { __macro1_ref: 'R-1' },
       recordingCarriesPlaceholders: true,
     });
     expect(flat).toEqual(accounted);
