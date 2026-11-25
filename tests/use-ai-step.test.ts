@@ -8,8 +8,8 @@ import type { AiClient } from '../src/ai/client.js';
 import type { Config } from '../src/config/types.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
-import { parseSkillFile, parseTestContent, parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { parseMacroFile, parseTestContent, parseTestFile } from '../src/parser/markdown.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import { identifyStepGroups } from '../src/runner/step-grouper.js';
 import { stepReadsScreen } from '../src/runner/computer-step.js';
 import { generationRefusal } from '../src/codebehind/live-compile.js';
@@ -25,7 +25,7 @@ import { resolveProject } from '../src/mcp/project.js';
 /**
  * `[use ai] <step>` where a FILE is read, and where the step's text is judged
  * without being run (stories/use-ai-step.md §Tests): the markdown parser, the
- * skill-body rule, the conditional grouper, the computer lock's predicate, the
+ * macro-body rule, the conditional grouper, the computer lock's predicate, the
  * three compile classifiers, and the MCP pre-flight.
  */
 
@@ -41,7 +41,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });
@@ -139,48 +139,48 @@ describe('the markdown parser', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Inside a skill body the name must be explicit (decision 7)
+// Inside a macro body the name must be explicit (decision 7)
 // ---------------------------------------------------------------------------
 
-describe('a [use ai] step in a skill body', () => {
-  const skill = (...steps: string[]) =>
-    ['---', 'type: skill', '---', '', '# gen', '', '## Outputs', '- code', '',
+describe('a [use ai] step in a macro body', () => {
+  const macro = (...steps: string[]) =>
+    ['---', 'type: macro', '---', '', '# gen', '', '## Outputs', '- code', '',
      '## Steps', ...steps.map((s, i) => `${i + 1}. ${s}`), ''].join('\n');
 
   it('is refused with no explicit name, saying why and showing [store as:]', async () => {
-    const file = await write('skills/gen.md', skill('[use ai] Make up a promo code and store it in code'));
-    await expect(parseSkillFile(file)).rejects.toThrow(
+    const file = await write('macros/gen.md', macro('[use ai] Make up a promo code and store it in code'));
+    await expect(parseMacroFile(file)).rejects.toThrow(
       /must name the value it stores[\s\S]*renames its variables per call[\s\S]*`\[store as: name\]`/,
     );
   });
 
-  it('is refused with [as:] or [output:], which a skill does not rename', async () => {
-    const file = await write('skills/gen.md', skill('[use ai] Make up a promo code [as: code]'));
-    await expect(parseSkillFile(file)).rejects.toThrow(/`\[store as: name\]` or `store as \{\{name\}\}`/);
+  it('is refused with [as:] or [output:], which a macro does not rename', async () => {
+    const file = await write('macros/gen.md', macro('[use ai] Make up a promo code [as: code]'));
+    await expect(parseMacroFile(file)).rejects.toThrow(/`\[store as: name\]` or `store as \{\{name\}\}`/);
   });
 
   it('is accepted with [store as:], and scoped by the caller\'s alias', async () => {
-    await write('skills/gen.md', skill('[use ai] Make up a promo code [store as: code]', 'Type {{code}} into the box'));
+    await write('macros/gen.md', macro('[use ai] Make up a promo code [store as: code]', 'Type {{code}} into the box'));
     const test = await write(
-      'uses-skill.md',
-      ['# T', '', '## Steps', '1. [skill: gen out.code="my_code"]', '2. Check {{my_code}}', ''].join('\n'),
+      'uses-macro.md',
+      ['# T', '', '## Steps', '1. [macro: gen out.code="my_code"]', '2. Check {{my_code}}', ''].join('\n'),
     );
-    const parsed = await parseTestFile(test, { skillsDir: path.join(dir, 'skills') });
+    const parsed = await parseTestFile(test, { macrosDir: path.join(dir, 'macros') });
     expect(parsed.steps.slice(0, 2)).toEqual([
       '[use ai] Make up a promo code [store as: my_code]',
       'Type {{my_code}} into the box',
     ]);
   });
 
-  it('an internal name becomes the skill\'s own, never the caller\'s', async () => {
+  it('an internal name becomes the macro\'s own, never the caller\'s', async () => {
     await write(
-      'skills/gen.md',
-      ['---', 'type: skill', '---', '', '# gen', '', '## Steps',
+      'macros/gen.md',
+      ['---', 'type: macro', '---', '', '# gen', '', '## Steps',
        '1. [use ai] Make up a word and store it as {{scratch}}', '2. Type {{scratch}} into the box', ''].join('\n'),
     );
-    const test = await write('uses-skill.md', ['# T', '', '## Steps', '1. [skill: gen]', ''].join('\n'));
-    const parsed = await parseTestFile(test, { skillsDir: path.join(dir, 'skills') });
-    expect(parsed.steps[0]).toMatch(/^\[use ai\] Make up a word and store it as \{\{__skill\d+_scratch\}\}$/);
+    const test = await write('uses-macro.md', ['# T', '', '## Steps', '1. [macro: gen]', ''].join('\n'));
+    const parsed = await parseTestFile(test, { macrosDir: path.join(dir, 'macros') });
+    expect(parsed.steps[0]).toMatch(/^\[use ai\] Make up a word and store it as \{\{__macro\d+_scratch\}\}$/);
   });
 });
 

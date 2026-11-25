@@ -591,7 +591,7 @@ export class ErrandRunner {
   /**
    * Run the steps in the borrowed tab.
    *
-   * The session loop's core, minus everything that is session state: no skill
+   * The session loop's core, minus everything that is session state: no macro
    * or section expansion, no frames, no conditional-group lookahead, no
    * breakpoints or step-mode pauses, no video, no report.
    * What is left is what an errand is for — plain steps, waits, assertions and

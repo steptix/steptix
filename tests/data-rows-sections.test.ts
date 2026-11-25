@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { parseTestFile, parseTestContent } from '../src/parser/markdown.js';
-import { clearSkillCache, expandSkills } from '../src/skills/expander.js';
+import { clearMacroCache, expandMacros } from '../src/macros/expander.js';
 // The CLIENT's producers — nothing else in the repo can answer "what does
 // Steptix actually put on the wire".
 //
@@ -31,7 +31,7 @@ let tmpDir: string;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'row-sections-'));
-  clearSkillCache();
+  clearMacroCache();
 });
 
 afterEach(async () => {
@@ -41,7 +41,7 @@ afterEach(async () => {
 async function parse(md: string) {
   const file = path.join(tmpDir, 'test.md');
   await fs.writeFile(file, md);
-  return parseTestFile(file, { skillsDir: path.join(tmpDir, 'skills') });
+  return parseTestFile(file, { macrosDir: path.join(tmpDir, 'macros') });
 }
 
 const UPLOAD = `# Upload
@@ -173,7 +173,7 @@ describe('rows under a ### Section', () => {
         ],
       },
     };
-    const expanded = await expandSkills(
+    const expanded = await expandMacros(
       ['Open the documents page', 'Upload each statement', 'Count the rows'],
       undefined,
       undefined,
@@ -229,7 +229,7 @@ describe('rows under a ### Section', () => {
         stepLines: [13, 14],
       },
     };
-    const expanded = await expandSkills(
+    const expanded = await expandMacros(
       ['Do each thing', 'Sign in', 'Done'],
       undefined,
       undefined,
@@ -278,7 +278,7 @@ describe('rows under a ### Section', () => {
         runSteps: [1],
       },
     };
-    const expanded = await expandSkills(
+    const expanded = await expandMacros(
       ['Upload each'],
       undefined,
       undefined,
@@ -319,7 +319,7 @@ describe('rows under a ### Section', () => {
     await fs.writeFile(file, RICH);
 
     // The CLI's answer.
-    const parsed = await parseTestFile(file, { skillsDir: path.join(tmpDir, 'skills') });
+    const parsed = await parseTestFile(file, { macrosDir: path.join(tmpDir, 'macros') });
 
     // The client's. `extractSections` returns `{line, instruction}` pairs and
     // no rows — `buildSectionsPayload` splits them into the two parallel
@@ -346,7 +346,7 @@ describe('rows under a ### Section', () => {
     );
 
     const mainSteps = extractSteps(RICH);
-    const expanded = await expandSkills(
+    const expanded = await expandMacros(
       mainSteps.map((s) => s.instruction),
       undefined,
       undefined,
@@ -453,11 +453,11 @@ describe('rows under a ### Section', () => {
     ]);
   });
 
-  it('substitutes a column into a skill call before the call is parsed', async () => {
-    await fs.mkdir(path.join(tmpDir, 'skills'), { recursive: true });
+  it('substitutes a column into a macro call before the call is parsed', async () => {
+    await fs.mkdir(path.join(tmpDir, 'macros'), { recursive: true });
     await fs.writeFile(
-      path.join(tmpDir, 'skills', 'enter_email.md'),
-      '---\ntype: skill\n---\n\n# enter_email\n\n## Parameters\n- email: the address\n\n## Steps\n1. Enter "{{email}}"\n',
+      path.join(tmpDir, 'macros', 'enter_email.md'),
+      '---\ntype: macro\n---\n\n# enter_email\n\n## Parameters\n- email: the address\n\n## Steps\n1. Enter "{{email}}"\n',
     );
     const parsed = await parse(`# T
 
@@ -469,7 +469,7 @@ describe('rows under a ### Section', () => {
 |-------|
 | a@b.c |
 | A@B.C |
-1. [skill: enter_email email="{{email}}"]
+1. [macro: enter_email email="{{email}}"]
 `);
     expect(parsed.steps).toEqual(['Enter "a@b.c"', 'Enter "A@B.C"']);
   });
@@ -480,15 +480,15 @@ describe('rows under a ### Section', () => {
     ).rejects.toThrow(/comes after a step/);
   });
 
-  it('accepts a table under a skill-internal section', async () => {
-    // A skill's own `## Steps` refuses a table — a skill is called with args,
+  it('accepts a table under a macro-internal section', async () => {
+    // A macro's own `## Steps` refuses a table — a macro is called with args,
     // not looped — but a section inside it is a flow like any other.
-    await fs.mkdir(path.join(tmpDir, 'skills'), { recursive: true });
+    await fs.mkdir(path.join(tmpDir, 'macros'), { recursive: true });
     await fs.writeFile(
-      path.join(tmpDir, 'skills', 'looper.md'),
+      path.join(tmpDir, 'macros', 'looper.md'),
       [
         '---',
-        'type: skill',
+        'type: macro',
         '---',
         '',
         '# looper',
@@ -505,7 +505,7 @@ describe('rows under a ### Section', () => {
         '',
       ].join('\n'),
     );
-    const parsed = await parse('# T\n\n## Steps\n1. [skill: looper]\n');
+    const parsed = await parse('# T\n\n## Steps\n1. [macro: looper]\n');
     expect(parsed.steps).toEqual(['Handle one', 'Handle two']);
   });
 });

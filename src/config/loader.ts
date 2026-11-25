@@ -636,7 +636,7 @@ function assertSnapshotMode(browser: unknown, configPath: string): void {
  * run — a per-step cost for a line that can never do what it says.
  *
  * Only the authored strings are checked here. A default hook that reaches a
- * flow-control line through a `[skill: …]` expansion cannot be seen from the
+ * flow-control line through a `[macro: …]` expansion cannot be seen from the
  * config, and is caught by the hook loop's own refusal at run time.
  */
 function assertNoFlowControlInDefaultHooks(config: Config, configPath: string): void {
@@ -677,7 +677,7 @@ function assertNoFlowControlInDefaultHooks(config: Config, configPath: string): 
  * §4.4's refusal, written once for the two places that need it: this loader,
  * over `execution.defaultHooks`, and the CLI runner's hook loop, which is the
  * only thing standing in front of a `[use …]` line reached through a
- * `[skill: …]` named as a hook.
+ * `[macro: …]` named as a hook.
  */
 export function useStepInHookError(instruction: string, where = ''): string {
   return (

@@ -162,7 +162,7 @@ const MARKERS_RE = /^(?:\[no-(?:hooks|agent)\]\s*)+/i;
 /** `Set {{x}} to` — the `Set` grammar's claim (`isSetStepClaim`'s regex). */
 const SET_CLAIM_RE = /^set\s+\{\{\s*\w+\s*\}\}\s+to\b/i;
 /** The bracket directives that claim a whole step. */
-const BRACKET_CLAIM_RE = /^\[(?:skill|tool|input)(?=[ \t:])|^\[interactive[ \t]*\]/i;
+const BRACKET_CLAIM_RE = /^\[(?:macro|tool|input)(?=[ \t:])|^\[interactive[ \t]*\]/i;
 
 /** The claimed-line test for the CLI's grammar. */
 export function isClaimedStepLine(text: string, sectionKeys: ReadonlySet<string>): boolean {

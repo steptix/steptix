@@ -9,7 +9,7 @@ Demonstrates the `## Hooks` mechanism. Uses the fixtures/test-app SecureBank
 flow:
 
 - `before` hooks sign in once, so every step runs from an authenticated state.
-- `beforeEach` calls the `dismiss_obstacles` skill so any cookie banner shown
+- `beforeEach` calls the `dismiss_obstacles` macro so any cookie banner shown
   on first navigation to a page is dealt with before the main step fires.
 - `[no-hooks]` on the balance-read step prevents the beforeEach from firing —
   the balance is stable and we want to keep the trace clean.
@@ -26,7 +26,7 @@ flow:
 - before: Type "{{username}}" into the email field on the login page
 - before: Type "{{password}}" into the password field
 - before: Click the "Sign In" button and wait for the dashboard to load
-- beforeEach: [skill: dismiss_obstacles]
+- beforeEach: [macro: dismiss_obstacles]
 - after: Click the "Sign out" button in the sidebar
 
 ## Steps

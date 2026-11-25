@@ -136,13 +136,13 @@ test('stepsFileBreakpoints: keeps only .steps.ts paths', async () => {
     stepsFileBreakpoints([
       String.raw`C:\p\tests\login.steps.ts`,
       '/p/tests/login.md',
-      '/p/skills/auth.steps.ts',
+      '/p/macros/auth.steps.ts',
       '/p/src/steps.ts', // not a .steps.ts — no dot before "steps"
       '/p/tests/LOGIN.STEPS.TS', // case-insensitive (Windows paths)
     ]),
     [
       String.raw`C:\p\tests\login.steps.ts`,
-      '/p/skills/auth.steps.ts',
+      '/p/macros/auth.steps.ts',
       '/p/tests/LOGIN.STEPS.TS',
     ],
   );

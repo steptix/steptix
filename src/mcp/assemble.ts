@@ -2,10 +2,11 @@
  * Turning a tool call into a `POST /sessions/:id/steps` body.
  *
  * Both run tools land here, and both assemble the *same* project fields —
- * `run_steps` is not a lesser path. Sending steps without `skillsDir`,
- * `toolsDir` or the composed `env` would make `[skill: x]` and `[tool: x]`
- * lines ship to the AI as prose and run against the *server process's* AI key
- * and model rather than the project's.
+ * `run_steps` is not a lesser path. Sending steps without `macrosDir`,
+ * `toolsDir` or the composed `env` would make the server refuse `[macro: x]`
+ * and `[tool: x]` lines unrun (docs/specs/SPEC-macros.md §7), and run the
+ * rest against the *server process's* AI key and model rather than the
+ * project's.
  *
  * Two things are worth knowing before editing this file:
  *
@@ -32,7 +33,7 @@ import {
   placeholderRoot,
 } from '../parser/parameters.js';
 import { controlLineError, parseControlLine } from '../parser/control-line.js';
-import { referencedVariableNames } from '../skills/expander.js';
+import { referencedVariableNames } from '../macros/expander.js';
 import { inlineStoreAsNames } from '../runner/placeholder-substitution.js';
 import { parseTestContent, resolveDataSourcePath } from '../parser/markdown.js';
 import type { ParsedSection, ParsedTest } from '../parser/types.js';
@@ -76,7 +77,7 @@ const INPUT_STEP_PATTERN = /^\[input:\s*\w+\]/i;
 const INTERACTIVE_STEP_PATTERN = /^\[interactive\]/i;
 
 /**
- * Does this step invoke a skill or a tool? Re-exported here because
+ * Does this step invoke a macro or a tool? Re-exported here because
  * `run_errand` and the project-less `run_steps` guard both refuse such steps,
  * and this is where "what counts as a code step" used to be defined.
  *
@@ -105,7 +106,7 @@ const NAMESPACE_PLACEHOLDER = /\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z0-9_.\-]
 const WHOLE_VALUE_VAR = /^\$([A-Za-z_][A-Za-z0-9_]*)$/;
 
 /** Runtime parameter placeholder — `{{name}}` and `{{name.property}}` — from
- *  the one definition in `src/parser/parameters.ts`, which the skill expander
+ *  the one definition in `src/parser/parameters.ts`, which the macro expander
  *  imports too. */
 const PARAM_PLACEHOLDER = new RegExp(PLACEHOLDER_SOURCE, 'g');
 
@@ -213,12 +214,12 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
     fail(parseFailed(absPath, (err as Error).message));
   }
 
-  if (parsed.frontmatter.type === 'skill') {
+  if (parsed.frontmatter.type === 'macro') {
     fail(
       notATestFile(
         absPath,
-        'its frontmatter says `type: skill`. Skills are step macros — invoke ' +
-          'one from a test with `[skill: <name>]` rather than running it directly.',
+        'its frontmatter says `type: macro`. A macro runs inside a test — call ' +
+          'it from a test with `[macro: <name>]` rather than running it directly.',
       ),
     );
   }
@@ -316,7 +317,7 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
     warnings.push(
       `These placeholders have no value and will reach the AI literally: ` +
         `${unresolvedParams.map((n) => `{{${n}}}`).join(', ')}. ` +
-        '(Only this file\'s own steps and sections were scanned — skill bodies ' +
+        '(Only this file\'s own steps and sections were scanned — macro bodies ' +
         'expand server-side and are not visible from here.)',
     );
   }
@@ -394,11 +395,11 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
   });
   const testFilePath = path.join(project.projectRoot, SYNTHETIC_STEPS_BASENAME);
 
-  // Rule 6 of stories/mcp-no-project.md. In user scope `skillsDir`/`toolsDir`
-  // are null by construction, and the server's behaviour for a `[skill:]` or
-  // `[tool:]` line with no directory on the wire is to hand it to the AI as
-  // prose — a silent, expensive wrong answer three layers down. Refused here,
-  // before any session exists, with the reason and the fix.
+  // Rule 6 of stories/mcp-no-project.md. In user scope `macrosDir`/`toolsDir`
+  // are null by construction, and the server fails a `[macro:]` or `[tool:]`
+  // line with no directory on the wire, with advice about project folders
+  // that a project-less run cannot follow (docs/specs/SPEC-macros.md §7).
+  // Refused here, before any session exists, with the reason and the fix.
   if (project.scope === 'user') {
     const offending = args.steps.filter((step) => isCodeStep(step));
     if (offending.length > 0) {
@@ -498,11 +499,11 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
 function projectFields(
   project: ProjectContext,
   testFilePath: string,
-): Pick<McpStepRequest, 'env' | 'envName' | 'skillsDir' | 'toolsDir' | 'testFilePath'> {
+): Pick<McpStepRequest, 'env' | 'envName' | 'macrosDir' | 'toolsDir' | 'testFilePath'> {
   return {
     env: project.env,
     ...(project.envName !== null && { envName: project.envName }),
-    ...(project.skillsDir !== null && { skillsDir: project.skillsDir }),
+    ...(project.macrosDir !== null && { macrosDir: project.macrosDir }),
     ...(project.toolsDir !== null && { toolsDir: project.toolsDir }),
     testFilePath,
   };
@@ -530,7 +531,7 @@ function usableSourceLines(
   warnings.push(
     'Source line numbers were unusable for this file, so per-step results may ' +
       'not be traceable back to the step that produced them (steps that expand ' +
-      'a skill or a section will report no index or text).',
+      'a macro or a section will report no index or text).',
   );
   return null;
 }

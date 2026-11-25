@@ -20,7 +20,7 @@ import {
  * events.
  *
  * Phase 4 ships a flat scope view: the server emits the entire
- * `resolvedParameters` map per step (including any `__skillN_x`
+ * `resolvedParameters` map per step (including any `__macroN_x`
  * namespaced internals). Per-frame filtering / reverse-rename resolution
  * is tracked as a Phase 4.B follow-up — for now the user sees the actual
  * runtime state, leaky abstractions and all, which is better than
@@ -82,23 +82,23 @@ export interface ScopeSource {
   currentMasking?(): ScopeMasking;
   /**
    * Identity of the frame whose scope is being rendered. Lets the view
-   * distinguish the test (root) frame — where skill-internal `__skillN_x`
+   * distinguish the test (root) frame — where macro-internal `__macroN_x`
    * names are noise from previous descents and should be hidden — from
-   * a skill frame where those names are the actual locals.
+   * a macro frame where those names are the actual locals.
    *
    * `null` when no run is in flight. The empty string is the test
-   * (root) frame; any other value is a skill or section frame's id, with
-   * `skillName` carrying a human-readable label for the view title and
-   * `kind` distinguishing the two — a section frame carries `skillName`
+   * (root) frame; any other value is a macro or section frame's id, with
+   * `macroName` carrying a human-readable label for the view title and
+   * `kind` distinguishing the two — a section frame carries `macroName`
    * as well (it holds the section name), so the label cannot be derived
    * from that field's presence alone.
    */
-  currentFrame(): { id: string; skillName?: string; kind?: FrameInfo['kind'] } | null;
+  currentFrame(): { id: string; macroName?: string; kind?: FrameInfo['kind'] } | null;
 }
 
 /** Matches the expander's per-instance internal-variable rename scheme.
- *  See src/skills/expander.ts `applySkillScope` → `internalRenames`. */
-const SKILL_INTERNAL_PREFIX = /^__skill\d+_/;
+ *  See src/macros/expander.ts `applyMacroScope` → `internalRenames`. */
+const MACRO_INTERNAL_PREFIX = /^__macro\d+_/;
 
 /**
  * Put one variable's name, value or `{{placeholder}}` on the clipboard and say
@@ -240,7 +240,7 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
   constructor(private readonly source: ScopeSource) {}
 
   /** Wire up a TreeView handle so frame transitions can update the
-   *  view title ("Variables (skill: name)"). Optional — without it, the
+   *  view title ("Variables (macro: name)"). Optional — without it, the
    *  static `package.json` "Variables" title stays. */
   attachView(view: vscode.TreeView<VariableNode>): void {
     this.view = view;
@@ -330,10 +330,10 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
     const scope = this.source.currentScope();
     const frame = this.source.currentFrame();
     // Phase 4.1.b: when rendering the test (root) frame's scope, hide
-    // skill-internal names (`__skillN_x`). They survive in
-    // `resolvedParameters` after a skill exits — the expander never
+    // macro-internal names (`__macroN_x`). They survive in
+    // `resolvedParameters` after a macro exits — the expander never
     // garbage-collects them — and would otherwise clutter the test view
-    // with names the user never wrote. Inside a skill frame the same
+    // with names the user never wrote. Inside a macro frame the same
     // names ARE the user's locals (just rewritten for namespacing) so
     // they're shown there. Phase 4.B will replace this with a real
     // per-frame filter that reverse-resolves the renames.
@@ -352,7 +352,7 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
     // lead its columns (§7.4), and code-unit order puts `_` between the upper
     // and the lower case letters — so an `Amount` alias came out ahead of it.
     const names = Object.keys(scope)
-      .filter((name) => !isTestFrame || !SKILL_INTERNAL_PREFIX.test(name))
+      .filter((name) => !isTestFrame || !MACRO_INTERNAL_PREFIX.test(name))
       .sort(compareVariableNames);
     const nodes = names.map((name) => ({ name, rawValue: scope[name] ?? '', masking }));
     this.rows = { scope, masking, isTestFrame, nodes };
@@ -372,14 +372,14 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
   }
 
   /** Test-only readback of the description the view would show. Keeps the
-   *  label rule (kind-derived, not skillName-presence) assertable without
+   *  label rule (kind-derived, not macroName-presence) assertable without
    *  reaching into a live TreeView. */
   descriptionForTests(): string {
     return this.computeDescription();
   }
 
   /** Drive the TreeView's description from the active frame: "test" at the
-   *  root, "skill: name" / "section: name" inside one. Gives the user an
+   *  root, "macro: name" / "section: name" inside one. Gives the user an
    *  anchor for which scope they're inspecting — without it, switching
    *  between frames was a silent re-render. */
   private updateTitle(): void {
@@ -391,15 +391,15 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
   /**
    * The description string for the current frame.
    *
-   * Keyed on `kind`, NOT on `skillName` presence: a section frame carries
-   * `skillName` too (it holds the section name), so a presence check labelled
-   * every paused section "skill: <section name>".
+   * Keyed on `kind`, NOT on `macroName` presence: a section frame carries
+   * `macroName` too (it holds the section name), so a presence check labelled
+   * every paused section "macro: <section name>".
    */
   private computeDescription(): string {
     const frame = this.source.currentFrame();
     if (!frame) return '';
     if (frame.id === '') return 'test';
-    if (!frame.skillName) return 'frame';
-    return `${frame.kind === 'section' ? 'section' : 'skill'}: ${frame.skillName}`;
+    if (!frame.macroName) return 'frame';
+    return `${frame.kind === 'section' ? 'section' : 'macro'}: ${frame.macroName}`;
   }
 }

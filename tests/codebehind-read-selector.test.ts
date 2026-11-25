@@ -8,7 +8,7 @@ import type { StepResult } from '../src/report/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { buildStepCodePrompt, contentBlocksToText } from '../src/ai/prompts.js';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import { logger } from '../src/utils/logger.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import type { RecordedAction } from '../src/codebehind/recording.js';
@@ -376,7 +376,7 @@ beforeAll(async () => {
   tmpBase = await makeScratchBase('read-selector');
 });
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });

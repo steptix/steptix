@@ -102,7 +102,7 @@ async function compileCommand(target: string, opts: CompileOptions): Promise<voi
 
   const testFile = path.resolve(target);
   const test = await parseTestFile(testFile, {
-    skillsDir: path.resolve(process.cwd(), config.tests.skillsDir),
+    macrosDir: path.resolve(process.cwd(), config.tests.macrosDir),
     ...(envName && {
       envData: { env: bundle.env, data: bundle.data, envName: bundle.envName },
     }),

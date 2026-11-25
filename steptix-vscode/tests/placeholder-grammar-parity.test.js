@@ -151,7 +151,7 @@ test('the exported matcher survives repeated use — matchAll leaves lastIndex a
  *  compared on the same cases and not on two convenient halves. */
 const CORPUS = [
   ['{{email}}', 'email'],
-  ['{{__skill1_username}}', '__skill1_username'],
+  ['{{__macro1_username}}', '__macro1_username'],
   ['{{a}}', 'a'],
   // The root is `\w+` and always was — `{{1st}}` resolves.
   ['{{1st}}', '1st'],

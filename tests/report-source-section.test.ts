@@ -30,16 +30,16 @@ describe('renderStep — section chip', () => {
     expect(renderStep(baseStep())).not.toContain('badge-section');
   });
 
-  it('renders both chips for a skill invoked from inside a section', () => {
+  it('renders both chips for a macro invoked from inside a section', () => {
     // The two are additive, not exclusive — this is the case the demo fixture
-    // produces for every skill-body step.
+    // produces for every macro-body step.
     const html = renderStep({
       ...baseStep(),
       sourceSection: 'Sign in',
-      sourceSkill: 'fill_login_form',
+      sourceMacro: 'fill_login_form',
     });
     expect(html).toContain('badge-section');
-    expect(html).toContain('badge-skill');
+    expect(html).toContain('badge-macro');
     expect(html).toContain('Sign in');
     expect(html).toContain('fill_login_form');
   });
@@ -50,9 +50,9 @@ describe('renderStep — section chip', () => {
     expect(html).toContain('&lt;img src=x&gt;');
   });
 
-  it('uses a class distinct from badge-skill (the prefix is baked into CSS)', () => {
+  it('uses a class distinct from badge-macro (the prefix is baked into CSS)', () => {
     const html = renderStep({ ...baseStep(), sourceSection: 'Sign in' });
-    // `.badge-skill::before { content: 'skill: ' }` would mislabel a section.
+    // `.badge-macro::before { content: 'macro: ' }` would mislabel a section.
     expect(html).toMatch(/class="badge badge-section"/);
   });
 });

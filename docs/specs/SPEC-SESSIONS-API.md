@@ -110,7 +110,7 @@ Steps are natural language instructions, identical to the format used in markdow
 - **Parameter interpolation**: `"Enter \"{{email}}\" in the email field"` — resolved from `parameters` in the request body, or from previously captured output variables.
 - **Output capture**: `"[output: variable_name] Get the displayed username"` — captures a DOM value into a named variable. Multiple outputs per step are supported: `"[output: plan_name] [output: plan_price] Get the plan details"`.
 - **Variable assignment**: `"Set {{summary}} to \"{{username}} had {{balance}}\""` — stores a value built from the session's existing variables under a new name, with no AI call. The template resolves `{{name}}` and `${env.X}` / `${data.x}` against the session as it stands; a reference it cannot resolve fails the step rather than storing the literal. Note that a **malformed** `Set {{name}} to …` is *not* rejected here: this endpoint receives step strings and never parses markdown, so a line that does not match the form is sent to the AI as ordinary prose. The parse-time refusal applies to files read by the CLI and by the MCP tools, not to steps posted here.
-- **A value from the model**: `"[use ai] Create a name starting with \"AUTO\" and store it in random_name"` or `"[use ai] Today is {{today}}. Give the date 3 days later [store as: days_from_now]"` — the rest of the step, placeholders filled in and secret-named values masked as `***`, goes to the AI on its own (no page, no history, no date), and the value it answers with is stored. A secret that a skill argument or a looped section's row writes into the step's text is masked too, with the same secret set the run's output uses. When a value was masked, the model is told `***` is hidden, and an answer that still contains the mask (spaced, escaped or in a lookalike character included) fails the step instead of being stored. That error, and the error when the model declines, names what was hidden, never its value. It is asked on every run and never compiled, so a value that must repeat is a tool's job; put any date it needs in the step. The value arrives as a `capture` event with `source: "generated"`, in `outputs` / `outputSources` (`"generated"`), and in that step's own `results[].outputs`. Because this endpoint never parses markdown, the refusals a file gets at parse time — no step after the token, two names, a failed name check — are made here at run time instead, failing that step with the same message and no AI call.
+- **A value from the model**: `"[use ai] Create a name starting with \"AUTO\" and store it in random_name"` or `"[use ai] Today is {{today}}. Give the date 3 days later [store as: days_from_now]"` — the rest of the step, placeholders filled in and secret-named values masked as `***`, goes to the AI on its own (no page, no history, no date), and the value it answers with is stored. A secret that a macro argument or a looped section's row writes into the step's text is masked too, with the same secret set the run's output uses. When a value was masked, the model is told `***` is hidden, and an answer that still contains the mask (spaced, escaped or in a lookalike character included) fails the step instead of being stored. That error, and the error when the model declines, names what was hidden, never its value. It is asked on every run and never compiled, so a value that must repeat is a tool's job; put any date it needs in the step. The value arrives as a `capture` event with `source: "generated"`, in `outputs` / `outputSources` (`"generated"`), and in that step's own `results[].outputs`. Because this endpoint never parses markdown, the refusals a file gets at parse time — no step after the token, two names, a failed name check — are made here at run time instead, failing that step with the same message and no AI call.
 - **Deliberate failure**: `"If {{a}} is \"peanuts\" then fail the test with error \"The variable value was peanuts\""` — the AI judges the condition against the live page, exactly as it does for `then return`, and when it holds the step fails with that message and the run stops. The failure is **not retried** — the step asked for it, and a retry prompt would invite the model to try something else — so it is attempted exactly once and `deliberate: true` rides on the event. A step whose *whole text* is the tail — `"Fail the test with error \"…\""` — fails the run with no AI call at all. The message is interpolated from the session's variables and secret-masked before it reaches the response, the event or the log; written without one, the framework words the error.
 - **Renaming a failure**: `"Verify the title contains \"Account details\" otherwise fail the test with message \"Page did not contain account details\""` — an ordinary step with the ordinary retry policy. The tail is stripped from what the AI is shown, so the model does the same check it would have done; only if the step has finally failed is `error` replaced by the message, with the framework's original moved into `reasoning`.
 - **Tolerating a failure**: `"Dismiss the promo banner otherwise continue"`, or `"… otherwise continue with warning \"Footer build number missing\""` — the step runs as itself with its usual retries, and a failure does **not** stop execution: the row keeps `status: "failed"` with `tolerated: true`, the next step runs, and the response's `status` does not count it. A warning, when written, rides the event and the row as `warning` — beside `error`, not instead of it. `or else` and `if it fails` are accepted for `otherwise`; `carry on`, `keep going` and `warn "…"` for `continue`.
@@ -157,13 +157,13 @@ no folder to resolve a relative path against, so it can only use absolute paths.
 A step written `If <condition> then return` (or `… then stop`), and a step whose
 whole text is that tail (`Return`, `Stop here`, `Stop running the remaining
 steps`), ends the innermost flow it is in **as a pass**: the
-rest of a `### Section` body, the rest of a skill body, or the rest of the run
+rest of a `### Section` body, the rest of a macro body, or the rest of the run
 when the step is in the main flow. The run status is unaffected — a return is
 not a failure — and the steps left behind are reported as **skipped**, never as
 passed. See `stories/step-flow-control.md`.
 
 - The returning step itself is an ordinary passed step: `status: "passed"`, with
-  `reasoning` reading `Returned from "<section or skill>"` or `Ended the run`,
+  `reasoning` reading `Returned from "<section or macro>"` or `Ended the run`,
   plus the model's own account of why the condition held.
 - Every step the return leaves behind gets a `results[]` entry with
   `status: "skipped"` and `reasoning` of the form
@@ -197,11 +197,11 @@ data: {"type":"step:skip","line":9,"frame":{…},"reason":"Not run: step 3 retur
 | Field    | Description |
 |----------|-------------|
 | `line`   | 1-based source line, in `frame`'s file, of the step (or call) that did not run. |
-| `frame`  | Origin frame, when the request asked for skill/section expansion. Optional, as on every other step event. |
+| `frame`  | Origin frame, when the request asked for macro/section expansion. Optional, as on every other step event. |
 | `reason` | The same sentence the step's `results[]` row carries. |
 
 A `step:skip` has **no matching `step:start`**, and no `frame:push` is emitted
-for a skipped step's frame. That is deliberate: a section or skill invoked
+for a skipped step's frame. That is deliberate: a section or macro invoked
 inside the returned body must not push and pop cleanly, or its call line would
 paint as passed for work that never ran. Such a nested call gets a
 `step:skip` of its own, addressed by the **invocation line in the parent

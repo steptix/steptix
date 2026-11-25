@@ -309,40 +309,40 @@ export function preflightSections(text: string): string | null {
 /**
  * Why a re-run against `failure` cannot be anchored safely, or null.
  *
- * Line anchors into a SKILL file assume document order matches execution
- * order there. A skill that defines its own sections breaks that: its section
+ * Line anchors into a MACRO file assume document order matches execution
+ * order there. A macro that defines its own sections breaks that: its section
  * bodies sit numerically below its main flow but execute wherever they are
  * called, so the server's `startAt` scan — which only applies exact matching
  * to the TEST file — falls back to nearest-line and can anchor inside a body
- * that already ran. Measured: re-running from a skill's last step re-executed
+ * that already ran. Measured: re-running from a macro's last step re-executed
  * two already-passed body steps against the live session, and reported green.
  *
  * Fixing that needs "compare against the step's top-level-ancestor source
  * line", which is an anchoring redesign rather than a patch. Until then both
- * skill-anchored flows refuse, per the runtime spec §7.
+ * macro-anchored flows refuse, per the runtime spec §7.
  *
- * Gated on `kind === 'skill'` deliberately. For a SECTION failure `skillUri`
+ * Gated on `kind === 'macro'` deliberately. For a SECTION failure `macroUri`
  * is the test file, which by definition defines sections — a kind-blind check
  * would refuse every section re-run, the exact flow this feature adds.
  */
-export function sectionedSkillRefusal(failure: {
-  kind: 'skill' | 'section';
-  skillUri: string;
-  skillName: string;
+export function sectionedMacroRefusal(failure: {
+  kind: 'macro' | 'section';
+  macroUri: string;
+  macroName: string;
 }): string | null {
-  if (failure.kind !== 'skill') return null;
+  if (failure.kind !== 'macro') return null;
   let text: string;
   try {
-    text = readFileSync(failure.skillUri, 'utf-8');
+    text = readFileSync(failure.macroUri, 'utf-8');
   } catch {
-    // Unreadable skill file: let the normal flow run and fail with its own
+    // Unreadable macro file: let the normal flow run and fail with its own
     // error rather than inventing one here.
     return null;
   }
   if (extractSections(text).length === 0) return null;
   return (
-    `Steptix: can't re-run inside "${failure.skillName}" — it defines inline ` +
-    `sections, and line anchors into a sectioned skill file can re-run steps ` +
+    `Steptix: can't re-run inside "${failure.macroName}" — it defines inline ` +
+    `sections, and line anchors into a sectioned macro file can re-run steps ` +
     `that already passed. Run the test again instead.`
   );
 }

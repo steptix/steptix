@@ -218,7 +218,7 @@ const cfg: Config = {
 let server: Server;
 let baseUrl: string;
 let tmpDir: string;
-let skillsDir: string;
+let macrosDir: string;
 let testFilePath: string;
 
 beforeAll(async () => {
@@ -232,15 +232,15 @@ beforeAll(async () => {
   testFilePath = path.join(tmpDir, 'flow.md');
   await fs.writeFile(testFilePath, '# placeholder — the server never reads this\n');
 
-  // A skill whose FIRST body step is the flow-control line and whose argument
+  // A macro whose FIRST body step is the flow-control line and whose argument
   // is a secret. The expander interpolates `{{password}}` into the step text,
   // so this fixture is what tells the authored reason apart from the
   // interpolated one — nothing with a plain body can.
-  skillsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'flow-control-skills-'));
+  macrosDir = await fs.mkdtemp(path.join(os.tmpdir(), 'flow-control-macros-'));
   await fs.writeFile(
-    path.join(skillsDir, 'login.md'),
+    path.join(macrosDir, 'login.md'),
     `---
-type: skill
+type: macro
 ---
 # login
 
@@ -258,7 +258,7 @@ type: skill
 afterAll(async () => {
   await new Promise<void>((r, e) => server.close((err) => (err ? e(err) : r())));
   await fs.rm(tmpDir, { recursive: true, force: true });
-  await fs.rm(skillsDir, { recursive: true, force: true });
+  await fs.rm(macrosDir, { recursive: true, force: true });
 });
 
 beforeEach(() => {
@@ -389,10 +389,10 @@ describe('a return inside a section body', () => {
     expect(skips.map((e) => e.line)).toEqual([10, 14, 15, 11, 6]);
 
     const [call, username, password, submit] = skips;
-    expect(call.frame).toMatchObject({ kind: 'section', skillName: 'Sign in', uri: testFilePath });
-    expect(username.frame).toMatchObject({ kind: 'section', skillName: 'Type creds' });
-    expect(password.frame).toMatchObject({ kind: 'section', skillName: 'Type creds' });
-    expect(submit.frame).toMatchObject({ kind: 'section', skillName: 'Sign in' });
+    expect(call.frame).toMatchObject({ kind: 'section', macroName: 'Sign in', uri: testFilePath });
+    expect(username.frame).toMatchObject({ kind: 'section', macroName: 'Type creds' });
+    expect(password.frame).toMatchObject({ kind: 'section', macroName: 'Type creds' });
+    expect(submit.frame).toMatchObject({ kind: 'section', macroName: 'Sign in' });
   });
 
   it('names the flow in every reason, and says which step ended it', async () => {
@@ -414,7 +414,7 @@ describe('a return inside a section body', () => {
     conditionHolds.add(RETURN_STEP);
     const events = await collect(nestedBody());
 
-    const pushed = events.filter((e) => e.type === 'frame:push').map((e) => e.frame.skillName);
+    const pushed = events.filter((e) => e.type === 'frame:push').map((e) => e.frame.macroName);
     // `Sign in` ran (its first step did). `Type creds` never did — and if it
     // had been pushed it would also have popped cleanly, painting ✓ on line 10
     // for work that never happened. That is the whole reason skipped steps do
@@ -685,8 +685,8 @@ describe('loops', () => {
     // The call line is reported in the frame it is WRITTEN in — `Sign in` —
     // not in the loop it introduces.
     const call = events.find((e) => e.type === 'step:skip')!;
-    expect(call.frame).toMatchObject({ skillName: 'Sign in', uri: testFilePath });
-    expect(events.filter((e) => e.type === 'frame:push').map((e) => e.frame.skillName)).toEqual([
+    expect(call.frame).toMatchObject({ macroName: 'Sign in', uri: testFilePath });
+    expect(events.filter((e) => e.type === 'frame:push').map((e) => e.frame.macroName)).toEqual([
       'Sign in',
     ]);
   });
@@ -694,7 +694,7 @@ describe('loops', () => {
   it('announces a call INSIDE a looped body once, not once per iteration', async () => {
     // The case the test above does not reach. There the call line's parent was
     // a single frame; here it is the iteration frame, and a two-row table has
-    // two of those. Keyed by parent frame ID the same `[skill: …]` line —
+    // two of those. Keyed by parent frame ID the same `[macro: …]` line —
     // line 7, one line in one file — is announced skipped once per row: the
     // gutter repaints over itself, but the run log and Test Explorer print it
     // twice. Keyed by the parent frame's URI plus the line, which is the
@@ -704,20 +704,20 @@ describe('loops', () => {
       steps: [STOP_STEP, 'Upload each file', 'Done'],
       sourceLines: [1, 2, 3],
       testFilePath,
-      skillsDir,
+      macrosDir,
       sections: {
         'upload each file': {
           name: 'Upload each file',
           headingLine: 6,
-          steps: ['[skill: login password="hunter2"]', 'Upload {{file}}'],
+          steps: ['[macro: login password="hunter2"]', 'Upload {{file}}'],
           stepLines: [7, 8],
           rows: [{ file: 'a.png' }, { file: 'b.png' }],
         },
       },
     });
 
-    // Line 2 is the section call, line 7 the skill call inside its body — each
-    // once. Lines 10/11/12 are the skill's own body steps (in login.md) and
+    // Line 2 is the section call, line 7 the macro call inside its body — each
+    // once. Lines 10/11/12 are the macro's own body steps (in login.md) and
     // line 8 the row step; those repeat per row, because each repetition IS a
     // step that would have run.
     expect(events.filter((e) => e.type === 'step:skip').map((e) => e.line)).toEqual([
@@ -728,15 +728,15 @@ describe('loops', () => {
   });
 });
 
-describe('a return inside a skill body', () => {
+describe('a return inside a macro body', () => {
   const RAW_RETURN = 'If {{password}} is already remembered then return';
   const RESOLVED_RETURN = 'If hunter2 is already remembered then return';
 
-  const skillBody = () => ({
-    steps: ['Open the shop', '[skill: login password="hunter2"]', 'Done'],
+  const macroBody = () => ({
+    steps: ['Open the shop', '[macro: login password="hunter2"]', 'Done'],
     sourceLines: [1, 2, 3],
     testFilePath,
-    skillsDir,
+    macrosDir,
   });
 
   it('quotes the AUTHORED line in every reason, never the resolved argument', async () => {
@@ -747,8 +747,8 @@ describe('a return inside a skill body', () => {
     // `expansionRawSteps` is the match side, which the expander never
     // interpolates (decision 4).
     conditionHolds.add(RESOLVED_RETURN);
-    const events = await collect(skillBody());
-    const body = await postSteps(skillBody());
+    const events = await collect(macroBody());
+    const body = await postSteps(macroBody());
 
     const expected = `Not run: step 2 returned from "login" — ${RAW_RETURN}`;
 
@@ -778,11 +778,11 @@ describe('a return inside a skill body', () => {
     }
   });
 
-  it('ends the skill invocation and carries on after the call', async () => {
+  it('ends the macro invocation and carries on after the call', async () => {
     // The other half of the same run: naming the authored line must not have
     // changed WHICH steps are skipped or where the run resumes.
     conditionHolds.add(RESOLVED_RETURN);
-    const body = await postSteps(skillBody());
+    const body = await postSteps(macroBody());
 
     expect(body.status).toBe('passed');
     expect(body.results.map((r: any) => [r.step, r.status])).toEqual([
@@ -798,7 +798,7 @@ describe('a return inside a skill body', () => {
 /**
  * A return inside a LOOPED SECTION body, where the row column is a secret.
  *
- * The sibling of the skill-argument test above, and until recently the one
+ * The sibling of the macro-argument test above, and until recently the one
  * shape that answered differently. The reason string is built from the match
  * side (`expansionRawSteps`), and a looped body's match side used to be the
  * row-INTERPOLATED text: the wire carries no `rawSteps` (contract §3.2), the
@@ -814,7 +814,7 @@ describe('a return inside a skill body', () => {
  * That fix has a test (tests/data-rows-sections.test.ts, the expander half) and
  * this composition did not — and the composition is the only thing that can see
  * a reason string. It belongs here rather than beside the rows tests for the
- * same reason the skill-argument test does: the surfaces are the server's, and
+ * same reason the macro-argument test does: the surfaces are the server's, and
  * this harness is the one that has all three of them.
  */
 describe('a return inside a looped section body', () => {

@@ -4,7 +4,7 @@
  * Almost every rule here exists because the obvious version reports something
  * false. The recurring hazard is that the event stream is a record of what
  * *executed*, while the agent asked about what it *sent* — and server-side
- * skill expansion, inline sections and conditional groups all make those two
+ * macro expansion, inline sections and conditional groups all make those two
  * lists different lengths.
  */
 // A VALUE import, and the only one in this file that leaves src/mcp — so it
@@ -30,7 +30,7 @@ export interface FoldedStep {
   sentIndex: number | null;
   line: number;
   uri: string;
-  frameKind: 'test' | 'skill' | 'section';
+  frameKind: 'test' | 'macro' | 'section';
   frameName: string | null;
   text: string | null;
   status: StepStatus;
@@ -201,7 +201,7 @@ export interface FoldInput {
   /** What we put on the wire. Absent when it had to be omitted. */
   sourceLines?: number[] | undefined;
   testFilePath: string;
-  /** True when `skillsDir` or `sections` were sent, so the server may have
+  /** True when `macrosDir` or `sections` were sent, so the server may have
    *  expanded steps and the sent list is not the executed list. */
   expansionPossible: boolean;
   /**
@@ -246,7 +246,7 @@ export const MAX_SCREENSHOT_BASE64 = 1_500_000;
 export const DATA_URI_PREFIX = /^data:image\/png;base64,/;
 
 /** Root frames are synthesized by the server whenever expansion ran, so
- *  "has a frame" does NOT mean "came from a skill". And `frame` is absent
+ *  "has a frame" does NOT mean "came from a macro". And `frame` is absent
  *  entirely when nothing expanded — which §3's "send a dir only if it exists"
  *  rule makes routine, not exotic. Hence both arms. */
 function isRootFrame(frame: FrameInfo | undefined): boolean {
@@ -355,7 +355,7 @@ export function foldRun(input: FoldInput): FoldedRun {
       const parent = frames.get(current.parentId);
       // A parent we never saw means a `frame:push` was dropped. Stopping here
       // and using this frame's `line` would read a line number from inside a
-      // skill body as though it were an invocation line in the test file —
+      // macro body as though it were an invocation line in the test file —
       // attributing the step to whatever sent step happens to sit on that
       // line, and suppressing that step's own row. Report incompleteness
       // instead and let the caller decline to guess.
@@ -371,7 +371,7 @@ export function foldRun(input: FoldInput): FoldedRun {
     let sentIndex: number | null;
     let text: string | null;
     let uri: string;
-    let frameKind: 'test' | 'skill' | 'section';
+    let frameKind: 'test' | 'macro' | 'section';
     let frameName: string | null;
 
     if (root) {
@@ -383,13 +383,13 @@ export function foldRun(input: FoldInput): FoldedRun {
     } else {
       const top = outermost(frame!);
       // The invocation line lives on the outermost frame; the step's own
-      // `line` points into the skill or section body, a file the agent never
+      // `line` points into the macro or section body, a file the agent never
       // sent us and whose text we therefore cannot show.
       sentIndex = top.complete ? sentIndexForLine(top.frame.line) : null;
       text = null;
       uri = frame!.uri;
       frameKind = frame!.kind;
-      frameName = frame!.skillName ?? null;
+      frameName = frame!.macroName ?? null;
     }
 
     const row: FoldedStep = {
@@ -652,7 +652,7 @@ export function foldRun(input: FoldInput): FoldedRun {
   if (steps.some((s) => s.status === 'unknown')) {
     warnings.push(
       'Some steps could not be attributed individually. Conditional steps and ' +
-        'skills with an empty body produce no per-step events, so their outcome ' +
+        'macros with an empty body produce no per-step events, so their outcome ' +
         'is not visible here — the overall run status still applies.',
     );
   }

@@ -43,51 +43,51 @@ describe('bake-over refusals', () => {
   let dir: string;
   beforeAll(() => {
     dir = mkdtempSync(path.join(tmpdir(), 'set-step-'));
-    mkdirSync(path.join(dir, 'skills'), { recursive: true });
+    mkdirSync(path.join(dir, 'macros'), { recursive: true });
   });
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-  const writeSkill = (name: string, body: string): void => {
-    writeFileSync(path.join(dir, 'skills', `${name}.md`), body);
+  const writeMacro = (name: string, body: string): void => {
+    writeFileSync(path.join(dir, 'macros', `${name}.md`), body);
   };
 
-  it("refuses a Set onto a skill's own parameter", async () => {
-    writeSkill(
+  it("refuses a Set onto a macro's own parameter", async () => {
+    writeMacro(
       'login',
-      `---\ntype: skill\n---\n\n# login\n\n## Parameters\n- username: who\n\n## Steps\n1. Set {{username}} to "someone else"\n`,
+      `---\ntype: macro\n---\n\n# login\n\n## Parameters\n- username: who\n\n## Steps\n1. Set {{username}} to "someone else"\n`,
     );
     const file = path.join(dir, 'test1.md');
-    writeFileSync(file, `# T\n\n## Steps\n1. [skill: login username="a"]\n`);
-    await expect(parseTestFile(file, { skillsDir: path.join(dir, 'skills') })).rejects.toThrow(
-      /it is a parameter of this skill/,
+    writeFileSync(file, `# T\n\n## Steps\n1. [macro: login username="a"]\n`);
+    await expect(parseTestFile(file, { macrosDir: path.join(dir, 'macros') })).rejects.toThrow(
+      /it is a parameter of this macro/,
     );
   });
 
-  it("allows a Set onto a skill's declared output", async () => {
-    writeSkill(
+  it("allows a Set onto a macro's declared output", async () => {
+    writeMacro(
       'capture',
-      `---\ntype: skill\n---\n\n# capture\n\n## Parameters\n- src: input\n\n## Outputs\n- label\n\n## Steps\n1. Set {{label}} to "from {{src}}"\n`,
+      `---\ntype: macro\n---\n\n# capture\n\n## Parameters\n- src: input\n\n## Outputs\n- label\n\n## Steps\n1. Set {{label}} to "from {{src}}"\n`,
     );
     const file = path.join(dir, 'test2.md');
-    writeFileSync(file, `# T\n\n## Steps\n1. [skill: capture src="x" out.label="tag"]\n`);
-    const parsed = await parseTestFile(file, { skillsDir: path.join(dir, 'skills') });
+    writeFileSync(file, `# T\n\n## Steps\n1. [macro: capture src="x" out.label="tag"]\n`);
+    const parsed = await parseTestFile(file, { macrosDir: path.join(dir, 'macros') });
     // The output alias renames the target the same way it renames a
     // `[store as:]`, because a Set target IS a `{{X}}` placeholder.
     expect(parsed.steps[0]).toBe('Set {{tag}} to "from x"');
   });
 
-  it('allows a Set onto an internal name inside a skill, namespaced', async () => {
-    writeSkill(
+  it('allows a Set onto an internal name inside a macro, namespaced', async () => {
+    writeMacro(
       'internal',
-      `---\ntype: skill\n---\n\n# internal\n\n## Steps\n1. Set {{scratch}} to "value"\n2. Type "{{scratch}}" into the box\n`,
+      `---\ntype: macro\n---\n\n# internal\n\n## Steps\n1. Set {{scratch}} to "value"\n2. Type "{{scratch}}" into the box\n`,
     );
     const file = path.join(dir, 'test3.md');
-    writeFileSync(file, `# T\n\n## Steps\n1. [skill: internal]\n`);
-    const parsed = await parseTestFile(file, { skillsDir: path.join(dir, 'skills') });
-    expect(parsed.steps[0]).toMatch(/^Set \{\{__skill\d+_scratch\}\} to "value"$/);
+    writeFileSync(file, `# T\n\n## Steps\n1. [macro: internal]\n`);
+    const parsed = await parseTestFile(file, { macrosDir: path.join(dir, 'macros') });
+    expect(parsed.steps[0]).toMatch(/^Set \{\{__macro\d+_scratch\}\} to "value"$/);
     // Namespaced consistently on both sides, or the write and the read would
     // be different variables.
-    expect(parsed.steps[1]).toMatch(/^Type "\{\{__skill\d+_scratch\}\}"/);
+    expect(parsed.steps[1]).toMatch(/^Type "\{\{__macro\d+_scratch\}\}"/);
   });
 
   it("refuses a Set onto a looped section's row column", () => {
@@ -133,13 +133,13 @@ describe('bake-over refusals that only expansion can see', () => {
   const parse = (md: string): Promise<unknown> => {
     const file = path.join(dir, `expand-${Math.random().toString(36).slice(2)}.md`);
     writeFileSync(file, md);
-    return parseTestFile(file, { skillsDir: path.join(dir, 'skills') });
+    return parseTestFile(file, { macrosDir: path.join(dir, 'macros') });
   };
 
   let dir: string;
   beforeAll(() => {
     dir = mkdtempSync(path.join(tmpdir(), 'set-expand-'));
-    mkdirSync(path.join(dir, 'skills'), { recursive: true });
+    mkdirSync(path.join(dir, 'macros'), { recursive: true });
   });
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -182,12 +182,12 @@ describe('bake-overs at the other substitution sites', () => {
   let dir: string;
   beforeAll(() => {
     dir = mkdtempSync(path.join(tmpdir(), 'set-sites-'));
-    mkdirSync(path.join(dir, 'skills'), { recursive: true });
+    mkdirSync(path.join(dir, 'macros'), { recursive: true });
   });
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-  const skill = (name: string, body: string): void =>
-    writeFileSync(path.join(dir, 'skills', `${name}.md`), body);
+  const macro = (name: string, body: string): void =>
+    writeFileSync(path.join(dir, 'macros', `${name}.md`), body);
   const testFile = (md: string): string => {
     const file = path.join(dir, `t-${Math.random().toString(36).slice(2)}.md`);
     writeFileSync(file, md);
@@ -206,26 +206,26 @@ describe('bake-overs at the other substitution sites', () => {
   });
 
   it('refuses an array-literal argument that breaks the assigned value', async () => {
-    skill(
+    macro(
       'arr',
-      ['---', 'type: skill', '---', '', '# arr', '', '## Parameters', '- items: list', '',
+      ['---', 'type: macro', '---', '', '# arr', '', '## Parameters', '- items: list', '',
        '## Steps', '1. Set {{m}} to "got {{items}}"', ''].join('\n'),
     );
-    const file = testFile('# T\n\n## Steps\n1. [skill: arr items=["a","b"]]\n');
+    const file = testFile('# T\n\n## Steps\n1. [macro: arr items=["a","b"]]\n');
     await expect(
-      parseTestFile(file, { skillsDir: path.join(dir, 'skills') }),
+      parseTestFile(file, { macrosDir: path.join(dir, 'macros') }),
     ).rejects.toThrow(/unparseable once its arguments/);
   });
 
-  it('still expands an ordinary skill argument into a Set template', async () => {
-    skill(
+  it('still expands an ordinary macro argument into a Set template', async () => {
+    macro(
       'ok',
-      ['---', 'type: skill', '---', '', '# ok', '', '## Parameters', '- who: name', '',
+      ['---', 'type: macro', '---', '', '# ok', '', '## Parameters', '- who: name', '',
        '## Steps', '1. Set {{greeting}} to "Hello {{who}}"', ''].join('\n'),
     );
-    const file = testFile('# T\n\n## Steps\n1. [skill: ok who="Alice"]\n');
-    const parsed = await parseTestFile(file, { skillsDir: path.join(dir, 'skills') });
-    expect(parsed.steps[0]).toBe('Set {{__skill1_greeting}} to "Hello Alice"');
+    const file = testFile('# T\n\n## Steps\n1. [macro: ok who="Alice"]\n');
+    const parsed = await parseTestFile(file, { macrosDir: path.join(dir, 'macros') });
+    expect(parsed.steps[0]).toBe('Set {{__macro1_greeting}} to "Hello Alice"');
   });
 });
 
@@ -233,7 +233,7 @@ describe('bake-overs at the other substitution sites', () => {
  * The enumeration five review rounds each proved was missing.
  *
  * Rounds one to five each found the SAME defect at the next substitution site
- * along — row bindings, skill arguments, hook baking, the skill body — because
+ * along — row bindings, macro arguments, hook baking, the macro body — because
  * each round fixed the instance and then asserted closure in prose. The story
  * sentence claiming "the one asymmetry left is hooks" is what told round four
  * to stop looking; there were three sites left.
@@ -249,7 +249,7 @@ describe('every substitution site preserves a Set step', () => {
   let dir: string;
   beforeAll(() => {
     dir = mkdtempSync(path.join(tmpdir(), 'set-sites-all-'));
-    mkdirSync(path.join(dir, 'skills'), { recursive: true });
+    mkdirSync(path.join(dir, 'macros'), { recursive: true });
   });
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -269,39 +269,39 @@ describe('every substitution site preserves a Set step', () => {
     refusal: RegExp;
   }> = [
     {
-      site: 'markdown.ts — skill body ${…}',
-      refusal: /A value substituted into skill "body" makes "Set \{\{g\}\} to …" unparseable/,
+      site: 'markdown.ts — macro body ${…}',
+      refusal: /A value substituted into macro "body" makes "Set \{\{g\}\} to …" unparseable/,
       build: () => {
         write(
-          'skills/body.md',
-          ['---', 'type: skill', '---', '', '# body', '', '## Outputs', '- g', '',
+          'macros/body.md',
+          ['---', 'type: macro', '---', '', '# body', '', '## Outputs', '- g', '',
            '## Steps', '1. Set {{g}} to "${env.GREETING}"', ''].join('\n'),
         );
         return {
-          file: write('t-body.md', '# T\n\n## Steps\n1. [skill: body]\n'),
-          opts: { skillsDir: path.join(dir, 'skills'), envData: { env: { GREETING: HOSTILE } } },
+          file: write('t-body.md', '# T\n\n## Steps\n1. [macro: body]\n'),
+          opts: { macrosDir: path.join(dir, 'macros'), envData: { env: { GREETING: HOSTILE } } },
         };
       },
     },
     {
-      site: 'markdown.ts — skill SECTION body ${…}',
-      refusal: /A value substituted into skill "sect" makes "Set \{\{g\}\} to …" unparseable/,
+      site: 'markdown.ts — macro SECTION body ${…}',
+      refusal: /A value substituted into macro "sect" makes "Set \{\{g\}\} to …" unparseable/,
       build: () => {
         write(
-          'skills/sect.md',
-          ['---', 'type: skill', '---', '', '# sect', '', '## Outputs', '- g', '',
+          'macros/sect.md',
+          ['---', 'type: macro', '---', '', '# sect', '', '## Outputs', '- g', '',
            '## Steps', '1. Inner', '', '### Inner', '',
            '1. Set {{g}} to "${env.GREETING}"', ''].join('\n'),
         );
         return {
-          file: write('t-sect.md', '# T\n\n## Steps\n1. [skill: sect]\n'),
-          opts: { skillsDir: path.join(dir, 'skills'), envData: { env: { GREETING: HOSTILE } } },
+          file: write('t-sect.md', '# T\n\n## Steps\n1. [macro: sect]\n'),
+          opts: { macrosDir: path.join(dir, 'macros'), envData: { env: { GREETING: HOSTILE } } },
         };
       },
     },
     {
-      site: 'expander.ts — skill arguments (output-name collision)',
-      refusal: /The call to skill "args" makes "Set \{\{g\}\} to …" unparseable once its arguments are substituted/,
+      site: 'expander.ts — macro arguments (output-name collision)',
+      refusal: /The call to macro "args" makes "Set \{\{g\}\} to …" unparseable once its arguments are substituted/,
       build: () => {
         // NOT a hostile quoted value: the invocation parser refuses
         // `who="He said "hi""` before the expander sees it, so that half of
@@ -311,14 +311,14 @@ describe('every substitution site preserves a Set step', () => {
         // silently never happens. `validateCall` only warns about an argument
         // that is not a parameter, so nothing else stops it.
         write(
-          'skills/args.md',
-          ['---', 'type: skill', '---', '', '# args', '', '## Parameters', '- who: n', '',
+          'macros/args.md',
+          ['---', 'type: macro', '---', '', '# args', '', '## Parameters', '- who: n', '',
            '## Outputs', '- g', '',
            '## Steps', '1. Set {{g}} to "hi {{who}}"', ''].join('\n'),
         );
         return {
-          file: write('t-args.md', '# T\n\n## Steps\n1. [skill: args who="x" g="baked"]\n'),
-          opts: { skillsDir: path.join(dir, 'skills') },
+          file: write('t-args.md', '# T\n\n## Steps\n1. [macro: args who="x" g="baked"]\n'),
+          opts: { macrosDir: path.join(dir, 'macros') },
         };
       },
     },
@@ -367,8 +367,8 @@ describe('every substitution site preserves a Set step', () => {
     // The guards must be invisible to everything else, or every existing test
     // file becomes a parse error.
     write(
-      'skills/plain.md',
-      ['---', 'type: skill', '---', '', '# plain', '', '## Parameters', '- who: n', '',
+      'macros/plain.md',
+      ['---', 'type: macro', '---', '', '# plain', '', '## Parameters', '- who: n', '',
        '## Steps', '1. Type "{{who}}" into ${env.FIELD}', ''].join('\n'),
     );
     const file = write(
@@ -376,13 +376,13 @@ describe('every substitution site preserves a Set step', () => {
       ['# T', '', '## Hooks', '- before: Navigate to ${env.FIELD}', '',
        // A benign arg value: a quoted one containing a quote is refused by
        // the invocation parser, which is a different (and correct) refusal.
-       '## Steps', '1. [skill: plain who="Alice"]', '2. Loop', '',
+       '## Steps', '1. [macro: plain who="Alice"]', '2. Loop', '',
        '### Loop', '', '| who |', '| --- |', `| ${HOSTILE} |`, '',
        '1. Type "{{who}}" into the box', ''].join('\n'),
     );
     await expect(
       parseTestFile(file, {
-        skillsDir: path.join(dir, 'skills'),
+        macrosDir: path.join(dir, 'macros'),
         envData: { env: { FIELD: '#search', GREETING: HOSTILE } },
       }),
     ).resolves.toBeDefined();

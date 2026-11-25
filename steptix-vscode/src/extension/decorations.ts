@@ -230,13 +230,13 @@ export class DecorationManager implements vscode.Disposable {
    * Walk every visible editor and decorate it against its own per-URI run
    * state — not just the editor whose URI matches the active-editor
    * snapshot. This is how Phase 2's "arrow follows frames across files"
-   * works: when a run descends into a `[skill: ...]`, statuses land on
-   * the skill `.md`'s URI in the tracker, and any open editor showing
+   * works: when a run descends into a `[macro: ...]`, statuses land on
+   * the macro `.md`'s URI in the tracker, and any open editor showing
    * that file gets the decorations even though the active test file has
-   * its own (running) status on the `[skill:]` line.
+   * its own (running) status on the `[macro:]` line.
    *
    * The active-file snapshot is still used as the fallback for the
-   * currently-focused editor so legacy behaviour (no skills involved) is
+   * currently-focused editor so legacy behaviour (no macros involved) is
    * unchanged: an editor with no run state but matching `snap.uri` still
    * paints the step-placeholder reservation marks.
    */
@@ -250,7 +250,7 @@ export class DecorationManager implements vscode.Disposable {
         continue;
       }
       // Other visible editors get decorations only when they have state
-      // (e.g. skill `.md` opened during a run). Editors with no state
+      // (e.g. macro `.md` opened during a run). Editors with no state
       // get cleared so stale icons from a previous run don't linger.
       const perUri = this.tracker.snapshotFor(editor.document.uri);
       if (perUri) {
@@ -405,7 +405,7 @@ export class DecorationManager implements vscode.Disposable {
     }
 
     // Paintable lines: main flow AND section bodies, so body steps get the
-    // same ✓ / ✗ / ▶ treatment. This is where sections beat skills
+    // same ✓ / ✗ / ▶ treatment. This is where sections beat macros
     // ergonomically — the whole run paints in one editor.
     // The data rows of every table join the paintable set: they wear the same
     // status vocabulary as the steps and are the control surface the author
@@ -429,9 +429,9 @@ export class DecorationManager implements vscode.Disposable {
     const errorRanges = snap.errors.map(([line]) => range(line));
     const headingLine = findStepsHeadingLine(snap.text);
     // The "N/M passed" summary belongs on the user's actual test file —
-    // not on skill `.md`s we surfaced during a descent. A skill running
+    // not on macro `.md`s we surfaced during a descent. A macro running
     // halfway through its own body would otherwise show a misleading
-    // "0/4 passed" while it's still executing, and a skill the user
+    // "0/4 passed" while it's still executing, and a macro the user
     // never wrote a test for shouldn't carry a passed-count signal at
     // all. Phase 2.1 cleanup.
     // "12/12 passed (7 code-behind, 1 stale), 1 skipped" — the

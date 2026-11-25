@@ -1036,7 +1036,7 @@ own. §6.2 checks the selector either way.
   first (`actions.ts:317-351`), and the recording keeps the action as the
   model emitted it, before any of that (`step-executor.ts:3641`).
 - **Names.** The recorded `as`, and any `{{placeholder}}` in the recorded
-  fields, use the run's names, which inside a skill body or a looped section
+  fields, use the run's names, which inside a macro body or a looped section
   are renamed. Map them back to the authored names through
   `binding.scope.renames`, as `recordedCapturesOf` does
   (`generate.ts:255-268`), and store through `step.setVar`'s path
@@ -1088,7 +1088,7 @@ own. §6.2 checks the selector either way.
   body takes its evidence from the first pass whose reads did prove something
   (`isEvidencePass`), so a `For each` that read nothing on its first item and
   three values on its second compiles from the second. Steps that share one
-  entry — a `### Section` table's rows, a section or skill called twice — take
+  entry — a `### Section` table's rows, a section or macro called twice — take
   theirs from the best of their runs by the same rank (`evidenceRank`), so a
   row that read items compiles the entry an earlier empty row could not.
   Whatever then fails on the replay — on any of those steps — is dropped,
@@ -1145,7 +1145,7 @@ data.
   plus a read, an `assert`, a selector holding a resolved parameter value,
   and a positional carve-out each go to the model. A `{{placeholder}}`
   selector is kept as written.
-- Names: a read inside a skill section stores under the authored name.
+- Names: a read inside a macro section stores under the authored name.
 - `step.read` against B's markup (`fixtures/test-app/control-flow.html`):
   it returns what the AI action returns on the same page and stores the same
   JSON; an iframe-promoted selector reads the same as the AI path; the
@@ -1352,7 +1352,7 @@ Compile uses the session's model (`live-compile.ts:128-132`) with the
 >   about 2 of 5 `compile-codebehind` replays.
 > - **A matcher chained onto an assertion**, `step.expect(page.url()).toBe(…)`
 >   (`chainedAssertionComplaint`). `step.expect` returns nothing, so the
->   replay threw. This was the entry Review revised in `compile-skill-subfolder`.
+>   replay threw. This was the entry Review revised in `compile-macro-subfolder`.
 > - **A tab named differently from the run**, `tabs.close("Account Summary")`
 >   where the run's `closePage` named `page:2` (`tabIdentifierComplaint`, which
 >   checks `tabs.switchTo` against `switchPage` the same way). A tab is found by

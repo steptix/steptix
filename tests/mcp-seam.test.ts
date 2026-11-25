@@ -37,7 +37,7 @@ function fakeProject(overrides: Partial<ProjectContext> = {}): ProjectContext {
     envName: null,
     serverUrl: 'http://127.0.0.1:3100',
     apiKey: 'server-key',
-    skillsDir: null,
+    macrosDir: null,
     toolsDir: null,
     envFilesConsulted: [`${PROJECT_ROOT}/.env`],
     cdpPermissions: { allowUnowned: false, ports: null },
@@ -372,7 +372,7 @@ describe('tool registration', () => {
 
     for (const name of ['run_steps', 'run_test_file']) {
       const tool = tools.find((t) => t.name === name);
-      expect(tool?.description).toContain('[skill:');
+      expect(tool?.description).toContain('[macro:');
       expect(tool?.description).toContain('${env.');
     }
   });
@@ -2002,7 +2002,7 @@ describe('project-less run_steps', () => {
       projectRoot: 'c:/users/x/steptix',
       configPath: 'c:/users/x/steptix/steptix.config.json',
       configSearch: ['c:/somewhere', 'c:/'],
-      skillsDir: null,
+      macrosDir: null,
       toolsDir: null,
     });
 
@@ -2039,13 +2039,13 @@ describe('project-less run_steps', () => {
     expect((res.content as { text?: string }[])[0]?.text ?? '').not.toContain('user root');
   });
 
-  it('rule 6: refuses [skill:] and [tool:] steps before anything reaches the wire', async () => {
+  it('rule 6: refuses [macro:] and [tool:] steps before anything reaches the wire', async () => {
     const harness = await connect({ project: userScope() });
 
     const res = await harness.client.callTool({
       name: 'run_steps',
       arguments: {
-        steps: ['open the site', 'Log in [skill: login user=bob]', '[tool: fetchOrders]'],
+        steps: ['open the site', 'Log in [macro: login user=bob]', '[tool: fetchOrders]'],
       },
     });
 
@@ -2054,7 +2054,7 @@ describe('project-less run_steps', () => {
     expect(text).toContain('no project resolved');
     expect(text).toContain('code belongs to a project');
     // Both offenders named; the innocent step is not.
-    expect(text).toContain('[skill: login user=bob]');
+    expect(text).toContain('[macro: login user=bob]');
     expect(text).toContain('[tool: fetchOrders]');
     expect(text).not.toContain('"open the site"');
     // The walk that found no project is in the message, so a typo'd config
@@ -2071,7 +2071,7 @@ describe('project-less run_steps', () => {
 
     const res = await harness.client.callTool({
       name: 'run_steps',
-      arguments: { steps: ['Log in [skill: login user=bob]'], project_root: PROJECT_ROOT },
+      arguments: { steps: ['Log in [macro: login user=bob]'], project_root: PROJECT_ROOT },
     });
 
     expect(res.isError).toBeFalsy();

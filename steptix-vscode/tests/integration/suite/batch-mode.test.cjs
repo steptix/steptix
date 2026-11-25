@@ -53,7 +53,7 @@ const INTERACTIVE_FIXTURE = [
   '3. Verify something',
   '',
 ].join('\n');
-const SKILL_FIXTURE = ['---', 'type: skill', '---', '# Skill', '', '## Steps', '1. do skill thing', ''].join('\n');
+const MACRO_FIXTURE = ['---', 'type: macro', '---', '# Macro', '', '## Steps', '1. do macro thing', ''].join('\n');
 const DISABLED_FIXTURE = ['---', 'disabled: true', '---', '# Disabled', '', '## Steps', '1. nothing', ''].join('\n');
 const TAGGED_FIXTURE = [
   '---',
@@ -90,7 +90,7 @@ const FIXTURES = {
   'batch-a.tmp.md': A_FIXTURE,
   'batch-b.tmp.md': B_FIXTURE,
   'batch-interactive.tmp.md': INTERACTIVE_FIXTURE,
-  'skill-fixture.tmp.md': SKILL_FIXTURE,
+  'macro-fixture.tmp.md': MACRO_FIXTURE,
   'disabled-fixture.tmp.md': DISABLED_FIXTURE,
   'tagged-fixture.tmp.md': TAGGED_FIXTURE,
   'no-heading-fixture.tmp.md': NO_HEADING_FIXTURE,
@@ -159,9 +159,9 @@ describe('Steptix batch-run mode', function () {
     assert.ok(filenames.includes('batch-fail.tmp.md'), 'fail fixture must be discovered');
   });
 
-  it('discovery: type: skill and disabled: true are excluded', () => {
+  it('discovery: type: macro and disabled: true are excluded', () => {
     const filenames = hooks.discoveredTests().map((t) => t.uri.split('/').pop());
-    assert.ok(!filenames.includes('skill-fixture.tmp.md'), 'skill must be excluded');
+    assert.ok(!filenames.includes('macro-fixture.tmp.md'), 'macro must be excluded');
     assert.ok(!filenames.includes('disabled-fixture.tmp.md'), 'disabled must be excluded');
   });
 
@@ -505,20 +505,20 @@ describe('Steptix batch-run mode', function () {
 
   // ── Where a failure is anchored ─────────────────────────────────────────
   //
-  // A run that descends into a `[skill: ...]` reports its body steps with
-  // lines in the SKILL's file. Test Explorer anchored every TestMessage on
-  // the test file's URI, so an in-skill failure pointed at that line number
+  // A run that descends into a `[macro: ...]` reports its body steps with
+  // lines in the MACRO's file. Test Explorer anchored every TestMessage on
+  // the test file's URI, so an in-macro failure pointed at that line number
   // in the test — prose, an unrelated step, or (as below) past the end of a
   // shorter file. The line is only meaningful together with its frame.
-  it('anchors an in-skill failure at the SKILL file, not that line of the test', async () => {
+  it('anchors an in-macro failure at the MACRO file, not that line of the test', async () => {
     const uri = fixtureUri('batch-fail.tmp.md');
     // The path the SERVER would send (a plain fsPath from Node), and the same
     // path as VS Code canonicalises it. They differ on Windows — `Uri.file`
     // lowercases the drive letter — so the assertion compares the canonical
     // form, which is what "same file" actually means here.
-    const skillPath = path.resolve(FIXTURES_DIR, 'skill-fixture.tmp.md');
-    const skillCanonical = vscode.Uri.file(skillPath).fsPath;
-    // The test fixture is 5 lines; the skill's step is on line 7. Anchoring
+    const macroPath = path.resolve(FIXTURES_DIR, 'macro-fixture.tmp.md');
+    const macroCanonical = vscode.Uri.file(macroPath).fsPath;
+    // The test fixture is 5 lines; the macro's step is on line 7. Anchoring
     // line 7 on the test file would land past its end — which is exactly the
     // bug, and why this fixture pairing is the one to assert on.
     const counts = await runBatchWithScript(hooks, fake, [uri], [
@@ -527,7 +527,7 @@ describe('Steptix batch-run mode', function () {
           type: 'step:fail',
           line: 7,
           error: 'no such button',
-          frame: { id: 'f1', parentId: null, kind: 'skill', uri: skillPath, line: 4, skillName: 'skill-fixture' },
+          frame: { id: 'f1', parentId: null, kind: 'macro', uri: macroPath, line: 4, macroName: 'macro-fixture' },
         });
         f.end();
       },
@@ -539,22 +539,22 @@ describe('Steptix batch-run mode', function () {
     assert.ok(anchored, `the failure message must survive. Got ${JSON.stringify(messages)}`);
     assert.equal(
       anchored.file,
-      skillCanonical,
-      `the failure must peek at the skill file the line belongs to. ` +
-        `actual=${anchored.file} expected=${skillCanonical}`,
+      macroCanonical,
+      `the failure must peek at the macro file the line belongs to. ` +
+        `actual=${anchored.file} expected=${macroCanonical}`,
     );
     assert.notEqual(
       anchored.file,
       uri.fsPath,
       'and must NOT be anchored on the test file — line 7 is past its end',
     );
-    assert.equal(anchored.line, 7, 'and at the line the skill reported');
+    assert.equal(anchored.line, 7, 'and at the line the macro reported');
 
     // The streamed line has no gutter to disambiguate it, so it names the
     // file too — "line 7" alone is unreadable when it isn't this test's.
     assert.ok(
-      hooks.batchOutput().some((l) => l.includes('line 7 of skill-fixture.tmp.md')),
-      `output must name the skill file. Got ${JSON.stringify(hooks.batchOutput())}`,
+      hooks.batchOutput().some((l) => l.includes('line 7 of macro-fixture.tmp.md')),
+      `output must name the macro file. Got ${JSON.stringify(hooks.batchOutput())}`,
     );
   });
 

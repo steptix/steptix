@@ -1,7 +1,7 @@
 /**
  * Agent skills (docs/specs/SPEC-use-agent.md §7): instructions in the open
  * Agent Skills format — a folder holding a `SKILL.md` whose frontmatter has
- * `name` and `description`. Not Steptix skills, the step macros `[skill: …]`
+ * `name` and `description`. Not Steptix macros, the step files `[macro: …]`
  * calls.
  *
  * Project only: never `~/.agents`, `~/.claude` or anywhere else on the

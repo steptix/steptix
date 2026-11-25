@@ -17,7 +17,7 @@ const DEFAULT_GLOB = '**/*.md';
 export interface DiscoveredTest {
   uri: vscode.Uri;
   eligible: boolean;
-  reason?: 'not-test-file' | 'is-skill' | 'disabled';
+  reason?: 'not-test-file' | 'is-macro' | 'disabled';
   frontmatter: TestFrontmatter;
   title: string | null;
 }
@@ -33,7 +33,7 @@ export type DiscoveryEvent =
  * A file is a test when:
  *  1. Its path matches `steptix.testsGlob`.
  *  2. It contains a `## Steps` heading.
- *  3. Frontmatter does NOT declare `type: skill`.
+ *  3. Frontmatter does NOT declare `type: macro`.
  *  4. Frontmatter does NOT declare `disabled: true`.
  *
  * The cache is keyed by URI string. Consumers subscribe to `onChange` and
@@ -268,10 +268,10 @@ export function classify(uri: vscode.Uri, text: string): DiscoveredTest {
   const title = parseTitleHeading(text);
 
   // `type` comparison is case-insensitive — users routinely write
-  // `type: Skill` or `type: SKILL` and intent is the same. Same forgiving
+  // `type: Macro` or `type: MACRO` and intent is the same. Same forgiving
   // policy as VS Code's own settings keys.
-  if (frontmatter.type?.toLowerCase() === 'skill') {
-    return { uri, eligible: false, reason: 'is-skill', frontmatter, title };
+  if (frontmatter.type?.toLowerCase() === 'macro') {
+    return { uri, eligible: false, reason: 'is-macro', frontmatter, title };
   }
   if (frontmatter.disabled === true) {
     return { uri, eligible: false, reason: 'disabled', frontmatter, title };

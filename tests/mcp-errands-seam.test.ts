@@ -28,7 +28,7 @@ import type {
 // attach: an errand takes a tab by NAME, which every sibling CDP tool refuses
 // to do — so what makes it safe is that zero or several matches refuse with the
 // candidates named, and the first-match-wins rule cdp-tabs guards against never
-// runs. Second, the wrong-door refusals: `session_id` and `[skill:]` are
+// runs. Second, the wrong-door refusals: `session_id` and `[macro:]` are
 // declared only so they can be turned away with the working alternative named,
 // and both must fire before anything reaches a browser.
 // ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ function fakeProject(overrides: Partial<ProjectContext> = {}): ProjectContext {
     envName: null,
     serverUrl: 'http://127.0.0.1:3100',
     apiKey: 'server-key',
-    skillsDir: null,
+    macrosDir: null,
     toolsDir: null,
     envFilesConsulted: [`${PROJECT_ROOT}/.env`],
     cdpPermissions: { allowUnowned: false, ports: null },
@@ -278,17 +278,17 @@ describe('run_errand refuses what it cannot do, naming what can', () => {
     expect(sessionId?.description).toMatch(/no sessions/i);
   });
 
-  it('refuses [skill:] and [tool:] steps by name, before any browser work', async () => {
-    // An errand carries no skillsDir/toolsDir, so the server would hand these
+  it('refuses [macro:] and [tool:] steps by name, before any browser work', async () => {
+    // An errand carries no macrosDir/toolsDir, so the server would hand these
     // to the AI as prose — a silent, expensive wrong answer three layers down.
     const h = await connect();
 
     const result = await errand(h, {
-      steps: ['open the cart', 'Log in [skill: login]', '[tool: seed_cart items=2]'],
+      steps: ['open the cart', 'Log in [macro: login]', '[tool: seed_cart items=2]'],
     });
 
     expect(result.isError).toBe(true);
-    expect(text(result)).toContain('[skill: login]');
+    expect(text(result)).toContain('[macro: login]');
     expect(text(result)).toContain('[tool: seed_cart items=2]');
     expect(text(result)).toContain('run_steps');
     // Not swept in: the step that only mentions the cart.
@@ -298,19 +298,19 @@ describe('run_errand refuses what it cannot do, naming what can', () => {
   });
 
   it('refuses the colon-less invocation spelling, but not bracketed prose', async () => {
-    // The invocation grammar's colon is optional (`[skill login]` is a call),
-    // so the errand scan must keep pace — while `[skills]` / `[toolbox]`,
+    // The invocation grammar's colon is optional (`[macro login]` is a call),
+    // so the errand scan must keep pace — while `[macros]` / `[toolbox]`,
     // which the tokenizer would never claim, must keep flowing as prose.
     const h = await connect();
 
     const result = await errand(h, {
-      steps: ['Open the [skills] page', 'Log in [skill login]', '[tool seed_cart items=2]'],
+      steps: ['Open the [macros] page', 'Log in [macro login]', '[tool seed_cart items=2]'],
     });
 
     expect(result.isError).toBe(true);
-    expect(text(result)).toContain('[skill login]');
+    expect(text(result)).toContain('[macro login]');
     expect(text(result)).toContain('[tool seed_cart items=2]');
-    expect(text(result)).not.toContain('[skills] page');
+    expect(text(result)).not.toContain('[macros] page');
     expect(h.errands).toEqual([]);
   });
 

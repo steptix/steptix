@@ -10,7 +10,7 @@ import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { parseTestFile } from '../src/parser/markdown.js';
 import { parseFlowControlStep } from '../src/parser/flow-control-step.js';
 import { executeStep } from '../src/runner/step-executor.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import { buildStepCodePrompt, contentBlocksToText } from '../src/ai/prompts.js';
 import { buildFileReviewPrompt } from '../src/codebehind/review.js';
 import { buildRepairPrompt } from '../src/codebehind/repair.js';
@@ -58,7 +58,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });

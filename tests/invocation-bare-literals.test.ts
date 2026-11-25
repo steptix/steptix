@@ -1,6 +1,6 @@
 /**
  * Tests for bare numeric/boolean literal arguments in `[tool: ...]` and
- * `[skill: ...]` invocations. Authors can now write:
+ * `[macro: ...]` invocations. Authors can now write:
  *
  *   [tool: extract_orders sinceDays=30 includeRefunds=true]
  *

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { expandSkills, clearSkillCache } from '../src/skills/expander.js';
+import { expandMacros, clearMacroCache } from '../src/macros/expander.js';
 import { parseTestContent } from '../src/parser/markdown.js';
 import {
   closedChainMemberMessage,
@@ -27,7 +27,7 @@ let tmpDir: string;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'control-exp-'));
-  clearSkillCache();
+  clearMacroCache();
 });
 
 afterEach(async () => {
@@ -37,17 +37,17 @@ afterEach(async () => {
 
 const doc = (...lines: string[]): string => ['# T', '', '## Steps', '', ...lines].join('\n');
 
-/** Expand a test file's own sections with no skills directory configured. */
-async function expandInline(md: string, skillsDir?: string) {
+/** Expand a test file's own sections with no macros directory configured. */
+async function expandInline(md: string, macrosDir?: string) {
   const parsed = parseTestContent(md, '/t/inline.md');
-  return expandSkills(parsed.steps, skillsDir, undefined, '/t/inline.md', parsed.stepLines, {
+  return expandMacros(parsed.steps, macrosDir, undefined, '/t/inline.md', parsed.stepLines, {
     sections: parsed.sections,
     rawSteps: parsed.rawSteps,
     warnDeadSections: false,
   });
 }
 
-async function writeSkill(name: string, content: string): Promise<void> {
+async function writeMacro(name: string, content: string): Promise<void> {
   await fs.writeFile(path.join(tmpDir, `${name}.md`), content);
 }
 
@@ -135,7 +135,7 @@ describe('a chain', () => {
     expect(card).not.toBe(cash);
     expect(result.frames[cash]).toMatchObject({
       kind: 'section',
-      skillName: 'Pay with cash',
+      macroName: 'Pay with cash',
       parentId: null, // the guard is at the top level
       invocationLine: 6, // the `If` line, not the heading
     });
@@ -272,23 +272,23 @@ describe('the tail is an ordinary step', () => {
     expect(result.rawSteps[1]).toBe('Click the Pay now button');
   });
 
-  it('a [skill:] tail goes through skill expansion, with its own frame', async () => {
-    await writeSkill(
+  it('a [macro:] tail goes through macro expansion, with its own frame', async () => {
+    await writeMacro(
       'enable_pro',
       ['# enable_pro', '', '## Steps', '', '1. Open Settings', '2. Turn on Pro'].join('\n'),
     );
     const result = await expandInline(
-      doc('1. If {{plan}} is "pro", then [skill: enable_pro]'),
+      doc('1. If {{plan}} is "pro", then [macro: enable_pro]'),
       tmpDir,
     );
     expect(result.steps).toEqual([
-      'If {{plan}} is "pro", then [skill: enable_pro]',
+      'If {{plan}} is "pro", then [macro: enable_pro]',
       'Open Settings',
       'Turn on Pro',
     ]);
     expect(result.controls[0]).toMatchObject({ kind: 'if', bodyStart: 1, bodyEnd: 2 });
-    expect(result.sourceSkills).toEqual([null, 'enable_pro', 'enable_pro']);
-    expect(result.frames[result.origins[1]!.frameId]).toMatchObject({ kind: 'skill' });
+    expect(result.sourceMacros).toEqual([null, 'enable_pro', 'enable_pro']);
+    expect(result.frames[result.origins[1]!.frameId]).toMatchObject({ kind: 'macro' });
   });
 
   it('a Set tail is emitted as an assignment, not rewritten', async () => {
@@ -298,8 +298,8 @@ describe('the tail is an ordinary step', () => {
     expect(result.steps[3]).toBe('Set {{plan}} to "free"');
   });
 
-  it('a control line inside a skill body works, resolved on the authored text', async () => {
-    await writeSkill(
+  it('a control line inside a macro body works, resolved on the authored text', async () => {
+    await writeMacro(
       'pay',
       [
         '# pay',
@@ -313,7 +313,7 @@ describe('the tail is an ordinary step', () => {
         '1. If the {{method}} option is shown, then Click Pay now',
       ].join('\n'),
     );
-    const result = await expandInline(doc('1. [skill: pay method="card"]'), tmpDir);
+    const result = await expandInline(doc('1. [macro: pay method="card"]'), tmpDir);
     // The caller's argument is interpolated into the guard and its tail is
     // still the tail — the DECISION is made on the authored text.
     expect(result.steps).toEqual([
@@ -331,7 +331,7 @@ describe('liveness', () => {
       doc('1. If cash, then Pay with cash', '', '### Pay with cash', '', '1. Click Pay now'),
       '/t/inline.md',
     );
-    await expandSkills(parsed.steps, undefined, undefined, '/t/inline.md', parsed.stepLines, {
+    await expandMacros(parsed.steps, undefined, undefined, '/t/inline.md', parsed.stepLines, {
       sections: parsed.sections,
       rawSteps: parsed.rawSteps,
     });
@@ -344,7 +344,7 @@ describe('liveness', () => {
       doc('1. If cash, then Click Pay now', '', '### Pay with cash', '', '1. Click Pay now'),
       '/t/inline.md',
     );
-    await expandSkills(parsed.steps, undefined, undefined, '/t/inline.md', parsed.stepLines, {
+    await expandMacros(parsed.steps, undefined, undefined, '/t/inline.md', parsed.stepLines, {
       sections: parsed.sections,
       rawSteps: parsed.rawSteps,
     });
@@ -362,7 +362,7 @@ describe('liveness', () => {
  */
 describe('a control line in a hook scope', () => {
   const asHook = async (steps: string[]) =>
-    expandSkills(steps, undefined, undefined, '/t/inline.md', steps.map((_, i) => i + 1), {
+    expandMacros(steps, undefined, undefined, '/t/inline.md', steps.map((_, i) => i + 1), {
       expandControlLines: false,
       warnDeadSections: false,
     });
@@ -528,15 +528,15 @@ describe('control lines inside a looped section', () => {
   });
 });
 
-describe('control lines inside a skill body', () => {
+describe('control lines inside a macro body', () => {
   it('a For each records the SCOPED item and the caller`s list', async () => {
-    // `applySkillScope` renames a body's own placeholders to `__skill<N>_<name>`
+    // `applyMacroScope` renames a body's own placeholders to `__macro<N>_<name>`
     // and interpolates the caller's arguments, so the step the runtime executes
-    // says `For each {{__skill1_item}} in {{accounts}}`. A record naming the
+    // says `For each {{__macro1_item}} in {{accounts}}`. A record naming the
     // authored `item` / `list` would bind and read variables that do not exist:
     // the loop fails with "`{{list}}` has no value" and the body never sees its
     // item.
-    await writeSkill(
+    await writeMacro(
       'check_accounts',
       [
         '# Check accounts',
@@ -557,20 +557,20 @@ describe('control lines inside a skill body', () => {
     const { steps, controls, rawSteps } = await expandInline(
       doc(
         '1. Read the name of every account [store as: accounts]',
-        '2. [skill: check_accounts list="{{accounts}}"]',
+        '2. [macro: check_accounts list="{{accounts}}"]',
       ),
       tmpDir,
     );
-    expect(steps[1]).toBe('For each {{__skill1_item}} in {{accounts}}, Check it');
+    expect(steps[1]).toBe('For each {{__macro1_item}} in {{accounts}}, Check it');
     expect(controls[1]).toMatchObject({
       kind: 'foreach',
-      item: '__skill1_item',
+      item: '__macro1_item',
       list: 'accounts',
       label: 'Check it',
     });
     // The authored text stays where the editor and code-behind read it.
     expect(rawSteps[1]).toBe('For each {{item}} in {{list}}, Check it');
-    expect(steps[2]).toBe('Verify "{{__skill1_item}}" is shown');
+    expect(steps[2]).toBe('Verify "{{__macro1_item}}" is shown');
   });
 
   /**
@@ -578,19 +578,19 @@ describe('control lines inside a skill body', () => {
    * (docs/specs/SPEC-structured-table-reads.md §8.2).
    *
    * `{{item.id}}` names the variable `item` and one of its properties, and the
-   * property belongs to the row rather than to this skill's scope. So the
+   * property belongs to the row rather than to this macro's scope. So the
    * rename keys on the ROOT and carries the segment across: the loop binds
-   * `__skill1_item` and, per pass, `__skill1_item.id`, which is exactly what
+   * `__macro1_item` and, per pass, `__macro1_item.id`, which is exactly what
    * the body now asks for.
    *
    * Namespacing `item.id` as a name in its own right would produce
-   * `{{__skill1_item.id}}` from a rename of `item.id`, and the same string
+   * `{{__macro1_item.id}}` from a rename of `item.id`, and the same string
    * from the root rename — consistent only by accident, and not at all when a
    * declared parameter shares the root (the root is exempt from renaming, the
    * dotted form is not, and the two halves then disagree).
    */
-  it('a dotted reference in a skill body renames by its root, segment intact', async () => {
-    await writeSkill(
+  it('a dotted reference in a macro body renames by its root, segment intact', async () => {
+    await writeMacro(
       'check_orders',
       [
         '# Check orders',
@@ -611,19 +611,19 @@ describe('control lines inside a skill body', () => {
     const { steps, controls } = await expandInline(
       doc(
         '1. Read the Order ID column as id from every row in the Orders table [store as: orders]',
-        '2. [skill: check_orders list="{{orders}}"]',
+        '2. [macro: check_orders list="{{orders}}"]',
       ),
       tmpDir,
     );
-    expect(controls[1]).toMatchObject({ kind: 'foreach', item: '__skill1_item', list: 'orders' });
+    expect(controls[1]).toMatchObject({ kind: 'foreach', item: '__macro1_item', list: 'orders' });
     expect(steps[2]).toBe(
-      'Verify the row for "{{__skill1_item.id}}" shows "{{__skill1_item.status}}" ' +
-        'in row {{__skill1_item._row}}',
+      'Verify the row for "{{__macro1_item.id}}" shows "{{__macro1_item.status}}" ' +
+        'in row {{__macro1_item._row}}',
     );
   });
 
   it('a declared parameter keeps its name, and so do its properties', async () => {
-    await writeSkill(
+    await writeMacro(
       'show_order',
       [
         '# Show order',
@@ -637,16 +637,16 @@ describe('control lines inside a skill body', () => {
         '1. Verify {{order.id}} is shown',
       ].join('\n'),
     );
-    const { steps } = await expandInline(doc('1. [skill: show_order order="{{row}}"]'), tmpDir);
+    const { steps } = await expandInline(doc('1. [macro: show_order order="{{row}}"]'), tmpDir);
     // The argument is interpolated into the body TEXT, so `{{order}}` itself
     // would be baked — but `{{order.id}}` is not a key of `call.args`, so it
-    // survives as a runtime reference rather than becoming `__skill1_order.id`,
+    // survives as a runtime reference rather than becoming `__macro1_order.id`,
     // which nothing would ever bind.
     expect(steps[0]).toBe('Verify {{order.id}} is shown');
   });
 
   it('a condition records the text the model will be asked, parameters resolved', async () => {
-    await writeSkill(
+    await writeMacro(
       'upgrade',
       [
         '# Upgrade',
@@ -661,7 +661,7 @@ describe('control lines inside a skill body', () => {
       ].join('\n'),
     );
     const { steps, controls, rawSteps } = await expandInline(
-      doc('1. [skill: upgrade plan="pro"]'),
+      doc('1. [macro: upgrade plan="pro"]'),
       tmpDir,
     );
     expect(steps[0]).toBe('If pro is "pro", then Click Upgrade');
@@ -875,7 +875,7 @@ describe('a section named like a control line, at expansion', () => {
     const parsed = parseTestContent(source, '/t/inline.md');
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
     try {
-      await expandSkills(parsed.steps, undefined, undefined, '/t/inline.md', parsed.stepLines, {
+      await expandMacros(parsed.steps, undefined, undefined, '/t/inline.md', parsed.stepLines, {
         sections: parsed.sections,
         rawSteps: parsed.rawSteps,
         warnDeadSections: false,

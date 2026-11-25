@@ -183,7 +183,7 @@ export function paramContextAt(
 }
 
 // ---------------------------------------------------------------------------
-// Frontmatter span (for the skill dataSources-path special case)
+// Frontmatter span (for the macro dataSources-path special case)
 // ---------------------------------------------------------------------------
 
 /**
@@ -194,9 +194,9 @@ export function paramContextAt(
  * immaterial here because a `---` fence line can never also contain the open
  * `${` that gets this function consulted.
  *
- * Inside the span, `${...}` is a *path* placeholder (skill `dataSources:`
+ * Inside the span, `${...}` is a *path* placeholder (macro `dataSources:`
  * values), where the runtime allows only `${env.X}` and `${envName}` — and
- * only for skills.
+ * only for macros.
  */
 export function inFrontmatter(
   text: string,
@@ -257,11 +257,11 @@ const CAPTURE_PATTERNS: ReadonlyArray<{
   // single-match, which is the other half of the runner's behaviour.)
   { re: /^\[input:\s*(\w+)\]/gdi, marker: 'input' },
   { re: /^\[output:\s*(\w+)\]/gdi, marker: 'output' },
-  // Inline captures, both spellings (cf. STORE_AS_RE, src/skills/expander.ts),
+  // Inline captures, both spellings (cf. STORE_AS_RE, src/macros/expander.ts),
   // anywhere in the instruction — that is how the AI prompt reads them, and how
   // the runner's own `[output:]` enrichment appends one.
   { re: /\[(?:store\s+)?as:\s*(\w+)\]/gdi, marker: 'as' },
-  // `[skill: n out.k="alias"]` — the QUOTED alias is what enters the caller's
+  // `[macro: n out.k="alias"]` — the QUOTED alias is what enters the caller's
   // scope (variables-panel.js:43); `out.k` is the callee's own name and is not
   // addressable from here. One invocation may expose several.
   { re: /\bout\.\w+\s*=\s*"([^"]+)"/gd, marker: 'out-alias' },
@@ -442,7 +442,7 @@ export function allCaptureWrites(
  * (a `N. ` ordinal, or a hook entry's `- scope: ` lead-in).
  *
  * Hits from every pattern are merged back into positional order because one
- * step can both invoke a skill and store a capture of its own, and the
+ * step can both invoke a macro and store a capture of its own, and the
  * left-to-right reading is the one an author would predict.
  */
 function writesIn(instruction: string, line: number, offset: number): CaptureName[] {
@@ -1016,14 +1016,14 @@ export interface NamespaceOptions {
   envName: string;
   /** Detail for the `data` item, e.g. `fixtures/data/local.json` (possibly
    *  suffixed ` (not found)`). Null suppresses the item — the caller passes
-   *  null for skills, which never see the caller-env data file. */
+   *  null for macros, which never see the caller-env data file. */
   dataDetail: string | null;
   /** Declared `dataSources` names with their declared paths as detail. */
   sources: Array<{ name: string; detail: string }>;
   /** Detail for the `env` item (which .env file(s) feed it). */
   envDetail: string;
   /** Restrict to what a dataSources *path string* may reference (`env` +
-   *  `envName` only) — set inside a skill's frontmatter. */
+   *  `envName` only) — set inside a macro's frontmatter. */
   pathPosition?: boolean;
 }
 

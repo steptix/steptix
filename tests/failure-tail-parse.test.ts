@@ -349,24 +349,24 @@ describe('the validator refuses a contradiction at parse time', () => {
   });
 });
 
-describe('a `[tool:]` or `[skill:]` step under a tail (decision 12)', () => {
-  it('names the directive it found, for a tool body and a skill body alike', () => {
+describe('a `[tool:]` or `[macro:]` step under a tail (decision 12)', () => {
+  it('names the directive it found, for a tool body and a macro body alike', () => {
     for (const [line, kind] of [
       ['[tool: fetch_orders] otherwise continue', 'tool'],
       ['[tool: fetch_orders] otherwise fail the test with message "no orders"', 'tool'],
       ['Upload the invoice [tool: upload_invoice] otherwise continue', 'tool'],
       ['[tool fetch_orders] otherwise continue', 'tool'],
-      // The skill twin drops its tail as silently — `parseInvocation` hands the
+      // The macro twin drops its tail as silently — `parseInvocation` hands the
       // expander ` otherwise continue` as `trailing` text nothing reads — and
       // the LABELLED form, where a body stops looking like a bare bracket.
-      ['[skill: sign_in] otherwise continue', 'skill'],
-      ['[skill: sign_in] otherwise fail the test with message "no session"', 'skill'],
-      ['Do it [skill: sign_in] otherwise fail the test with error "m"', 'skill'],
-      ['[skill sign_in] otherwise continue', 'skill'],
+      ['[macro: sign_in] otherwise continue', 'macro'],
+      ['[macro: sign_in] otherwise fail the test with message "no session"', 'macro'],
+      ['Do it [macro: sign_in] otherwise fail the test with error "m"', 'macro'],
+      ['[macro sign_in] otherwise continue', 'macro'],
       // The accepted OVER-REACH: a colon-less candidate `parseInvocation` would
       // decline as English is refused here too, since the alternative is a tail
       // the validator lets through and this module declines — silence.
-      ['Verify the [skill level: expert] badge otherwise continue', 'skill'],
+      ['Verify the [macro level: expert] badge otherwise continue', 'macro'],
     ] as const) {
       expect(failureTailDirective(line), line).toBe(kind);
       // …and the parser declines what the validator refuses, so the loops see
@@ -380,36 +380,36 @@ describe('a `[tool:]` or `[skill:]` step under a tail (decision 12)', () => {
     for (const line of [
       '[tool: fetch_orders]',
       'Upload the invoice [tool: upload_invoice]',
-      '[skill: sign_in]',
-      'Sign in first [skill: sign_in]',
+      '[macro: sign_in]',
+      'Sign in first [macro: sign_in]',
       'Dismiss the promo banner otherwise continue',
       'Verify the total otherwise fail with message "m"',
-      // The word, not the token: a step may talk about tools and skills.
+      // The word, not the token: a step may talk about tools and macros.
       'Check the tool list otherwise continue',
       'Open the [tools] menu otherwise continue',
-      'Check the skills list otherwise continue',
-      'Open the [skills] menu otherwise continue',
+      'Check the macros list otherwise continue',
+      'Open the [macros] menu otherwise continue',
       // The CASE, which the copy this check used to be got wrong: the rule is
       // built from `invocationTokenPattern` and is case-SENSITIVE, so
-      // `[SKILL: x]` is prose to the runner too.
-      '[SKILL: sign_in] otherwise continue',
+      // `[MACRO: x]` is prose to the runner too.
+      '[MACRO: sign_in] otherwise continue',
       '[Tool: fetch_orders] otherwise continue',
     ]) {
       expect(failureTailDirective(line), line).toBeNull();
     }
     // …and the upper-case line really is a TAIL, not just un-refused, while its
     // lower-case twin is refused; a directive-less line keeps its tail too.
-    expect(parseFailureTail('[SKILL: sign_in] otherwise continue')).toEqual({
-      body: '[SKILL: sign_in]',
+    expect(parseFailureTail('[MACRO: sign_in] otherwise continue')).toEqual({
+      body: '[MACRO: sign_in]',
       outcome: 'continue',
     });
-    expect(parseFailureTail('[skill: sign_in] otherwise continue')).toBeNull();
+    expect(parseFailureTail('[macro: sign_in] otherwise continue')).toBeNull();
     expect(parseFailureTail('Check the tool list otherwise continue')).toEqual({
       body: 'Check the tool list',
       outcome: 'continue',
     });
-    expect(parseFailureTail('Open the [skills] menu otherwise continue')).toEqual({
-      body: 'Open the [skills] menu',
+    expect(parseFailureTail('Open the [macros] menu otherwise continue')).toEqual({
+      body: 'Open the [macros] menu',
       outcome: 'continue',
     });
   });
@@ -428,39 +428,39 @@ describe('a `[tool:]` or `[skill:]` step under a tail (decision 12)', () => {
     expect(toolMessage).toContain('a step after the call');
     expect(toolMessage).not.toMatch(/section/i);
 
-    const skillMessage = directiveFailureTailError(
-      '[skill: sign_in] otherwise continue',
-      'skill',
+    const macroMessage = directiveFailureTailError(
+      '[macro: sign_in] otherwise continue',
+      'macro',
       ' in tests/t.md at line 3',
     );
-    expect(skillMessage).toContain(directiveFailureTail('skill'));
-    expect(skillMessage).toContain('[skill:]');
-    expect(skillMessage).toContain('"[skill: sign_in] otherwise continue"');
-    // A skill already HAS steps, so the way out differs — still not a wrapper.
-    expect(skillMessage).toContain('a step inside the skill');
-    expect(skillMessage).not.toMatch(/section/i);
+    expect(macroMessage).toContain(directiveFailureTail('macro'));
+    expect(macroMessage).toContain('[macro:]');
+    expect(macroMessage).toContain('"[macro: sign_in] otherwise continue"');
+    // A macro already HAS steps, so the way out differs — still not a wrapper.
+    expect(macroMessage).toContain('a step inside the macro');
+    expect(macroMessage).not.toMatch(/section/i);
   });
 
   it('is refused at parse time, in `## Steps` and in a section body alike', () => {
     const tool = directiveFailureTail('tool');
-    const skill = directiveFailureTail('skill');
+    const macro = directiveFailureTail('macro');
     expectRefusal(md('Navigate to /', '[tool: fetch_orders] otherwise continue'), tool, '/t/c.md');
     expectRefusal(
       md('Load the orders') + section('Load the orders', '[tool: fetch_orders] otherwise continue'),
       tool,
     );
-    expectRefusal(md('Navigate to /', '[skill: sign_in] otherwise continue'), skill, '/t/c.md');
-    expectRefusal(md('Sign in [skill: sign_in] otherwise fail the test with error "no session"'), skill);
+    expectRefusal(md('Navigate to /', '[macro: sign_in] otherwise continue'), macro, '/t/c.md');
+    expectRefusal(md('Sign in [macro: sign_in] otherwise fail the test with error "no session"'), macro);
     expectRefusal(
-      md('Sign in') + section('Sign in', '[skill: sign_in] otherwise continue'),
-      skill,
+      md('Sign in') + section('Sign in', '[macro: sign_in] otherwise continue'),
+      macro,
     );
   });
 
-  it('leaves an ordinary tool or skill step alone', () => {
+  it('leaves an ordinary tool or macro step alone', () => {
     const steps = [
       '[tool: fetch_orders]',
-      '[skill: sign_in]',
+      '[macro: sign_in]',
       'Dismiss the promo banner otherwise continue',
     ];
     expect(parseTestContent(md(...steps), '/t/ok.md').steps).toEqual(steps);

@@ -7,7 +7,7 @@ import type { ChatMessage } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import { executeStep } from '../src/runner/step-executor.js';
 import { buildCodeBehindRegistry, type CodeBehindRegistry } from '../src/codebehind/loader.js';
 import { countStepOrigins, renderStep, CODE_BEHIND_MARK } from '../src/report/generator.js';
@@ -40,7 +40,7 @@ let counter = 0;
 let dir: string;
 
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });

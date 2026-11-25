@@ -16,7 +16,7 @@ import { parseTestContent } from '../src/parser/markdown.js';
 const doc = (...lines: string[]): string => lines.join('\n');
 /** Native fixture paths (CLAUDE.md: never a hard-coded drive). */
 const TEST_FILE = path.resolve(path.sep, 'proj', 't.md');
-const SKILL_FILE = path.resolve(path.sep, 'proj', 'skills', 'login.md');
+const MACRO_FILE = path.resolve(path.sep, 'proj', 'macros', 'login.md');
 
 const linesOf = (text: string): number[] => cliScope(text).steps.map((s) => s.line);
 
@@ -155,10 +155,10 @@ describe('the server reads the same scope from the wire (§5.7)', () => {
     const scopes = agentScopesForBatch({
       steps: ['Open the wizard', 'Click Save'],
       origins: [
-        { inputIndex: 0, frameId: 's1', skillLine: 9 },
+        { inputIndex: 0, frameId: 's1', macroLine: 9 },
         { inputIndex: 1, frameId: '' },
       ],
-      frames: { s1: { id: 's1', parentId: null, kind: 'section', uri: TEST_FILE, invocationLine: 4, skillName: 'Export' } },
+      frames: { s1: { id: 's1', parentId: null, kind: 'section', uri: TEST_FILE, invocationLine: 4, macroName: 'Export' } },
       sections: { export: { name: 'Export', steps: ['[use agent]', 'Open the wizard'] } },
       testFilePath: TEST_FILE,
     });
@@ -166,18 +166,18 @@ describe('the server reads the same scope from the wire (§5.7)', () => {
     expect(scopes.scope[1]).toBeNull();
   });
 
-  it('a skill file decides its own scope; the caller\'s agent: on does not carry in', () => {
-    const skill = doc('---', 'type: skill', '---', '# Login', '## Steps', '1. Enter the user', '2. Click Sign in');
+  it('a macro file decides its own scope; the caller\'s agent: on does not carry in', () => {
+    const macro = doc('---', 'type: macro', '---', '# Login', '## Steps', '1. Enter the user', '2. Click Sign in');
     const scopes = agentScopesForBatch({
       steps: ['Enter the user', 'Click Sign in'],
       origins: [
-        { inputIndex: 0, frameId: 'k1', skillFilePath: SKILL_FILE, skillLine: 6 },
-        { inputIndex: 0, frameId: 'k1', skillFilePath: SKILL_FILE, skillLine: 7 },
+        { inputIndex: 0, frameId: 'k1', macroFilePath: MACRO_FILE, macroLine: 6 },
+        { inputIndex: 0, frameId: 'k1', macroFilePath: MACRO_FILE, macroLine: 7 },
       ],
-      frames: { k1: { id: 'k1', parentId: null, kind: 'skill', uri: SKILL_FILE, invocationLine: 3 } },
+      frames: { k1: { id: 'k1', parentId: null, kind: 'macro', uri: MACRO_FILE, invocationLine: 3 } },
       wire: { file: true },
       testFilePath: TEST_FILE,
-      readFile: () => skill,
+      readFile: () => macro,
     });
     expect(scopes.scope).toEqual([null, null]);
   });

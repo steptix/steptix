@@ -2,11 +2,11 @@
  * Code-behind step-into dispatch (stories/codebehind-debugging.md §Flow 2).
  *
  * Coverage:
- *  1. F11 while step-paused on a plain (non-tool, non-skill) line sends
+ *  1. F11 while step-paused on a plain (non-tool, non-macro) line sends
  *     runControl with `pauseAtNextCodeBehind: true` — the server decides
  *     whether the step actually has an entry.
- *  2. F11 while step-paused on a `[skill: ...]` line sends NEITHER debugger
- *     flag: it must keep meaning "pause on the skill's first step in the
+ *  2. F11 while step-paused on a `[macro: ...]` line sends NEITHER debugger
+ *     flag: it must keep meaning "pause on the macro's first step in the
  *     .md", not "jump into that step's code-behind".
  *
  * The tool-line branch (`pauseAtNextTool`) is pinned by
@@ -97,7 +97,7 @@ describe('Steptix code-behind step-into dispatch', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('F11 while step-paused on a [skill:] line sends neither debugger flag', async () => {
+  it('F11 while step-paused on a [macro:] line sends neither debugger flag', async () => {
     const editor = await openFixture('test-shared-a.md');
     editor.selection = new vscode.Selection(
       new vscode.Position(7, 0),
@@ -107,7 +107,7 @@ describe('Steptix code-behind step-into dispatch', function () {
     void vscode.commands.executeCommand('steptix.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
-    // Park on line 8 — `[skill: shared_skill] run the shared skill`.
+    // Park on line 8 — `[macro: shared_macro] run the shared macro`.
     fake.push({ type: 'step:awaiting', line: 8 });
     await waitFor('step-paused', () => hooks.isStepPaused());
 
@@ -119,7 +119,7 @@ describe('Steptix code-behind step-into dispatch', function () {
     assert.ok(
       call.opts === null ||
         (!call.opts.pauseAtNextTool && !call.opts.pauseAtNextCodeBehind),
-      `expected no debugger flags on a skill line, got ${JSON.stringify(call.opts)}`,
+      `expected no debugger flags on a macro line, got ${JSON.stringify(call.opts)}`,
     );
 
     fake.end();

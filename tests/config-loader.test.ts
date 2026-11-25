@@ -126,11 +126,11 @@ describe('loadConfig — steptix.config.json loading + deep merge', () => {
   it('loads JSON and merges over defaults (omitted keys keep defaults)', async () => {
     const file = await writeConfig({
       server: { host: '0.0.0.0' },
-      tests: { skillsDir: './my-skills' },
+      tests: { macrosDir: './my-macros' },
     });
     const config = await loadConfig(file);
     expect(config.server.host).toBe('0.0.0.0');
-    expect(config.tests.skillsDir).toBe('./my-skills');
+    expect(config.tests.macrosDir).toBe('./my-macros');
     // Untouched keys keep their defaults.
     expect(config.reports.outputDir).toBe('./reports');
     expect(config.tests.pattern).toBe('**/*.md');
@@ -246,10 +246,10 @@ describe('loadConfig — steptix.config.json loading + deep merge', () => {
 
   it('replaces arrays wholesale (does not concatenate)', async () => {
     const file = await writeConfig({
-      execution: { defaultHooks: { beforeEach: ['[skill: only_this]'] } },
+      execution: { defaultHooks: { beforeEach: ['[macro: only_this]'] } },
     });
     const config = await loadConfig(file);
-    expect(config.execution.defaultHooks?.beforeEach).toEqual(['[skill: only_this]']);
+    expect(config.execution.defaultHooks?.beforeEach).toEqual(['[macro: only_this]']);
   });
 
   // docs/specs/SPEC-use-computer.md §4.4 — a hook runs on the page surface, so
@@ -281,11 +281,11 @@ describe('loadConfig — steptix.config.json loading + deep merge', () => {
   it('does not leak mutations back into shared defaults across loads', async () => {
     // Load with no override on `server`, then mutate the returned subtree the
     // way serve.ts does. A second load must still see the pristine default.
-    const fileA = await writeConfig({ tests: { skillsDir: './a' } });
+    const fileA = await writeConfig({ tests: { macrosDir: './a' } });
     const first = await loadConfig(fileA);
     first.server.host = '0.0.0.0';
 
-    const fileB = await writeConfig({ tests: { skillsDir: './b' } });
+    const fileB = await writeConfig({ tests: { macrosDir: './b' } });
     const second = await loadConfig(fileB);
     expect(second.server.host).toBe('127.0.0.1');
   });
@@ -506,7 +506,7 @@ describe('steptix.config.schema.json validates configs', () => {
   it('accepts a minimal config with $schema', () => {
     const ok = validate({
       $schema: 'https://example.com/schema.json',
-      tests: { skillsDir: './skills', toolsDir: './tools/src' },
+      tests: { macrosDir: './macros', toolsDir: './tools/src' },
       browser: { headed: true },
     });
     expect(ok).toBe(true);

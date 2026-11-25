@@ -4,7 +4,7 @@ AI-powered UI test automation using natural language Markdown test files. Write 
 
 > **Steptix is beta software.** Test-file syntax, configuration keys, CLI options and the Sessions API can still change between versions without a deprecation period. Check the [CHANGELOG](CHANGELOG.md) before upgrading.
 
-For AI-assisted test generation, give your AI the [test-writing handbook](docs/test-writing-handbook.md) — how the framework reads a test, the phrasing that maps to real actions, and how to use skills and tools — together with the [test authoring guide](docs/ai-test-authoring-guide.md), the rule-by-rule reference covering variables, data-driven flows, hooks and validation.
+For AI-assisted test generation, give your AI the [test-writing handbook](docs/test-writing-handbook.md) — how the framework reads a test, the phrasing that maps to real actions, and how to use macros and tools — together with the [test authoring guide](docs/ai-test-authoring-guide.md), the rule-by-rule reference covering variables, data-driven flows, hooks and validation.
 
 ## Prerequisites
 
@@ -528,12 +528,12 @@ mobile user agent, or devicePixelRatio emulation); see
 - `[use ai] step text` -- asks the model for a value from the step text alone (no page, no earlier steps, no date) and stores it: `[use ai] Create a customer name starting with AUTO [store as: customer]`. Asked again on every run and never compiled; it is a poor source of randomness, so put any date it needs in the step and write a tool for a value that must be the same every time
 - `[input: variable_name] prompt text` -- pauses for user input, stores as `{{variable_name}}`
 - `[interactive] optional hint` -- opens an interactive REPL (commands are `/`-prefixed: `/continue` advance, `/resume` jump to any step, `/screenshot` capture, `/help` for the full list)
-- `[skill: name args]` -- inline a reusable named sequence of steps from your `skills/` directory; `[skill: subfolder/name args]` for a skill in a subfolder (see [Skills](#skills))
+- `[macro: name args]` -- inline a reusable named sequence of steps from your `macros/` directory; `[macro: subfolder/name args]` for a macro in a subfolder (see [Macros](#macros))
 - `[tool: name args]` -- run deterministic TypeScript code with full Playwright access (see [Tools](#tools))
 
-For `[skill:` and `[tool:` — and only those two — the colon is optional: `[skill login]` is the same call as `[skill: login]`. (`[input:`, `[output:]` and `[interactive]` are unchanged and still need their colon.) The keyword must be followed by the colon or whitespace, so bracketed prose like `[skills]` or `[skillful]` is never mistaken for an invocation, and neither is a markdown link such as `[skill guide](./guide.md)`.
+For `[macro:` and `[tool:` — and only those two — the colon is optional: `[macro login]` is the same call as `[macro: login]`. (`[input:`, `[output:]` and `[interactive]` are unchanged and still need their colon.) The keyword must be followed by the colon or whitespace, so bracketed prose like `[macros]` or `[macroscopic]` is never mistaken for an invocation, and neither is a markdown link such as `[macro guide](./guide.md)`.
 
-The two spellings differ in one way, deliberately. `[skill: ...]` is unambiguous intent, so a malformed one is a parse error pointing at the problem. The colon-less form is reachable by ordinary English — `Verify the [skill level: expert] badge` — so when it doesn't parse it is simply treated as prose rather than failing the file. Write the colon if you want the strict reading.
+The two spellings differ in one way, deliberately. `[macro: ...]` is unambiguous intent, so a malformed one is a parse error pointing at the problem. The colon-less form is reachable by ordinary English — `Select the [macro lens: 100mm] option` — so when it doesn't parse it is simply treated as prose rather than failing the file. Write the colon if you want the strict reading.
 
 ### Setting a variable
 
@@ -553,8 +553,8 @@ It costs nothing: no AI call and no page interaction. Notes:
 - The value is text, and only text. `"{{n}} + 1"` stores those characters — arithmetic and string surgery belong in a [tool](#tools), where `regex_extract` and friends already live.
 - A `{{name}}` the run cannot resolve **fails the step**, naming it. Storing the literal `{{typo}}` would pass green and break a later step instead.
 - The value may not contain a double quote — there is no way to tell one inside the value from the one that closes it, and guessing would silently store the wrong text. A step like `Set {{q}} to "shoes" and search for "shoes"` is refused for the same reason.
-- `Set {{name}} to` claims the line the way `[skill:` does, so a missing quote is a parse error rather than prose sent to the model. `Set the filter to Recent` names no variable and stays an ordinary AI step.
-- Inside a skill you can assign to a declared `## Outputs` name or an internal one, but not to one of the skill's own `## Parameters` — a caller's arguments are written into the step text rather than kept as variables, so there would be no variable there to assign to. The same applies to the columns of a table under a `### Section`. Both are refused when the file is parsed.
+- `Set {{name}} to` claims the line the way `[macro:` does, so a missing quote is a parse error rather than prose sent to the model. `Set the filter to Recent` names no variable and stays an ordinary AI step.
+- Inside a macro you can assign to a declared `## Outputs` name or an internal one, but not to one of the macro's own `## Parameters` — a caller's arguments are written into the step text rather than kept as variables, so there would be no variable there to assign to. The same applies to the columns of a table under a `### Section`. Both are refused when the file is parsed.
 
 ### Reading a table into rows
 
@@ -594,13 +594,13 @@ rows](docs/test-writing-handbook.md#38-reading-a-table-into-rows) in the
 test-writing handbook, and the shipped `table-*.md` tests under
 `templates/init/tests/` are worked examples.
 
-## Skills
+## Macros
 
-A skill is a reusable sequence of steps shared **across** tests, kept in its own `.md` file under your project's `skills/` directory. Unlike inline sections (below), a skill has its own parameters and outputs, so it's the right tool when a flow — logging in, seeding data, completing checkout — is used by more than one test.
+A macro is a reusable sequence of steps shared **across** tests, kept in its own `.md` file under your project's `macros/` directory. Unlike inline sections (below), a macro has its own parameters and outputs, so it's the right tool when a flow — logging in, seeding data, completing checkout — is used by more than one test.
 
 ```markdown
 ---
-type: skill
+type: macro
 ---
 
 # fill_login_form
@@ -624,28 +624,28 @@ Invoke it from any test step, passing arguments and aliasing outputs into the ca
 
 ```markdown
 ## Steps
-1. [skill: fill_login_form username="admin@test.com" password="$ADMIN_PW" out.session_id="admin_session"]
+1. [macro: fill_login_form username="admin@test.com" password="$ADMIN_PW" out.session_id="admin_session"]
 2. Use {{admin_session}} for the next request
 ```
 
-Skills expand inline before the run, so the runner and the report see the fully-expanded flow, and Steptix can step **into** a skill body, set breakpoints in it, and show a call stack. The skills directory defaults to `skills/` and is configurable via `tests.skillsDir` in `steptix.config.json`.
+Macros expand inline before the run, so the runner and the report see the fully-expanded flow, and Steptix can step **into** a macro body, set breakpoints in it, and show a call stack. The macros directory defaults to `macros/` and is configurable via `tests.macrosDir` in `steptix.config.json`.
 
-Skills may be grouped into subfolders of that directory and referenced path-qualified — `skills/auth/login.md` is `[skill: auth/login]`. A leading slash is optional sugar for the same file (`[skill: /auth/login]`), and the unqualified form (`[skill: login]`) still means a skill sitting directly in `skills/`:
+Macros may be grouped into subfolders of that directory and referenced path-qualified — `macros/auth/login.md` is `[macro: auth/login]`. A leading slash is optional sugar for the same file (`[macro: /auth/login]`), and the unqualified form (`[macro: login]`) still means a macro sitting directly in `macros/`:
 
 ```markdown
 ## Steps
-1. [skill: auth/login username="admin@test.com" password="$ADMIN_PW"]
-2. [skill: admin/users/create_user role="viewer"]
+1. [macro: auth/login username="admin@test.com" password="$ADMIN_PW"]
+2. [macro: admin/users/create_user role="viewer"]
 ```
 
 Two things worth knowing about how those names resolve:
 
-- **A `[skill: ...]` inside a skill body is resolved against the skills root too**, never against the calling skill's own folder. `[skill: mfa]` written inside `skills/auth/login.md` means `skills/mfa.md`, not `skills/auth/mfa.md` — write `[skill: auth/mfa]` for the sibling. One name always means one file, wherever it is written.
-- **Names are file paths, so they are case-sensitive wherever the filesystem is** (Linux, macOS by default). Windows will happily open `skills/Auth/Login.md` for `[skill: auth/login]`, so a mismatch that works locally can fail in CI. Match the case on disk.
+- **A `[macro: ...]` inside a macro body is resolved against the macros root too**, never against the calling macro's own folder. `[macro: mfa]` written inside `macros/auth/login.md` means `macros/mfa.md`, not `macros/auth/mfa.md` — write `[macro: auth/mfa]` for the sibling. One name always means one file, wherever it is written.
+- **Names are file paths, so they are case-sensitive wherever the filesystem is** (Linux, macOS by default). Windows will happily open `macros/Auth/Login.md` for `[macro: auth/login]`, so a mismatch that works locally can fail in CI. Match the case on disk.
 
 ## Inline Sections
 
-An `### Name` heading **inside `## Steps`** defines a reusable block of steps *within a single test* — an inline skill, without the separate file or the parameter declarations. A step invokes it by writing the section's name as its entire text; the bare name **is** the call.
+An `### Name` heading **inside `## Steps`** defines a reusable block of steps *within a single test* — an inline macro, without the separate file or the parameter declarations. A step invokes it by writing the section's name as its entire text; the bare name **is** the call.
 
 ```markdown
 ## Steps
@@ -667,9 +667,9 @@ An `### Name` heading **inside `## Steps`** defines a reusable block of steps *w
 
 Steps 1 and 4 both call `### Login`; step 3 calls `### Checkout`. Each expands inline before the run.
 
-- **Section or skill?** A section groups steps within one test and shares the test's scope — no parameters, no outputs, no second file. Use a skill when a block is shared across tests or needs its own inputs.
+- **Section or macro?** A section groups steps within one test and shares the test's scope — no parameters, no outputs, no second file. Use a macro when a block is shared across tests or needs its own inputs.
 - **The main flow** is the numbered steps before the first `###`; it can't resume after a section begins.
-- **Matching** is the step's raw text, trimmed and case-insensitive (`Login` = `login` = `LOGIN`). `1. **Login**` is an ordinary AI step, not a call; a typo or trailing period is a near-miss. A `[skill:]`/`[tool:]`/`[input:]`/`[interactive]` step is never a section call.
+- **Matching** is the step's raw text, trimmed and case-insensitive (`Login` = `login` = `LOGIN`). `1. **Login**` is an ordinary AI step, not a call; a typo or trailing period is a near-miss. A `[macro:]`/`[tool:]`/`[input:]`/`[interactive]` step is never a section call.
 - **Names** may contain spaces. Reserved H2 keywords, names starting with `[` or containing `{{`, empty names, and duplicates are rejected.
 
 Steptix gives sectioned files full debug support — status on body lines, breakpoints, step-into, go-to-definition, completion, and "did you mean?" diagnostics. See [SPEC.md](docs/specs/SPEC.md#inline-sections) for the full grammar and semantics.
@@ -682,7 +682,7 @@ Tools are deterministic TypeScript functions you can call from a test step. They
 - The action is mechanically tricky for the AI — HTML5 drag-and-drop, file downloads, multi-page choreography that races on Playwright events.
 - You want determinism — anything the AI shouldn't decide on the fly.
 
-A tool gets the live Playwright `page`, `context`, and `browser` (the same instances the rest of the test uses), reads/writes the test's variable scope, and is callable from any step or skill via `[tool: name ...]` — including the same shorthand syntax skill calls support.
+A tool gets the live Playwright `page`, `context`, and `browser` (the same instances the rest of the test uses), reads/writes the test's variable scope, and is callable from any step or macro via `[tool: name ...]` — including the same shorthand syntax macro calls support.
 
 ### Project layout
 
@@ -693,7 +693,7 @@ my-test-project/
 ├── steptix.config.json        ← framework config
 ├── tests/
 │   └── login-flow.md             ← natural-language tests
-├── skills/
+├── macros/
 │   └── login_via_otp.md          ← reusable step macros
 └── tools/                        ← own JS project
     ├── package.json              ← own deps
@@ -867,7 +867,7 @@ export default defineTool({
 
 ### Calling a tool
 
-Tool calls support the same shorthand syntax as skill calls:
+Tool calls support the same shorthand syntax as macro calls:
 
 ```markdown
 ## Steps
@@ -877,7 +877,7 @@ Tool calls support the same shorthand syntax as skill calls:
 4. [tool: fetch_otp email out.otp="primary_otp"]        ← capture under alias
 ```
 
-Tool calls are also valid inside skills (`skills/*.md`) and inside hooks (`## Hooks` section), so you can mix them freely with natural-language steps.
+Tool calls are also valid inside macros (`macros/*.md`) and inside hooks (`## Hooks` section), so you can mix them freely with natural-language steps.
 
 ### What a tool can do
 
@@ -1247,7 +1247,7 @@ A typical external tests project looks like:
 
 ```
 aitests/
-├── steptix.config.json        # project config (tests.dataDir, skillsDir, …)
+├── steptix.config.json        # project config (tests.dataDir, macrosDir, …)
 ├── .env                    # base config — shared across all envs (e.g. AI_API_KEY)
 ├── .env.local              # env-specific secrets / URLs (BASE_URL, passwords, …)
 ├── .env.staging

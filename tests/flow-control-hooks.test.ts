@@ -8,7 +8,7 @@
  * three defensible answers, which is the signature of a rule nobody should
  * have to guess. So the line is refused in the two places it can be AUTHORED:
  * `## Hooks` at parse, and project `defaultHooks` at config load. (The third
- * arrival — a hook the Sessions API posted, or one a skill expanded into a
+ * arrival — a hook the Sessions API posted, or one a macro expanded into a
  * default — is the run loop's backstop, covered in
  * `tests/flow-control-runner.test.ts`.)
  */

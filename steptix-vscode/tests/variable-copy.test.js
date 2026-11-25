@@ -83,9 +83,9 @@ test('placeholder: a record property keeps its one dot', () => {
   assert.equal(placeholderFor('payment._row'), '{{payment._row}}');
 });
 
-test('placeholder: a skill local drops the expander prefix the skill file never wrote', () => {
-  assert.equal(placeholderFor('__skill2_query'), '{{query}}');
-  assert.equal(placeholderFor('__skill12_order.id'), '{{order.id}}');
+test('placeholder: a macro local drops the expander prefix the macro file never wrote', () => {
+  assert.equal(placeholderFor('__macro2_query'), '{{query}}');
+  assert.equal(placeholderFor('__macro12_order.id'), '{{order.id}}');
 });
 
 test('placeholder: a name the runtime grammar cannot reference has none', () => {

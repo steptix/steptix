@@ -50,7 +50,7 @@ import { recordExecutedStep, type RunStats } from './run-stats.js';
  */
 
 /** The four fields a loop reads back. `name` / `value` are present only when
- *  a value was stored under a reportable name — a skill-internal `__skill*`
+ *  a value was stored under a reportable name — a macro-internal `__macro*`
  *  name is bound and never reported, exactly as `runSetStep` does it. */
 export interface UseAiStepOutcome {
   result: StepResult;
@@ -80,7 +80,7 @@ export interface UseAiStepArgs {
   envData?: EnvDataContext | null | undefined;
   /** The loop's free-text mask set (`secretsNow()`), which `maskValueForPrompt`
    *  applies inside a value whose NAME says nothing, and which is applied to
-   *  the step's own words too — where a skill argument or a looped section's
+   *  the step's own words too — where a macro argument or a looped section's
    *  row value was written in, so the set must carry those
    *  (`runSecretsWithInputs`). */
   secrets: readonly string[];
@@ -161,13 +161,13 @@ interface HiddenFromModel {
 const hidAnything = (hidden: HiddenFromModel): boolean => hidden.refs.size > 0 || hidden.inText;
 
 /**
- * A skill body's variable as the AUTHOR wrote it. `applySkillScope`
- * (src/skills/expander.ts) renames each skill-internal name to
- * `__skill<N>_<name>`, a spelling the author never wrote and cannot search the
- * skill for. Only that prefix is removed, as often as it was applied.
+ * A macro body's variable as the AUTHOR wrote it. `applyMacroScope`
+ * (src/macros/expander.ts) renames each macro-internal name to
+ * `__macro<N>_<name>`, a spelling the author never wrote and cannot search the
+ * macro for. Only that prefix is removed, as often as it was applied.
  */
 function authoredName(name: string): string {
-  return name.replace(/^(?:__skill\d+_)+/, '');
+  return name.replace(/^(?:__macro\d+_)+/, '');
 }
 
 /** `a`, `a and b`, `a, b and c`. */
@@ -210,7 +210,7 @@ function hiddenList(hidden: HiddenFromModel): string {
  * `steptix run` sends it, so it is no fix under Steptix, MCP or Flick.
  *
  * A secret in the step's own words is explained, because the author usually
- * wrote `{{password}}` in a section body or a skill and is looking at a
+ * wrote `{{password}}` in a section body or a macro and is looking at a
  * placeholder, not at text — and when the author's own word merely equals a
  * short secret, the same sentence says why that word was masked.
  */
@@ -232,7 +232,7 @@ function hiddenHints(hidden: HiddenFromModel): string {
   if (hidden.inText) {
     hints.push(
       "A secret's value is masked wherever it appears in the step's text, including where a " +
-        "skill's argument or a looped section's row put it.",
+        "macro's argument or a looped section's row put it.",
     );
   }
   return hints.length === 0 ? '' : ` ${hints.join(' ')}`;
@@ -299,7 +299,7 @@ function holdsMask(value: string): boolean {
  * `unmask: keyword` with `keyword` = `AU` would still turn a written
  * "AUstralia" into "***stralia" — the set is built for the report, which
  * ignores `unmask:` on purpose. Only names the runner can look up are
- * exempted: a skill argument or a section column under an unmasked name is
+ * exempted: a macro argument or a section column under an unmasked name is
  * not in the variable map, so its value stays masked in the text.
  */
 function textMaskSet(
@@ -371,7 +371,7 @@ async function askTheModel(args: UseAiStepArgs): Promise<UseAiStepOutcome> {
   // 2. What the model reads: the step minus its tail (decision 10), with
   //    every reference filled in and every secret-named value masked by the
   //    `## Values` block's own membership rule (decision 4) — and the step's
-  //    own words masked with the run's mask set, because a skill argument or
+  //    own words masked with the run's mask set, because a macro argument or
   //    a looped section's row value is written into them at expansion, where
   //    no `{{…}}` is left to name it (issue 060).
   const question = stripFailureTail(parsed.text);
@@ -407,7 +407,7 @@ async function askTheModel(args: UseAiStepArgs): Promise<UseAiStepOutcome> {
     // The same set the report is masked with, and so the same floor: a value
     // off the page (a record cell, a loop's `row.token`) joins it only from
     // four characters up, but a value under a name the author chose — a
-    // parameter, a section column, a skill parameter — joins it at any
+    // parameter, a section column, a macro parameter — joins it at any
     // length, because that name is the instruction (`joinsMaskSet`,
     // src/utils/secrets.ts). So, as in the report, a short secret is masked
     // wherever its characters occur: a `password` of `test` hides the word
@@ -552,7 +552,7 @@ async function askTheModel(args: UseAiStepArgs): Promise<UseAiStepOutcome> {
     // The write — the same helper every other writer uses, so a rebind of a
     // loop's item name clears its dotted keys here too.
     bindVariable(scope, named.name, reply.value);
-    const reportable = !named.name.startsWith('__skill');
+    const reportable = !named.name.startsWith('__macro');
     return {
       result: {
         index,

@@ -7,7 +7,7 @@ import {
   type ExpandedFrame,
   type ExpandedStepOrigin,
   type SectionDefs,
-} from '../skills/expander.js';
+} from '../macros/expander.js';
 import type { CodeBehindBinding, CodeBehindExpansion } from './loader.js';
 import { neverCompiled } from './live-compile.js';
 import { entryTextIn } from './writer.js';
@@ -47,9 +47,9 @@ export interface DetachedBodyStep {
  * `picks` is parallel to the request's INPUT steps (an origin's `inputIndex`),
  * not to the expanded list: one input can expand to several steps. Only the
  * steps an input emits into the ROOT frame move. A body step that calls a
- * sibling section or a `[skill:]` already expanded into that section's or
- * skill's own frame, which binds where it should. Moving it too would file a
- * skill's entries under this section in the test's `.steps.ts`.
+ * sibling section or a `[macro:]` already expanded into that section's or
+ * macro's own frame, which binds where it should. Moving it too would file a
+ * macro's entries under this section in the test's `.steps.ts`.
  *
  * `sections` supplies the authored bodies the occurrence is counted over. A
  * section not in `sections` keeps the occurrence its steps counted within this
@@ -78,7 +78,7 @@ export function detachedBodyExpansion(
       // The field a section frame carries its name in, and the one
       // `resolveDefiningSite` reads the entry's `section:` scope from. The
       // heading's own spelling, as a full run stamps it, not the request's.
-      skillName: Object.prototype.hasOwnProperty.call(sections, key)
+      macroName: Object.prototype.hasOwnProperty.call(sections, key)
         ? sections[key]!.name
         : section,
     };

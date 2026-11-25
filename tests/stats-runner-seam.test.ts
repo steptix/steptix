@@ -246,7 +246,7 @@ function hooks(over: Partial<Record<'before' | 'beforeEach' | 'afterEach' | 'aft
     ...(scopes as unknown as Pick<ResolvedHooks, 'before' | 'beforeEach' | 'afterEach' | 'after'>),
     hasAny: Object.values(scopes).some((lines) => lines.length > 0),
     toolCalls: slots() as ResolvedHooks['toolCalls'],
-    sourceSkills: slots() as ResolvedHooks['sourceSkills'],
+    sourceMacros: slots() as ResolvedHooks['sourceMacros'],
   };
 }
 
@@ -1045,19 +1045,19 @@ async function writeAndParse(root: string, name: string, markdown: string) {
   return parseTestFile(file);
 }
 
-describe('a skill body\'s steps are recorded as authored (finding 9)', () => {
-  it('without the __skill<N>_ renames the expander put on their placeholders', async () => {
+describe('a macro body\'s steps are recorded as authored (finding 9)', () => {
+  it('without the __macro<N>_ renames the expander put on their placeholders', async () => {
     const { root, reports } = project();
-    fs.mkdirSync(path.join(root, 'skills'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'macros'), { recursive: true });
     fs.writeFileSync(
-      path.join(root, 'skills', 'find_order.md'),
-      '---\ntype: skill\n---\n\n# find_order\n\n## Steps\n1. Read the order number [store as: order]\n2. Search for {{order}}\n',
+      path.join(root, 'macros', 'find_order.md'),
+      '---\ntype: macro\n---\n\n# find_order\n\n## Steps\n1. Read the order number [store as: order]\n2. Search for {{order}}\n',
     );
-    const file = path.join(root, 'tests', 'skill.md');
-    fs.writeFileSync(file, '# Skill\n\n## Steps\n1. [skill: find_order]\n');
-    const test = await parseTestFile(file, { skillsDir: path.join(root, 'skills') });
-    // The premise: the expander renamed the skill's own variable.
-    expect(test.steps.join('\n')).toContain('__skill1_order');
+    const file = path.join(root, 'tests', 'macro.md');
+    fs.writeFileSync(file, '# Macro\n\n## Steps\n1. [macro: find_order]\n');
+    const test = await parseTestFile(file, { macrosDir: path.join(root, 'macros') });
+    // The premise: the expander renamed the macro's own variable.
+    expect(test.steps.join('\n')).toContain('__macro1_order');
 
     gw.respond = () => ({ text: plan([{ action: 'click', selector: '#search' }]), usage: { input_tokens: 10, output_tokens: 1 } });
     await runTests([test], config(reports));
@@ -1067,7 +1067,7 @@ describe('a skill body\'s steps are recorded as authored (finding 9)', () => {
       'Search for {{order}}',
     ]);
     const dir = path.join(userRoot, 'steptix', 'stats');
-    expect(fs.readdirSync(dir).map((name) => fs.readFileSync(path.join(dir, name), 'utf-8')).join('')).not.toContain('__skill');
+    expect(fs.readdirSync(dir).map((name) => fs.readFileSync(path.join(dir, name), 'utf-8')).join('')).not.toContain('__macro');
   });
 });
 

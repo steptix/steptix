@@ -2,7 +2,7 @@
  * The closure argument for `Set {{name}} to "…"`, made mechanical.
  *
  * Six review rounds each found the same defect at the NEXT substitution site
- * along — row bindings, skill arguments, hook baking, skill bodies — because
+ * along — row bindings, macro arguments, hook baking, macro bodies — because
  * each round fixed the instance and then asserted closure in prose. Round
  * five replaced the prose with `substitutePreservingSet` and a parameterised
  * test over the four known sites. Round six disproved even that: it added a
@@ -102,7 +102,7 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   // own any more.
   'src/runner/literal-decision.ts': { why: 'not-step-text', calls: 1 },
   // Several, and deliberately one label: a validate-only main-flow pass, the
-  // hook preserve, the guarded skill-body and skill-section passes, and value
+  // hook preserve, the guarded macro-body and macro-section passes, and value
   // passes for parameters, rows, config and output names. The count is what
   // makes adding an eighth trip this test.
   'src/parser/markdown.ts': { why: 'step-text/guarded', calls: 8 },
@@ -143,10 +143,10 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   'src/server/errand-runner.ts': { why: 'step-text/authored', calls: 2 },
   // Two calls for agent steps (docs/specs/SPEC-use-agent.md): the tail
   // MESSAGE, as in the CLI; and the partial-re-run guard's SUBJECT, which only
-  // asks whether a `{{__skill…}}` is left unresolved and is never sent or
+  // asks whether a `{{__macro…}}` is left unresolved and is never sent or
   // handed to `parseSetStep` — the goal itself keeps its `{{…}}` (§5.5).
   'src/server/session-manager.ts': { why: 'step-text/authored', calls: 6 },
-  'src/skills/expander.ts': { why: 'step-text/guarded', calls: 4 },
+  'src/macros/expander.ts': { why: 'step-text/guarded', calls: 4 },
   'src/tools/executor.ts': { why: 'not-step-text', calls: 1 },
   // The Electron loop. Absent from the first version of this table, which is
   // its own small proof that a hand-written inventory needs a mechanical

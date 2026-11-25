@@ -9,7 +9,7 @@ import type { StepResult } from '../src/report/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { parseTestFile } from '../src/parser/markdown.js';
 import { parseFlowControlStep } from '../src/parser/flow-control-step.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import { executeStep } from '../src/runner/step-executor.js';
 import { buildStepCodePrompt, contentBlocksToText } from '../src/ai/prompts.js';
 import { buildFileReviewPrompt } from '../src/codebehind/review.js';
@@ -95,7 +95,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   settles.calls.length = 0;
   settles.order.length = 0;
   dir = path.join(tmpBase, `t${counter++}`);

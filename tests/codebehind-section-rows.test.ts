@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import type { Page, BrowserContext, Browser } from 'playwright';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import { buildCodeBehindRegistry, type CodeBehindBinding } from '../src/codebehind/loader.js';
 import { runCodeBehindEntry } from '../src/codebehind/execute.js';
 import { stepParameters } from '../src/codebehind/generate.js';
@@ -14,12 +14,12 @@ import type { CodeBehindContext } from '../src/codebehind/types.js';
  * Code-behind inside a LOOPED section (stories/data-driven-rows.md, part B).
  *
  * One entry is generated per section body and reused by every iteration, the
- * way one entry serves every invocation of a skill. What makes that possible
+ * way one entry serves every invocation of a macro. What makes that possible
  * is the frame: each iteration carries its row as `inputs`, so the generated
  * code keeps saying `step.getVar('file')` and the runtime answers with that
  * iteration's cell.
  *
- * Before this, `varScopeFor` walked to the nearest *skill* frame and gave a
+ * Before this, `varScopeFor` walked to the nearest *macro* frame and gave a
  * plain section an empty scope — so a looped body's `{{file}}` reached the
  * generator with no name→value pair at all, the entry would inline row 1's
  * literal with the leak guard blind, and replay would read `undefined`.
@@ -39,7 +39,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   dir = path.join(tmpBase!, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });
@@ -57,7 +57,7 @@ async function write(rel: string, contents: string): Promise<string> {
 
 async function bindingsFor(testMd: string): Promise<CodeBehindBinding[]> {
   const testPath = await write('t.md', testMd);
-  const parsed = await parseTestFile(testPath, { skillsDir: path.join(dir, 'skills') });
+  const parsed = await parseTestFile(testPath, { macrosDir: path.join(dir, 'macros') });
   const registry = await buildCodeBehindRegistry(
     {
       steps: parsed.steps,
@@ -205,18 +205,18 @@ describe('composing along the frame chain', () => {
     expect(values).toEqual(['inner']);
   });
 
-  it('keeps a skill namespace while still seeing the enclosing row', async () => {
+  it('keeps a macro namespace while still seeing the enclosing row', async () => {
     // The two halves of the scope answer different questions: `renames` come
-    // from the nearest skill instance alone, `inputs` from every enclosing
-    // frame. A step inside a skill called from a looped body needs both.
+    // from the nearest macro instance alone, `inputs` from every enclosing
+    // frame. A step inside a macro called from a looped body needs both.
     await write(
-      'skills/handle.md',
+      'macros/handle.md',
       [
-        '---', 'type: skill', '---', '# handle', '',
+        '---', 'type: macro', '---', '# handle', '',
         '## Parameters', '- what: the thing', '',
         '## Steps',
         // `scratch` is written before it is read, which is what makes the
-        // expander treat it as skill-internal and namespace it.
+        // expander treat it as macro-internal and namespace it.
         '1. Note a value [store as: scratch]',
         '2. Handle {{what}} and reuse {{scratch}}',
       ].join('\n'),
@@ -230,27 +230,27 @@ describe('composing along the frame chain', () => {
 | thing |
 |-------|
 | alpha |
-1. [skill: handle what="{{thing}}"]
+1. [macro: handle what="{{thing}}"]
 `);
     expect(bindings).toHaveLength(2);
     // Read the namespaced name off the binding rather than guessing it: the
-    // `__skill<N>_` counter is shared with the section frames, so hard-coding
+    // `__macro<N>_` counter is shared with the section frames, so hard-coding
     // it would be testing the sequence number, not the composition.
     const namespaced = bindings[1]!.scope.renames['scratch'];
-    expect(namespaced, 'the skill frame must still supply its renames').toBeDefined();
+    expect(namespaced, 'the macro frame must still supply its renames').toBeDefined();
 
     const seen: Record<string, string | undefined> = {};
-    await runEntry(bindings[1]!, { [namespaced!]: 'from-skill-scope' }, ({ step }) => {
-      // The skill's own parameter, and the enclosing loop's row.
+    await runEntry(bindings[1]!, { [namespaced!]: 'from-macro-scope' }, ({ step }) => {
+      // The macro's own parameter, and the enclosing loop's row.
       seen.what = step.getVar('what');
       seen.thing = step.getVar('thing');
-      // The namespaced internal still resolves through the skill's renames.
+      // The namespaced internal still resolves through the macro's renames.
       seen.scratch = step.getVar('scratch');
     });
     expect(seen).toEqual({
       what: 'alpha',
       thing: 'alpha',
-      scratch: 'from-skill-scope',
+      scratch: 'from-macro-scope',
     });
   });
 

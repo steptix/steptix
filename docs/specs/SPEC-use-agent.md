@@ -376,7 +376,7 @@ measure them.
 
 In a scope, every **plain** step runs as an agent step, its text the goal,
 with the endings of §5.3. Lines the parser already claims keep their meaning
-and are never agent steps: `Set`, `[tool: …]`, `[use ai]`, `[skill: …]`,
+and are never agent steps: `Set`, `[tool: …]`, `[use ai]`, `[macro: …]`,
 `[input: …]`, `[interactive]`, `[use computer]` / `[use browser]`,
 control-flow lines, and section calls. `[no-agent]` opts out one plain step.
 
@@ -388,7 +388,7 @@ ordinary `Verify` is marked `[no-agent]`, as §4.9 does, and the docs say so.
 frontmatter, never from the caller. An ordinary section called from an
 agent-scoped main flow runs its steps as ordinary steps, and an agent-scoped
 section called from an ordinary flow runs its steps as agent steps. A
-`[skill: …]` file is a file of its own: its frontmatter decides, and the
+`[macro: …]` file is a file of its own: its frontmatter decides, and the
 caller's does not carry in. So a reader can tell which steps are agent
 steps from the file alone, and the editor can paint them before a run.
 
@@ -605,8 +605,8 @@ container or VM.
 
 Instructions in the open [Agent Skills](https://agentskills.io) format: a
 folder with a `SKILL.md` whose frontmatter has `name` and `description`.
-These are not Steptix skills — the step macros in `skillsDir` that a test
-calls with `[skill: …]` — and they live in their own folder,
+These are not Steptix macros — the step files in `tests.macrosDir` that a test
+calls with `[macro: …]` — and they live in their own folder,
 `agent.skillsDir`, default `.agents/skills` under the project.
 
 - **Project only.** Never `~/.agents`, `~/.claude` or anywhere else on the
@@ -906,7 +906,7 @@ unless code saves it. That is its own change, and comes first.
   not a block's first step refused; `[no-agent]` in and out of a scope, in
   both orders with `[no-hooks]`; the lexical rule both ways (ordinary section
   called from an agent scope, agent section called from an ordinary flow); a
-  `[skill: …]` file not inheriting; claimed lines never becoming agent steps;
+  `[macro: …]` file not inheriting; claimed lines never becoming agent steps;
   the editor's marks and the report's labels agreeing for the same file.
 - **Unit, the journeys the review found** (§15 has the review):
   - *Scope on every path (§5.7):* each entry point in the list sends the same
@@ -963,7 +963,7 @@ unless code saves it. That is its own change, and comes first.
 - MCP servers.
 - Saving a script the agent wrote as a project tool, so later runs replay it
   without the model.
-- Letting the agent call Steptix skills (`[skill: …]` macros).
+- Letting the agent call Steptix macros (`[macro: …]`).
 - Limiting which tools and skills one test may use.
 - Native tool calling where a provider has it.
 

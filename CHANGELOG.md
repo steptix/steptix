@@ -11,6 +11,42 @@ carried a `-beta.N` suffix.
 
 ## Unreleased
 
+### Changed — skills are macros
+
+Steptix's own reusable step files are called **macros** now, so the word
+"skills" is left to Agent Skills (`SKILL.md`), a different feature with its
+own standard. The old names are gone, not deprecated:
+
+| Was | Is |
+|---|---|
+| `[skill: name arg="…"]`, `[skill name]` | `[macro: name arg="…"]`, `[macro name]` |
+| `type: skill` | `type: macro` |
+| `tests.skillsDir`, default `./skills` | `tests.macrosDir`, default `./macros` |
+| the report's `skill:` chip | `macro:` |
+| `skillsDir` in a Sessions API step request | `macrosDir` |
+| `steptix.runSkillStepsOnStoppedSession` | `steptix.runMacroStepsOnStoppedSession` |
+| MCP's `frameKind: 'skill'` | `frameKind: 'macro'` |
+
+A step that still says `[skill: …]` is no longer a call: on its own it is
+refused as an unknown bracket, whose message lists `[macro: name]`, and after
+other text it is prose for the model. To move a project:
+rename the folder, the config key, `type: skill` and every `[skill:` (see
+[SPEC-macros.md](docs/specs/SPEC-macros.md) §4).
+
+The VS Code extension now finds the default `macros/` and `tools/src`
+folders beside `steptix.config.json` when the config doesn't name them, as
+the CLI and MCP already did. Before, a project relying on the defaults sent
+no folder from the editor. On the page surface its `[macro:]` lines went to
+the model as prose, and completion and Go to Definition found nothing
+(SPEC-macros.md §6).
+
+A `[macro: …]` line nothing expanded, or a `[tool: …]` line with no tools
+loaded, now fails unrun on the page surface too, as it already did in
+computer mode. It used to go to the model as prose, so the step could pass
+without the macro or tool ever running. The message says which folder
+Steptix was not given and how to supply it (SPEC-macros.md §7). The
+computer-mode message is reworded the same way.
+
 ### Added — accessibility snapshots are the default
 
 - **The model is shown an accessibility snapshot, and names the element by

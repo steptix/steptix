@@ -140,7 +140,7 @@ function hooks(over: Partial<Record<Scope, string[]>> = {}): ResolvedHooks {
     ...scopes,
     hasAny: Object.values(scopes).some((lines) => lines.length > 0),
     toolCalls: slots() as ResolvedHooks['toolCalls'],
-    sourceSkills: slots() as ResolvedHooks['sourceSkills'],
+    sourceMacros: slots() as ResolvedHooks['sourceMacros'],
   };
 }
 
@@ -156,7 +156,7 @@ function config(): Config {
 async function instanceOf(
   markdown: string,
   name = 'use-ai.md',
-  options: { skillsDir?: string } = {},
+  options: { macrosDir?: string } = {},
 ): Promise<TestInstance> {
   const filePath = path.join(dir, name);
   await fs.writeFile(filePath, markdown);
@@ -376,20 +376,20 @@ describe('a secret the expander wrote into the step text (issue 060)', () => {
     expect(everything).not.toContain('cli-row-SECRET-2');
   });
 
-  it('masks a skill argument, and an echo fails the step', async () => {
-    const skillsDir = path.join(dir, 'skills');
-    await fs.mkdir(skillsDir, { recursive: true });
+  it('masks a macro argument, and an echo fails the step', async () => {
+    const macrosDir = path.join(dir, 'macros');
+    await fs.mkdir(macrosDir, { recursive: true });
     await fs.writeFile(
-      path.join(skillsDir, 'echo.md'),
+      path.join(macrosDir, 'echo.md'),
       [
-        '---', 'type: skill', '---', '# echo', '',
+        '---', 'type: macro', '---', '# echo', '',
         '## Parameters', '- password: the value to repeat', '',
         '## Steps', '1. [use ai] Repeat {{password}} exactly [store as: copy]', '',
       ].join('\n'),
     );
     model.echo = true;
-    const instance = await instanceOf(stepsDoc('[skill: echo password="cli-skill-SECRET"]'), 'skill.md', {
-      skillsDir,
+    const instance = await instanceOf(stepsDoc('[macro: echo password="cli-macro-SECRET"]'), 'macro.md', {
+      macrosDir,
     });
     const { value: report, lines } = await logged(() => runTest(instance, config()));
 
@@ -398,7 +398,7 @@ describe('a secret the expander wrote into the step text (issue 060)', () => {
     expect(model.requests[0]![0]!.content).toContain(SENTENCE);
     expect(report.status).toBe('failed');
     expect(report.steps[0]!.error).toContain(IN_TEXT);
-    expect(lines + JSON.stringify(report) + JSON.stringify(model.requests)).not.toContain('cli-skill-SECRET');
+    expect(lines + JSON.stringify(report) + JSON.stringify(model.requests)).not.toContain('cli-macro-SECRET');
   });
 });
 

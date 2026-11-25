@@ -221,7 +221,7 @@ describe('recordedCapturesOf', () => {
     expect(recordedCapturesOf(bindingFor(READ), undefined)).toBeUndefined();
   });
 
-  it('reads a skill body capture through its rename', () => {
+  it('reads a macro body capture through its rename', () => {
     const binding = bindingFor('Read the total [store as: total]', {
       scope: { renames: { total: 'grand_total' }, inputs: {} },
     });

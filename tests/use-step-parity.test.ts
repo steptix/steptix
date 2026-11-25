@@ -84,7 +84,7 @@ const CORPUS = [
   // A NON-BREAKING space, which `\s` matches and `[ \t]` does not. This is the
   // one line that distinguishes the separator class either side could widen
   // by accident — `invocationTokenPattern` argues the same point for
-  // `[skill<NBSP>login]`, and nothing else in the corpus would say.
+  // `[macro<NBSP>login]`, and nothing else in the corpus would say.
   '[use\u00a0computer]',
   '[no-hooks] [use computer]',
   '[NO-HOOKS][use browser]',
@@ -120,7 +120,7 @@ const CORPUS = [
   'Click the Save button',
   'Verify the [use of cookies] banner is shown',
   'Read the terms on [use browser] and confirm',
-  '[skill: login]',
+  '[macro: login]',
   '[tool: echo value="hi"]',
   '[input: pin] Enter your PIN',
   '[interactive]',
@@ -290,19 +290,19 @@ describe('src/parser/whole-step-bracket.ts and its runner-core mirror agree', ()
     '[computer-use]',
     '[desktop mode]',
     '[use the computer]',
-    '[skill]',
+    '[macro]',
     '[tool]',
     '[input]',
     '[interactve]',
     '[INTERACTIVE]',
-    '[skil: login]',
+    '[macr: login]',
     '[output: total]',
     '[store as: total]',
     '[as: total]',
     '[no-hooks]',
     '[a] [b]',
     '[tool: fetch arr=["a","b"]]',
-    '[skillful] navigation is expected',
+    '[macroscopic] navigation is expected',
     'Verify the [optional] banner',
     '[]',
     '[ ]',

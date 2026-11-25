@@ -6,7 +6,7 @@ import type { ChatMessage } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import type { StepResult } from '../src/report/types.js';
 import {
   compileTest,
@@ -45,7 +45,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });
@@ -1282,11 +1282,11 @@ export default defineSteps([
   });
 });
 
-describe('compileTest — skills span several files', () => {
-  it('writes a skill body\'s entry into the skill\'s own .steps.ts', async () => {
-    await write('skills/login.md', [
+describe('compileTest — macros span several files', () => {
+  it('writes a macro body\'s entry into the macro\'s own .steps.ts', async () => {
+    await write('macros/login.md', [
       '---',
-      'type: skill',
+      'type: macro',
       '---',
       '# Login',
       '',
@@ -1297,10 +1297,10 @@ describe('compileTest — skills span several files', () => {
       '# Booking',
       '',
       '## Steps',
-      '1. [skill: login]',
+      '1. [macro: login]',
       '2. Enter the booking code',
     ].join('\n'));
-    const test = await parseTestFile(md, { skillsDir: path.join(dir, 'skills') });
+    const test = await parseTestFile(md, { macrosDir: path.join(dir, 'macros') });
     expect(test.steps).toHaveLength(2);
 
     const { client } = scriptedClient([
@@ -1317,14 +1317,14 @@ describe('compileTest — skills span several files', () => {
 
     expect(result.status).toBe('green');
     expect(Object.keys(result.files).sort()).toEqual([
-      path.join(dir, 'skills', 'login.steps.ts'),
+      path.join(dir, 'macros', 'login.steps.ts'),
       path.join(dir, 'tests', 'booking.steps.ts'),
     ].sort());
     // Both files were offered to the replay as candidates.
     expect(Object.keys(requests[1]!.candidateFiles ?? {})).toHaveLength(2);
-    const skillFile = await fs.readFile(path.join(dir, 'skills', 'login.steps.ts'), 'utf-8');
-    expect(skillFile).toContain('code-behind for login.md');
-    expect(skillFile).toContain('Click the sign-in button');
+    const macroFile = await fs.readFile(path.join(dir, 'macros', 'login.steps.ts'), 'utf-8');
+    expect(macroFile).toContain('code-behind for login.md');
+    expect(macroFile).toContain('Click the sign-in button');
   });
 });
 

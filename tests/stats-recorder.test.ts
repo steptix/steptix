@@ -549,16 +549,16 @@ describe('stepToLines', () => {
     for (const line of stepToLines(result, CTX, META)) expect(line).not.toHaveProperty('card');
   });
 
-  it('a skill body’s step text is recorded as authored: the __skill<N>_ renames come off, and masking still applies', () => {
+  it('a macro body’s step text is recorded as authored: the __macro<N>_ renames come off, and masking still applies', () => {
     const result = stepResult({ turns: [turn([subAction({ action: 'type', selector: '#code' })])] });
     const lines = stepToLines(result, { ...CTX, maskValues: ['s3cret'] }, {
       ...META,
-      stepText: 'Type {{__skill1_code}} for s3cret, then read the total [store as: __skill2___skill1_total]',
+      stepText: 'Type {{__macro1_code}} for s3cret, then read the total [store as: __macro2___macro1_total]',
     });
     expect(stepOf(lines).stepText).toBe('Type {{code}} for ***, then read the total [store as: total]');
     // Only the prefix the expander adds, and only in a placeholder.
-    const plain = stepToLines(result, CTX, { ...META, stepText: 'Find __skill1_x in {{ __skill3_order.id }}' });
-    expect(stepOf(plain).stepText).toBe('Find __skill1_x in {{ order.id }}');
+    const plain = stepToLines(result, CTX, { ...META, stepText: 'Find __macro1_x in {{ __macro3_order.id }}' });
+    expect(stepOf(plain).stepText).toBe('Find __macro1_x in {{ order.id }}');
   });
 
   it('a wait on an element records its selector and form from `condition` (prompt rule 12)', () => {

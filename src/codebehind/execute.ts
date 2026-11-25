@@ -582,9 +582,9 @@ interface StepApiRuntime {
 /**
  * The frame-aware variable view.
  *
- * Generated code is written **once per skill**, not per invocation, so it uses
+ * Generated code is written **once per macro**, not per invocation, so it uses
  * the name the author wrote (`username`). The expander rewrote *this*
- * invocation's step text to `__skill<N>_username` — or to a caller's output
+ * invocation's step text to `__macro<N>_username` — or to a caller's output
  * alias — and it interpolated declared parameters straight into the text,
  * where they exist under no runtime name at all. So a read resolves in three
  * steps and a write in one:
@@ -592,8 +592,8 @@ interface StepApiRuntime {
  *  1. the frame's rename table (internal names + output aliases),
  *  2. the frame's captured inputs (declared parameters),
  *  3. for a DOTTED name whose root the frame renames, the same name with its
- *     ROOT renamed (`order.id` → `__skill3_order.id`: a `For each {{order}}`
- *     inside a skill body binds the scoped keys) — and, like step 1, that
+ *     ROOT renamed (`order.id` → `__macro3_order.id`: a `For each {{order}}`
+ *     inside a macro body binds the scoped keys) — and, like step 1, that
  *     answer is final,
  *  4. the bare name,
  *  5. the environment: `data.url`, `env.BASE_URL`, `<source>.path`,
@@ -603,7 +603,7 @@ interface StepApiRuntime {
  *     the markdown; a run with no environment answers `undefined`.
  *
  * Steps at the top level, or in a section that is neither looped nor inside a
- * skill, have an empty scope, so the first four collapse to "the bare name"
+ * macro, have an empty scope, so the first four collapse to "the bare name"
  * and this behaves exactly like the tool executor's `step`.
  *
  * A step inside a LOOPED section does have a scope: its iteration's row
@@ -659,14 +659,14 @@ function makeStepApi(
         return interpolateEnvData(value, envData);
       }
       // A DOTTED name whose root the frame renames — `order.id` inside a
-      // skill body whose `For each {{order}}` the expander rewrote to
-      // `{{__skill3_order}}`. The pass bound `__skill3_order.id`, so without
+      // macro body whose `For each {{order}}` the expander rewrote to
+      // `{{__macro3_order}}`. The pass bound `__macro3_order.id`, so without
       // this the entry answered `undefined` on exactly the step the loop exists
       // to vary (stories/codebehind-loops-and-conditions.md, "The entry,
       // loading and running it").
       //
       // BEFORE the bare name, and final like the flat rename above: the frame
-      // renames `order`, so `order.id` in this frame IS `__skill3_order.id`.
+      // renames `order`, so `order.id` in this frame IS `__macro3_order.id`.
       // Asked after the bare map, an outer `For each {{order}}` — current, or
       // left behind by an earlier loop — answered with the OUTER item's id
       // while `getVar('order')` answered with the inner item: one step reading

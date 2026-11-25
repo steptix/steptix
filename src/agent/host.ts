@@ -13,7 +13,7 @@ import path from 'node:path';
 import type { Page } from 'playwright';
 import type { AgentConfig } from '../config/types.js';
 import type { AgentStepScope } from '../report/types.js';
-import type { ExpandedFrame, ExpandedStepOrigin } from '../skills/expander.js';
+import type { ExpandedFrame, ExpandedStepOrigin } from '../macros/expander.js';
 import { agentScopeOf, isClaimedStepLine } from '../parser/agent-scope.js';
 import { scanStepSpans } from '../parser/markdown.js';
 import { agentWireScopeOf } from './wire-scope.js';
@@ -65,7 +65,7 @@ export interface BatchAgentScopes {
  *   `agent.steps`).
  * - A section of the test file: `agent.file`, or the section's body, sent in
  *   `sections`, opening with a bare `[use agent]`.
- * - A skill's step, or a section of a skill: the skill FILE decides,
+ * - A macro's step, or a section of a macro: the macro FILE decides,
  *   read from disk, since the expander read the same file (lexical scope).
  */
 export function agentScopesForBatch(input: {
@@ -144,20 +144,20 @@ export function agentScopesForBatch(input: {
         found = { reason: 'file' };
       }
     } else if (frame.kind === 'section' && sameFile(frame.uri, input.testFilePath)) {
-      if (sectionOpens(frame.skillName)) {
+      if (sectionOpens(frame.macroName)) {
         scoped = true;
-        found = { reason: 'section', ...(frame.skillName !== undefined && { section: frame.skillName }) };
+        found = { reason: 'section', ...(frame.macroName !== undefined && { section: frame.macroName }) };
       } else if (input.wire?.file) {
         scoped = true;
         found = { reason: 'file' };
       }
-    } else if (origin?.skillLine !== undefined) {
+    } else if (origin?.macroLine !== undefined) {
       const fileScope = scopeOfFile(frame.uri);
-      const hit = fileScope?.steps.find((s) => s.line === origin.skillLine);
+      const hit = fileScope?.steps.find((s) => s.line === origin.macroLine);
       if (hit && hit.reason !== 'prefix') {
         scoped = true;
         found = { reason: hit.reason, ...(hit.section !== undefined && { section: hit.section }) };
-      } else if (fileScope?.optedOut.includes(origin.skillLine)) {
+      } else if (fileScope?.optedOut.includes(origin.macroLine)) {
         scoped = true;
       }
     }

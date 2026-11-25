@@ -24,6 +24,17 @@ So commands here don't hardcode where the checkout lives: they write it as
 (git worktree list --porcelain)[0] -replace '^worktree ', ''
 ```
 
+### Macros were called skills
+
+Steptix's own reusable step files are **macros**: `[macro: name]`,
+`type: macro`, `tests.macrosDir`, `src/macros/`
+([SPEC-macros.md](docs/specs/SPEC-macros.md)). They were called skills, with
+no fallback left for the old names. Stories, issues, `ideas/`,
+`docs/unit-test-review/` and older CHANGELOG entries keep `[skill:]`,
+`skillsDir` and `src/skills/`; read them as macros there, and leave them as
+written. Never call a macro a skill in new code or docs: "skill" means Agent
+Skills (`SKILL.md`), a separate feature that keeps its standard's name.
+
 The GitHub repo is `steptix/steptix`. Links to `pkent/steptix` and
 `pkent/ai-ui-automation` in resolved issues, stories and older CHANGELOG
 entries, and `pkent/steptix-archive#N` in commit messages, lead to the

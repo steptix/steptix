@@ -354,8 +354,9 @@ export interface TestsConfig {
   dataDir: string;
   /** Directory containing context .md files */
   contextDir: string;
-  /** Directory containing skill .md files (reusable parameterised step macros) */
-  skillsDir: string;
+  /** Directory containing macro .md files — steps with parameters and outputs,
+   *  inlined wherever a step calls `[macro: name]`. Default `./macros`. */
+  macrosDir: string;
   /** Directory containing tool .ts/.js files (deterministic code callable from
    *  tests via `[tool: name ...]`). Files are auto-discovered at run start;
    *  each must default-export a `defineTool(...)` result. */

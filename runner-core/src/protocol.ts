@@ -31,9 +31,9 @@ export type StepStatus = 'passed' | 'failed' | 'error' | 'skipped';
  * step-into protocol (added in Phase 1 of the step-into work). Absent on
  * legacy servers — clients must tolerate missing `frame`.
  *
- * A frame is one execution scope: the top-level test, a `[skill: ...]`
- * invocation, or an inline `### Section` call. Frames nest when skills call
- * skills, when a section calls a section, and in either combination. `id` is
+ * A frame is one execution scope: the top-level test, a `[macro: ...]`
+ * invocation, or an inline `### Section` call. Frames nest when macros call
+ * macros, when a section calls a section, and in either combination. `id` is
  * unique per run and stable for the lifetime of the frame; `parentId` is null
  * for the test frame and the parent's id otherwise.
  *
@@ -47,34 +47,34 @@ export type StepStatus = 'passed' | 'failed' | 'error' | 'skipped';
 export interface FrameInfo {
   id: string;
   parentId: string | null;
-  kind: 'test' | 'skill' | 'section';
+  kind: 'test' | 'macro' | 'section';
   /**
    * Absolute **filesystem path** of the file this frame's steps live in —
    * despite the field's name, NOT a `file://` URI. Every producer passes a
-   * plain path (`skill.filePath`, `ctx.sectionsFilePath`, the synthesised
+   * plain path (`macro.filePath`, `ctx.sectionsFilePath`, the synthesised
    * test frame's `request.testFilePath`). A client turning it into a URI
    * must use the equivalent of `Uri.file`, never `Uri.parse`, which reads a
    * Windows drive letter as a scheme.
    *
    * For `kind === 'section'` that is the file that **defines** the section:
-   * the test file for a test-file section, the skill file for one declared
-   * inside a skill body.
+   * the test file for a test-file section, the macro file for one declared
+   * inside a macro body.
    */
   uri: string;
   /** 1-based line of the step in that file. */
   line: number;
   /**
-   * Set when `kind === 'skill'` — the skill name as authored — and when
+   * Set when `kind === 'macro'` — the macro name as authored — and when
    * `kind === 'section'`, where it carries the **section** name. For a
-   * section declared inside a skill, the enclosing skill's name is on the
-   * nearest ancestor frame with `kind === 'skill'`, not here.
+   * section declared inside a macro, the enclosing macro's name is on the
+   * nearest ancestor frame with `kind === 'macro'`, not here.
    */
-  skillName?: string;
+  macroName?: string;
   /**
    * 1-based position, in the section's own data table, of the row this frame
    * is running — present only on a looped section's frames
    * (stories/data-driven-rows.md part B). The server has stamped this on
-   * every such frame since part B landed (`src/skills/expander.ts` writes it,
+   * every such frame since part B landed (`src/macros/expander.ts` writes it,
    * `src/server/session-manager.ts` copies it onto the wire frame); it is
    * declared here so the client can *read* it.
    *
@@ -230,7 +230,7 @@ export interface StepFailEvent {
  * (stories/step-flow-control.md, decision 9).
  *
  * One per skipped step line, plus one per skipped nested CALL line — a
- * `### Section` or `[skill: ...]` invocation inside the returned body,
+ * `### Section` or `[macro: ...]` invocation inside the returned body,
  * addressed by that frame's `invocationLine` in its PARENT frame's file. The
  * call line is what the author sees in the editor and has no step of its own in
  * the expansion, so without an event of its own it would keep whatever glyph
@@ -266,7 +266,7 @@ export interface StepSkipEvent {
 
 /**
  * Emitted when execution enters a new frame — i.e. just before the first
- * step of a `[skill: ...]` invocation runs. Pairs 1:1 with a `frame:pop`.
+ * step of a `[macro: ...]` invocation runs. Pairs 1:1 with a `frame:pop`.
  */
 export interface FramePushEvent {
   type: 'frame:push';
@@ -275,7 +275,7 @@ export interface FramePushEvent {
 
 /**
  * Emitted when a frame finishes (its last step passed, or execution fell
- * off the end of the skill body). `outputs` carries the values the skill
+ * off the end of the macro body). `outputs` carries the values the macro
  * exposed back to the caller — aliased into the caller's variable scope.
  */
 export interface FramePopEvent {
@@ -363,7 +363,7 @@ export interface CaptureEvent {
   /**
    * Where this variable came from. Four values flow through this event:
    * `'capture'` (an `[output:]`/`[store as:]` extraction from the page),
-   * `'toolOutput'` (a `[tool:]`/`[skill:]` return), `'assignment'` (a
+   * `'toolOutput'` (a `[tool:]`/`[macro:]` return), `'assignment'` (a
    * `Set {{name}} to "…"` step — stories/variable-assignment.md) and
    * `'generated'` (a `[use ai] <step>`, whose value the model made up from
    * the step text alone — stories/use-ai-step.md).
@@ -411,11 +411,11 @@ export interface DoneEvent {
  *  - `continue` — run to the next breakpoint or end-of-batch. No
  *    between-step pauses.
  *  - `into` — pause unconditionally after each emitted step. Stepping
- *    "into" a `[skill: ...]` happens naturally: the next step the server
- *    pauses on is the first step of the skill body.
+ *    "into" a `[macro: ...]` happens naturally: the next step the server
+ *    pauses on is the first step of the macro body.
  *  - `over` — pause when the next step is at or shallower than the
  *    just-executed step's frame depth. Skips the entire body of any
- *    deeper skill invocation as a single atomic step.
+ *    deeper macro invocation as a single atomic step.
  *  - `out` — pause when the next step is strictly shallower than the
  *    just-executed step's frame depth. Runs to the end of the current
  *    frame. No-op at the test (root) frame.
@@ -507,7 +507,7 @@ export interface ToolAwaitingDebuggerEvent {
    *  Node debugger's source-map handling and to surface "we're stepping
    *  into <file>" in the UI overlay. */
   toolFilePath?: string;
-  /** 1-based source line of the `[tool: ...]` invocation in the test/skill
+  /** 1-based source line of the `[tool: ...]` invocation in the test/macro
    *  file. The yellow ▶ stays parked on this line while VS Code's Node
    *  debugger drives the user inside the tool body. */
   line: number;
@@ -531,7 +531,7 @@ export interface CodeBehindAwaitingDebuggerEvent {
   type: 'codebehind:awaiting-debugger';
   /** Absolute path of the `.steps.ts` whose entry is about to run. */
   file: string;
-  /** 1-based source line of the step in its test/skill file. The yellow ▶
+  /** 1-based source line of the step in its test/macro file. The yellow ▶
    *  stays parked here while the Node debugger drives the entry body. */
   line: number;
   /** Origin frame the step belongs to. */
@@ -741,8 +741,8 @@ export interface CompileSummary {
  *
  * `files` is the whole proposed content of each `.steps.ts`, not a patch — the
  * client renders it as the right-hand side of a diff and writes it on Apply.
- * Several files when the test invokes skills, whose entries compile into the
- * skill's own file.
+ * Several files when the test invokes macros, whose entries compile into the
+ * macro's own file.
  */
 export interface CompileResultEvent {
   type: 'compile:result';
@@ -1631,25 +1631,25 @@ export interface HostServerSetupMsg {
 }
 
 /**
- * Offer (or withdraw) the "re-run this skill step with its variables" action
+ * Offer (or withdraw) the "re-run this macro step with its variables" action
  * in the Variables panel. Sent with a non-null `failure` when a step inside a
- * top-level skill fails and its session is still live; the webview shows the
+ * top-level macro fails and its session is still live; the webview shows the
  * captured scope with editable capture rows and a "Re-run from failed step"
  * button. `failure: null` withdraws it. The webview also withdraws it on the
  * next `running: true` (a new run invalidates the parked failure's scope).
  */
-export interface HostSkillRerunAvailableMsg {
-  type: 'skillRerunAvailable';
+export interface HostMacroRerunAvailableMsg {
+  type: 'macroRerunAvailable';
   failure: {
     /** Owning test document URI (as a string). Echoed back in the re-run
      *  message so the host targets THIS test's controller — critical when two
-     *  tests share a skill and both have a parked failure. */
+     *  tests share a macro and both have a parked failure. */
     testUri: string;
-    /** Skill name, for the panel heading. */
-    skillName: string;
-    /** Captured scope to seed, already stripped of `__skill*` internals. */
+    /** Macro name, for the panel heading. */
+    macroName: string;
+    /** Captured scope to seed, already stripped of `__macro*` internals. */
     scope: Record<string, string>;
-    /** Names within `scope` that are the skill's input parameters — read-only
+    /** Names within `scope` that are the macro's input parameters — read-only
      *  in v1 (baked into step text at expansion). Everything else is an
      *  editable captured/runtime var. */
     paramNames: string[];
@@ -1766,7 +1766,7 @@ export type HostToWebviewMsg =
   | HostBreakpointStopMsg
   | HostBatchBannerMsg
   | HostServerSetupMsg
-  | HostSkillRerunAvailableMsg
+  | HostMacroRerunAvailableMsg
   | HostCompileEventMsg
   | HostCompileProgressMsg
   | HostCompileRunEventMsg
@@ -1934,13 +1934,13 @@ export interface WebviewStateMsg {
 /**
  * User clicked "Re-run from failed step" in the Variables panel. `edits` are
  * the (caller-visible) captured-var values the user changed; the host overlays
- * them on the captured scope and re-runs the failed skill from the failed step
- * to the end of the skill on the live session. Param / `__skill*` names are
+ * them on the captured scope and re-runs the failed macro from the failed step
+ * to the end of the macro on the live session. Param / `__macro*` names are
  * never included (params are read-only in v1; internals aren't editable).
  */
-export interface WebviewRerunSkillStepMsg {
-  type: 'rerunSkillStep';
-  /** Owning test document URI (echoed from `skillRerunAvailable`) so the host
+export interface WebviewRerunMacroStepMsg {
+  type: 'rerunMacroStep';
+  /** Owning test document URI (echoed from `macroRerunAvailable`) so the host
    *  re-runs the right test when more than one has a parked failure. */
   testUri: string;
   edits: Record<string, string>;
@@ -2086,7 +2086,7 @@ export type WebviewToHostMsg =
   | WebviewCopyVariableMsg
   | WebviewExportVariablesMsg
   | WebviewStateMsg
-  | WebviewRerunSkillStepMsg;
+  | WebviewRerunMacroStepMsg;
 
 // ---------------------------------------------------------------------------
 // Narrowing helpers
@@ -2117,7 +2117,7 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'copyVariable' ||
     t === 'exportVariables' ||
     t === 'webviewState' ||
-    t === 'rerunSkillStep' ||
+    t === 'rerunMacroStep' ||
     t === 'compile' ||
     // Record Steps (stories/steptix-record-steps.md). `runner-view.ts` drops
     // anything this guard rejects, so a panel button whose type is missing

@@ -4,7 +4,7 @@ This file is meant to be pasted into the context of an AI that writes tests for
 **steptix** (the `steptix` CLI, the Steptix VS Code extension, and the
 MCP server all run the same test files). It explains how the framework reads a
 test, which phrasings map to real browser actions, and how to reuse work
-through skills and tools. Every statement was checked against the source on
+through macros and tools. Every statement was checked against the source on
 2026-09-21; the last section says where to look when the framework moves on.
 
 The companion [ai-test-authoring-guide.md](ai-test-authoring-guide.md) is the
@@ -25,7 +25,7 @@ than performed by a model:
 - `[use ai] <step>` asks the model for a value and stores it (§3.2). The
   model sees the step text and nothing else — no page, no earlier steps, no
   date — and is asked again on every run.
-- `[skill: name …]` inlines a reusable step sequence from another file.
+- `[macro: name …]` inlines a reusable step sequence from another file.
 - `[tool: name …]` runs a TypeScript function.
 - `[use computer]` / `[use browser]` switch which *surface* the following
   steps run on — the whole screen, or the page (§3.10).
@@ -153,7 +153,7 @@ The account menu is the avatar in the top right corner, `#user-menu`.
 | `## Context` | Free text the AI is given with every step of this test. See below. |
 | `## Steps` | The instructions. The heading must be exactly this; `## Steps (happy path)` yields a test with no steps. |
 | `## Hooks` | Setup and teardown lines (CLI runner only, see §8). |
-| `## Outputs` | Skill files only: the variables a skill hands back. |
+| `## Outputs` | Macro files only: the variables a macro hands back. |
 
 Any other `##` heading, and everything under it, is ignored. That makes extra
 prose sections safe and makes a misspelled `## Step` heading a silent failure.
@@ -222,7 +222,7 @@ not substituted.
 
 Exactly six keys survive parsing: `tags` (a list, or a comma-separated
 string), `timeout`, `env`, `dataFile`, `dataSources` (a mapping), and `type`
-(`skill` or `test`). Steptix additionally honours `disabled: true`, which
+(`macro` or `test`). Steptix additionally honours `disabled: true`, which
 hides the file from its test list. Write `timeout: 90s` as a string; a bare
 YAML number is dropped without a warning.
 
@@ -516,10 +516,10 @@ wrote fails the step, because no later step can be relying on it. That check
 rules out invented names, not unnamed steps: a step that never says what to
 call its value can be stored under any word of its sentence (`Write a paragraph
 about Australia` may become `{{paragraph}}`), so always name it. Inside a
-skill the name must be `[store as: name]` or `store as {{name}}`, which the
-skill's scoping renames per call. A secret-named value filled into the step
+macro the name must be `[store as: name]` or `store as {{name}}`, which the
+macro's scoping renames per call. A secret-named value filled into the step
 reaches the model as `***`, exactly as in the `## Values` block (§4.4), and so
-does a secret that a skill argument or a looped section's row writes into the
+does a secret that a macro argument or a looped section's row writes into the
 step's text, so a step cannot compute from a secret. It fails instead of
 guessing: the model is told `***` is a value hidden from it, and an answer that
 still contains the mask, however it is spelled (`* * *`, `\*\*\*`), is refused.
@@ -672,7 +672,7 @@ the case this shape gets wrong. If you meant alternatives, say so with
 `Else if …, then …` (§3.5); if you meant two independent checks, separate them
 with an ordinary step so they form two groups.
 
-Keep watch bodies to ordinary page instructions. A `[tool:]`, `[skill:]` or
+Keep watch bodies to ordinary page instructions. A `[tool:]`, `[macro:]` or
 section name inside a watch clause is not conditional dispatch: the whole line
 is prose, and the model performs what it can of it. Adding `then` is what turns
 the line into a decision the framework dispatches (§3.5). A `Set` step, any
@@ -699,7 +699,7 @@ one step to run:
 | `Repeat Click Load more until the Load more button is gone, up to 20 times` | Run the tail, then ask. One or more passes. |
 | `For each {{account}} in {{accounts}}, Check the account` | One pass per element of the list, with `{{account}}` bound to it. |
 
-The tail is one step **of any kind**: a `### Section` name, a `[skill: …]`, a
+The tail is one step **of any kind**: a `### Section` name, a `[macro: …]`, a
 `[tool: …]`, a `Set {{x}} to "…"`, or a plain page instruction. A body of more
 than one step is a section, exactly as it is for reuse (§5), and nesting a
 decision inside a branch means putting the inner decision in a section too.
@@ -886,7 +886,7 @@ Running versions of all of it are shipped:
 ### 3.6 Leaving a flow early
 
 A step that ends `then return` or `then stop` ends the flow it is in, as a
-pass. The rest of a `### Section` body, the rest of a skill body, or the rest
+pass. The rest of a `### Section` body, the rest of a macro body, or the rest
 of the test when the step is in the main flow. The steps it leaves behind are
 marked skipped with a reason, and the run carries on after the flow that
 ended. The condition is read the way an `If …` step's is: one that asks about
@@ -915,7 +915,7 @@ and the caller continues at the step after the call. The call line passes both
 times.
 
 The number is the step's position in the **expanded** test — sections and
-skills flattened into one list — which is what the report rows and the run log
+macros flattened into one list — which is what the report rows and the run log
 count by, so a reason and a log line can be read side by side. It is not a line
 you can find in the editor, which is why the returning step's own text comes
 with it, clipped to 80 characters. That half you can search for anywhere.
@@ -1103,11 +1103,11 @@ The details:
   run either.
 - A tail is read on prose steps only, and the four lines that do not take one
   each say so differently:
-  - A `[tool: …]` or `[skill: …]` step is **refused by name** when you write a
+  - A `[tool: …]` or `[macro: …]` step is **refused by name** when you write a
     tail on it — *a [tool:] step does not take an "otherwise" tail* — because
     both have a grammar of their own that the tail is not threaded through, and
     a tail that was parsed and then ignored is worse than a refusal. For a
-    skill, put the tail on a step inside the skill. For a tool there is nowhere
+    macro, put the tail on a step inside the macro. For a tool there is nowhere
     to put it — wrapping the call in a section does not help, because the
     wrapper is matched by the exact text of the calling line and a tail on that
     line stops it calling the section (the `### Section` bullet below) — so write
@@ -1548,7 +1548,7 @@ it is pixels on the screen like everything else.
 Each directive is the **whole step**: a line that is nothing but the bracket,
 with no sentence after it. `[use computer] and click Save` is a parse error,
 not two steps. Re-entering the mode you are already in is a no-op, so a
-section or skill may open with `[use computer]` defensively. A skill call
+section or macro may open with `[use computer]` defensively. A macro call
 restores the caller's surface when it returns; an inline section does not —
 which is how you write a desktop excursion once and call it by name.
 
@@ -1618,7 +1618,7 @@ the answer, with no browser launched at all.
 
 `## Parameters`, the current data-table row (which overrides a same-named
 parameter), captures from earlier steps, `Set` assignments, `[use ai]` values
-(§3.2), tool and skill outputs, `[input:]` answers, and the bindings a
+(§3.2), tool and macro outputs, `[input:]` answers, and the bindings a
 `For each` pass makes (§3.5, §3.8) all write into one variable map, and the
 latest write wins. All values are strings; lists are JSON text.
 
@@ -1658,8 +1658,8 @@ The right-hand side is always one double-quoted string with no double quote
 inside it and nothing after the closing quote. Every `{{name}}`, `${env.X}`
 and `${data.x}` inside it is substituted; nothing is evaluated, so `"{{n}} +
 1"` stores those characters. `Set the filter to Recent` names no variable and
-is an ordinary AI step. Inside a skill, `Set` may target an `## Outputs` name
-or a private name but never one of the skill's own parameters; inside a
+is an ordinary AI step. Inside a macro, `Set` may target an `## Outputs` name
+or a private name but never one of the macro's own parameters; inside a
 looped section it may not target a column.
 
 ### 4.3 Environment values
@@ -1697,7 +1697,7 @@ the executor substitutes it when acting. Never write `***` as a value
 yourself; the framework refuses an action containing it. If a non-secret name
 is caught by the rule, list it under `unmask` in `## Config`. The hatch
 governs what is shown *live* — the `## Values` block the model reads, and
-Steptix's Variables view, Variables panel and skill re-run rows — and
+Steptix's Variables view, Variables panel and macro re-run rows — and
 deliberately nothing that is written to a file: the report, the run log and
 the console line still star an unmasked name, so an `unmask` line can never
 put a real credential into an artefact you send someone. Two smaller surfaces
@@ -1804,7 +1804,7 @@ tags: [rows]
 
 Rules: headers are identifiers and unique, every row has every cell, at least
 one data row, no `{{` inside a cell, no second table, no table together with
-`dataFile`, and no table in a skill's own `## Steps`. Put the successful row
+`dataFile`, and no table in a macro's own `## Steps`. Put the successful row
 first: a compiled run records row one, and an empty cell in the recorded row
 cannot stand in for the parameter.
 
@@ -1865,7 +1865,7 @@ File `tests/search-products.md`:
 
 - Matching is on the trimmed text, case-insensitively, against the raw line:
   `search each product` calls it, `**Search each product**` and `Search each
-  product.` do not. A `[skill:]`, `[tool:]`, `[input:]` or `[interactive]`
+  product.` do not. A `[macro:]`, `[tool:]`, `[input:]` or `[interactive]`
   line is never a section call.
 - A table under a section heading loops the section body once per row in the
   same browser, page state preserved between rows.
@@ -1873,24 +1873,24 @@ File `tests/search-products.md`:
   is ticked, then Pay with cash` — and that counts as a use, so a section only
   ever named in tails is live, not dead.
 - Sections share the test's variables and have no parameters or outputs. A
-  section may call other sections and skills. Cycles are refused.
+  section may call other sections and macros. Cycles are refused.
 - Names may contain spaces. `Steps`, `Config`, `Parameters`, `Outputs` and
   `Hooks` are reserved. An empty section that is called is an error.
 - A `####` heading inside `## Steps` makes the numbered lines under it inert,
   with a warning.
 
-## 6. Skills: reuse across files
+## 6. Macros: reuse across files
 
-A skill is a Markdown file under the project's `skills/` directory (the
-`tests.skillsDir` setting) with its own parameters and outputs. It expands
+A macro is a Markdown file under the project's `macros/` directory (the
+`tests.macrosDir` setting) with its own parameters and outputs. It expands
 inline before the run, so the report and the debugger show its steps as if
 they were written in the caller.
 
-File `skills/auth/sign_in.md`:
+File `macros/auth/sign_in.md`:
 
 ```markdown
 ---
-type: skill
+type: macro
 ---
 
 # sign_in
@@ -1923,15 +1923,15 @@ File `tests/greeting.md`:
 - expected_name: QA User
 
 ## Steps
-1. [skill: auth/sign_in login_url email password out.display_name="signed_in_name"]
+1. [macro: auth/sign_in login_url email password out.display_name="signed_in_name"]
 2. Assert that "{{signed_in_name}}" equals "{{expected_name}}"
-3. [skill: auth/sign_in login_url email="second.user@example.test" password out.display_name="second_name"]
+3. [macro: auth/sign_in login_url email="second.user@example.test" password out.display_name="second_name"]
 4. Assert that "{{second_name}}" is not "{{signed_in_name}}"
 ```
 
-### 6.1 The skill file
+### 6.1 The macro file
 
-- `type: skill` in frontmatter is what keeps the file out of `steptix run`'s test
+- `type: macro` in frontmatter is what keeps the file out of `steptix run`'s test
   discovery and stops MCP running it as a test. Resolution does not depend on
   it, but always write it.
 - The `# Title` is a display name; the call path selects the file.
@@ -1940,53 +1940,53 @@ File `tests/greeting.md`:
   declared parameter must be supplied by the caller.
 - `## Outputs` bullets declare what the caller receives. Capture or `Set` each
   one somewhere in the body, or the caller gets nothing.
-- `## Config` and `## Hooks` in a skill are parsed and silently discarded. A
-  data table under a skill's own `## Steps` is an error; a table under one of
-  the skill's `### Section` headings loops that section as usual.
-- A skill may define and call its own `### Section`s, may call other skills,
+- `## Config` and `## Hooks` in a macro are parsed and silently discarded. A
+  data table under a macro's own `## Steps` is an error; a table under one of
+  the macro's `### Section` headings loops that section as usual.
+- A macro may define and call its own `### Section`s, may call other macros,
   and may carry its own `dataSources`, whose paths resolve relative to the
-  skill file.
+  macro file.
 
 ### 6.2 The call
 
-`[skill: path/name arg… out.output…]`, one call per line, lowercase keyword.
+`[macro: path/name arg… out.output…]`, one call per line, lowercase keyword.
 
 | Form | Meaning |
 | --- | --- |
-| `auth/sign_in` | `<skillsDir>/auth/sign_in.md`. No `.md`, leading `/` optional, case must match the file on disk (Windows forgives it, Linux CI does not). |
+| `auth/sign_in` | `<macrosDir>/auth/sign_in.md`. No `.md`, leading `/` optional, case must match the file on disk (Windows forgives it, Linux CI does not). |
 | `email` | Shorthand for `email="{{email}}"`. |
 | `email="qa@example.test"` | Literal string. Double quotes only; no escape for a quote inside. Spaces, `=` and `]` are fine inside. |
 | `email="${data.users.admin.email}"` | Environment reference inside quotes. |
 | `retries=3`, `strict=true` | Bare number or boolean. No exponent form, no other bare words. |
 | `ids=["a","b"]` | Inline JSON array. |
 | `out.display_name` | Receive the output under its declared name. |
-| `out.display_name="signed_in_name"` | Receive it under another name. Needed when the same skill is called twice and both results must survive. |
+| `out.display_name="signed_in_name"` | Receive it under another name. Needed when the same macro is called twice and both results must survive. |
 
 Rules the expander enforces:
 
-- A missing declared parameter is an error naming the skill and parameter. An
+- A missing declared parameter is an error naming the macro and parameter. An
   undeclared extra argument is only a warning, and it still overwrites any
   `{{name}}` of that name in the body.
 - `out.x` for an undeclared output is an error listing the declared ones.
 - Everything the body captures that is not a declared output is renamed to a
-  private `__skillN_x` and stays invisible to the caller. An unparameterised
+  private `__macroN_x` and stays invisible to the caller. An unparameterised
   `{{foo}}` in a body therefore never reads the caller's `foo`; pass it as a
   parameter.
-- `[skill: mfa]` written inside `skills/auth/sign_in.md` means
-  `skills/mfa.md`, never `skills/auth/mfa.md`. Cycles are an error, and
+- `[macro: mfa]` written inside `macros/auth/sign_in.md` means
+  `macros/mfa.md`, never `macros/auth/mfa.md`. Cycles are an error, and
   expansion is capped at depth 10.
 - Arguments are separated by spaces, never commas. `email={{email}}` without
   quotes, `email='x'` and `email=x` are all parse errors with a message that
   says to quote the value.
 - With the colon, a malformed call is a parse error that points at the
-  problem. Without the colon (`[skill auth/sign_in …]` is also accepted) a
+  problem. Without the colon (`[macro auth/sign_in …]` is also accepted) a
   malformed call silently becomes prose for the model. Write the colon.
 - Text after the closing `]` is dropped; a second call on the same line is
   dropped too. A descriptive label before the bracket is allowed and inert.
-- Upload paths inside a skill resolve against the **calling test file's**
-  directory, not the skill's.
+- Upload paths inside a macro resolve against the **calling test file's**
+  directory, not the macro's.
 
-Skills can also be called from `## Hooks` lines, from section bodies, and from
+Macros can also be called from `## Hooks` lines, from section bodies, and from
 a looped section with row values in the arguments.
 
 ## 7. Tools: deterministic code
@@ -2164,7 +2164,7 @@ export default defineTool({
 | `log.info/warn/error` | | Lines land in the HTML report. |
 | `args` | `Record<string, unknown>` | The full argument bag (bare function and `tool()` only). |
 
-Not available: calling another tool, a skill or an AI step; the `tabs` and
+Not available: calling another tool, a macro or an AI step; the `tabs` and
 `browsers` helpers, which belong to compiled code-behind; any retry. A thrown
 error or a false `expect` fails the step once, with the message in the report.
 Which tab and browser a tool lands in, and how to steer it, is §7.4.
@@ -2196,7 +2196,7 @@ that returns an object stores it JSON-encoded, and one that returns
   section has both files. The long-running server reloads a tool when its
   file changes; the CLI loads once per run.
 
-Tool calls use the same argument grammar as skill calls (§6.2). Objects
+Tool calls use the same argument grammar as macro calls (§6.2). Objects
 (`key={…}`) are not accepted; pass a JSON array or a variable.
 
 ### 7.4 Which tab and browser the tool runs in
@@ -2327,10 +2327,10 @@ did not open. Own the tab from the steps, not from the code.
 ```
 
 `before` runs once, `beforeEach` and `afterEach` wrap every step, `after` runs
-once at the end. Hooks may call tools and skills. A failing `after` is logged
+once at the end. Hooks may call tools and macros. A failing `after` is logged
 and does not change the result, but a failing `afterEach` **aborts the test**,
 so keep `afterEach` to checks you mean as hard requirements. `[no-hooks]` on a
-step skips the two per-step hooks for it; on a section or skill call it covers
+step skips the two per-step hooks for it; on a section or macro call it covers
 the whole expanded body.
 
 Hooks exist only on the CLI file runner. Steptix, the Sessions API and the
@@ -2538,7 +2538,7 @@ report's skipped steps and warnings, not just the summary.
 | `Click Submit` then `Verify it worked` | `Click Submit and wait for the Order placed message`, then verify a value | "Worked" is not checkable; a named message or value is. |
 | `Click Place order` then `Verify the page shows no error message` | `Click Place order and wait for the "Order placed" message`, then verify | A check does not wait for a page that is still loading ([#98](https://github.com/steptix/steptix/issues/98)); one that something is not shown passes before the error has arrived. |
 | `Note the order number` | `Read the order number [store as: order_id]` | Nothing is stored without a name. |
-| `Read the order number [as: order_id]` | `[store as: order_id]` | `[as:]` has no parser and is renamed wrongly inside skills. |
+| `Read the order number [as: order_id]` | `[store as: order_id]` | `[as:]` has no parser and is renamed wrongly inside macros. |
 | `Set {{total}} to "{{a}} + {{b}}"` | A `defineTool` with number parameters | `Set` is text only. |
 | `Make up a customer name and remember it` | `[use ai] Make up a customer name [store as: customer]` | A plain step goes to the page model, whose only way to store anything is to read it off the page. |
 | `[use ai] Give the date 3 days from today as yyyymmdd [store as: due]` | `[use ai] Today is {{today}}. Give the date 3 days later as yyyymmdd [store as: due]` | The model sees the step text and nothing else — no date. |
@@ -2552,7 +2552,7 @@ report's skipped steps and warnings, not just the summary.
 | `Click Approve in the row for "{{payment.payee}}"` on a table with two rows for that payee | `Click Approve in row {{payment._row}}` | A value that is not unique names two rows; the row number names one. |
 | `Verify that {{payment.reference}} is empty` | `Verify that "{{payment.reference}}" is empty` | A value-only assertion is checked as a predicate, substituted just before the check is generated — so an empty value leaves `is empty` with nothing on its left. Conditions are exempt: the framework decides those from the values, quotes or not (§3.8). |
 | `Press Enter in the Search field` | `Type "shoes" into the Search field and press Enter` | The key press targets nothing. |
-| `[skill: sign_in]` when the skill declares `email` | `[skill: sign_in email password]` | Every declared parameter is required. |
+| `[macro: sign_in]` when the macro declares `email` | `[macro: sign_in email password]` | Every declared parameter is required. |
 | `[tool: slugify s="x"]` for a named export | `[tool: strings/slugify s="x"]` | Named exports need the file prefix. |
 | `[tool: visit_each urls={{links}}]` | `urls="{{links}}"` | Unquoted templates are a parse error. |
 | `[use computer] Click Cancel` | `[use computer]`, then `Click Cancel` | The directive is the whole step; trailing text is a parse error (§3.10). |
@@ -2565,20 +2565,20 @@ report's skipped steps and warnings, not just the summary.
 | `## Steps (login)` | `## Steps` | Any other heading yields no steps. |
 | `Wait for .spinner:hidden` | `Wait until the spinner disappears` | State belongs in words, not selectors. |
 | A section body's steps before the main flow ends | Main flow first, then `###` headings | Everything after the first `###` belongs to a section. |
-| `If we are signed in then skip ahead` | `If we are signed in then return` | Only `return` / `stop` (and the six endings §3.6 lists) end a flow, and only `fail …` (§3.7) ends the run in your own words. Anything else after ` then ` is a decision, and a tail that names no `### Section` and no `[skill:]` is prose, so "skip ahead" is handed to a model as an instruction — the same way `then retun` is (§3.6). |
+| `If we are signed in then skip ahead` | `If we are signed in then return` | Only `return` / `stop` (and the six endings §3.6 lists) end a flow, and only `fail …` (§3.7) ends the run in your own words. Anything else after ` then ` is a decision, and a tail that names no `### Section` and no `[macro:]` is prose, so "skip ahead" is handed to a model as an instruction — the same way `then retun` is (§3.6). |
 | `beforeEach: If already signed in then return` | Put the line in `## Steps` | A hook has no flow to leave; the file is refused at parse. |
 
 ## 12. Checklist before handing a test over
 
 - Title, `## Steps` spelled exactly, one instruction per physical line.
 - Every `{{name}}` is supplied by a parameter, a row, a capture with
-  `[store as:]`, a `Set`, a `[use ai]` step that names it, or a skill or tool
+  `[store as:]`, a `Set`, a `[use ai]` step that names it, or a macro or tool
   output that runs first.
 - Every `[use ai]` step carries in its own text everything the model needs —
   the date included — and none of them is a value that must repeat run to run.
 - Every `${…}` reference has an environment that defines it, and the test says
   which (`env:` in frontmatter or a documented `--env`).
-- Every skill call passes every declared parameter and aliases outputs that
+- Every macro call passes every declared parameter and aliases outputs that
   must survive a second call; every tool call names an existing file and
   declared outputs.
 - Every action has a named completion condition where the page is slow, and
@@ -2605,9 +2605,9 @@ report's skipped steps and warnings, not just the summary.
 | Table reads, records and `{{item.property}}` | [SPEC-structured-table-reads.md](specs/SPEC-structured-table-reads.md), [actions.ts](../src/browser/actions.ts) (the extractor), [parameters.ts](../src/parser/parameters.ts) (the one placeholder grammar), [control-flow.ts](../src/runner/control-flow.ts) (the pass bindings) |
 | `return` / `stop`, and which steps a return skips | [flow-control-step.ts](../src/parser/flow-control-step.ts), [flow-control.ts](../src/runner/flow-control.ts), [control-flow.ts](../src/runner/control-flow.ts) (`returnExit`), [test-runner.ts](../src/runner/test-runner.ts) |
 | `fail`, and the `otherwise` tails | [flow-control-step.ts](../src/parser/flow-control-step.ts) (the `fail` verb and its message), [failure-tail.ts](../src/parser/failure-tail.ts), [step-executor.ts](../src/runner/step-executor.ts) |
-| Skill files, calls, expansion | [expander.ts](../src/skills/expander.ts), [invocation-parser.ts](../src/parser/invocation-parser.ts) |
+| Macro files, calls, expansion | [expander.ts](../src/macros/expander.ts), [invocation-parser.ts](../src/parser/invocation-parser.ts) |
 | Tools | [types.ts](../src/tools/types.ts), [define-tool.ts](../src/tools/define-tool.ts), [tool-helper.ts](../src/tools/tool-helper.ts), [registry.ts](../src/tools/registry.ts), [executor.ts](../src/tools/executor.ts), working examples in [fixtures/tools/src](../fixtures/tools/src) |
 | Tab and browser tracking | [manager.ts](../src/browser/manager.ts), [step-executor.ts](../src/runner/step-executor.ts), [tabs.ts](../src/codebehind/tabs.ts) |
-| Shipped example tests and skills | [templates/init/tests](../templates/init/tests), [templates/init/skills](../templates/init/skills) |
+| Shipped example tests and macros | [templates/init/tests](../templates/init/tests), [templates/init/macros](../templates/init/macros) |
 | MCP tools and their limits | [schemas.ts](../src/mcp/schemas.ts), [assemble.ts](../src/mcp/assemble.ts) |
 | Defaults | [defaults.ts](../src/config/defaults.ts) |

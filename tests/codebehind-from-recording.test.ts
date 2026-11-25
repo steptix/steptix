@@ -12,7 +12,7 @@ import { buildStepCodePrompt, contentBlocksToText } from '../src/ai/prompts.js';
 import { executeAction, waitForStableCount } from '../src/browser/actions.js';
 import { parseTestFile } from '../src/parser/markdown.js';
 import { storeCapture } from '../src/runner/store-capture.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import { logger } from '../src/utils/logger.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import type { RecordedAction } from '../src/codebehind/recording.js';
@@ -195,15 +195,15 @@ describe('entryFromRecording — which steps are written from the recording', ()
     expect(fromRecording(B_STEP, [B_FIND, B_READ, { action: 'noop' }])).toBe(B_ENTRY);
   });
 
-  it('writes a read inside a skill body under the authored names, placeholders included', () => {
+  it('writes a read inside a macro body under the authored names, placeholders included', () => {
     const text = fromRecording(
       'Read the balance of {{account}} [store as: balance]',
-      [{ action: 'read', selector: '#account-list [data-account="{{__skill1_account}}"] .account-balance', as: '__skill1_balance' }],
-      { binding: { scope: { renames: { account: '__skill1_account', balance: '__skill1_balance' }, inputs: {} } } },
+      [{ action: 'read', selector: '#account-list [data-account="{{__macro1_account}}"] .account-balance', as: '__macro1_balance' }],
+      { binding: { scope: { renames: { account: '__macro1_account', balance: '__macro1_balance' }, inputs: {} } } },
     );
     expect(text).toContain(`selector: '#account-list [data-account="{{account}}"] .account-balance',`);
     expect(text).toContain("as: 'balance',");
-    expect(text).not.toContain('__skill1');
+    expect(text).not.toContain('__macro1');
   });
 });
 
@@ -390,21 +390,21 @@ describe('step.read and step.count — the AI action, run again', () => {
     expect(resolvedParameters.closed).toBe('[]');
   });
 
-  it('stores under the frame name and fills placeholders through the frame inside a skill body', async () => {
+  it('stores under the frame name and fills placeholders through the frame inside a macro body', async () => {
     const text = fromRecording(
       'Read the balance of {{account}} [store as: balance]',
-      [{ action: 'read', selector: '#account-list [data-account="{{__skill1_account}}"] .account-balance', as: '__skill1_balance' }],
-      { binding: { scope: { renames: { account: '__skill1_account', balance: '__skill1_balance' }, inputs: {} } } },
+      [{ action: 'read', selector: '#account-list [data-account="{{__macro1_account}}"] .account-balance', as: '__macro1_balance' }],
+      { binding: { scope: { renames: { account: '__macro1_account', balance: '__macro1_balance' }, inputs: {} } } },
     )!;
     const { outcome, resolvedParameters } = await run(
       entryOf(text),
-      { scope: { renames: { account: '__skill1_account', balance: '__skill1_balance' }, inputs: {} } },
-      { __skill1_account: 'Savings' },
+      { scope: { renames: { account: '__macro1_account', balance: '__macro1_balance' }, inputs: {} } },
+      { __macro1_account: 'Savings' },
     );
     expect(outcome.status).toBe('passed');
-    expect(resolvedParameters.__skill1_balance).toBe('$8,410.00');
+    expect(resolvedParameters.__macro1_balance).toBe('$8,410.00');
     expect(resolvedParameters).not.toHaveProperty('balance');
-    expect(outcome.outputs).toEqual({ __skill1_balance: '$8,410.00' });
+    expect(outcome.outputs).toEqual({ __macro1_balance: '$8,410.00' });
   });
 
   it('fails, naming the placeholder, when this run has no value for it', async () => {
@@ -509,7 +509,7 @@ beforeAll(async () => {
   tmpBase = await makeScratchBase('from-recording');
 });
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });

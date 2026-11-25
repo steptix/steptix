@@ -89,7 +89,7 @@ import {
 } from '../desktop/vision-route.js';
 import type { DesktopConfig } from '../config/types.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
-import { parseSkillCall } from '../skills/skill-call-parser.js';
+import { parseMacroCall } from '../macros/macro-call-parser.js';
 import { unknownWholeStepBracketError } from '../parser/whole-step-bracket.js';
 import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import { parseSetStep } from '../parser/set-step.js';
@@ -483,7 +483,7 @@ const PERSON_STEP_RES: readonly RegExp[] = [/^\[input:\s*\w+\]/, /^\[interactive
  *    capture of anything (stories/use-ai-step.md);
  *  - a whole-step `Return` / `Stop running the remaining steps` / `Fail the
  *    test with error "…"` — nothing to judge;
- *  - a `[tool: …]` line that does not parse, a raw `[skill: …]` line, and a
+ *  - a `[tool: …]` line that does not parse, a raw `[macro: …]` line, and a
  *    bracket §4.2 refuses, which fail with §5.4's message before anything
  *    runs;
  *  - a `[use …]` line, which the surface switch owns (`[use computer]`
@@ -518,7 +518,7 @@ export function stepReadsScreen(step: string): boolean {
   if (claim && claim.body === undefined) return false;
   const tool = tryParse(() => parseToolCall(step));
   if (tool !== null) return 'value' in tool;
-  if (tryParse(() => parseSkillCall(step)) !== null) return false;
+  if (tryParse(() => parseMacroCall(step)) !== null) return false;
   if (unknownWholeStepBracketError(step) !== null) return false;
   return true;
 }
@@ -584,22 +584,32 @@ export function modeMarkerText(surface: 'browser' | 'computer'): string {
 
 /** What the calling loop knows about why a directive went undispatched. */
 export interface DirectiveDispatchContext {
+  /** The surface the step was about to be answered on. Computer mode adds why
+   *  a model must never see the line, and refuses a bare unknown bracket too. */
+  surface: 'browser' | 'computer';
   /** A tool catalogue is loaded, so the loop dispatches every `[tool:]` line
    *  through it. False on a Sessions API request that carried no `toolsDir`. */
   toolsLoaded: boolean;
-  /** A skills directory was supplied, so every `[skill:]` line should have been
+  /** A macros directory was supplied, so every `[macro:]` line should have been
    *  expanded into its body before the loop ever saw it. */
-  skillsDirSupplied: boolean;
+  macrosDirSupplied: boolean;
 }
 
-/** The sentence every refusal below ends with: why this surface refuses where
- *  the page surface still hands the line to the model as prose. */
-function neverActedOut(kind: 'tool' | 'skill' | 'bracket'): string {
+/** The sentence a computer-mode refusal ends with: why a model handed this
+ *  line would do harm there. The page surface's refusal ends without it. */
+function neverActedOut(kind: 'tool' | 'macro' | 'bracket', surface: 'browser' | 'computer'): string {
+  if (surface !== 'computer') return '';
   const what = kind === 'bracket' ? 'a bracket step nobody dispatched is' : `a ${kind} line is`;
   return (
     `In computer mode ${what} never handed to the model, because it would act it out ` +
     'on the real screen.'
   );
+}
+
+/** `message` followed by `suffix` after `separator`, or `message` alone when
+ *  there is no suffix. */
+function withSuffix(message: string, separator: string, suffix: string): string {
+  return suffix ? `${message}${separator}${suffix}` : message;
 }
 
 /** Run an invocation parser, keeping a syntax error as a value: a line that
@@ -615,84 +625,102 @@ function tryParse<T>(parse: () => T | null): { value: T } | { error: Error } | n
 
 /**
  * The failure for a step that is a bracket directive the loop did NOT
- * dispatch, when it is about to be answered on the computer surface — or null
- * for a step that is prose and may go to the model.
+ * dispatch, when it is about to be handed to a model — or null for a step that
+ * is prose and may go to the model.
  *
- * Measured live: a Sessions API request with no `toolsDir` ran
+ * A `[tool:]` line nothing dispatched and a `[macro:]` line nothing expanded
+ * cannot run as written, so whatever a model did with one, a pass included,
+ * would be a guess (docs/specs/SPEC-macros.md §7). On the computer surface it
+ * is worse. Measured live: a Sessions API request with no `toolsDir` ran
  * `[tool: open_calculator]` in computer mode. With no catalogue loaded the
  * line fell through to the model as prose, and the model ACTED IT OUT — Win+R,
- * `calc`, Enter — launching a program on the real desktop. On the page
- * surface the same fall-through is legacy and mostly harmless; here it is the
- * one thing computer mode must never let a model do.
+ * `calc`, Enter — launching a program on the real desktop. So computer mode
+ * also refuses a whole-step bracket that names no directive, which the page
+ * surface still hands to its model.
  *
  * Detection is by the runner's own parsers, not a new pattern: `parseToolCall`
- * and `parseSkillCall` are what decide elsewhere that a line IS a tool or a
- * skill call (a label before the bracket included), and
+ * and `parseMacroCall` are what decide elsewhere that a line IS a tool or a
+ * macro call (a label before the bracket included), and
  * `unknownWholeStepBracketError` is §4.2's rule for a bracket step that names
  * no directive. Both loops call this only once every other dispatch has
- * passed the step by, immediately before `executeComputerStep`.
+ * passed the step by, immediately before the step is handed to a model.
  */
 export function undispatchedDirectiveError(
   step: string,
   context: DirectiveDispatchContext,
 ): string | null {
+  const { surface } = context;
   const tool = tryParse(() => parseToolCall(step));
   if (tool) {
     if ('error' in tool) {
-      return (
-        `This [tool: …] line was not run: it does not parse. ${tool.error.message}\n` +
-        neverActedOut('tool')
+      return withSuffix(
+        `This [tool: …] line was not run: it does not parse. ${tool.error.message}`,
+        '\n',
+        neverActedOut('tool', surface),
       );
     }
     const call = `[tool: ${tool.value.name}]`;
-    return context.toolsLoaded
-      ? `${call} was not run: the runner did not dispatch it as a tool call. ${neverActedOut('tool')}`
-      : `${call} was not run: this request carried no tools directory (toolsDir), so no tool ` +
-          `is loaded — declare tests.toolsDir in the project's steptix.config.json so the client ` +
-          `sends one. ${neverActedOut('tool')}`;
+    return withSuffix(
+      context.toolsLoaded
+        ? `${call} was not run: the runner did not dispatch it as a tool call.`
+        : `${call} was not run: Steptix was given no tools folder for this run, so no tool ` +
+            'is loaded. Keep the tools in a tools/src folder beside steptix.config.json, or ' +
+            'set tests.toolsDir in that file to the folder that holds them.',
+      ' ',
+      neverActedOut('tool', surface),
+    );
   }
 
-  const skill = tryParse(() => parseSkillCall(step));
-  if (skill) {
-    if ('error' in skill) {
-      return (
-        `This [skill: …] line was not run: it does not parse. ${skill.error.message}\n` +
-        neverActedOut('skill')
+  const macro = tryParse(() => parseMacroCall(step));
+  if (macro) {
+    if ('error' in macro) {
+      return withSuffix(
+        `This [macro: …] line was not run: it does not parse. ${macro.error.message}`,
+        '\n',
+        neverActedOut('macro', surface),
       );
     }
-    const call = `[skill: ${skill.value.name}]`;
-    return context.skillsDirSupplied
-      ? `${call} was not run: skills are expanded into their steps before the run starts, and ` +
-          `this line reached the step loop unexpanded. ${neverActedOut('skill')}`
-      : `${call} was not run: this request carried no skills directory (skillsDir), so the ` +
-          `skill was never expanded into its steps — declare tests.skillsDir in the project's ` +
-          `steptix.config.json so the client sends one. ${neverActedOut('skill')}`;
+    const call = `[macro: ${macro.value.name}]`;
+    return withSuffix(
+      context.macrosDirSupplied
+        ? `${call} was not run: macros are expanded into their steps before the run starts, ` +
+            'and this line reached the step loop unexpanded.'
+        : `${call} was not run: Steptix was given no macros folder for this run, so the ` +
+            'macro was never turned into its steps. Keep the macros in a macros folder ' +
+            'beside steptix.config.json, or set tests.macrosDir in that file to the folder ' +
+            'that holds them.',
+      ' ',
+      neverActedOut('macro', surface),
+    );
   }
 
   // §4.2 is enforced where a FILE is parsed and where MCP assembles steps; a
   // bare Sessions API batch reaches this loop without either. On the page
-  // surface that stays as it was. Here it would be a model improvising on the
-  // real screen from a word in brackets.
+  // surface that stays as it was. In computer mode it would be a model
+  // improvising on the real screen from a word in brackets.
+  if (surface !== 'computer') return null;
   const bracket = unknownWholeStepBracketError(step);
-  if (bracket) return `${bracket} ${neverActedOut('bracket')}`;
+  if (bracket) return `${bracket} ${neverActedOut('bracket', surface)}`;
 
   return null;
 }
 
 /** The row a refused directive records: failed, zero turns, no model call, on
- *  the computer surface it was refused on. The message is the explanation too,
- *  as it is for the §5.1 refusals, so a client that shows `reasoning` rather
- *  than `error` still says why. */
+ *  the surface it was refused on (left unset for the page, as every page step
+ *  leaves it). The message is the explanation too, as it is for the §5.1
+ *  refusals, so a client that shows `reasoning` rather than `error` still says
+ *  why. */
 export function undispatchedDirectiveResult(
   index: number,
   instruction: string,
   error: string,
+  surface: 'browser' | 'computer',
 ): StepResult {
   return {
     index,
     instruction,
     status: 'failed',
-    surface: 'computer',
+    ...(surface === 'computer' && { surface: 'computer' as const }),
     turns: [],
     durationMs: 0,
     retried: false,
@@ -721,21 +749,21 @@ export function computerContextFor(
 }
 
 // ---------------------------------------------------------------------------
-// Skill frames restore the caller's surface (§4.5)
+// Macro frames restore the caller's surface (§4.5)
 // ---------------------------------------------------------------------------
 
 /**
- * "A skill call restores the caller's surface on return, whatever the skill's
+ * "A macro call restores the caller's surface on return, whatever the macro's
  * body did. An inline section does not."
  *
- * Both runners expand skills and sections at PARSE time into one flat step
+ * Both runners expand macros and sections at PARSE time into one flat step
  * list, so there is no call to hook and no frame to pop: what there is, per
  * step, is the chain of frames it runs in (`ExpandedStepOrigin.frameId` and
  * each frame's `parentId`). This tracker turns that into the push/pop the rule
- * is written in terms of — a skill frame this step is in and the last one was
+ * is written in terms of — a macro frame this step is in and the last one was
  * not is an entry, and the reverse is a return.
  *
- * SKILL frames only, which is the whole distinction §4.5 draws: a section is
+ * MACRO frames only, which is the whole distinction §4.5 draws: a section is
  * inline by definition, and a section that switches surface is how an author
  * writes a desktop excursion once and calls it by name.
  *
@@ -744,16 +772,16 @@ export function computerContextFor(
  * preconditions, the lock, the opt-in — and can fail. See
  * {@link restoreCallerSurface}.
  */
-export class SkillSurfaceStack {
+export class MacroSurfaceStack {
   private readonly open: Array<{ frameId: string; surface: 'browser' | 'computer' }> = [];
 
   /**
-   * Move to the step whose skill-frame chain is `chain` (outermost first), and
+   * Move to the step whose macro-frame chain is `chain` (outermost first), and
    * answer the surface the caller must be put back on — or `null` when this
-   * move returns from no skill, or the caller is already on the surface it was
+   * move returns from no macro, or the caller is already on the surface it was
    * on when it made the call.
    *
-   * Returning from several skills at once answers the OUTERMOST caller's
+   * Returning from several macros at once answers the OUTERMOST caller's
    * surface: the ones in between would be put on their surface only to be
    * taken off it again, and a `computer` in between would load an adapter and
    * take the lock for nothing.
@@ -778,20 +806,20 @@ export class SkillSurfaceStack {
 }
 
 /**
- * Put a caller back on the surface it was on when it called a skill (§4.5), as
- * {@link SkillSurfaceStack.enter} answered it. Shared by both loops so the two
+ * Put a caller back on the surface it was on when it called a macro (§4.5), as
+ * {@link MacroSurfaceStack.enter} answered it. Shared by both loops so the two
  * cannot disagree about what "restore" means.
  *
  * - `browser` is `[use browser]`'s transition, and cannot fail.
  * - `computer` is `[use computer]`'s, through `enter` — the caller's own
  *   {@link enterComputerMode} with the inputs its `[use computer]` step takes:
  *   the opt-in, the vision route, the adapter load, the lock, the capture
- *   probe. The skill's `[use browser]` dropped the adapter and released the
+ *   probe. The macro's `[use browser]` dropped the adapter and released the
  *   lock, so there is nothing to keep; this is a fresh entry. It used to be a
  *   no-op, and the caller's next desktop step went to the page.
  *
  * A refusal comes back as the error for the step the restore was made for —
- * the caller's first step after the skill — to fail with, before anything
+ * the caller's first step after the macro — to fail with, before anything
  * runs on it.
  */
 export async function restoreCallerSurface(
@@ -801,7 +829,7 @@ export async function restoreCallerSurface(
   lock: ComputerLockOptions | undefined,
   enter: () => Promise<{ ok: true; reentered: boolean } | { ok: false; error: string }>,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  log(`restoring the caller's surface (${to}) on return from a skill`);
+  log(`restoring the caller's surface (${to}) on return from a macro`);
   if (to === 'browser') {
     leaveComputerMode(state, lockId, lock);
     return { ok: true };
@@ -811,14 +839,14 @@ export async function restoreCallerSurface(
   return {
     ok: false,
     error:
-      `The caller's computer surface could not be restored when it returned from a skill: ` +
+      `The caller's computer surface could not be restored when it returned from a macro: ` +
       entered.error,
   };
 }
 
-/** The chain of SKILL frame ids a step runs in, outermost first — the input
- *  {@link SkillSurfaceStack.enter} takes. */
-export function skillFrameChain(
+/** The chain of MACRO frame ids a step runs in, outermost first — the input
+ *  {@link MacroSurfaceStack.enter} takes. */
+export function macroFrameChain(
   frameId: string | undefined,
   frames: Readonly<Record<string, { parentId: string | null; kind: string }>> | null | undefined,
 ): string[] {
@@ -828,7 +856,7 @@ export function skillFrameChain(
   for (let depth = 0; id && depth < 64; depth++) {
     const frame: { parentId: string | null; kind: string } | undefined = frames[id];
     if (!frame) break;
-    if (frame.kind === 'skill') chain.unshift(id);
+    if (frame.kind === 'macro') chain.unshift(id);
     id = frame.parentId;
   }
   return chain;

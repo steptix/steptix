@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { matchText } from '../parser/section-match.js';
-import type { ExpandedFrame, ExpandedStepOrigin } from '../skills/expander.js';
+import type { ExpandedFrame, ExpandedStepOrigin } from '../macros/expander.js';
 import { bundleAndImport } from '../tools/reload.js';
 import { logger } from '../utils/logger.js';
 import { writtenByNewer } from '../utils/file-stamp.js';
@@ -11,9 +11,9 @@ import type { StepCodeEntry } from './types.js';
 /**
  * Code-behind resolution: which `.steps.ts` each expanded step binds into,
  * which entry it matches, and the variable scope its code runs under.
- * See stories/step-codebehind.md ("Sections and skills", "Execution").
+ * See stories/step-codebehind.md ("Sections and macros", "Execution").
  *
- * Everything here runs once at test load, after skill/section expansion,
+ * Everything here runs once at test load, after macro/section expansion,
  * where both the authored raw text and the origin frames are still in hand.
  * The result is a registry carried into the executor alongside the other
  * per-run state (`structureMemo`, `uploadPaths`).
@@ -44,8 +44,8 @@ export function codeBehindPathFor(markdownFile: string): string {
 /**
  * The variable view a code-behind entry runs under.
  *
- * `renames` is the executing skill frame's `varScope` — authored name to the
- * `__skill<N>_`/alias name the expander rewrote the step text to. `inputs` is
+ * `renames` is the executing macro frame's `varScope` — authored name to the
+ * `__macro<N>_`/alias name the expander rewrote the step text to. `inputs` is
  * that frame's caller-supplied parameter values, which the expander
  * interpolated straight into the text and so exist under no name at all.
  * Both empty for a step at the top level or in a plain section.
@@ -74,7 +74,7 @@ export interface CodeBehindBinding {
   source: string;
   /**
    * 0-based occurrence of this (section, source) pair **within this step's
-   * own frame instance**. A section or skill body is defined once and inlined
+   * own frame instance**. A section or macro body is defined once and inlined
    * many times; every invocation is its own frame and matching restarts, so
    * all invocations bind to the same entries in body order.
    */
@@ -162,11 +162,11 @@ export class CodeBehindRegistry {
   }
 }
 
-/** The expansion facts binding needs. Satisfied by `SkillExpansion` and by
+/** The expansion facts binding needs. Satisfied by `MacroExpansion` and by
  *  `ParsedTest.expansion` + `steps`. */
 export interface CodeBehindExpansion {
   steps: string[];
-  /** Parallel to `steps` — authored match-side text (`SkillExpansion.rawSteps`). */
+  /** Parallel to `steps` — authored match-side text (`MacroExpansion.rawSteps`). */
   rawSteps: string[];
   origins: ExpandedStepOrigin[];
   frames: Record<string, ExpandedFrame>;
@@ -213,7 +213,7 @@ export async function buildCodeBehindRegistry(
 
   // Pass 1 — target (file, section, occurrence, scope) per step. Occurrence
   // counting is keyed by the frame INSTANCE, so it restarts for every
-  // inlining of a section or skill body (issue 037's instability, avoided by
+  // inlining of a section or macro body (issue 037's instability, avoided by
   // construction).
   const perFrameCounts = new Map<string, number>();
   const targets: (Omit<CodeBehindBinding, 'entry'> | undefined)[] = [];
@@ -327,12 +327,12 @@ export async function buildCodeBehindRegistry(
  * | Nearest frame | Defining file | Scope |
  * |---|---|---|
  * | top level (`''`) | the test file | none |
- * | `kind: 'skill'`  | that skill's file | none |
+ * | `kind: 'macro'`  | that macro's file | none |
  * | `kind: 'section'`| the frame's `uri` | the section's name |
  *
  * A section frame's `uri` is already the file that *defines* it — the test
- * file, or the skill file for a skill-internal section — so nothing extra is
- * needed to make a skill-internal section land in the skill's `.steps.ts`.
+ * file, or the macro file for a macro-internal section — so nothing extra is
+ * needed to make a macro-internal section land in the macro's `.steps.ts`.
  */
 function resolveDefiningSite(
   frameId: string,
@@ -346,8 +346,8 @@ function resolveDefiningSite(
     return testFilePath ? { file: testFilePath } : undefined;
   }
   if (frame.kind === 'section') {
-    return frame.skillName !== undefined
-      ? { file: frame.uri, section: frame.skillName }
+    return frame.macroName !== undefined
+      ? { file: frame.uri, section: frame.macroName }
       : { file: frame.uri };
   }
   return { file: frame.uri };
@@ -359,17 +359,17 @@ function resolveDefiningSite(
  * Two different rules, because the two things a scope carries answer
  * different questions:
  *
- *  - `renames` come from the nearest ancestor **skill** frame alone. They are
- *    that skill instance's `__skill<N>_` namespace, and an outer skill's
+ *  - `renames` come from the nearest ancestor **macro** frame alone. They are
+ *    that macro instance's `__macro<N>_` namespace, and an outer macro's
  *    namespace is not this one's.
  *  - `inputs` are merged from **every** enclosing frame that has them,
  *    innermost winning. A looped section binds its row as `inputs`
  *    (stories/data-driven-rows.md, part B), and a body step inside one needs
- *    to read that row — including from inside a skill the body calls, and
+ *    to read that row — including from inside a macro the body calls, and
  *    including the enclosing row of an outer loop, which is what makes a
  *    nested loop's `{{account}}` resolve.
  *
- * Before section rows this walked to the nearest skill frame and returned an
+ * Before section rows this walked to the nearest macro frame and returned an
  * empty scope for anything else, so a looped body's `{{file}}` reached the
  * generator with no name→value pair at all: it would inline row 1's literal
  * with the leak guard blind, and `getVar('file')` would read `undefined` at
@@ -388,9 +388,9 @@ function varScopeFor(
   while (current && !seen.has(current.id)) {
     seen.add(current.id);
     if (current.inputs) inputLayers.push(current.inputs);
-    // First skill ancestor wins the namespace, but the walk continues: an
+    // First macro ancestor wins the namespace, but the walk continues: an
     // outer looped section's row is still in scope for a step inside it.
-    if (renames === undefined && current.kind === 'skill') {
+    if (renames === undefined && current.kind === 'macro') {
       renames = current.varScope ?? {};
     }
     current = current.parentId ? frames[current.parentId] : undefined;

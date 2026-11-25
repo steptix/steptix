@@ -448,7 +448,7 @@ describe('SessionManager', () => {
       expect(response2.outputs).toHaveProperty('confirmCode', 'CONF-456');
     });
 
-    // ── Re-run a skill step with its variables (startAt + seedScope) ─────────
+    // ── Re-run a macro step with its variables (startAt + seedScope) ─────────
     it('a partial re-run (startAt) runs only the tail and seeds the scope', async () => {
       const ran: string[] = [];
       const scopeSeen: Array<Record<string, string>> = [];
@@ -463,15 +463,15 @@ describe('SessionManager', () => {
         sourceLines: [10, 11, 12],
         testFilePath: '/proj/test.md',
         startAt: { uri: '/proj/test.md', line: 11 },
-        seedScope: { foo: 'bar', __skill1_internal: 'secret' },
+        seedScope: { foo: 'bar', __macro1_internal: 'secret' },
       });
 
       expect(response.status).toBe('passed');
       // Step one (line 10) is skipped; the tail (lines 11, 12) runs.
       expect(ran).toEqual(['Step two', 'Step three']);
-      // The seed reaches the run; the __skill* internal is stripped.
+      // The seed reaches the run; the __macro* internal is stripped.
       expect(scopeSeen[0]).toHaveProperty('foo', 'bar');
-      expect(scopeSeen[0]).not.toHaveProperty('__skill1_internal');
+      expect(scopeSeen[0]).not.toHaveProperty('__macro1_internal');
     });
 
     it('endAt bounds the slice — runs only the selected range, not to the end', async () => {
@@ -516,7 +516,7 @@ describe('SessionManager', () => {
 
     it('refuses a partial re-run whose tail needs an unseedable internal var', async () => {
       const response = await manager.executeSteps('session-refuse', {
-        steps: ['Type {{__skill1_token}} into the box'],
+        steps: ['Type {{__macro1_token}} into the box'],
         sourceLines: [10],
         testFilePath: '/proj/test.md',
         startAt: { uri: '/proj/test.md', line: 10 },
@@ -524,7 +524,7 @@ describe('SessionManager', () => {
       });
 
       expect(response.status).toBe('error');
-      expect(response.error?.message ?? '').toMatch(/re-run the whole skill/i);
+      expect(response.error?.message ?? '').toMatch(/re-run the whole macro/i);
       // The step must NOT have been executed with a literal placeholder.
       expect(vi.mocked(executeStep)).not.toHaveBeenCalled();
     });
@@ -905,7 +905,7 @@ describe('SessionManager', () => {
     describe('early-exit runs still finalize last-run info (issue 031)', () => {
       it('a partial-rerun refusal (early setup exit) leaves getLastRun finalized, not hanging', async () => {
         const response = await manager.executeSteps('s031-refuse', {
-          steps: ['Type {{__skill1_token}} into the box'],
+          steps: ['Type {{__macro1_token}} into the box'],
           sourceLines: [10],
           testFilePath: '/proj/test.md',
           startAt: { uri: '/proj/test.md', line: 10 },
@@ -1069,11 +1069,11 @@ describe('SessionManager', () => {
       expect(captures).toHaveLength(1);
     });
 
-    it('never auto-surfaces a __skill*-namespaced `as` capture (issue 042 review)', async () => {
+    it('never auto-surfaces a __macro*-namespaced `as` capture (issue 042 review)', async () => {
       vi.mocked(executeStep).mockClear();
       vi.mocked(executeStep).mockImplementationOnce(async (_idx, _total, _instruction, opts) => {
         if (opts.resolvedParameters) {
-          opts.resolvedParameters['__skill1_total'] = '$37.77';
+          opts.resolvedParameters['__macro1_total'] = '$37.77';
         }
         return {
           index: 1,
@@ -1088,7 +1088,7 @@ describe('SessionManager', () => {
               subActions: [
                 {
                   index: 1,
-                  action: { action: 'read', selector: '#total', as: '__skill1_total', description: 'internal skill capture' },
+                  action: { action: 'read', selector: '#total', as: '__macro1_total', description: 'internal macro capture' },
                   durationMs: 10,
                 },
               ],
@@ -1108,8 +1108,8 @@ describe('SessionManager', () => {
 
       const captures = events.filter((e) => e.type === 'capture');
       expect(captures).toHaveLength(0);
-      expect(response.results[0]!.outputs).not.toHaveProperty('__skill1_total');
-      expect(response.outputSources).not.toHaveProperty('__skill1_total');
+      expect(response.results[0]!.outputs).not.toHaveProperty('__macro1_total');
+      expect(response.outputSources).not.toHaveProperty('__macro1_total');
     });
 
     it('does not re-emit a stale value when this step\'s `as` action failed (name captured by an earlier step)', async () => {
@@ -1492,16 +1492,16 @@ describe('SessionManager', () => {
       expect(response.outputSources).toMatchObject({ token: 'parameter' });
     });
 
-    it('tags skill ## Outputs as source "toolOutput" in outputSources', async () => {
-      // A skill output reaches session scope via a rewritten `[store as:]`,
+    it('tags macro ## Outputs as source "toolOutput" in outputSources', async () => {
+      // A macro output reaches session scope via a rewritten `[store as:]`,
       // which is otherwise indistinguishable from a plain page capture. The
       // expander surfaces the effective output name and the server seeds the
       // 'toolOutput' label from it — so this must NOT fall through to 'capture'.
-      const skillsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sm-skill-'));
+      const macrosDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sm-macro-'));
       await fs.writeFile(
-        path.join(skillsDir, 'fetch_order.md'),
+        path.join(macrosDir, 'fetch_order.md'),
         `---
-type: skill
+type: macro
 ---
 # fetch_order
 ## Outputs
@@ -1525,11 +1525,11 @@ type: skill
       });
 
       const response = await manager.executeSteps('session-1', {
-        steps: ['[skill: fetch_order out.order_id="myOrder"]'],
-        skillsDir,
+        steps: ['[macro: fetch_order out.order_id="myOrder"]'],
+        macrosDir,
       });
 
-      await fs.rm(skillsDir, { recursive: true, force: true });
+      await fs.rm(macrosDir, { recursive: true, force: true });
 
       expect(response.outputs).toMatchObject({ myOrder: 'ORD-9' });
       expect(response.outputSources).toMatchObject({ myOrder: 'toolOutput' });

@@ -3,14 +3,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { marked, type Token, type Tokens } from 'marked';
 import { parseFrontmatter } from './frontmatter.js';
-import type { ParsedSection, ParsedSkill, ParsedTest, TestConfig, TestHooks } from './types.js';
+import type { ParsedSection, ParsedMacro, ParsedTest, TestConfig, TestHooks } from './types.js';
 import {
   NO_HOOKS_MARKER,
   matchInput,
   matchText,
   validateSectionName,
 } from './section-match.js';
-import { expandSkills } from '../skills/expander.js';
+import { expandMacros } from '../macros/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { parseSetStep, setStepError, substitutePreservingSet } from './set-step.js';
 import { parseUseAiStep, useStepError } from './use-step.js';
@@ -58,11 +58,11 @@ import { resolveBaseUrl } from '../utils/base-url.js';
 const HOOK_SCOPES = new Set(['before', 'beforeeach', 'aftereach', 'after']);
 
 export interface ParseOptions {
-  /** Directory to resolve `[skill: name]` references from. Omit to disable. */
-  skillsDir?: string;
+  /** Directory to resolve `[macro: name]` references from. Omit to disable. */
+  macrosDir?: string;
   /**
    * Env + structured-data context for `${env.X}` / `${data.X.Y}` interpolation.
-   * Applied after skill expansion to every step, hook entry, parameter value,
+   * Applied after macro expansion to every step, hook entry, parameter value,
    * and config value. Throws on unknown references so the runner fails fast
    * with a precise file pointer rather than sending a `${...}` literal to the AI.
    * Omit to disable env-data interpolation.
@@ -73,7 +73,7 @@ export interface ParseOptions {
 /**
  * Parse a Markdown test file into a structured ParsedTest object.
  * Handles: frontmatter, H1 title, ## Config, ## Parameters, ## Steps sections.
- * If `skillsDir` is provided, `[skill: name ...]` step references are
+ * If `macrosDir` is provided, `[macro: name ...]` step references are
  * expanded inline before the test is returned.
  */
 export async function parseTestFile(
@@ -84,10 +84,10 @@ export async function parseTestFile(
   const rawContent = await fs.readFile(absPath, 'utf-8');
   const parsed = parseTestContentRaw(rawContent, absPath);
 
-  // Expand when there is a skills directory OR the file defines sections.
-  // The narrower `if (options.skillsDir)` gate would leave a library caller
-  // that omits `skillsDir` with unexpanded bare-name calls shipped to the AI
-  // as prose. The CLI always passes its `./skills` default, so this only
+  // Expand when there is a macros directory OR the file defines sections.
+  // The narrower `if (options.macrosDir)` gate would leave a library caller
+  // that omits `macrosDir` with unexpanded bare-name calls shipped to the AI
+  // as prose. The CLI always passes its `./macros` default, so this only
   // widens behaviour for direct `parseTestFile` consumers.
   const definesSections = Object.keys(parsed.sections).length > 0;
   // …and when the file holds a control line, for the same reason: its tail is
@@ -97,28 +97,28 @@ export async function parseTestFile(
   const definesControlFlow = parsed.steps.some(
     (_, i) => parseControlLine(matchInput(parsed, i)) !== null,
   );
-  if (options.skillsDir || definesSections || definesControlFlow) {
-    // Thread the run-wide env context (env vars + envName) into skill
-    // expansion so a skill's own `dataSources` (declared in the skill's
+  if (options.macrosDir || definesSections || definesControlFlow) {
+    // Thread the run-wide env context (env vars + envName) into macro
+    // expansion so a macro's own `dataSources` (declared in the macro's
     // frontmatter) can resolve `${envName}` / `${env.X}` in their paths and
     // load env-appropriate JSON files at parse time.
-    const envCtxForSkills = options.envData;
+    const envCtxForMacros = options.envData;
     const preExpansionStepLines = parsed.stepLines;
     const preExpansionSkipHooks = parsed.skipHooks;
-    const stepsExp = await expandSkills(
+    const stepsExp = await expandMacros(
       parsed.steps,
-      options.skillsDir,
-      envCtxForSkills,
+      options.macrosDir,
+      envCtxForMacros,
       absPath,
       preExpansionStepLines,
       { sections: parsed.sections, rawSteps: parsed.rawSteps },
     );
     parsed.steps = stepsExp.steps;
-    parsed.sourceSkills = stepsExp.sourceSkills;
+    parsed.sourceMacros = stepsExp.sourceMacros;
     parsed.sourceSections = stepsExp.sourceSections;
     // Re-align stepLines with the now-flattened step list. For inline
-    // entries the inputIndex points to themselves; for skill-expanded
-    // entries the inputIndex points to the `[skill: ...]` invocation line
+    // entries the inputIndex points to themselves; for macro-expanded
+    // entries the inputIndex points to the `[macro: ...]` invocation line
     // in the test file — the only file the user has open when looking at a
     // CLI report, so that's the most useful pointer.
     parsed.stepLines = stepsExp.origins.map(
@@ -132,10 +132,10 @@ export async function parseTestFile(
     // an unevaluated guard handed to the model as prose, and a tail that ran
     // unconditionally (stories/control-flow.md; `opts.expandControlLines`).
     const noControls = { expandControlLines: false } as const;
-    const beforeExp = await expandSkills(parsed.hooks.before, options.skillsDir, envCtxForSkills, absPath, undefined, noControls);
-    const beforeEachExp = await expandSkills(parsed.hooks.beforeEach, options.skillsDir, envCtxForSkills, absPath, undefined, noControls);
-    const afterEachExp = await expandSkills(parsed.hooks.afterEach, options.skillsDir, envCtxForSkills, absPath, undefined, noControls);
-    const afterExp = await expandSkills(parsed.hooks.after, options.skillsDir, envCtxForSkills, absPath, undefined, noControls);
+    const beforeExp = await expandMacros(parsed.hooks.before, options.macrosDir, envCtxForMacros, absPath, undefined, noControls);
+    const beforeEachExp = await expandMacros(parsed.hooks.beforeEach, options.macrosDir, envCtxForMacros, absPath, undefined, noControls);
+    const afterEachExp = await expandMacros(parsed.hooks.afterEach, options.macrosDir, envCtxForMacros, absPath, undefined, noControls);
+    const afterExp = await expandMacros(parsed.hooks.after, options.macrosDir, envCtxForMacros, absPath, undefined, noControls);
 
     parsed.hooks = {
       before: beforeExp.steps,
@@ -143,13 +143,13 @@ export async function parseTestFile(
       afterEach: afterEachExp.steps,
       after: afterExp.steps,
     };
-    parsed.hookSourceSkills = {
-      before: beforeExp.sourceSkills,
-      beforeEach: beforeEachExp.sourceSkills,
-      afterEach: afterEachExp.sourceSkills,
-      after: afterExp.sourceSkills,
+    parsed.hookSourceMacros = {
+      before: beforeExp.sourceMacros,
+      beforeEach: beforeEachExp.sourceMacros,
+      afterEach: afterEachExp.sourceMacros,
+      after: afterExp.sourceMacros,
     };
-    // Skill bodies may themselves contain `[tool: ...]` lines that surface
+    // Macro bodies may themselves contain `[tool: ...]` lines that surface
     // only after expansion, so re-derive the parallel toolCalls arrays
     // against every expanded step list (test body + each hook scope).
     // A GUARD is never a tool call, however its tail is written.
@@ -171,11 +171,11 @@ export async function parseTestFile(
     //
     // This used to pad with `false` / truncate to the expanded length, which
     // silently misaligned the array whenever an invocation expanded to
-    // anything other than exactly one step: `[no-hooks] [skill: multi_step]`
+    // anything other than exactly one step: `[no-hooks] [macro: multi_step]`
     // applied to roughly the first expanded step and left the rest hooked.
     // Origin mapping is what makes "`[no-hooks]` on the invocation covers the
     // whole expanded body" actually true — for sections, where multi-step
-    // expansion is the common case, and for skills, where it was already the
+    // expansion is the common case, and for macros, where it was already the
     // documented intent.
     parsed.skipHooks = stepsExp.origins.map(
       (o) => preExpansionSkipHooks[o.inputIndex] ?? false,
@@ -188,7 +188,7 @@ export async function parseTestFile(
     };
   }
 
-  // A file with neither skills nor sections never enters the expander, but
+  // A file with neither macros nor sections never enters the expander, but
   // code-behind binding needs the same shape either way: every step is
   // top-level (frame `''`) and its own match side is `matchInput`.
   parsed.expansion ??= {
@@ -196,9 +196,9 @@ export async function parseTestFile(
     origins: parsed.steps.map((_, i) => ({ inputIndex: i, frameId: '' })),
     frames: {},
     // No expansion ran, so no control line was resolved. A file with neither
-    // skills nor sections CAN still hold one (`While …, Click Load more`), and
+    // macros nor sections CAN still hold one (`While …, Click Load more`), and
     // this path answers "no structure" for it — which is the same answer it
-    // gives for `[skill:]` lines it did not expand either.
+    // gives for `[macro:]` lines it did not expand either.
     controls: parsed.steps.map(() => null),
   };
 
@@ -364,100 +364,100 @@ function applyEnvDataInterpolation(parsed: ParsedTest, ctx: EnvDataContext): voi
 }
 
 /**
- * Parse a Markdown skill file. Skills share the same parser as tests but
- * additionally read the `## Outputs` section and use the H1 as the skill name.
+ * Parse a Markdown macro file. Macros share the same parser as tests but
+ * additionally read the `## Outputs` section and use the H1 as the macro name.
  *
- * When `envCtx` is supplied, the skill's own `dataSources` (frontmatter) are
+ * When `envCtx` is supplied, the macro's own `dataSources` (frontmatter) are
  * resolved here — paths are interpolated via `${env.X}` / `${envName}`,
- * loaded, and then the skill body / parameters / outputs are interpolated
- * against the env + skill-private namespaces. The resulting `ParsedSkill`
- * has skill-private placeholders already resolved, so by the time the
+ * loaded, and then the macro body / parameters / outputs are interpolated
+ * against the env + macro-private namespaces. The resulting `ParsedMacro`
+ * has macro-private placeholders already resolved, so by the time the
  * expander inlines it the caller's interpolation pass sees only literals
  * and `{{paramName}}` placeholders.
  */
-export async function parseSkillFile(
+export async function parseMacroFile(
   filePath: string,
   envCtx?: EnvDataContext,
-): Promise<ParsedSkill> {
+): Promise<ParsedMacro> {
   const absPath = path.resolve(filePath);
   const rawContent = await fs.readFile(absPath, 'utf-8');
-  const parsed = parseSkillContent(rawContent, absPath);
+  const parsed = parseMacroContent(rawContent, absPath);
   if (envCtx) {
-    await applySkillEnvDataInterpolation(parsed, absPath, envCtx);
+    await applyMacroEnvDataInterpolation(parsed, absPath, envCtx);
   } else if (parsed.dataSources && Object.keys(parsed.dataSources).length > 0) {
-    // Skill declares dataSources but no env context was provided — the
-    // skill-private `${<source>.X}` placeholders won't be resolved here, and
+    // Macro declares dataSources but no env context was provided — the
+    // macro-private `${<source>.X}` placeholders won't be resolved here, and
     // they'll fall through to caller-level interpolation which doesn't know
     // about them. Warn loudly so the footgun surfaces at parse time rather
     // than as an unresolved literal in a step at runtime.
     logger.warn(
-      `Skill "${parsed.name}" at ${absPath} declares dataSources but was parsed ` +
+      `Macro "${parsed.name}" at ${absPath} declares dataSources but was parsed ` +
       `without an env context — its \${<source>.X} placeholders will pass through ` +
-      `unresolved. Pass envCtx into parseSkillFile / expandSkills to fix.`,
+      `unresolved. Pass envCtx into parseMacroFile / expandMacros to fix.`,
     );
   }
   return parsed;
 }
 
 /**
- * Resolve skill-private `dataSources` paths, load the JSON files, then
- * interpolate the skill body / parameters / outputs against a context that
- * includes the env, the active envName, and the skill's own namespaces —
- * but NOT `data` (the caller's env-default file). Skill-private namespaces
- * are private to the skill: a colliding name in the calling test resolves
- * against the test's file in test scope, not the skill's.
+ * Resolve macro-private `dataSources` paths, load the JSON files, then
+ * interpolate the macro body / parameters / outputs against a context that
+ * includes the env, the active envName, and the macro's own namespaces —
+ * but NOT `data` (the caller's env-default file). Macro-private namespaces
+ * are private to the macro: a colliding name in the calling test resolves
+ * against the test's file in test scope, not the macro's.
  */
-async function applySkillEnvDataInterpolation(
-  parsed: ParsedSkill,
-  skillAbsPath: string,
+async function applyMacroEnvDataInterpolation(
+  parsed: ParsedMacro,
+  macroAbsPath: string,
   envCtx: EnvDataContext,
 ): Promise<void> {
-  const skillDir = path.dirname(skillAbsPath);
+  const macroDir = path.dirname(macroAbsPath);
   const extraData: Record<string, DataObject> = {};
   if (parsed.dataSources) {
     for (const [name, declaredPath] of Object.entries(parsed.dataSources)) {
       const resolvedPathStr = interpolateDataSourcePath(declaredPath, {
         env: envCtx.env,
         envName: envCtx.envName ?? null,
-        filePath: skillAbsPath,
+        filePath: macroAbsPath,
       });
-      const absDataPath = resolveDataSourcePath(resolvedPathStr, skillDir);
+      const absDataPath = resolveDataSourcePath(resolvedPathStr, macroDir);
       extraData[name] = await loadDataFromPath(absDataPath, envCtx.env);
     }
   }
 
-  const skillCtx: EnvDataContext = {
+  const macroCtx: EnvDataContext = {
     env: envCtx.env,
-    // Deliberately omit `data` — skills don't reach into the caller's
-    // env-default data file. `${data.X}` in a skill body passes through
+    // Deliberately omit `data` — macros don't reach into the caller's
+    // env-default data file. `${data.X}` in a macro body passes through
     // and is resolved later by test-level interpolation if the test owns it.
     ...(Object.keys(extraData).length > 0 && { extraData }),
     ...(envCtx.envName !== undefined && { envName: envCtx.envName }),
-    filePath: skillAbsPath,
+    filePath: macroAbsPath,
   };
 
-  // A skill's own `${…}` bake, guarded like every other site that writes into
+  // A macro's own `${…}` bake, guarded like every other site that writes into
   // step text: a value holding a `"` would otherwise turn a body `Set` into a
   // line the value grammar refuses, and it would run as AI prose having
   // assigned nothing. This was the fifth consecutive round to find that
   // defect one substitution site further along — see `substitutePreservingSet`.
-  const skillEnvData = (s: string): string =>
+  const macroEnvData = (s: string): string =>
     substitutePreservingSet(
       s,
-      (text) => interpolateEnvData(text, skillCtx),
+      (text) => interpolateEnvData(text, macroCtx),
       (target) =>
-        `A value substituted into skill "${parsed.name}" makes ` +
+        `A value substituted into macro "${parsed.name}" makes ` +
         `"Set {{${target}}} to …" unparseable — almost always a \`${'${env.X}'}\` ` +
         `or \`${'${<source>.x}'}\` whose value contains a double quote, which ` +
         `the assigned value may not. Left to run, the assignment would ` +
         `silently not happen.`,
     );
 
-  parsed.steps = parsed.steps.map(skillEnvData);
+  parsed.steps = parsed.steps.map(macroEnvData);
   for (const [k, v] of Object.entries(parsed.parameters)) {
-    parsed.parameters[k] = interpolateEnvData(v, skillCtx);
+    parsed.parameters[k] = interpolateEnvData(v, macroCtx);
   }
-  parsed.outputs = parsed.outputs.map((o) => interpolateEnvData(o, skillCtx));
+  parsed.outputs = parsed.outputs.map((o) => interpolateEnvData(o, macroCtx));
 
   // Section bodies get the same pass as the main body, or a `${env.X}` used
   // only inside a section would survive as a literal and either fail later
@@ -466,14 +466,14 @@ async function applySkillEnvDataInterpolation(
   // `rawSteps` is deliberately NOT interpolated: it is the match side, and
   // section resolution must stay decidable from the file as authored (the
   // editor's links and dead-section diagnostic have nothing else to work
-  // with). `applySkillScope` leaves it alone for the same reason. See the
+  // with). `applyMacroScope` leaves it alone for the same reason. See the
   // contract §3.1.
   for (const section of Object.values(parsed.sections)) {
-    section.steps = section.steps.map(skillEnvData);
+    section.steps = section.steps.map(macroEnvData);
   }
 }
 
-/** Parse test content from a string (steps returned verbatim — no skill expansion) */
+/** Parse test content from a string (steps returned verbatim — no macro expansion) */
 export function parseTestContent(rawContent: string, filePath = '<inline>'): ParsedTest {
   return parseTestContentRaw(rawContent, filePath);
 }
@@ -498,9 +498,9 @@ function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
     stepLines: sections.stepLines,
     skipHooks: sections.skipHooks,
     toolCalls: sections.toolCalls,
-    // Pre-skill-expansion: every step is inline (no source skill yet). Will be
-    // re-populated by parseTestFile after expandSkills() runs.
-    sourceSkills: sections.steps.map(() => null),
+    // Pre-macro-expansion: every step is inline (no source macro yet). Will be
+    // re-populated by parseTestFile after expandMacros() runs.
+    sourceMacros: sections.steps.map(() => null),
     sourceSections: sections.steps.map(() => null),
     sections: sections.sectionDefs,
     rawSteps: sections.rawSteps,
@@ -513,7 +513,7 @@ function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
       afterEach: sections.hooks.afterEach.map(() => null),
       after: sections.hooks.after.map(() => null),
     },
-    hookSourceSkills: {
+    hookSourceMacros: {
       before: sections.hooks.before.map(() => null),
       beforeEach: sections.hooks.beforeEach.map(() => null),
       afterEach: sections.hooks.afterEach.map(() => null),
@@ -522,18 +522,18 @@ function parseTestContentRaw(rawContent: string, filePath: string): ParsedTest {
   };
 }
 
-function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
+function parseMacroContent(rawContent: string, filePath: string): ParsedMacro {
   const { sections, frontmatter, title } = parseSections(rawContent, filePath);
   validateAgentScope(rawContent, filePath);
 
-  // A skill's parameters are not runtime variables: `applySkillScope`
+  // A macro's parameters are not runtime variables: `applyMacroScope`
   // interpolates the caller's arguments into the body TEXT, so a `Set
-  // {{username}} to "…"` in a skill body would reach the runner as
+  // {{username}} to "…"` in a macro body would reach the runner as
   // `Set demo@securebank.com to "…"`. Refused by name, here, where the name
   // still exists (stories/variable-assignment.md §Locked). A test's
   // `## Parameters` are the opposite case — they live in
   // `resolvedParameters` and are assignable like anything else — which is
-  // why this check is skill-only and not in `parseSections`.
+  // why this check is macro-only and not in `parseSections`.
   const declared = new Set(Object.keys(sections.parameters));
   if (declared.size > 0) {
     const bodies = [
@@ -546,22 +546,22 @@ function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
         if (setStep && declared.has(setStep.name)) {
           throw new Error(
             `Cannot assign to {{${setStep.name}}} in ${filePath}: it is a ` +
-              `parameter of this skill, and a caller's arguments are written ` +
+              `parameter of this macro, and a caller's arguments are written ` +
               `into the step text rather than kept as variables. Assign to a ` +
               `declared \`## Outputs\` name, or to an internal one.`,
           );
         }
         // Same refusal, same reason, for the name a `For each` binds per
-        // pass: `applySkillScope` would write the caller's argument over it
+        // pass: `applyMacroScope` would write the caller's argument over it
         // and leave `For each demo@x in {{list}}`, which claims the form,
         // fails to complete it, and runs as one prose step with no loop.
         // The LIST name is deliberately not refused — passing `list="{{accounts}}"`
-        // to hand a skill the variable to iterate is a legitimate call.
+        // to hand a macro the variable to iterate is a legitimate call.
         const control = parseControlLine(step);
         if (control?.kind === 'foreach' && declared.has(control.item)) {
           throw new Error(
             `Cannot loop over {{${control.item}}} in ${filePath}: it is a ` +
-              `parameter of this skill, and a caller's arguments are written ` +
+              `parameter of this macro, and a caller's arguments are written ` +
               `into the step text rather than kept as variables. The ` +
               `\`For each\` line would stop being one. Loop over a different ` +
               `name.`,
@@ -571,28 +571,28 @@ function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
     }
   }
 
-  // A `[use ai]` step in a skill must NAME its value, and name it in a spelling
-  // the skill's scoping rewrites (stories/use-ai-step.md, decision 7). A skill
+  // A `[use ai]` step in a macro must NAME its value, and name it in a spelling
+  // the macro's scoping rewrites (stories/use-ai-step.md, decision 7). A macro
   // keeps its variables apart from its caller's by rewriting names in the step
-  // TEXT at expansion — `{{x}}` and `[store as: x]` become `__skill<N>_x`, a
+  // TEXT at expansion — `{{x}}` and `[store as: x]` become `__macro<N>_x`, a
   // declared output its caller's alias — and a name the model makes up at run
   // time never passes through that rewrite, so it would land in the caller's
   // scope unrenamed. `[as: x]` and `[output: x]` are not rewritten either
-  // (`renameVar`, src/skills/expander.ts), so they would leak the same way.
+  // (`renameVar`, src/macros/expander.ts), so they would leak the same way.
   // `### Section` bodies of a TEST share the test's scope and need no such
-  // rule; a skill's own sections are checked here with its main flow.
-  const skillBodies = [
+  // rule; a macro's own sections are checked here with its main flow.
+  const macroBodies = [
     sections.steps,
     ...Object.values(sections.sectionDefs).map((s) => s.steps),
   ];
-  for (const body of skillBodies) {
+  for (const body of macroBodies) {
     for (const step of body) {
       const useAi = parseUseAiStep(step);
       if (!useAi) continue;
       if (useAi.explicitNames.length === 0) {
         throw new Error(
           `Cannot run "${step.trim()}" in ${filePath}: a [use ai] step inside a ` +
-            `skill must name the value it stores. A skill renames its variables ` +
+            `macro must name the value it stores. A macro renames its variables ` +
             `per call, and a name the model chooses at run time is never renamed, ` +
             `so it would land in the caller's variables. Add \`[store as: name]\` ` +
             `to the step.`,
@@ -600,9 +600,9 @@ function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
       }
       if (/\[(?:as|output)[ \t]*:/i.test(step)) {
         throw new Error(
-          `Cannot run "${step.trim()}" in ${filePath}: inside a skill, name a ` +
+          `Cannot run "${step.trim()}" in ${filePath}: inside a macro, name a ` +
             `[use ai] value with \`[store as: name]\` or \`store as {{name}}\`. ` +
-            `A skill renames its variables per call, and \`[as: …]\` / ` +
+            `A macro renames its variables per call, and \`[as: …]\` / ` +
             `\`[output: …]\` are not renamed, so the value would land in the ` +
             `caller's variables.`,
         );
@@ -756,7 +756,7 @@ function parseSections(rawContent: string, filePath: string): {
   }
 
   if (!title) {
-    if (frontmatter.type !== 'skill') {
+    if (frontmatter.type !== 'macro') {
       logger.warn(`Test file ${filePath} has no H1 title heading`);
     }
     title = path.basename(filePath, '.md');
@@ -849,14 +849,14 @@ function parseSections(rawContent: string, filePath: string): {
 
     // `Set {{name}} to "…"` (stories/variable-assignment.md). Validated here
     // because this is the one loop every authored step line of every file —
-    // test or skill, main flow or section body — passes through.
+    // test or macro, main flow or section body — passes through.
     const where = ` in ${filePath}${entry ? ` at line ${entry.line}` : ''}`;
     const setError = setStepError(steps[i]!, where);
     if (setError) throw new Error(setError);
 
     // `[use computer]` / `[use browser]` (SPEC-use-computer.md §4.1), in the
     // same loop and for the same reason: it is the one loop every authored
-    // step line of every file — test or skill, main flow or section body —
+    // step line of every file — test or macro, main flow or section body —
     // passes through, which is the scope §4.4 asks for.
     //
     // Asked BEFORE the whole-step bracket rule below, and the order is
@@ -873,13 +873,13 @@ function parseSections(rawContent: string, filePath: string): {
     const bracketError = unknownWholeStepBracketError(steps[i]!, where);
     if (bracketError) throw new Error(bracketError);
 
-    // `[tool: foo] otherwise continue` and `[skill: foo] otherwise continue`
+    // `[tool: foo] otherwise continue` and `[macro: foo] otherwise continue`
     // (stories/step-failure-outcomes.md, decision 12). Both are out of the tail's
     // scope, and until this refusal existed the line parsed, ran the call, and
     // dropped the tail without a word. ONE refusal for both, naming whichever
-    // directive it found: the skill half was missing for exactly as long as the two
+    // directive it found: the macro half was missing for exactly as long as the two
     // halves were separate. Refused in THIS loop rather than beside decision 8's
-    // contradiction below, because such a call is as legal in a skill file and a
+    // contradiction below, because such a call is as legal in a macro file and a
     // section body as in `## Steps`, and this is the loop that sees all three.
     const tailDirective = failureTailDirective(steps[i]!);
     if (tailDirective) {
@@ -932,8 +932,8 @@ function parseSections(rawContent: string, filePath: string): {
     // carries the same guard for the bindings an ENCLOSING looped section
     // merges in, which this pass cannot see.
     //
-    // A skill PARAMETER as the list is a different thing and stays legal:
-    // `[skill: check list="{{accounts}}"]` leaves a placeholder behind, so the
+    // A macro PARAMETER as the list is a different thing and stays legal:
+    // `[macro: check list="{{accounts}}"]` leaves a placeholder behind, so the
     // body still reads a variable at run time.
     const control = parseControlLine(matchSides[i]!);
     if (control?.kind === 'foreach' && columns) {
@@ -999,16 +999,16 @@ function parseSections(rawContent: string, filePath: string): {
     sectionMap[matchText(section.name)] = section;
   }
 
-  // A table under `## Steps` loops the run. Two files can't have one: a skill
+  // A table under `## Steps` loops the run. Two files can't have one: a macro
   // is invoked with arguments rather than looped, and `dataFile:` already
   // names an external set of rows — two sources of rows for one flow is an
   // ambiguity with no sensible resolution, so it is refused rather than
   // silently ranked.
   if (scan.dataTable) {
-    if (frontmatter.type === 'skill') {
+    if (frontmatter.type === 'macro') {
       throw new Error(
-        `${filePath}:${scan.dataTable.headerLine} — a skill's own \`## Steps\` ` +
-          `cannot carry a data table. A skill is invoked with arguments, not ` +
+        `${filePath}:${scan.dataTable.headerLine} — a macro's own \`## Steps\` ` +
+          `cannot carry a data table. A macro is invoked with arguments, not ` +
           `looped; put the table under the \`## Steps\` of the test that calls ` +
           `it, or under a \`### Section\`.`,
       );

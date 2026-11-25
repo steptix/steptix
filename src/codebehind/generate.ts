@@ -25,7 +25,7 @@ import { parseUseAgentStep, parseUseAiStep, parseUseStep } from '../parser/use-s
 import { WIDE_PLACEHOLDER_SOURCE, dottedThroughRename, interpolate } from '../parser/parameters.js';
 import { boundValue } from '../runner/placeholder-substitution.js';
 import type { AssertionResult } from '../report/types.js';
-import { referencedVariableNames } from '../skills/expander.js';
+import { referencedVariableNames } from '../macros/expander.js';
 import { logger } from '../utils/logger.js';
 import { EMPTY, MASK, inheritLoopBindings, redact, runSecrets, secretValues } from '../utils/secrets.js';
 import { actingCalls, codeText, matchClose } from './entry-actions.js';
@@ -78,7 +78,7 @@ const FRAMEWORK_ACTIONS: ReadonlySet<AIAction['action']> = new Set(['prompt', 'r
 /**
  * Steps whose text opens with a bracket token.
  *
- * `[skill:]` and `[tool:]` are expanded or dispatched before the AI loop, so
+ * `[macro:]` and `[tool:]` are expanded or dispatched before the AI loop, so
  * they cannot reach here anyway. `[output:]`, `[input:]` and `[interactive]`
  * CAN: the runner rewrites the instruction and hands the result to
  * `executeStep`, so the authored text still arrives with its marker. Compiling
@@ -87,7 +87,7 @@ const FRAMEWORK_ACTIONS: ReadonlySet<AIAction['action']> = new Set(['prompt', 'r
  * these is a stated non-goal (stories/step-codebehind.md, "Non-goals");
  * execution of a hand-written entry still works, only generation is refused.
  */
-const BRACKET_TOKEN_STEP = /^\[(skill|tool|input|output|interactive)\b/i;
+const BRACKET_TOKEN_STEP = /^\[(macro|tool|input|output|interactive)\b/i;
 
 /**
  * The one wording for a `[use computer]` / `[use browser]` line, used by all
@@ -255,9 +255,9 @@ export interface GenerateStepEntryOptions {
  * name the AUTHOR wrote in `[store as: …]`, the name the prompt lists and the
  * entry's `step.setVar` writes.
  *
- * A row's `outputs` are keyed by the name the RUN wrote, which inside a skill
+ * A row's `outputs` are keyed by the name the RUN wrote, which inside a macro
  * body is the frame's rename of the authored one; it is read through the
- * rename first, then by the authored name. A skill-internal `__skill*` capture
+ * rename first, then by the authored name. A macro-internal `__macro*` capture
  * never reaches `outputs`, so it has no recorded value here and is listed in
  * the prompt by name alone, as before.
  *
@@ -474,7 +474,7 @@ export async function generateStepEntry(
 /**
  * Every value a step's references resolved to, keyed by the name the MODEL
  * would have written in an action: the authored name, the run-time name a
- * skill rename gave it, and each `${…}` reference. Reads a placeholder-bearing
+ * macro rename gave it, and each `${…}` reference. Reads a placeholder-bearing
  * selector the way the runtime read it — see `ambiguousSelectorComplaint` and
  * `recordedReadMismatch`. Exported for the review pass, which checks a
  * revision against the values of the pass each entry was generated from.
@@ -1057,7 +1057,7 @@ function capturedCount(
   recorded: Record<string, string> | undefined,
 ): number | undefined {
   if (recorded === undefined || typeof action.as !== 'string') return undefined;
-  const names = [action.as, action.as.replace(/^__skill\d+_/, '')];
+  const names = [action.as, action.as.replace(/^__macro\d+_/, '')];
   const name = names.find((n) => Object.hasOwn(recorded, n));
   if (name === undefined) return undefined;
   const value = recorded[name]!;
@@ -1805,7 +1805,7 @@ const OWN_EXPECT = /(?:function|const|let|var)\s+expect\b/;
  * `step.expect` and `step.check` take the condition itself and return nothing,
  * so the chained `.toBe` reads a property of undefined and throws on every
  * replay — after the step's action has run, so the step heals under AI each
- * time. Measured live: compile-skill-subfolder's entry for "Navigate to the
+ * time. Measured live: compile-macro-subfolder's entry for "Navigate to the
  * baseUrl", as Review revised it, threw `Cannot read properties of undefined
  * (reading 'toBe')`. A bare `expect(…).toBe(…)` is the same idiom, and no
  * `expect` exists in an entry (rule 6: no imports).
@@ -2172,8 +2172,8 @@ export function stepEnvRefs(
 export function unresolvedRefsReason(refs: string[], envData: EnvDataContext | undefined): string {
   const list = refs.map((r) => `\${${r}}`).join(', ');
   const cause = envData
-    ? 'nothing in this environment defines it — a skill-private data source is ' +
-      'resolved inside the skill and has no run-time name'
+    ? 'nothing in this environment defines it — a macro-private data source is ' +
+      'resolved inside the macro and has no run-time name'
     : 'the compile ran without an environment';
   return `the step references ${list}, which code-behind cannot read at run time: ${cause}`;
 }
@@ -2293,10 +2293,10 @@ export function stepParameters(
     // the text to search for.
     const renamed = boundValue(binding.scope.renames, name);
     const input = boundValue(binding.scope.inputs, name);
-    // A DOTTED name whose root the frame renames — `{{order.id}}` in a skill
+    // A DOTTED name whose root the frame renames — `{{order.id}}` in a macro
     // body whose `For each {{order}}` the expander rewrote — resolves through
     // that rename, in the order `step.getVar` asks (execute.ts): the pass
-    // bound `__skill1_order.id`, and no map holds `order.id` under the name
+    // bound `__macro1_order.id`, and no map holds `order.id` under the name
     // the step wrote. Missed, the prompt said "this step uses no parameters"
     // and the leak guard held nothing, so an entry hard-coding the item's id
     // was accepted — the one inlined value a loop exists to vary.
@@ -2312,7 +2312,7 @@ export function stepParameters(
           ? boundValue(resolvedParameters, scoped)
           : boundValue(resolvedParameters, name);
     // The scoped key rides along, so the prompt asks the map's loop marks
-    // about the name the map HOLDS: the pass marked `__skill1_row.keyword`,
+    // about the name the map HOLDS: the pass marked `__macro1_row.keyword`,
     // never the authored `row.keyword`, and asked about that one the author
     // rule answered — `keyword` matches `key`, and `AU` was masked out of the
     // block the model writes its selector from.
@@ -2327,14 +2327,14 @@ export interface StepParameter {
   name: string;
   value: string;
   /** The key the value is held under in the map, when it is not `name`: a
-   *  dotted name in a skill body, resolved through its root's rename
-   *  (`row.keyword` → `__skill1_row.keyword`). What a loop mark is keyed by. */
+   *  dotted name in a macro body, resolved through its root's rename
+   *  (`row.keyword` → `__macro1_row.keyword`). What a loop mark is keyed by. */
   bound?: string;
 }
 
 /**
  * The caller-supplied inputs of a binding's frames, resolved the way the step's
- * own references resolve them ({@link resolveInputValue}): `[skill: api
+ * own references resolve them ({@link resolveInputValue}): `[macro: api
  * token="uk_live_1234" header="Bearer uk_live_1234"]` inlined both into the
  * body's text, so they exist under no name in the run's map — only here.
  */
@@ -2364,7 +2364,7 @@ function resolvedFrameInputs(
  *    value no key names as secret (`auth: "Bearer <the key>"`) included;
  *  - each binding's frame inputs, resolved ({@link resolvedFrameInputs}) and
  *    judged by their names as the run's `secretsNow` judges them — which
- *    merges every frame's inputs into the set, so `[skill: api token="<key>"
+ *    merges every frame's inputs into the set, so `[macro: api token="<key>"
  *    header="Bearer <key>"]` masks the key inside `{{header}}` too;
  *  - `extra`: secrets the caller knows some other way (the boxed compile's
  *    values recovered from a redacted final map).
@@ -2399,7 +2399,7 @@ export function compilePromptSecrets(
  *
  * The second half exists because the expander captures the argument TEXT and
  * env-data interpolation runs after expansion without ever walking the
- * frames' `inputs` — so `[skill: greet username="${data.username}"]` reaches
+ * frames' `inputs` — so `[macro: greet username="${data.username}"]` reaches
  * the binding as the raw placeholder while the transcript typed the value. A
  * prompt fed the raw text cannot tell the model which name the literal
  * belongs to, and a leak guard holding the raw text waves the literal
@@ -2441,7 +2441,7 @@ export function unresolvedInputRefs(
     // `boundValue` on both scope maps, for the reason `stepParameters` states
     // above: `renames['constructor']` is the `Object` function on a scope that
     // renames nothing, so `{{constructor}}` took the rename branch and this
-    // function returned before ever looking at the input. A skill called with
+    // function returned before ever looking at the input. A macro called with
     // `constructor="${data.username}"` in a run with no environment was then
     // reported as having no unresolved reference at all — and `generateStepEntry`,
     // which declines over exactly this list, compiled the step with the
@@ -2628,7 +2628,7 @@ export interface PlaceholderAccounting extends PlaceholderReport {
  * Two carve-outs, both deliberate:
  *
  * - **Scope-supplied names** (decision 6). A name the binding's scope answers
- *   — a skill argument, a part B section row — is interpolated into the body
+ *   — a macro argument, a part B section row — is interpolated into the body
  *   text by the expander, so the runtime never sees a placeholder and the
  *   model cannot name one. Those keep today's value match, silently, until
  *   phase 2 moves them onto the runtime map. Warning them would drown the
@@ -2638,8 +2638,8 @@ export interface PlaceholderAccounting extends PlaceholderReport {
  * - **Flow-control steps** (stories/step-flow-control.md, decisions 2 and 11).
  *   See below.
  *
- * A skill RENAME is not a carve-out: the expander rewrites the step text to
- * `{{__skill1_username}}` and the runtime substitutes that at run time, so the
+ * A macro RENAME is not a carve-out: the expander rewrites the step text to
+ * `{{__macro1_username}}` and the runtime substitutes that at run time, so the
  * model is shown a placeholder and can name it. The token looked for is the
  * renamed one; the reason names the authored one, which is what the author
  * wrote.
@@ -2768,9 +2768,9 @@ export function accountPlaceholders(options: {
     // Decision 6: the expander baked this one into the text, so no token can
     // exist. Today's behaviour, no warning, no decline.
     if (renamed === undefined && boundValue(binding.scope.inputs, name) !== undefined) continue;
-    // A DOTTED name whose root the frame renames — `{{order.id}}` in a skill
+    // A DOTTED name whose root the frame renames — `{{order.id}}` in a macro
     // body whose `For each {{order}}` the expander rewrote — is shown to the
-    // model, and so named back by it, as `{{__skill1_order.id}}`: the renamed
+    // model, and so named back by it, as `{{__macro1_order.id}}`: the renamed
     // root plus the property. The same `dottedThroughRename` `stepParameters`
     // resolves its value through, in the same precedence (a full-name rename
     // or an input wins). Looking for the authored `order.id` instead declined
@@ -2847,7 +2847,7 @@ function sanitiseComment(reason: string): string {
 /** A control line that compiles to a `condition` entry, parsed. */
 export interface CompilableCondition {
   kind: 'if' | 'elseif' | 'while' | 'repeat';
-  /** The condition part, AUTHORED — `{{plan}}`, never a skill's renamed form. */
+  /** The condition part, AUTHORED — `{{plan}}`, never a macro's renamed form. */
   condition: string;
   /** What the line does when the condition holds (a loop: its body). */
   tail: string;
@@ -2864,8 +2864,8 @@ export interface CompilableCondition {
  * values is free already and would only be made worse by code
  * (`isLiteralCondition`).
  *
- * Read off the AUTHORED line — the binding's `source` — so a skill body's
- * condition is the author's `{{order}}` rather than the `{{__skill1_order}}`
+ * Read off the AUTHORED line — the binding's `source` — so a macro body's
+ * condition is the author's `{{order}}` rather than the `{{__macro1_order}}`
  * the run judged it by. The live compiler asks it for its plan and for
  * `offerGuard`; the boxed `describeSteps` is meant to ask it too.
  */
@@ -2885,8 +2885,8 @@ export function compilableCondition(line: string): CompilableCondition | undefin
  * own bindings (`StepResult.loop.values`): its dotted keys are the `item.key`
  * bindings a `For each` over records made, and they are named under the
  * AUTHORED item, which is the name `step.getVar` reads — `runtimeItem` is the
- * name the run bound them under when that differs (a skill body's
- * `__skill1_order`), so both roots are recognised.
+ * name the run bound them under when that differs (a macro body's
+ * `__macro1_order`), so both roots are recognised.
  */
 export function loopContextFor(
   guardLine: string,
@@ -3949,7 +3949,7 @@ export async function generateConditionEntry(
   }
 
   // The condition's own references, read through the line's binding scope —
-  // a skill body's `{{order}}` is renamed exactly as it is on the whole line.
+  // a macro body's `{{order}}` is renamed exactly as it is on the whole line.
   const conditionBinding: CodeBehindBinding = { ...binding, source: line.condition };
   const parameters = stepParameters(conditionBinding, options.resolvedParameters, options.envData);
   const envRefs = stepEnvRefs(conditionBinding, options.envData);
@@ -4104,8 +4104,8 @@ export interface RecordingEntryInput {
  *    model, to build a locator from the value.
  *
  * Names: the recorded `as` and any `{{placeholder}}` in a recorded field are
- * the RUN's names, which a skill body or a looped section renames
- * (`__skill1_total`). They are written back as the authored names
+ * the RUN's names, which a macro body or a looped section renames
+ * (`__macro1_total`). They are written back as the authored names
  * (`binding.scope.renames`), which `step.read` resolves through the frame at
  * replay.
  */

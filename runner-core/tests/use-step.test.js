@@ -83,7 +83,7 @@ test('prose stays prose — the claim is anchored and needs a separator', () => 
     '[used]',
     '[user guide]',
     '[use-computer]',
-    '[skill: login]',
+    '[macro: login]',
     '[interactive]',
     '',
   ]) {
@@ -105,7 +105,7 @@ test('§4.2 an invented whole-step bracket is refused, with the list and a guess
 
 test('§4.2 leaves a bracket inside a longer step alone', () => {
   for (const line of [
-    '[skillful] navigation is expected',
+    '[macroscopic] navigation is expected',
     'Verify the [optional] banner',
     '[a] [b]',
     'Click Save',
@@ -117,8 +117,8 @@ test('§4.2 leaves a bracket inside a longer step alone', () => {
 
 test('§4.2 knows the real directives, `[use …]` included', () => {
   for (const line of [
-    '[skill: login]',
-    '[skill login]',
+    '[macro: login]',
+    '[macro login]',
     '[tool: echo]',
     '[input: pin]',
     '[interactive]',

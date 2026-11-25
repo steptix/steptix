@@ -36,30 +36,30 @@ incrementally.
 
 | Phase | Commit | Ships |
 | --- | --- | --- |
-| **1** — frames over the wire | `f9ba24c` | `FrameInfo` type + `frame:push` / `frame:pop` / `frame:scope` events + optional `frame?` on step events. `skillsDir` / `testFilePath` on the request body. Server-side skill expansion (and **fixed a latent bug** where `[skill: ...]` from the extension previously went to the AI as a literal string — skills didn't actually work via the extension before this). |
-| **2** — frame stack + Call Stack view | `b8a6e78` + `ffec982` | Extension consumes frame events, multi-file status decorations (test file + skill `.md`), aggregate pass/fail on `[skill:]` lines, auto-reveal of skill files on descent, Call Stack TreeView in the activity-bar container. Tests + dead-code cleanup in the follow-up. |
+| **1** — frames over the wire | `f9ba24c` | `FrameInfo` type + `frame:push` / `frame:pop` / `frame:scope` events + optional `frame?` on step events. `macrosDir` / `testFilePath` on the request body. Server-side macro expansion (and **fixed a latent bug** where `[macro: ...]` from the extension previously went to the AI as a literal string — macros didn't actually work via the extension before this). |
+| **2** — frame stack + Call Stack view | `b8a6e78` + `ffec982` | Extension consumes frame events, multi-file status decorations (test file + macro `.md`), aggregate pass/fail on `[macro:]` lines, auto-reveal of macro files on descent, Call Stack TreeView in the activity-bar container. Tests + dead-code cleanup in the follow-up. |
 | **2.1** — frame state hardening | `ce8df97` | `markFrameFailed` walks ancestry via a persistent `frameParents` map so a late `step:fail` (after `frame:pop`) still propagates. Per-controller `revealedFrameUris`. `markAllRunningStopped` clears every URI on Stop. Steps-summary suppressed on non-test files. |
-| **3** — Step Into / Over / Out | `0df374e` | `StepMode` type + `step:awaiting` event + `stepMode?` on the request body. Server pause-between-steps state machine with depth-aware decisions. New `POST /sessions/:id/run-control` endpoint. Extension commands stepInto / stepOver / stepOut / continueRun + F11 / F10 / Shift+F11 keybindings. **Fixed a Phase 1 gap** — the api-server's request validator was silently dropping `skillsDir` / `testFilePath` / `stepMode` from the JSON body, so Phase 1's wire-level work didn't reach the server until this commit. |
-| **3.1** — step-pause polish | `5b15690` | Stop clears step-paused marker on its actual URI (not just the active editor). `sendRunControl` swallows `not-found` (409) silently. `dispatchStep` detects running-but-not-step-paused. Step Out at root frame redirects to Continue. End-to-end Step-Over-a-skill test. |
+| **3** — Step Into / Over / Out | `0df374e` | `StepMode` type + `step:awaiting` event + `stepMode?` on the request body. Server pause-between-steps state machine with depth-aware decisions. New `POST /sessions/:id/run-control` endpoint. Extension commands stepInto / stepOver / stepOut / continueRun + F11 / F10 / Shift+F11 keybindings. **Fixed a Phase 1 gap** — the api-server's request validator was silently dropping `macrosDir` / `testFilePath` / `stepMode` from the JSON body, so Phase 1's wire-level work didn't reach the server until this commit. |
+| **3.1** — step-pause polish | `5b15690` | Stop clears step-paused marker on its actual URI (not just the active editor). `sendRunControl` swallows `not-found` (409) silently. `dispatchStep` detects running-but-not-step-paused. Step Out at root frame redirects to Continue. End-to-end Step-Over-a-macro test. |
 | **4** — Variables panel | `7fed755` | Server emits `frame:scope` after every `step:pass` / `step:fail`. `RunController.scopesByFrame` map + `currentScope()` accessor. New `VariablesTreeProvider` (flat scope, alphabetical, `maskIfSecret` for secret-named entries) registered alongside Call Stack. |
-| **4.1** — Variables polish | `bfeb529` | View title flips between "Variables (test)" / "Variables (skill: name)" via `createTreeView`. Test-frame view hides `__skill\d+_` skill-internal names (which the expander never garbage-collects after a skill exits). Render-path secret-mask test. STORIES doc: [variables-panel-scope-semantics.md](variables-panel-scope-semantics.md). |
-| **5.A** — server-side tool dispatch | `baa2a93` | `toolsDir` request field; `session-manager.executeStepsInternal` parses `[tool: ...]` lines via `parseToolCall` and dispatches through `executeToolStep` with the session's live `page` / `context` / `browser`. Tool outputs surface as `capture` SSE events. **Discovered + fixed a latent gap**: tools previously didn't work via the extension at all — `[tool: ...]` reached the AI as plain text because the server's step loop had no tool-call recognition. Same shape as Phase 1's skill gap. New test file `tests/api-server-tools.test.ts`. |
+| **4.1** — Variables polish | `bfeb529` | View title flips between "Variables (test)" / "Variables (macro: name)" via `createTreeView`. Test-frame view hides `__macro\d+_` macro-internal names (which the expander never garbage-collects after a macro exits). Render-path secret-mask test. STORIES doc: [variables-panel-scope-semantics.md](variables-panel-scope-semantics.md). |
+| **5.A** — server-side tool dispatch | `baa2a93` | `toolsDir` request field; `session-manager.executeStepsInternal` parses `[tool: ...]` lines via `parseToolCall` and dispatches through `executeToolStep` with the session's live `page` / `context` / `browser`. Tool outputs surface as `capture` SSE events. **Discovered + fixed a latent gap**: tools previously didn't work via the extension at all — `[tool: ...]` reached the AI as plain text because the server's step loop had no tool-call recognition. Same shape as Phase 1's macro gap. New test file `tests/api-server-tools.test.ts`. |
 | **5.B** — tool step-into | HEAD | Wire-level pieces: `tool:awaiting-debugger` event + `pauseAtNextTool` flag (on initial request body AND `run-control` body) + `POST /sessions/:id/tool-debugger-ack` endpoint. Server emits the event before the next `[tool: ...]` step and parks on a per-session debugger-ack Promise; resumes on ack and hits a cooperative `debugger;` statement which Node's V8 inspector traps. Extension: F11 on a tool line detects the invocation and sends `pauseAtNextTool: true`; the `tool:awaiting-debugger` handler calls `vscode.debug.startDebugging` with a `pwa-node` attach config (settings: `steptix.inspectorPort` / `inspectorHost`); fails gracefully with ack-and-exit when the server isn't local or the inspector isn't reachable. |
 
 ## What works end-to-end right now
 
-- Skill expansion when invoked via the extension (was broken before
+- Macro expansion when invoked via the extension (was broken before
   Phase 1).
 - Frame stack visible in the Call Stack view; resizes / updates as
   the run descends.
 - Status decorations follow frames across files: green/red icons land
   on the right line in the right `.md`.
-- Aggregate pass / fail on the `[skill:]` line in the test file
+- Aggregate pass / fail on the `[macro:]` line in the test file
   reflects the descent outcome.
 - F11 (Step Into) from idle → starts a stepping run, pauses on the
   first step.
-- F11 from step-paused → advances one step, descends into skills.
-- F10 (Step Over) → skips a `[skill:]` invocation atomically.
+- F11 from step-paused → advances one step, descends into macros.
+- F10 (Step Over) → skips a `[macro:]` invocation atomically.
 - Shift+F11 (Step Out) → runs to end of current frame (Continue at
   root).
 - F5 from step-paused → drains the rest of the run.
@@ -73,7 +73,7 @@ incrementally.
 
 ## What doesn't work yet
 
-- **Skill-file breakpoints.** A breakpoint set inside a skill `.md`
+- **Macro-file breakpoints.** A breakpoint set inside a macro `.md`
   is read by the tracker but not honored — the extension's
   client-side `trimAtBreakpoint` only looks at the test file's
   breakpoints. Tracked for future work.
@@ -94,28 +94,28 @@ incrementally.
 
 Worth knowing about because they shape what tests exist now:
 
-1. **Skills didn't work via the extension.** The server's
-   `step-executor.ts` has zero `[skill: ...]` recognition; it sends
-   raw text to the AI. The CLI flow ran `expandSkills` at parse time
+1. **Macros didn't work via the extension.** The server's
+   `step-executor.ts` has zero `[macro: ...]` recognition; it sends
+   raw text to the AI. The CLI flow ran `expandMacros` at parse time
    so the runner only ever saw flattened steps; the server flow had
-   no equivalent. Pre-Phase-1, any `skill-demo.md` run from the
-   extension shipped literal `[skill: ...]` strings to the LLM.
-   Fixed by Phase 1's server-side expansion when `skillsDir` is
+   no equivalent. Pre-Phase-1, any `macro-demo.md` run from the
+   extension shipped literal `[macro: ...]` strings to the LLM.
+   Fixed by Phase 1's server-side expansion when `macrosDir` is
    supplied.
 
 2. **The api-server was silently dropping Phase 1's new fields.**
    The request validator in `src/server/api-server.ts` only forwards
-   fields it explicitly pulls. Phase 1 added `skillsDir` /
+   fields it explicitly pulls. Phase 1 added `macrosDir` /
    `testFilePath` to `StepRequest` but didn't extend the validator,
    so the fields stayed `undefined` server-side. Phase 1's tests all
-   called `expandSkills` directly or used a `FakeApiClient` that
+   called `expandMacros` directly or used a `FakeApiClient` that
    bypassed HTTP, so the gap was invisible. Fixed in Phase 3 along
    with the new `stepMode` field. Now covered by
    `tests/api-server-stepmode.test.ts`.
 
-3. **Stop while step-paused on a skill file left a stale yellow ▶.**
+3. **Stop while step-paused on a macro file left a stale yellow ▶.**
    Stop handlers cleared `breakpointStop` only on the active editor's
-   URI. A `step:awaiting` marker placed on a skill file's URI
+   URI. A `step:awaiting` marker placed on a macro file's URI
    survived Stop. Fixed in Phase 3.1 via a new
    `clearAllStepPausedMarkers()` registry method.
 
@@ -128,7 +128,7 @@ Worth knowing about because they shape what tests exist now:
    was caught when tracing the would-be `debugger;` pause point.
    Fixed in Phase 5.A by wiring `parseToolCall` + `executeToolStep`
    into `executeStepsInternal`, gated on a new `toolsDir` request
-   field (parallel to `skillsDir`). Covered by
+   field (parallel to `macrosDir`). Covered by
    `tests/api-server-tools.test.ts`.
 
 Process takeaway baked into the test suite: any new field on
@@ -140,11 +140,11 @@ function.
 
   - **Phase 4.B** — proper per-frame scope filtering server-side
     with reverse-rename resolution. Replaces Phase 4.1's view-side
-    `__skill\d+_` filter with real per-frame scopes the expander
+    `__macro\d+_` filter with real per-frame scopes the expander
     emits filtered + aliased.
-  - **Skill-file breakpoints** — extension's `trimAtBreakpoint`
+  - **Macro-file breakpoints** — extension's `trimAtBreakpoint`
     needs to look at per-URI breakpoint sets (test file + every
-    referenced skill `.md`).
+    referenced macro `.md`).
   - **Conditional / hit-count breakpoints** — explicitly non-goal in
     the design doc; tracked here for completeness.
   - **F11-from-idle semantics** — the current behaviour executes the

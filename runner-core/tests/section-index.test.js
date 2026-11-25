@@ -265,14 +265,14 @@ test('nameStart points past the ordinal and past a [no-hooks] marker', () => {
 test('bracket directives are neither calls nor non-calls', () => {
   // A step claimed by a bracket parser can never be a section call, and must
   // not be offered as a near-miss for one either — otherwise
-  // `1. [skill: login]` warns about a section named Login.
+  // `1. [macro: login]` warns about a section named Login.
   const text = [
     '## Steps',
-    '1. [skill: login]',
+    '1. [macro: login]',
     '2. [tool: click selector="#go"]',
     '3. [input: username]',
     '4. [interactive]',
-    '5. [no-hooks] [skill: login]',
+    '5. [no-hooks] [macro: login]',
     '6. [something unknown]',
     '',
     '### Login',
@@ -355,7 +355,7 @@ test('sectionNameError: the reserved list, case-insensitively', () => {
 });
 
 test('sectionNameError: bracket prefix, interpolation, empty', () => {
-  assert.match(sectionNameError('[skill: x]') ?? '', /may not begin with/i);
+  assert.match(sectionNameError('[macro: x]') ?? '', /may not begin with/i);
   assert.match(sectionNameError('Login {{user}}') ?? '', /may not contain/i);
   assert.match(sectionNameError('') ?? '', /empty name/i);
   assert.match(sectionNameError('   ') ?? '', /empty name/i);
@@ -505,7 +505,7 @@ test('the tail is only read when the whole line names no section', () => {
 });
 
 test('control-line tail: a bracket-directive tail is neither a call nor a near miss', () => {
-  const index = buildSectionIndex(controlDoc('If a, then [skill: login]'));
+  const index = buildSectionIndex(controlDoc('If a, then [macro: login]'));
   assert.equal(index.calls.length, 0);
   // Line 5 is the guard; line 9 is the section's own body step.
   assert.deepEqual(index.nonCallSteps.map((s) => s.line), [9]);

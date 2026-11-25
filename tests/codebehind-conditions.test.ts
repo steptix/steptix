@@ -7,7 +7,7 @@ import type { ChatMessage } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { parseTestFile } from '../src/parser/markdown.js';
-import { clearSkillCache } from '../src/skills/expander.js';
+import { clearMacroCache } from '../src/macros/expander.js';
 import { buildCodeBehindRegistry, type CodeBehindBinding } from '../src/codebehind/loader.js';
 import {
   entrySourceText,
@@ -47,7 +47,7 @@ let counter = 0;
 let dir: string;
 
 beforeEach(async () => {
-  clearSkillCache();
+  clearMacroCache();
   dir = path.join(tmpBase, `t${counter++}`);
   await fs.mkdir(dir, { recursive: true });
 });
@@ -67,8 +67,8 @@ async function write(rel: string, contents: string): Promise<string> {
   return abs;
 }
 
-async function registryFor(testPath: string, warnings: string[] = [], skillsDir?: string) {
-  const parsed = await parseTestFile(testPath, skillsDir ? { skillsDir } : {});
+async function registryFor(testPath: string, warnings: string[] = [], macrosDir?: string) {
+  const parsed = await parseTestFile(testPath, macrosDir ? { macrosDir } : {});
   const registry = await buildCodeBehindRegistry(
     {
       steps: parsed.steps,
@@ -331,18 +331,18 @@ describe('a condition entry bound to an ordinary step', () => {
 // ─── getVar through a renamed root ───────────────────────────────────────────
 
 describe('step.getVar on a dotted name whose root the frame renames', () => {
-  /** A skill whose `For each` item the expander rewrites to `__skill<N>_order`. */
-  const REVIEW_SKILL = [
-    '---', 'type: skill', '---', '# review', '',
+  /** A macro whose `For each` item the expander rewrites to `__macro<N>_order`. */
+  const REVIEW_MACRO = [
+    '---', 'type: macro', '---', '# review', '',
     '## Steps',
     '1. Read the orders [store as: orders]',
     '2. For each {{order}} in {{orders}}, Open the order {{order.id}}',
   ].join('\n');
 
   async function tailBinding(): Promise<CodeBehindBinding> {
-    await write('skills/review.md', REVIEW_SKILL);
-    const md = await write('t.md', ['# T', '', '## Steps', '1. [skill: review]'].join('\n'));
-    const { steps, registry } = await registryFor(md, [], path.join(dir, 'skills'));
+    await write('macros/review.md', REVIEW_MACRO);
+    const md = await write('t.md', ['# T', '', '## Steps', '1. [macro: review]'].join('\n'));
+    const { steps, registry } = await registryFor(md, [], path.join(dir, 'macros'));
     const index = steps.findIndex((s) => s.startsWith('Open the order'));
     return registry.bindingFor(index)!;
   }
@@ -364,7 +364,7 @@ describe('step.getVar on a dotted name whose root the frame renames', () => {
   it('reads `order.id` from the scoped key the pass bound', async () => {
     const binding = await tailBinding();
     const scoped = binding.scope.renames['order']!;
-    expect(scoped).toMatch(/^__skill\d+_order$/);
+    expect(scoped).toMatch(/^__macro\d+_order$/);
     const seen = await read(binding, 'order.id', {
       [scoped]: '{"id":"ORD-7"}',
       [`${scoped}.id`]: 'ORD-7',
@@ -374,7 +374,7 @@ describe('step.getVar on a dotted name whose root the frame renames', () => {
 
   it('reads the frame\'s own item over an outer loop\'s `order.id`, as the flat name does', async () => {
     // An outer `For each {{order}}` — running, or left behind by an earlier
-    // loop — binds the bare `order` / `order.id`; the skill body's own loop
+    // loop — binds the bare `order` / `order.id`; the macro body's own loop
     // binds the renamed keys. Measured before the fix: `getVar('order')`
     // answered the INNER item and `getVar('order.id')` the OUTER one — one
     // step reading two different orders. The rename is final for both.
@@ -409,11 +409,11 @@ describe('step.getVar on a dotted name whose root the frame renames', () => {
       file: path.join(dir, 'x.steps.ts'),
       source: 'x',
       occurrence: 0,
-      scope: { renames: { order: '__skill3_order' }, inputs: {} },
+      scope: { renames: { order: '__macro3_order' }, inputs: {} },
     };
-    expect(await read(binding, 'order.id', { '__skill3_order.id': 'A' })).toBe('A');
+    expect(await read(binding, 'order.id', { '__macro3_order.id': 'A' })).toBe('A');
     expect(await read(binding, 'constructor.name', {})).toBeUndefined();
     // A flat name keeps its own rule — the rename, not a dotted lookup.
-    expect(await read(binding, 'order', { __skill3_order: 'flat' })).toBe('flat');
+    expect(await read(binding, 'order', { __macro3_order: 'flat' })).toBe('flat');
   });
 });

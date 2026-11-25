@@ -415,7 +415,7 @@ export async function runAgentStep(args: AgentStepArgs): Promise<AgentStepOutcom
           ...base,
           status: 'passed',
           ...(stored.length > 0 && {
-            outputs: Object.fromEntries(stored.filter((s) => !s.name.startsWith('__skill')).map((s) => [s.name, s.value])),
+            outputs: Object.fromEntries(stored.filter((s) => !s.name.startsWith('__macro')).map((s) => [s.name, s.value])),
           }),
           aiExplanation: `Agent done in ${plural(turnCount, 'turn')}` + (refusals.length > 0 ? ` (${plural(refusals.length, 'refusal')})` : ''),
         },

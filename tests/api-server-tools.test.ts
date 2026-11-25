@@ -3,13 +3,13 @@
  *
  * Pre-Phase-5, `[tool: ...]` lines in a `POST /sessions/:id/steps` request
  * went straight to the AI as plain text — the same gap Phase 1 fixed for
- * skills. This test exercises the HTTP route with a real `toolsDir`
+ * macros. This test exercises the HTTP route with a real `toolsDir`
  * pointing at a real tool fixture, and asserts:
  *
  *   - the tool's `run()` actually executes (not just the AI seeing the text);
  *   - the tool's outputs land in `session.outputs` via `capture` events;
  *   - the step:pass payload includes the tool's aiExplanation;
- *   - tools work alongside skills in the same run.
+ *   - tools work alongside macros in the same run.
  *
  * The browser / AI / step-executor are mocked the same way as
  * api-server-stepmode.test.ts. The tool catalogue + `executeToolStep` are
@@ -324,10 +324,12 @@ describe('api-server tool dispatch', () => {
     expect(body.outputSources).toMatchObject({ echoed: 'toolOutput' });
   });
 
-  it('without toolsDir, [tool: ...] steps fall through to executeStep (legacy)', async () => {
-    // Without `toolsDir` in the body, the catalogue isn't loaded; the
-    // tool line goes through the AI mock (which we've stubbed to always
-    // pass) as the raw `[tool: ...]` text, and the tool itself never runs.
+  it('without toolsDir, a [tool: ...] step fails unrun instead of reaching executeStep', async () => {
+    // Without `toolsDir` in the body, the catalogue isn't loaded, so the tool
+    // cannot run. This used to pin the line falling through to the AI mock
+    // (stubbed to always pass) as raw text, a pass for a tool that never ran.
+    // It is refused now, on the page surface as in computer mode
+    // (docs/specs/SPEC-macros.md §7).
     vi.mocked(executeStep).mockClear();
     const sessionId = 'no-tools-' + Date.now();
     const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
@@ -340,12 +342,16 @@ describe('api-server tool dispatch', () => {
       events.push(ev);
       if (ev.type === 'done') break;
     }
-    // The fall-through itself: the line reached the AI loop verbatim, and the
-    // run passed on the mock's say-so. Without these, a 4xx (no events at all)
-    // or a step that failed outright would pass the capture check below.
-    expect(vi.mocked(executeStep)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(executeStep).mock.calls[0]![2]).toBe('[tool: echo value="should-fall-through"]');
-    expect(events.find((e) => e.type === 'done')?.status).toBe('passed');
+    // The refusal itself, over the wire: the step failed with the folder
+    // message and never reached the AI loop. Without the step:fail check, a
+    // 4xx (no events at all) would pass the executeStep one.
+    expect(vi.mocked(executeStep)).not.toHaveBeenCalled();
+    expect(events.filter((e) => e.type === 'step:fail')).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'step:pass')).toHaveLength(0);
+    expect(events.find((e) => e.type === 'done')?.status).toBe('failed');
+    expect(JSON.stringify(events)).toContain(
+      '[tool: echo] was not run: Steptix was given no tools folder for this run',
+    );
     const captures = events.filter((e) => e.type === 'capture');
     expect(captures).toHaveLength(0); // no setVar fired — the tool never ran
   });
