@@ -170,18 +170,10 @@ jobs:
       # commands on the runner for PR #127. Never merge.
       - name: Build root
         run: npm run build
-      - name: Diag idle
+      - name: Diag first
         shell: bash
-        run: node scripts/diag-agent-shell.mjs idle
-      - name: Agent test files alone
-        if: ${{ !cancelled() }}
-        run: npx vitest run tests/agent-commands.test.ts tests/agent-runner.test.ts --maxWorkers=4
-      - name: Diag under the full root suite
+        run: node scripts/diag-agent-shell.mjs first
+      - name: Diag second
         if: ${{ !cancelled() }}
         shell: bash
-        run: |
-          (npx vitest run --maxWorkers=4 > root.log 2>&1; echo "root exit $?" >> root.log) &
-          sleep 45; node scripts/diag-agent-shell.mjs load-45s
-          sleep 30; node scripts/diag-agent-shell.mjs load-later
-          wait
-          grep -aE "agent-(commands|runner)|Test Files|      Tests|FAIL|root exit" root.log | head -40
+        run: node scripts/diag-agent-shell.mjs second
