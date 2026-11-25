@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv from 'ajv';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
-import { loadConfig } from '../src/config/loader.js';
+import { aiConfigNow, loadConfig } from '../src/config/loader.js';
 import { logger } from '../src/utils/logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -487,6 +487,139 @@ describe('loadConfig — machine AI floor (stories/machine-key.md)', () => {
 
     expect(config.ai.gatewayUrl).toBeUndefined();
     expect(DEFAULT_CONFIG.ai.gatewayUrl).toBeUndefined();
+  });
+});
+
+describe('aiConfigNow — the machine .env read again for each run (issue #128)', () => {
+  let tmpDir: string;
+  const AI_KEYS = ['AI_API_KEY', 'AI_MODEL', 'AI_GATEWAY_URL'] as const;
+  const preservedAi: Record<string, string | undefined> = {};
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-ai-now-'));
+    for (const key of AI_KEYS) {
+      preservedAi[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(async () => {
+    for (const key of AI_KEYS) {
+      if (preservedAi[key] === undefined) delete process.env[key];
+      else process.env[key] = preservedAi[key];
+    }
+    await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 5 });
+  });
+
+  async function writeConfig(obj: unknown): Promise<string> {
+    const file = path.join(tmpDir, 'steptix.config.json');
+    await fs.writeFile(file, JSON.stringify(obj), 'utf8');
+    return file;
+  }
+
+  it('picks up a changed model, key and gateway without reloading', async () => {
+    await writeUserRootEnv('AI_MODEL=machine/a\nAI_API_KEY=key-a\nAI_GATEWAY_URL=https://a.gateway.test\n');
+    const config = await loadConfig(await writeConfig({}));
+    expect(aiConfigNow(config.ai)).toEqual({ ai: config.ai, modelFrom: 'machine-file' });
+
+    await writeUserRootEnv('AI_MODEL=machine/b\nAI_API_KEY=key-b\nAI_GATEWAY_URL=https://b.gateway.test\n');
+    const now = aiConfigNow(config.ai);
+
+    expect(now.ai.model).toBe('machine/b');
+    expect(now.ai.apiKey).toBe('key-b');
+    expect(now.ai.gatewayUrl).toBe('https://b.gateway.test');
+    expect(now.modelFrom).toBe('machine-file');
+    // A copy: the loaded config, which a server keeps for its whole life, is
+    // never rewritten.
+    expect(config.ai.model).toBe('machine/a');
+  });
+
+  it('a line removed from the machine file reverts to the built-in values', async () => {
+    await writeUserRootEnv('AI_MODEL=machine/a\nAI_API_KEY=key-a\nAI_GATEWAY_URL=https://a.gateway.test\n');
+    const config = await loadConfig(await writeConfig({}));
+
+    await writeUserRootEnv('STEPTIX_SERVER_API_KEY=machine-key-only\n');
+    const now = aiConfigNow(config.ai);
+
+    expect(now.ai.model).toBe(DEFAULT_CONFIG.ai.model);
+    expect(now.ai.apiKey).toBeUndefined();
+    expect(now.ai.gatewayUrl).toBeUndefined();
+    expect(now.modelFrom).toBe('built-in-default');
+  });
+
+  it('a machine model added after load is used, where there was none before', async () => {
+    const config = await loadConfig(await writeConfig({}));
+    expect(aiConfigNow(config.ai).modelFrom).toBe('built-in-default');
+
+    await writeUserRootEnv('AI_MODEL=machine/new\n');
+
+    expect(aiConfigNow(config.ai)).toMatchObject({ ai: { model: 'machine/new' }, modelFrom: 'machine-file' });
+  });
+
+  it('still never beats the config file', async () => {
+    await writeUserRootEnv('AI_MODEL=machine/a\n');
+    const config = await loadConfig(
+      await writeConfig({ ai: { model: 'file/model', gatewayUrl: 'https://file.gateway.test' } }),
+    );
+
+    await writeUserRootEnv('AI_MODEL=machine/b\nAI_GATEWAY_URL=https://b.gateway.test\n');
+    const now = aiConfigNow(config.ai);
+
+    expect(now.ai.model).toBe('file/model');
+    expect(now.ai.gatewayUrl).toBe('https://file.gateway.test');
+    expect(now.modelFrom).toBe('server-settings');
+  });
+
+  it('still never beats the environment the config was loaded under', async () => {
+    process.env['AI_MODEL'] = 'env/model';
+    process.env['AI_API_KEY'] = 'env-key';
+    const config = await loadConfig(await writeConfig({}));
+    // The environment is read once, at load — a later change to it is not what
+    // this is about, and nothing changes it under a running server.
+    delete process.env['AI_MODEL'];
+    delete process.env['AI_API_KEY'];
+
+    await writeUserRootEnv('AI_MODEL=machine/b\nAI_API_KEY=key-b\n');
+    const now = aiConfigNow(config.ai);
+
+    expect(now.ai.model).toBe('env/model');
+    expect(now.ai.apiKey).toBe('env-key');
+    expect(now.modelFrom).toBe('server-settings');
+  });
+
+  it('survives the config being spread to change another section', async () => {
+    const loaded = await loadConfig(await writeConfig({}));
+    const config = { ...loaded, server: { ...loaded.server, port: 0 } };
+
+    await writeUserRootEnv('AI_MODEL=machine/b\n');
+
+    expect(aiConfigNow(config.ai).ai.model).toBe('machine/b');
+  });
+
+  it('leaves a hand-built config as it is', async () => {
+    await writeUserRootEnv('AI_MODEL=machine/b\n');
+    const ai = { ...DEFAULT_CONFIG.ai, model: 'hand/built' };
+
+    expect(aiConfigNow(ai)).toEqual({ ai, modelFrom: 'server-settings' });
+  });
+
+  it('keeps the last values it read when the file cannot be read, and says so', async () => {
+    await writeUserRootEnv('AI_MODEL=machine/a\n');
+    const config = await loadConfig(await writeConfig({}));
+    await writeUserRootEnv('AI_MODEL=machine/b\n');
+    expect(aiConfigNow(config.ai).ai.model).toBe('machine/b');
+
+    // A directory where the file should be fails to read on every platform.
+    const envPath = path.join(userRootTmp, 'steptix', '.env');
+    await fs.rm(envPath);
+    await fs.mkdir(envPath);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      expect(aiConfigNow(config.ai).ai.model).toBe('machine/b');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Could not read the machine settings file'));
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

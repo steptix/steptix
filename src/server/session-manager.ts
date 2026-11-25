@@ -6,7 +6,9 @@ import {
   buildEnrichedInstruction,
   isBrowserClosed,
   isSkippableStep,
+  modelForRunLine,
   parseOutputPrefixes,
+  serverConfigNow,
   UNATTENDED_SKIP_REASON,
 } from './run-helpers.js';
 import type { Config, EffectiveSettings, RunSettings } from '../config/types.js';
@@ -24,6 +26,7 @@ import type { LoopMarker, StepResult, TestReport } from '../report/types.js';
 import { isHealedStep } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { aiConfigured } from '../config/loader.js';
+import { userRootEnvPath } from '../env/user-root.js';
 import { TokenTracker } from '../utils/tokens.js';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import {
@@ -1678,6 +1681,12 @@ interface ManagedSession {
    * session has run once.
    */
   lastEffectiveSettings?: EffectiveSettings;
+  /**
+   * The last "AI model for this run" line this session wrote (issue #128), so
+   * the batches that continue a run — one per data row, say — do not repeat
+   * it. Cleared by a run with no AI, so the next run with AI says it again.
+   */
+  lastModelLine?: string;
   outputs: Record<string, string>;
   /**
    * Provenance label for each key in `outputs`. Written at each variable
@@ -2182,7 +2191,7 @@ export class SessionManager {
    */
   private recordingHasModel(session: ManagedSession | undefined, request: RecordStepsRequest): boolean {
     if (session && !request.env) return session.aiClient.isConfigured();
-    const desiredAi = applyEnvToAiConfig(this.config.ai, request.env);
+    const desiredAi = applyEnvToAiConfig(serverConfigNow(this.config).config.ai, request.env);
     const override = session?.runSettings.model;
     const model = typeof override === 'string' && override.trim() !== '' ? override.trim() : desiredAi.model;
     return aiConfigured({ ...desiredAi, model });
@@ -2343,7 +2352,8 @@ export class SessionManager {
     session.browserConfig = bundle.config.browser;
     session.desktopConfig = bundle.config.desktop ?? this.config.desktop;
 
-    const desiredAi = applyEnvToAiConfig(this.config.ai, request.env);
+    const server = serverConfigNow(this.config).config;
+    const desiredAi = applyEnvToAiConfig(server.ai, request.env);
     if (request.env) {
       // The batch's own re-pointing (`executeStepsInternal`), for the same
       // reason: a saved `.env` edit reaches the next model call without a
@@ -2356,7 +2366,7 @@ export class SessionManager {
     // `ai.sendScreenshots` as a batch would resolve it: server → project → the
     // session's retained run setting. The AI switch is bypassed — this is
     // settings resolution for a request FOR AI, not a run.
-    const settings = resolveRunSettings(this.config, bundle.config, desiredAi.model, session.runSettings, {
+    const settings = resolveRunSettings(server, bundle.config, desiredAi.model, session.runSettings, {
       ai: desiredAi,
       bypassAiPolicy: true,
     });
@@ -3037,14 +3047,21 @@ export class SessionManager {
    * asking about session X what session Y-or-nobody is doing, which is the
    * confusion this whole report exists to remove.
    *
-   * Reads only retained state — no page, no browser, no project bundle — so it
-   * is safe on a GET and costs nothing.
+   * Reads retained state plus the machine `.env` — no page, no browser, no
+   * project bundle — so it is safe on a GET and costs one small file read.
    */
-  getRunSettings(sessionId?: string): RunSettingsReport | null {
+  getRunSettings(
+    sessionId?: string,
+    /** The server config to report on. Defaults to `this.config` with the
+     *  machine `.env` read now, so this reports what the next run will use
+     *  rather than what the server read at startup (issue #128). A caller
+     *  that shows the config beside this report passes the one it shows, so
+     *  the two come from one read of the file. */
+    server: Config = serverConfigNow(this.config).config,
+  ): RunSettingsReport | null {
     // The server base: no project config in play (so the comparison inside
     // `resolveRunSettings` reports everything as `'server'`) and no overrides.
-    const serverBase = resolveRunSettings(this.config, this.config, this.config.ai.model, {})
-      .effective;
+    const serverBase = resolveRunSettings(server, server, server.ai.model, {}).effective;
     if (sessionId === undefined) return { server: serverBase, session: null };
 
     const session = this.sessions.get(this.sessionKey(sessionId));
@@ -3056,8 +3073,7 @@ export class SessionManager {
     // no project config to reflect, so its overrides fold over the server base.
     const effective =
       session.lastEffectiveSettings ??
-      resolveRunSettings(this.config, this.config, this.config.ai.model, session.runSettings)
-        .effective;
+      resolveRunSettings(server, server, server.ai.model, session.runSettings).effective;
     return {
       server: serverBase,
       session: {
@@ -3430,7 +3446,7 @@ export class SessionManager {
 
     // Apply per-request env to a fresh ai config copy. Server's process.env is
     // never mutated; concurrent sessions stay isolated.
-    const aiConfig = applyEnvToAiConfig(this.config.ai, envOverrides);
+    const aiConfig = applyEnvToAiConfig(serverConfigNow(this.config).config.ai, envOverrides);
 
     // Video recording (Tier 1 — main page only). Thread the videos/ dir so the
     // launched context records when the resolved per-project `videoMode` isn't
@@ -3613,13 +3629,20 @@ export class SessionManager {
     // Re-apply the per-request env (.env) AI overrides to this session's client
     // so a saved AI_MODEL / AI_API_KEY / AI_GATEWAY_URL edit is picked up on the
     // next run without closing the session. Recomputed from the server base
-    // (`this.config.ai`), NOT the session's current values, so deleting a line
+    // (`serverConfigNow`), NOT the session's current values, so deleting a line
     // from `.env` cleanly reverts to the base rather than sticking on the last
-    // override. This runs at the top of the `queueTail`-serialized body (not in
-    // `executeSteps`, which resolves the session before queuing) so it can never
-    // mutate the shared AiClient config out from under a concurrent in-flight
-    // batch.
-    const desiredAi = applyEnvToAiConfig(this.config.ai, request.env);
+    // override. This runs at the top of the `queueTail`-serialized body (not
+    // in `executeSteps`, which resolves the session before queuing) so it can
+    // never mutate the shared AiClient config out from under a concurrent
+    // in-flight batch.
+    //
+    // The base itself is re-read here too: its AI values come from the machine
+    // `.env` as it is now, so an edit there (Copilot setup, a hand edit)
+    // reaches this run without a server restart (issue #128). Read once, and
+    // `serverNow` used for the rest of the batch, so the client and the
+    // resolved settings below cannot straddle an edit.
+    const serverNow = serverConfigNow(this.config);
+    const desiredAi = applyEnvToAiConfig(serverNow.config.ai, request.env);
     // Run settings merge FIRST, so the model override below sees this batch's
     // value and every later read in this function sees the same session state.
     // Per key (see `mergeRunSettings`) — a request carrying only `capture` must
@@ -3643,8 +3666,8 @@ export class SessionManager {
     // what `[use computer]` checks (SPEC-use-computer.md §15.4) is by
     // construction what the client was just pointed at — and not
     // `runConfig.ai`, whose `gatewayUrl` and `apiKey` are spread from the
-    // SERVER's startup config (`resolveRunSettings`) and so miss a project
-    // `.env` that routes through the Copilot bridge.
+    // SERVER's own config (`serverNow.config`, via `resolveRunSettings`) and so
+    // miss a project `.env` that routes through the Copilot bridge.
     const effectiveAiRoute: VisionRouteAi = {
       model: desiredModel,
       gatewayUrl: desiredAi.gatewayUrl,
@@ -4009,7 +4032,8 @@ export class SessionManager {
     // retained overrides (stories/run-settings.md §2).
     //
     // `runConfig` is what both executor call sites are handed in place of
-    // `this.config`. It is a COMPLETE Config — spread from `this.config` with
+    // `this.config`. It is a COMPLETE Config — spread from `serverNow.config`
+    // (`this.config` with the machine `.env`'s AI values as they are now) with
     // only the four values this story owns re-sourced — because those call sites
     // take the whole object, and a partial one would blank out every setting
     // nobody asked to change.
@@ -4064,11 +4088,11 @@ export class SessionManager {
       );
     }
     const resolvedSettings = resolveRunSettings(
-      this.config,
+      serverNow.config,
       projectConfig,
       desiredAi.model,
       session.runSettings,
-      // `desiredAi`, not `this.config.ai`: whether this run has a key at all is
+      // `desiredAi`, not `serverNow.config.ai`: whether this run has a key at all is
       // decided by the client's `.env` layered over the server base, and a
       // server started keyless would otherwise report a keyed project as
       // having no AI.
@@ -4098,6 +4122,26 @@ export class SessionManager {
     const runKeyless =
       !aiConfigured({ ...desiredAi, model: desiredModel }) ||
       resolvedSettings.effective.ai === 'off';
+    // Say which model this run uses and which setting chose it (issue #128):
+    // the machine-wide file can change under a running server, and a model
+    // nobody expected is otherwise visible only in the report's AI calls. At
+    // the start of a run, and again only when the answer changes, so a
+    // 100-row run says it once. Not for a run with no AI: it calls no model.
+    if (runKeyless) {
+      delete session.lastModelLine;
+    } else {
+      const modelSource =
+        typeof overrideModel === 'string' && overrideModel.trim() !== ''
+          ? 'session'
+          : (request.env?.['AI_MODEL'] ?? '').trim() !== ''
+            ? 'project-env'
+            : serverNow.modelFrom;
+      const modelLine = modelForRunLine(desiredModel, modelSource, userRootEnvPath());
+      if (request.runStart !== undefined || modelLine !== session.lastModelLine) {
+        logger.info(modelLine);
+      }
+      session.lastModelLine = modelLine;
+    }
     // The session's own viewport, re-applied on top (stories/per-test-viewport.md
     // §2: "every browser the test opens inherits it").
     //

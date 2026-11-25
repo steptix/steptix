@@ -180,6 +180,16 @@ default that beats explicit project config is not a default — so user-root
 values enter the loader as a distinct bottom layer, consulted only when
 nothing above set the value, per verification rule (9).
 
+**The server reads the user-root AI values at every run, not once.** Which
+values the file may fill is decided when the server loads its config. What
+the file says is read again for each run, errand and compile, and for
+`GET /config`. Copilot setup writes `AI_MODEL` into this file while a server
+is running, and so can a hand edit. Before issue #128 the server kept the
+values it read at startup, so every later run silently used the old model
+until a restart. Each run with AI now logs one line naming its model and
+which setting chose it: the session, the project's `.env`, the server's own
+settings, this file (by path), or the built-in default.
+
 **The suggested auto-start command loses its `--env-file`.** The
 `serverAutoStart.command` setting currently teaches
 `node --inspect=0 --env-file=templates/.env dist/index.js serve

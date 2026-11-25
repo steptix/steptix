@@ -64,6 +64,7 @@ import { HEALTH_SERVICE_ID, startedByOf, type HealthResponse } from './health.js
 // the exact rules that would 400 it here. Behaviour is unchanged — this is the
 // same function, moved.
 import { validateDetachedBody, validateSectionEntry } from './section-entry.js';
+import { serverConfigNow } from './run-helpers.js';
 import { logger } from '../utils/logger.js';
 import { describeVersion, getBuildInfo, getPackageRoot, getPackageVersion } from '../utils/version.js';
 
@@ -1657,13 +1658,16 @@ export function createApiServer(
       return;
     }
 
-    const settings = sessionManager.getRunSettings(rawSessionId);
+    // One read of the machine `.env` for both halves of the answer, so an edit
+    // landing mid-request cannot make them disagree (issue #128).
+    const server = serverConfigNow(config).config;
+    const settings = sessionManager.getRunSettings(rawSessionId, server);
     if (!settings) {
       res.status(404).json({ error: 'Session not found' });
       return;
     }
 
-    res.status(200).json({ config: redactConfig(config), ...settings });
+    res.status(200).json({ config: redactConfig(server), ...settings });
   });
 
   // DELETE /sessions/:id

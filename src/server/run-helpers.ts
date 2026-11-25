@@ -1,5 +1,6 @@
 import type { BrowserSession } from '../browser/manager.js';
-import type { AiConfig } from '../config/types.js';
+import { aiConfigNow, type BaseModelSource } from '../config/loader.js';
+import type { AiConfig, Config } from '../config/types.js';
 import type { StepResult } from '../report/types.js';
 
 /**
@@ -84,6 +85,51 @@ export const UNATTENDED_SKIP_REASON =
   'Skipped: [input] and [interactive] steps are not supported in API mode';
 
 /**
+ * The server's startup config with its AI values re-read from the machine
+ * `.env` — what every run, errand, compile and settings report builds on
+ * (issue #128).
+ *
+ * The server loads its config once, but the machine file is written while it
+ * runs (Copilot setup in VS Code, a hand edit). Reading it here, once per
+ * request, is what makes such a change reach the next run the way a saved
+ * project `.env` already does. Which values the file may fill is still what
+ * the load decided, so a model the server's own environment or config file set
+ * keeps beating it (`aiConfigNow`, src/config/loader.ts).
+ *
+ * Call it once per request and use the result throughout: two reads in one
+ * batch could straddle an edit and disagree with each other.
+ */
+export function serverConfigNow(config: Config): { config: Config; modelFrom: BaseModelSource } {
+  const now = aiConfigNow(config.ai);
+  return { config: { ...config, ai: now.ai }, modelFrom: now.modelFrom };
+}
+
+/** Where a run's model came from, as {@link modelForRunLine} names it. */
+export type RunModelSource = 'session' | 'project-env' | BaseModelSource;
+
+/**
+ * The one line a run writes about its model (issue #128): which model, and
+ * which setting chose it, so a model the user did not expect points at the
+ * file to change.
+ *
+ * `machineEnvPath` is named in full only for the machine file, because that
+ * is the one a user cannot find by looking beside the test.
+ */
+export function modelForRunLine(model: string, source: RunModelSource, machineEnvPath: string): string {
+  const from =
+    source === 'session'
+      ? 'set for this session'
+      : source === 'project-env'
+        ? "from this project's .env file"
+        : source === 'machine-file'
+          ? `from the machine-wide settings file (${machineEnvPath})`
+          : source === 'server-settings'
+            ? "from the server's own settings (the environment it was started with, or its steptix.config.json)"
+            : "Steptix's built-in default — no settings file names a model";
+  return `AI model for this run: ${model}, ${from}.`;
+}
+
+/**
  * Build an AiConfig with optional env overrides applied over a base. Only
  * `apiKey`, `model` and `gatewayUrl` are honoured today — these are the env
  * knobs a `.env` shipped from a client realistically wants to override, and
@@ -92,11 +138,11 @@ export const UNATTENDED_SKIP_REASON =
  * client's `.env` arrives. A var added there and not here works in every
  * loader unit test and does nothing at all through Steptix.
  *
- * Always pass the server base config (`this.config.ai`) as `baseConfig`, never
- * a session's current config: overrides apply only on non-empty values, so
- * basing on the fixed server config lets a removed `.env` line revert cleanly
- * instead of sticking on the prior override. Server process.env is never
- * mutated.
+ * Always pass the server base as {@link serverConfigNow} gives it for this
+ * request as `baseConfig`, never a session's current config: overrides apply
+ * only on non-empty values, so basing on the server config lets a removed
+ * `.env` line revert cleanly instead of sticking on the prior override. Server
+ * process.env is never mutated.
  *
  * **Always returns a fresh object, even with nothing to apply.** It used to
  * return `baseConfig` itself on the no-overrides path, which handed
