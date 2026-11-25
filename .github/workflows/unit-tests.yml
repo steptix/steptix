@@ -173,7 +173,3 @@ jobs:
       - name: Diag first
         shell: bash
         run: node scripts/diag-agent-shell.mjs first
-      - name: Diag second
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: node scripts/diag-agent-shell.mjs second
